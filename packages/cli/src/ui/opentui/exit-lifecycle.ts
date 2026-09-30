@@ -25,6 +25,7 @@
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import { runExitCleanup } from '../../utils/cleanup.js';
+import { exitCleanly } from '../../utils/processUtils.js';
 
 /** Exit code for interrupt-style exits (Ctrl+C / Ctrl+D double press). */
 export const EXIT_CODE_INTERRUPT = 130;
@@ -68,7 +69,7 @@ export async function exitSession(
   } catch {
     // runExitCleanup swallows per-cleanup errors already; belt and braces.
   }
-  process.exit(code);
+  return exitCleanly(code);
 }
 
 /** TEST ONLY: reset the module-level exit latch between cases. */

@@ -57,6 +57,30 @@ const makeSuccess = (
   responseMedia: Part[] = [],
 ): TrackedToolCall => makeCompleted('success', displayName, responseMedia);
 
+describe('mapToDisplay — Advisor errors', () => {
+  it('retains the advisor model and failure result after the usage limit', () => {
+    const call = {
+      status: 'error',
+      request: { callId: 'advisor-1', name: 'advisor', args: {} },
+      tool: { displayName: 'Advisor', isOutputMarkdown: true },
+      invocation: { getDescription: () => 'advisor-model' },
+      response: {
+        resultDisplay: 'Advisor usage limit reached',
+        responseParts: [],
+      },
+    } as unknown as TrackedToolCall;
+
+    expect(mapToDisplay(call).tools[0]).toMatchObject({
+      name: 'Advisor',
+      description: 'advisor-model',
+      resultDisplay: 'Advisor usage limit reached',
+    });
+    expect(
+      mapToDisplay(makeCompleted('error', 'Read File')).tools[0].description,
+    ).toBe('{}');
+  });
+});
+
 describe('mapToDisplay — raw args (ui.showToolCallArgs)', () => {
   it('carries the request args through to the display object', () => {
     const call = {

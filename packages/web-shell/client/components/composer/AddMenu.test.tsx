@@ -1178,3 +1178,39 @@ describe('mobile AddMenu', () => {
     expect(props.mobileActions!.onHistory).toHaveBeenCalledOnce();
   });
 });
+
+describe('AddMenu BTW entry', () => {
+  it.each(['en', 'zh-CN'] as const)('explains BTW in %s', async (language) => {
+    const t = getTranslator(language);
+    const props = baseProps({ btw: { onSelect: vi.fn() } });
+    renderWith(props, language);
+    await openMenu();
+    const item = menuItem('composer-add-menu-btw')!;
+    expect(item.textContent).toContain(t('composerAdd.btw.label'));
+    expect(item.textContent).toContain(t('composerAdd.btw.description'));
+    expect(item.textContent).toContain('/btw');
+  });
+
+  it('runs the mobile action after the drawer releases focus', async () => {
+    const onSelect = vi.fn(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    renderWith(
+      baseProps({
+        btw: { onSelect },
+        mobileActions: {
+          commands: [],
+          onHistory: vi.fn(),
+          onToggleShell: vi.fn(),
+          shellMode: false,
+        },
+      }),
+    );
+    await openMenu();
+    await act(async () => menuItem('composer-add-menu-btw')!.click());
+    await settle();
+    expect(onSelect).toHaveBeenCalledOnce();
+  });
+});

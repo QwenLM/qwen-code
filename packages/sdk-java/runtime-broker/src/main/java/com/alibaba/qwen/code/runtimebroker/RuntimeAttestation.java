@@ -8,10 +8,20 @@ public final class RuntimeAttestation {
     private final long epoch;
     private final RuntimeScope scope;
     private final String provisionRequestId;
+    private final String storageId;
 
     public RuntimeAttestation(String runtimeInstanceId,
             String runtimeIncarnation, String leaseId, long epoch,
             RuntimeScope scope, String provisionRequestId) {
+        this(runtimeInstanceId, runtimeIncarnation, leaseId, epoch, scope,
+                provisionRequestId, null);
+    }
+
+    public RuntimeAttestation(String runtimeInstanceId,
+            String runtimeIncarnation, String leaseId, long epoch,
+            RuntimeScope scope, String provisionRequestId, String storageId) {
+        this.storageId = storageId == null ? null
+                : ManagedContextProtocol.storageId(storageId);
         this.runtimeInstanceId = BrokerValues.requireId(runtimeInstanceId,
                 "runtimeInstanceId");
         this.runtimeIncarnation = BrokerValues.requireId(runtimeIncarnation,
@@ -27,6 +37,10 @@ public final class RuntimeAttestation {
         this.scope = scope;
         this.provisionRequestId = BrokerValues.requireId(provisionRequestId,
                 "provisionRequestId");
+    }
+
+    public String getStorageId() {
+        return storageId;
     }
 
     public String getRuntimeInstanceId() {

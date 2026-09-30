@@ -5,6 +5,7 @@
  */
 
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
+import type { HookExecutionOwner } from './hook-execution-context.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { getAliasSetForTool } from '../tools/tool-utils.js';
@@ -120,8 +121,19 @@ export class HookPlanner {
   createExecutionPlan(
     eventName: HookEventName,
     context?: HookEventContext,
+    owner?: HookExecutionOwner,
   ): HookExecutionPlan | null {
-    const hookEntries = this.hookRegistry.getHooksForEvent(eventName);
+    const hookEntries = this.hookRegistry
+      .getHooksForEvent(eventName)
+      .filter(
+        (entry) =>
+          (entry.agentScope === undefined ||
+            (owner !== undefined &&
+              entry.owner !== undefined &&
+              entry.owner.sessionId === owner.sessionId &&
+              entry.owner.agentId === owner.agentId)) &&
+          (entry.isSourceTrusted?.() ?? true),
+      );
 
     if (hookEntries.length === 0) {
       return null;

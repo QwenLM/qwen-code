@@ -713,6 +713,12 @@ describe('WorkspaceChannelSettingsStore', () => {
       message: 'cannot use groupHistoryLimit',
     },
     {
+      label: 'session rotation',
+      type: 'user-default-management-test',
+      extra: { sessionRotation: { maxTurns: 2 } },
+      message: 'cannot use sessionRotation',
+    },
+    {
       label: 'per-group history',
       type: 'user-default-management-test',
       extra: {
@@ -732,6 +738,30 @@ describe('WorkspaceChannelSettingsStore', () => {
       code: 'channel_settings_invalid_config',
       message: expect.stringContaining(message),
     });
+  });
+
+  it('accepts bounded session rotation and rejects malformed bounds', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const saved = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        sessionRotation: { maxTurns: 2, maxAgeHours: 24 },
+      },
+    });
+    expect(saved.channels['bot']?.['sessionRotation']).toEqual({
+      maxTurns: 2,
+      maxAgeHours: 24,
+    });
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: saved.revision,
+        config: {
+          type: 'user-default-management-test',
+          sessionRotation: { maxTurns: 0 },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
   });
 
   it('rejects enabling multiSession while preserving webhook config', async () => {

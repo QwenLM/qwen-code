@@ -49,6 +49,7 @@ import {
   type SettingsType,
   type SettingsValue,
 } from '../../config/settingsSchema.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
 import { isAutoLanguage } from '../../i18n/languageUtils.js';
 import {
   getExtendedSystemInfo,
@@ -101,6 +102,11 @@ export const SUB_DIALOG_SETTING_KEYS = [
 export function isSubDialogSetting(key: string): boolean {
   return (SUB_DIALOG_SETTING_KEYS as readonly string[]).includes(key);
 }
+
+// The rule itself lives in `utils/aux-model-selector.ts` next to the rest of
+// the selector-scrub surface, so the ink and OpenTUI `/settings` rows cannot
+// drift apart. Re-exported here for this dialog's existing unit test.
+export { formatSettingRowValue };
 
 export interface SettingsListItem {
   key: string;
@@ -785,7 +791,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                displayValue = formatSettingRowValue(
+                  item.key,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }

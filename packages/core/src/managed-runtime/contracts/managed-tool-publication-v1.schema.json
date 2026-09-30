@@ -1,0 +1,459 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "executionCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "modelCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "runtimeBindingId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "writerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "activationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+        },
+        "publication": {
+          "const": "managed-tool-publication/1"
+        },
+        "publicationId": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]{1,128}$"
+        },
+        "sessionKey": {
+          "type": "object",
+          "properties": {
+            "tenantId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "workspaceId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "sessionId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            }
+          },
+          "required": ["tenantId", "workspaceId", "sessionId"],
+          "additionalProperties": false
+        },
+        "reference": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "promptId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "callId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "argsDigest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": ["sessionId", "promptId", "callId", "argsDigest"],
+          "additionalProperties": false
+        },
+        "bindingGeneration": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,18}$"
+        },
+        "captureId": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]{1,128}$"
+        },
+        "revision": {
+          "const": 1
+        },
+        "captureScope": {
+          "const": "process_pipes"
+        },
+        "capturePolicy": {
+          "const": "complete_required"
+        },
+        "argsRef": {
+          "type": "object",
+          "properties": {
+            "resourceId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "kind": {
+              "const": "managed-tool-input"
+            },
+            "schemaVersion": {
+              "const": 1
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "resourceId",
+            "kind",
+            "schemaVersion",
+            "byteLength",
+            "digest"
+          ],
+          "additionalProperties": false
+        },
+        "checkpointRef": {
+          "type": "object",
+          "properties": {
+            "resourceId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            },
+            "kind": {
+              "const": "managed-checkpoint"
+            },
+            "schemaVersion": {
+              "const": 1
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "resourceId",
+            "kind",
+            "schemaVersion",
+            "byteLength",
+            "digest"
+          ],
+          "additionalProperties": false
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "writerGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740990
+        },
+        "activationEpoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740990
+        },
+        "intentSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740990
+        }
+      },
+      "required": [
+        "turnId",
+        "executionCallId",
+        "modelCallId",
+        "runtimeBindingId",
+        "writerId",
+        "activationId",
+        "publication",
+        "publicationId",
+        "sessionKey",
+        "reference",
+        "bindingGeneration",
+        "captureId",
+        "revision",
+        "captureScope",
+        "capturePolicy",
+        "argsRef",
+        "checkpointRef",
+        "requestDigest",
+        "writerGeneration",
+        "activationEpoch",
+        "intentSequence"
+      ],
+      "additionalProperties": false
+    },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "publication": {
+              "const": "managed-tool-publication/1"
+            },
+            "sessionKey": {
+              "type": "object",
+              "properties": {
+                "tenantId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "sessionId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                }
+              },
+              "required": ["tenantId", "workspaceId", "sessionId"],
+              "additionalProperties": false
+            },
+            "owner": {
+              "type": "object",
+              "properties": {
+                "writerId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "writerGeneration": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740990
+                }
+              },
+              "required": ["writerId", "writerGeneration"],
+              "additionalProperties": false
+            },
+            "operation": {
+              "const": "reserve"
+            },
+            "binding": {
+              "$ref": "#/$defs/binding"
+            },
+            "captureBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2199023255552
+            }
+          },
+          "required": [
+            "publication",
+            "sessionKey",
+            "owner",
+            "operation",
+            "binding",
+            "captureBytes"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "publication": {
+              "const": "managed-tool-publication/1"
+            },
+            "sessionKey": {
+              "type": "object",
+              "properties": {
+                "tenantId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "sessionId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                }
+              },
+              "required": ["tenantId", "workspaceId", "sessionId"],
+              "additionalProperties": false
+            },
+            "owner": {
+              "type": "object",
+              "properties": {
+                "writerId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+                },
+                "writerGeneration": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740990
+                }
+              },
+              "required": ["writerId", "writerGeneration"],
+              "additionalProperties": false
+            },
+            "operation": {
+              "enum": ["renew", "fence", "close_not_started"]
+            },
+            "publicationId": {
+              "type": "string",
+              "pattern": "^[a-z0-9_-]{1,128}$"
+            }
+          },
+          "required": [
+            "publication",
+            "sessionKey",
+            "owner",
+            "operation",
+            "publicationId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "grant": {
+      "type": "object",
+      "properties": {
+        "publication": {
+          "const": "managed-tool-publication/1"
+        },
+        "publicationId": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]{1,128}$"
+        },
+        "bindingDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "enum": ["OPEN", "FENCED", "NOT_STARTED"]
+        },
+        "expiresAt": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 8640000000000000
+        },
+        "captureBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2199023255552
+        },
+        "producerBytes": {
+          "const": 2686976
+        },
+        "admissionBytes": {
+          "const": 2097152
+        }
+      },
+      "required": [
+        "publication",
+        "publicationId",
+        "bindingDigest",
+        "state",
+        "expiresAt",
+        "captureBytes",
+        "producerBytes",
+        "admissionBytes"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "OPEN"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "expiresAt": {
+                "type": "integer"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expiresAt": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/binding"
+    },
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/grant"
+    }
+  ]
+}

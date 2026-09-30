@@ -59,7 +59,16 @@ export class SyntheticOutputTool extends BaseDeclarativeTool<
 > {
   static readonly Name: string = ToolNames.STRUCTURED_OUTPUT;
 
-  constructor(userSchema: Record<string, unknown>) {
+  /**
+   * @param validateParams Replaces the default parameter validation when
+   *   given. Workflow `agent({schema})` passes a validator compiled for that
+   *   one call, so a schema that fails to compile, or shares an `$id` with
+   *   another schema, is never skipped. Returns an error message, or null.
+   */
+  constructor(
+    userSchema: Record<string, unknown>,
+    private readonly validateParams?: (params: unknown) => string | null,
+  ) {
     super(
       SyntheticOutputTool.Name,
       ToolDisplayNames.STRUCTURED_OUTPUT,
@@ -72,6 +81,13 @@ export class SyntheticOutputTool extends BaseDeclarativeTool<
       true, // alwaysLoad — never hidden behind the deferred-tool bridge
       'structured output json schema final result submit',
     );
+  }
+
+  override validateToolParams(params: StructuredOutputParams): string | null {
+    if (this.validateParams) {
+      return this.validateParams(params);
+    }
+    return super.validateToolParams(params);
   }
 
   protected createInvocation(params: StructuredOutputParams) {

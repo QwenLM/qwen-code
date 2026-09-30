@@ -19,11 +19,20 @@
  * otherwise bury its own result under forty near-identical lines.
  */
 
+import { types } from 'node:util';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  sanitizeWorkflowText,
+  stringifyWorkflowResult,
+  truncateWorkflowText,
+} from './workflow-result-format.js';
+
+const debugLogger = createDebugLogger('WORKFLOW_FAILURES');
 
 /** Failure lines printed in full before the rest is named. */
 export const MAX_FAILURE_LINES = 10;
-/** Maximum characters retained for one rendered failure line. */
+/** Maximum characters retained for one rendered failure block. */
 export const MAX_FAILURE_LINE_CHARS = 400;
 
 /** What a failure list needs from one dispatch. */
@@ -40,7 +49,7 @@ export interface WorkflowFailureSource {
 }
 
 /**
- * One line per failed agent, oldest first, capped at `MAX_FAILURE_LINES`
+ * One bounded block per failed agent, oldest first, capped at `MAX_FAILURE_LINES`
  * with a named remainder. Empty when nothing failed — callers omit their
  * whole section rather than printing an empty heading.
  */
@@ -50,12 +59,45 @@ export function buildFailureLines(source: WorkflowFailureSource): string[] {
   const shown = failed.slice(0, MAX_FAILURE_LINES);
   const lines = shown.map((dispatch) => {
     const label = stripAnsiAndControl(dispatch.label || 'workflow-agent');
-    const error = stripAnsiAndControl(dispatch.error || 'dispatch failed');
-    return `[${label}] ${error}`.slice(0, MAX_FAILURE_LINE_CHARS);
+    const error = sanitizeWorkflowText(dispatch.error || 'dispatch failed');
+    return truncateWorkflowText(`[${label}] ${error}`, MAX_FAILURE_LINE_CHARS);
   });
   const remaining = failed.length - shown.length;
   if (remaining > 0) {
     lines.push(`… and ${remaining} more failures omitted`);
   }
   return lines;
+}
+
+/** Script-reported failures are data, independent of runtime dispatch status. */
+export function reportedFailureLines(result: unknown): string[] {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
+  return ['failed', 'errors', 'error'].flatMap((key) => {
+    try {
+      const failure = (result as Record<string, unknown>)[key];
+      if (
+        !failure ||
+        (Array.isArray(failure) && failure.length === 0) ||
+        ((types.isMap(failure) || types.isSet(failure)) && failure.size === 0)
+      )
+        return [];
+      const payload = sanitizeWorkflowText(stringifyWorkflowResult(failure));
+      if (
+        !payload.trim() ||
+        (payload === '{}' &&
+          !types.isNativeError(failure) &&
+          Object.prototype.toString.call(failure) === '[object Object]')
+      )
+        return [];
+      return [
+        truncateWorkflowText(
+          `Reported ${key}: ${payload}`,
+          MAX_FAILURE_LINE_CHARS,
+        ),
+      ];
+    } catch (error) {
+      debugLogger.debug('Failed to read workflow result field:', key, error);
+      return [];
+    }
+  });
 }

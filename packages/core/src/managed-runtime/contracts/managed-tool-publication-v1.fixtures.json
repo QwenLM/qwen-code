@@ -1,0 +1,1719 @@
+{
+  "protocol": "managed-tool-publication/1",
+  "payloadJson": "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"printf hi\",\"description\":\"capture\"}}",
+  "canonicalInputJson": "{\"command\":\"printf hi\",\"description\":\"capture\"}",
+  "argsJson": "{\"harnessSessionId\":\"session-1\",\"runtimeSessionId\":\"runtime-session-1\",\"payloadJson\":\"{\\\"toolName\\\":\\\"run_shell_command\\\",\\\"input\\\":{\\\"command\\\":\\\"printf hi\\\",\\\"description\\\":\\\"capture\\\"}}\"}",
+  "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+  "cases": [
+    {
+      "id": "distinct-model-runtime-ids",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "revision-two",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 2,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "noncanonical-generation",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "01",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "generation-overflow",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "9223372036854775808",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "id": "zero-writer",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 0,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "unsafe-writer",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 9007199254740991,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "capture-traversal",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "../escape",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "non-nfc",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "e\u0301",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "id": "unpaired-surrogate",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "\ud800",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "id": "utf8-overflow",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d\u4e2d",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "id": "c1-control",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "a\u0085b",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "wrong-policy",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "best_effort",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "missing-digest-prefix",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "closed-sessionKey",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1",
+          "extra": 1
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "closed-reference",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11",
+          "input": {}
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "closed-argsRef",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502",
+          "url": "file:///tmp/x"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "uppercase-digest",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "wrong-args-kind",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-context",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "large-checkpoint",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 65537,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "unknown-binding-field",
+      "kind": "binding",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "turnId": "turn-1",
+        "executionCallId": "execution-1",
+        "modelCallId": "model-call-1",
+        "runtimeBindingId": "binding-1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "bindingGeneration": "1",
+        "captureId": "capture-1",
+        "revision": 1,
+        "captureScope": "process_pipes",
+        "capturePolicy": "complete_required",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "writerId": "writer-1",
+        "writerGeneration": 1,
+        "activationId": "activation-1",
+        "activationEpoch": 1,
+        "intentSequence": 2,
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        },
+        "extra": false
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "reserve",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "reserve",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "binding": {
+          "publication": "managed-tool-publication/1",
+          "publicationId": "publication-1",
+          "sessionKey": {
+            "tenantId": "tenant-1",
+            "workspaceId": "workspace-1",
+            "sessionId": "session-1"
+          },
+          "turnId": "turn-1",
+          "executionCallId": "execution-1",
+          "modelCallId": "model-call-1",
+          "runtimeBindingId": "binding-1",
+          "reference": {
+            "sessionId": "runtime-session-1",
+            "promptId": "prompt-1",
+            "callId": "runtime-call-uuid",
+            "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+          },
+          "bindingGeneration": "1",
+          "captureId": "capture-1",
+          "revision": 1,
+          "captureScope": "process_pipes",
+          "capturePolicy": "complete_required",
+          "argsRef": {
+            "resourceId": "args-1",
+            "kind": "managed-tool-input",
+            "schemaVersion": 1,
+            "byteLength": 190,
+            "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+          },
+          "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+          "writerId": "writer-1",
+          "writerGeneration": 1,
+          "activationId": "activation-1",
+          "activationEpoch": 1,
+          "intentSequence": 2,
+          "checkpointRef": {
+            "resourceId": "checkpoint-1",
+            "kind": "managed-checkpoint",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        },
+        "captureBytes": 104857600
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "array-operation",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": ["reserve"],
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "binding": {
+          "publication": "managed-tool-publication/1",
+          "publicationId": "publication-1",
+          "sessionKey": {
+            "tenantId": "tenant-1",
+            "workspaceId": "workspace-1",
+            "sessionId": "session-1"
+          },
+          "turnId": "turn-1",
+          "executionCallId": "execution-1",
+          "modelCallId": "model-call-1",
+          "runtimeBindingId": "binding-1",
+          "reference": {
+            "sessionId": "runtime-session-1",
+            "promptId": "prompt-1",
+            "callId": "runtime-call-uuid",
+            "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+          },
+          "bindingGeneration": "1",
+          "captureId": "capture-1",
+          "revision": 1,
+          "captureScope": "process_pipes",
+          "capturePolicy": "complete_required",
+          "argsRef": {
+            "resourceId": "args-1",
+            "kind": "managed-tool-input",
+            "schemaVersion": 1,
+            "byteLength": 190,
+            "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+          },
+          "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+          "writerId": "writer-1",
+          "writerGeneration": 1,
+          "activationId": "activation-1",
+          "activationEpoch": 1,
+          "intentSequence": 2,
+          "checkpointRef": {
+            "resourceId": "checkpoint-1",
+            "kind": "managed-checkpoint",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        },
+        "captureBytes": 104857600
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "reserve-cross-tenant",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "reserve",
+        "sessionKey": {
+          "tenantId": "other",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "binding": {
+          "publication": "managed-tool-publication/1",
+          "publicationId": "publication-1",
+          "sessionKey": {
+            "tenantId": "tenant-1",
+            "workspaceId": "workspace-1",
+            "sessionId": "session-1"
+          },
+          "turnId": "turn-1",
+          "executionCallId": "execution-1",
+          "modelCallId": "model-call-1",
+          "runtimeBindingId": "binding-1",
+          "reference": {
+            "sessionId": "runtime-session-1",
+            "promptId": "prompt-1",
+            "callId": "runtime-call-uuid",
+            "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+          },
+          "bindingGeneration": "1",
+          "captureId": "capture-1",
+          "revision": 1,
+          "captureScope": "process_pipes",
+          "capturePolicy": "complete_required",
+          "argsRef": {
+            "resourceId": "args-1",
+            "kind": "managed-tool-input",
+            "schemaVersion": 1,
+            "byteLength": 190,
+            "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+          },
+          "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+          "writerId": "writer-1",
+          "writerGeneration": 1,
+          "activationId": "activation-1",
+          "activationEpoch": 1,
+          "intentSequence": 2,
+          "checkpointRef": {
+            "resourceId": "checkpoint-1",
+            "kind": "managed-checkpoint",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        },
+        "captureBytes": 104857600
+      },
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "id": "reserve-wrong-writer",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "reserve",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 2
+        },
+        "binding": {
+          "publication": "managed-tool-publication/1",
+          "publicationId": "publication-1",
+          "sessionKey": {
+            "tenantId": "tenant-1",
+            "workspaceId": "workspace-1",
+            "sessionId": "session-1"
+          },
+          "turnId": "turn-1",
+          "executionCallId": "execution-1",
+          "modelCallId": "model-call-1",
+          "runtimeBindingId": "binding-1",
+          "reference": {
+            "sessionId": "runtime-session-1",
+            "promptId": "prompt-1",
+            "callId": "runtime-call-uuid",
+            "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+          },
+          "bindingGeneration": "1",
+          "captureId": "capture-1",
+          "revision": 1,
+          "captureScope": "process_pipes",
+          "capturePolicy": "complete_required",
+          "argsRef": {
+            "resourceId": "args-1",
+            "kind": "managed-tool-input",
+            "schemaVersion": 1,
+            "byteLength": 190,
+            "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+          },
+          "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+          "writerId": "writer-1",
+          "writerGeneration": 1,
+          "activationId": "activation-1",
+          "activationEpoch": 1,
+          "intentSequence": 2,
+          "checkpointRef": {
+            "resourceId": "checkpoint-1",
+            "kind": "managed-checkpoint",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        },
+        "captureBytes": 104857600
+      },
+      "valid": false,
+      "schemaValid": true
+    },
+    {
+      "id": "zero-capacity",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "reserve",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "binding": {
+          "publication": "managed-tool-publication/1",
+          "publicationId": "publication-1",
+          "sessionKey": {
+            "tenantId": "tenant-1",
+            "workspaceId": "workspace-1",
+            "sessionId": "session-1"
+          },
+          "turnId": "turn-1",
+          "executionCallId": "execution-1",
+          "modelCallId": "model-call-1",
+          "runtimeBindingId": "binding-1",
+          "reference": {
+            "sessionId": "runtime-session-1",
+            "promptId": "prompt-1",
+            "callId": "runtime-call-uuid",
+            "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+          },
+          "bindingGeneration": "1",
+          "captureId": "capture-1",
+          "revision": 1,
+          "captureScope": "process_pipes",
+          "capturePolicy": "complete_required",
+          "argsRef": {
+            "resourceId": "args-1",
+            "kind": "managed-tool-input",
+            "schemaVersion": 1,
+            "byteLength": 190,
+            "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+          },
+          "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+          "writerId": "writer-1",
+          "writerGeneration": 1,
+          "activationId": "activation-1",
+          "activationEpoch": 1,
+          "intentSequence": 2,
+          "checkpointRef": {
+            "resourceId": "checkpoint-1",
+            "kind": "managed-checkpoint",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        },
+        "captureBytes": 0
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "renew",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "renew",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "publicationId": "publication-1"
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "closed-renew",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "renew",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "publicationId": "publication-1",
+        "proofNotStarted": true
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "fence",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "fence",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "publicationId": "publication-1"
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "closed-fence",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "fence",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "publicationId": "publication-1",
+        "proofNotStarted": true
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "close_not_started",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "close_not_started",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "publicationId": "publication-1"
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "closed-close_not_started",
+      "kind": "request",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "operation": "close_not_started",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "owner": {
+          "writerId": "writer-1",
+          "writerGeneration": 1
+        },
+        "publicationId": "publication-1",
+        "proofNotStarted": true
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "open-grant",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": "OPEN",
+        "expiresAt": 2000000000000,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "array-state",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": ["FENCED"],
+        "expiresAt": null,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "fenced-grant",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": "FENCED",
+        "expiresAt": null,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "not_started-grant",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": "NOT_STARTED",
+        "expiresAt": null,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152
+      },
+      "valid": true,
+      "schemaValid": true
+    },
+    {
+      "id": "grant-secret-refused",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": "OPEN",
+        "expiresAt": 2000000000000,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152,
+        "token": "secret"
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "open-without-expiry",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": "OPEN",
+        "expiresAt": null,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152
+      },
+      "valid": false,
+      "schemaValid": false
+    },
+    {
+      "id": "future-state-refused",
+      "kind": "grant",
+      "value": {
+        "publication": "managed-tool-publication/1",
+        "publicationId": "publication-1",
+        "bindingDigest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8",
+        "state": "FINISHED",
+        "expiresAt": 2000000000000,
+        "captureBytes": 104857600,
+        "producerBytes": 2686976,
+        "admissionBytes": 2097152
+      },
+      "valid": false,
+      "schemaValid": false
+    }
+  ],
+  "digestVectors": [
+    {
+      "id": "unicode",
+      "binding": {
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        },
+        "intentSequence": 2,
+        "activationEpoch": 1,
+        "activationId": "activation-1",
+        "writerGeneration": 1,
+        "writerId": "writer\"\\slash",
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "capturePolicy": "complete_required",
+        "captureScope": "process_pipes",
+        "revision": 1,
+        "captureId": "capture-1",
+        "bindingGeneration": "1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "runtimeBindingId": "binding-1",
+        "modelCallId": "\u6a21\u578b\ud83d\ude42\u00e9",
+        "executionCallId": "execution-1",
+        "turnId": "turn-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "publicationId": "publication-1",
+        "publication": "managed-tool-publication/1"
+      },
+      "digest": "a39714936c408e85ac1a92ff28d492af6a75c4dece0a569e00d3236b47546c1c"
+    },
+    {
+      "id": "safe-integer",
+      "binding": {
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        },
+        "intentSequence": 2,
+        "activationEpoch": 9007199254740990,
+        "activationId": "activation-1",
+        "writerGeneration": 9007199254740990,
+        "writerId": "writer-1",
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "capturePolicy": "complete_required",
+        "captureScope": "process_pipes",
+        "revision": 1,
+        "captureId": "capture-1",
+        "bindingGeneration": "1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "runtimeBindingId": "binding-1",
+        "modelCallId": "model-call-1",
+        "executionCallId": "execution-1",
+        "turnId": "turn-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "publicationId": "publication-1",
+        "publication": "managed-tool-publication/1"
+      },
+      "digest": "fd78d03466bd694effa074c3ba7fe269500bdf257db0e872cf93ff7bc64931ae"
+    },
+    {
+      "id": "reordered",
+      "binding": {
+        "checkpointRef": {
+          "resourceId": "checkpoint-1",
+          "kind": "managed-checkpoint",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        },
+        "intentSequence": 2,
+        "activationEpoch": 1,
+        "activationId": "activation-1",
+        "writerGeneration": 1,
+        "writerId": "writer-1",
+        "requestDigest": "sha256:75530d5ce0f65ce321fead586996081cf9ef0c451d8c4688cb043325c545ac8e",
+        "argsRef": {
+          "resourceId": "args-1",
+          "kind": "managed-tool-input",
+          "schemaVersion": 1,
+          "byteLength": 190,
+          "digest": "4e0c9c45edc251f77cd7f72a31b8c7235a6be4f72b84b1637672569846393502"
+        },
+        "capturePolicy": "complete_required",
+        "captureScope": "process_pipes",
+        "revision": 1,
+        "captureId": "capture-1",
+        "bindingGeneration": "1",
+        "reference": {
+          "sessionId": "runtime-session-1",
+          "promptId": "prompt-1",
+          "callId": "runtime-call-uuid",
+          "argsDigest": "sha256:bb59270010c4d63c218b3bfd3b86332d4b027be5bf61b1740437d5405175db11"
+        },
+        "runtimeBindingId": "binding-1",
+        "modelCallId": "model-call-1",
+        "executionCallId": "execution-1",
+        "turnId": "turn-1",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "publicationId": "publication-1",
+        "publication": "managed-tool-publication/1"
+      },
+      "digest": "0e9e44f23047cf18a9347b86e3fcd05e2d58748530cac6b044fc390341f78fe8"
+    }
+  ],
+  "tokenVector": {
+    "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "hash": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a"
+  }
+}

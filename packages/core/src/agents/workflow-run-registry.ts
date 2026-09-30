@@ -15,8 +15,8 @@
  * State machine: running → pausing → paused → running, with every active
  * state able to settle as completed, failed, or cancelled.
  *
- * Foreground runs return through the normal tool-result channel. Background
- * runs additionally emit one terminal `<task-notification>` through a
+ * Model-started foreground runs return through the tool-result channel.
+ * Background and client-started foreground runs emit `<task-notification>` through a
  * dedicated model-completion callback. That slot is separate from the
  * terminal-bell callback so the CLI can subscribe to both without either
  * consumer replacing the other.
@@ -45,7 +45,15 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
-import { buildFailureLines } from './workflow-failure-lines.js';
+import {
+  buildFailureLines,
+  reportedFailureLines,
+} from './workflow-failure-lines.js';
+import {
+  sanitizeWorkflowText,
+  stringifyWorkflowResult,
+  truncateWorkflowText,
+} from './workflow-result-format.js';
 import {
   formatWorkflowSizeWarningLog,
   type WorkflowSizeWarning,
@@ -57,11 +65,19 @@ import {
   NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
-import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
+import {
+  escapeXml,
+  escapeXmlElementText,
+  escapeXmlWithinBudget,
+} from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_REGISTRY');
+
+// Match the default tool-output budget without allowing configuration to
+// disable the notification bound. Count XML-escaped characters on the wire.
+const MAX_COMPLETION_RESULT_CHARS = 25_000;
 
 const mutatingWorkflowTasks = new Map<string, symbol>();
 const activeWorkflowRunKeys = new Map<string, number>();
@@ -323,6 +339,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   status: WorkflowStatus;
   /** Whether the tool returned before this run reached a terminal state. */
   isBackgrounded?: boolean;
+  /** Deliver client-started foreground results through the notification queue. */
+  notifyOnCompletion?: boolean;
   /** Whether a model-visible resume may preserve background execution. */
   resumeInBackground?: boolean;
   /** Title of the most recent `phase(...)` call, or `null` before the first phase. */
@@ -411,6 +429,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * reconstructing the path from a storage handle it does not have.
    */
   journalPath?: string;
+  /** Snapshot destination; the runner persists it after emitting completion. */
+  snapshotPath?: string;
   /**
    * Failure hint naming where the authoring reference is in this session, for
    * a script the model authored. The foreground tool result carries it in the
@@ -504,6 +524,7 @@ export type WorkflowRunStatusChangeCallback = (entry?: WorkflowTask) => void;
  */
 export type WorkflowRunNotificationCallback = (entry: WorkflowTask) => void;
 export interface WorkflowRunCompletionMeta {
+  isBackgrounded?: boolean;
   runId: string;
   status: Extract<WorkflowStatus, 'completed' | 'failed'>;
   todoWorkChainId?: string;
@@ -656,23 +677,58 @@ export class WorkflowRunRegistry {
   }
 
   private emitCompletion(entry: WorkflowTask): void {
-    if (!entry.isBackgrounded || !this.completionCallback) return;
+    if (
+      (!entry.isBackgrounded && !entry.notifyOnCompletion) ||
+      !this.completionCallback
+    )
+      return;
     if (entry.status !== 'completed' && entry.status !== 'failed') return;
 
     const statusText = entry.status === 'completed' ? 'completed' : 'failed';
-    const label = stripAnsiAndControl(entry.description) || entry.runId;
-    const displayText = `Background workflow "${label}" ${statusText}.`;
+    const label =
+      sanitizeWorkflowText(stripAnsiAndControl(entry.description)) ||
+      entry.runId;
+    const prefix = entry.isBackgrounded ? 'Background workflow' : 'Workflow';
+    const summary = `${prefix} "${label}" ${statusText}.`;
+    const resultText =
+      entry.status === 'completed'
+        ? sanitizeWorkflowText(stringifyWorkflowResult(entry.result))
+        : '';
+    const failures = buildFailureLines(entry);
+    const reported = reportedFailureLines(entry.result);
+    const displayText = entry.isBackgrounded
+      ? summary
+      : [
+          `${summary} Run ID: ${entry.runId}`,
+          entry.status === 'failed'
+            ? `Error: ${entry.error ?? ''}`
+            : `Result: ${resultText}`,
+          ...failures,
+          ...reported,
+        ]
+          .map((block) => truncateWorkflowText(block, 4_096))
+          .join('\n');
     const modelParts = [
       '<task-notification>',
       '<kind>workflow</kind>',
       `<task-id>${escapeXml(entry.runId)}</task-id>`,
       `<status>${entry.status}</status>`,
-      `<summary>Background workflow "${escapeXml(label)}" ${statusText}.</summary>`,
+      `<summary>${prefix} "${escapeXml(label)}" ${statusText}.</summary>`,
     ];
     if (entry.status === 'completed' && entry.result !== undefined) {
-      modelParts.push(
-        `<result>${escapeXml(stringifyCompletionResult(entry.result))}</result>`,
+      const { text: modelResult, truncated } = escapeXmlWithinBudget(
+        resultText,
+        MAX_COMPLETION_RESULT_CHARS,
       );
+      modelParts.push(`<result>${modelResult}</result>`);
+      if (truncated) {
+        const snapshotHint = entry.snapshotPath
+          ? `Aggregate result snapshot after finalization (if persistence succeeds): ${stripAnsiAndControl(entry.snapshotPath)}. Snapshots use plain JSON; Error, Map, and Set contents are not preserved. Result and reported-failure previews may also be truncated.`
+          : `Inspect workflow run ${entry.runId} after it settles.`;
+        modelParts.push(
+          `<result-truncated>Preview truncated. ${escapeXml(snapshotHint)}</result-truncated>`,
+        );
+      }
     }
     if (entry.status === 'failed') {
       modelParts.push(
@@ -688,10 +744,14 @@ export class WorkflowRunRegistry {
     // slots — and the count alone gives the reader no way to judge whether
     // the result is thin because the work was thin or because the agents
     // failed. These are the errors the registry already recorded.
-    const failures = buildFailureLines(entry);
     if (failures.length > 0) {
       modelParts.push(
         `<failures>${escapeXmlElementText(failures.join('\n'))}</failures>`,
+      );
+    }
+    if (reported.length > 0) {
+      modelParts.push(
+        `<reported-failures>${escapeXmlElementText(reported.join('\n'))}</reported-failures>`,
       );
     }
     // The two recovery routes a backgrounded run needs and cannot reconstruct:
@@ -712,13 +772,18 @@ export class WorkflowRunRegistry {
     modelParts.push('</task-notification>');
 
     const meta: WorkflowRunCompletionMeta = {
+      ...(!entry.isBackgrounded ? { isBackgrounded: false } : {}),
       runId: entry.runId,
       status: entry.status,
       todoWorkChainId: entry.todoWorkChainId,
     };
     try {
       runOutsideAgentContext(() =>
-        this.completionCallback!(displayText, modelParts.join('\n'), meta),
+        this.completionCallback!(
+          sanitizeWorkflowText(displayText),
+          sanitizeWorkflowText(modelParts.join('\n')),
+          meta,
+        ),
       );
     } catch (error) {
       debugLogger.error('Failed to emit workflow completion:', error);
@@ -1532,7 +1597,10 @@ export class WorkflowRunRegistry {
     // Script-derived failure text rides into the snapshot, the /workflows
     // render, and the completion-notification XML: normalize it once at
     // this boundary and persist the same string in both projections.
-    entry.error = stripAnsiAndControl(message).slice(0, 4_096);
+    entry.error = sanitizeWorkflowText(stripAnsiAndControl(message)).slice(
+      0,
+      4_096,
+    );
     this.appendEvent(entry, {
       type: 'workflow-failed',
       at: endTime,
@@ -1864,15 +1932,6 @@ export class WorkflowRunRegistry {
     } catch (error) {
       debugLogger.error('Failed to emit workflow approval change:', error);
     }
-  }
-}
-
-function stringifyCompletionResult(result: unknown): string {
-  if (typeof result === 'string') return result;
-  try {
-    return JSON.stringify(result) ?? String(result);
-  } catch {
-    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
   }
 }
 

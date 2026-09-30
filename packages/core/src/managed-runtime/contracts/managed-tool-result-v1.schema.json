@@ -1,0 +1,2328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwenlm.github.io/qwen-code/contracts/managed-tool-result-v1.schema.json",
+  "title": "Managed tool result v1 (managed-tool-result/1) conformance fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "envelopeCases",
+    "envelopeManifestCases",
+    "errors",
+    "kinds",
+    "limits",
+    "manifest",
+    "manifestCases",
+    "manifestTextCases",
+    "pageCases",
+    "pagePositionCases",
+    "pageRevisionCases",
+    "pageTextCases",
+    "pages",
+    "requestCases",
+    "requests",
+    "responseCases",
+    "revisionCases",
+    "routes",
+    "segmentSequences",
+    "stdout",
+    "toolResult"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": 1
+    },
+    "toolResult": {
+      "$ref": "#/$defs/toolResult"
+    },
+    "kinds": {
+      "const": {
+        "manifest": "managed-tool-result-manifest",
+        "page": "managed-tool-result-page",
+        "content": "managed-tool-result-content"
+      }
+    },
+    "limits": {
+      "const": {
+        "maxManifestBytes": 65536,
+        "maxPageBytes": 262144,
+        "maxContents": 32,
+        "maxPagesPerStream": 64,
+        "maxSegmentsPerPage": 1024,
+        "maxSegmentBytes": 16777216,
+        "maxOrdinal": 65535,
+        "maxMimeTypeLength": 255,
+        "maxIdBytes": 512,
+        "maxTokenLength": 128
+      }
+    },
+    "routes": {
+      "const": [
+        {
+          "key": "execute",
+          "method": "POST",
+          "path": "/internal/managed-runtime/v3/execute",
+          "protocolVersion": 3,
+          "requestBodyLimitBytes": 262144,
+          "responseBodyLimitBytes": 1048576,
+          "cacheControl": "no-store"
+        },
+        {
+          "key": "status",
+          "method": "POST",
+          "path": "/internal/managed-runtime/v3/status",
+          "protocolVersion": 3,
+          "requestBodyLimitBytes": 16384,
+          "responseBodyLimitBytes": 1048576,
+          "cacheControl": "no-store"
+        },
+        {
+          "key": "cancel",
+          "method": "POST",
+          "path": "/internal/managed-runtime/v3/cancel",
+          "protocolVersion": 3,
+          "requestBodyLimitBytes": 16384,
+          "responseBodyLimitBytes": 1048576,
+          "cacheControl": "no-store"
+        },
+        {
+          "key": "acknowledge",
+          "method": "POST",
+          "path": "/internal/managed-runtime/v3/acknowledge",
+          "protocolVersion": 3,
+          "requestBodyLimitBytes": 16384,
+          "responseBodyLimitBytes": 1048576,
+          "cacheControl": "no-store"
+        }
+      ]
+    },
+    "errors": {
+      "const": [
+        {
+          "status": 401,
+          "code": "managed_runtime_unauthorized",
+          "classification": "credentials"
+        },
+        {
+          "status": 400,
+          "code": "managed_runtime_attestation_invalid",
+          "classification": "protocol"
+        },
+        {
+          "status": 413,
+          "code": "managed_runtime_attestation_too_large",
+          "classification": "protocol"
+        },
+        {
+          "status": 409,
+          "code": "managed_runtime_identity_conflict",
+          "classification": "identity"
+        },
+        {
+          "status": 409,
+          "code": "managed_tool_result_conflict",
+          "classification": "identity"
+        },
+        {
+          "status": 404,
+          "code": null,
+          "classification": "incompatible"
+        },
+        {
+          "status": null,
+          "code": "managed_tool_result_invalid",
+          "classification": "protocol"
+        },
+        {
+          "status": null,
+          "code": "managed_tool_result_conflict",
+          "classification": "identity"
+        },
+        {
+          "status": null,
+          "code": "managed_tool_result_digest_mismatch",
+          "classification": "integrity"
+        }
+      ]
+    },
+    "manifest": {
+      "$ref": "#/$defs/manifest"
+    },
+    "pages": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/page"
+      }
+    },
+    "stdout": {
+      "$ref": "#/$defs/bytes"
+    },
+    "manifestCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "manifest", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "manifest": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "manifestTextCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "text": {
+            "type": "string"
+          },
+          "padToBytes": {
+            "$ref": "#/$defs/positiveCount"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "pageCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "page", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "page": {},
+          "repeatSegments": {
+            "type": "integer",
+            "minimum": 2
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "pageTextCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "text": {
+            "type": "string"
+          },
+          "padToBytes": {
+            "$ref": "#/$defs/positiveCount"
+          },
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "pagePositionCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "manifest",
+          "page",
+          "pageIndex",
+          "streamIndex",
+          "valid"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "manifest": {},
+          "streamIndex": {
+            "type": "integer"
+          },
+          "pageIndex": {
+            "type": "integer"
+          },
+          "page": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "revisionCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next", "previous", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "previous": {},
+          "next": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "pageRevisionCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next", "previous", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "previous": {},
+          "next": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "segmentSequences": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "steps"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/step"
+            }
+          }
+        }
+      }
+    },
+    "envelopeCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "result", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "result": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "envelopeManifestCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "manifest", "result", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "result": {},
+          "manifest": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "requests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acknowledge", "cancel", "execute", "status"],
+      "properties": {
+        "execute": {
+          "$ref": "#/$defs/executeRequest"
+        },
+        "status": {
+          "$ref": "#/$defs/statusRequest"
+        },
+        "cancel": {
+          "$ref": "#/$defs/cancelRequest"
+        },
+        "acknowledge": {
+          "$ref": "#/$defs/acknowledgeRequest"
+        }
+      }
+    },
+    "requestCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["body", "id", "route", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "route": {
+            "enum": ["execute", "status", "cancel", "acknowledge"]
+          },
+          "body": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "responseCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["body", "id", "route", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "route": {
+            "enum": ["execute", "status", "cancel", "acknowledge"]
+          },
+          "body": {},
+          "valid": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "caseId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    },
+    "toolResult": {
+      "const": "managed-tool-result/1"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{1,128}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,18}$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740990
+    },
+    "positiveCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740990
+    },
+    "durableRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byteLength",
+        "digest",
+        "kind",
+        "resourceId",
+        "schemaVersion"
+      ],
+      "properties": {
+        "resourceId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "$ref": "#/$defs/id"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/count"
+        },
+        "byteLength": {
+          "$ref": "#/$defs/count"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "manifestRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byteLength",
+        "digest",
+        "kind",
+        "resourceId",
+        "schemaVersion"
+      ],
+      "properties": {
+        "resourceId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "managed-tool-result-manifest"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "pageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byteLength",
+        "digest",
+        "kind",
+        "resourceId",
+        "schemaVersion"
+      ],
+      "properties": {
+        "resourceId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "managed-tool-result-page"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "contentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byteLength",
+        "digest",
+        "kind",
+        "resourceId",
+        "schemaVersion"
+      ],
+      "properties": {
+        "resourceId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "managed-tool-result-content"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740990
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "mimeType": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*(?:;[\\u0020-\\u007e]*)?$"
+    },
+    "missingRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["end", "start"],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/count"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/count"
+            }
+          ]
+        }
+      }
+    },
+    "pageReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byteLength", "ref", "segmentCount"],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/pageRef"
+        },
+        "segmentCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "byteLength": {
+          "$ref": "#/$defs/positiveCount"
+        }
+      }
+    },
+    "resourceBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref"],
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/contentRef"
+        }
+      }
+    },
+    "pagedBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pages"],
+      "properties": {
+        "pages": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/pageReference"
+          }
+        }
+      }
+    },
+    "descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "body",
+        "byteLength",
+        "digest",
+        "mimeType",
+        "missingRanges",
+        "role",
+        "state",
+        "streamId"
+      ],
+      "properties": {
+        "streamId": {
+          "$ref": "#/$defs/token"
+        },
+        "role": {
+          "enum": ["stdout", "stderr", "pty", "result", "attachment"]
+        },
+        "mimeType": {
+          "$ref": "#/$defs/mimeType"
+        },
+        "state": {
+          "enum": ["open", "sealed", "incomplete"]
+        },
+        "byteLength": {
+          "$ref": "#/$defs/count"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "missingRanges": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/missingRange"
+          }
+        },
+        "body": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/resourceBody"
+            },
+            {
+              "$ref": "#/$defs/pagedBody"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "open"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/pagedBody"
+              }
+            },
+            "required": ["body"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["open", "sealed"]
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "missingRanges": {
+                "type": "array",
+                "maxItems": 0
+              }
+            },
+            "required": ["missingRanges"]
+          }
+        }
+      ]
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bindingGeneration",
+        "callId",
+        "captureId",
+        "capturePolicy",
+        "captureReason",
+        "captureScope",
+        "captureStatus",
+        "contents",
+        "executionCallId",
+        "executionStatus",
+        "exitCode",
+        "invocationDigest",
+        "revision",
+        "sessionId",
+        "signal",
+        "tenantId",
+        "toolResult",
+        "turnId",
+        "type",
+        "upstreamTruncated"
+      ],
+      "properties": {
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "type": {
+          "const": "manifest"
+        },
+        "tenantId": {
+          "$ref": "#/$defs/id"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "turnId": {
+          "$ref": "#/$defs/id"
+        },
+        "executionCallId": {
+          "$ref": "#/$defs/id"
+        },
+        "callId": {
+          "$ref": "#/$defs/id"
+        },
+        "invocationDigest": {
+          "$ref": "#/$defs/id"
+        },
+        "bindingGeneration": {
+          "$ref": "#/$defs/generation"
+        },
+        "captureId": {
+          "$ref": "#/$defs/token"
+        },
+        "revision": {
+          "$ref": "#/$defs/positiveCount"
+        },
+        "executionStatus": {
+          "enum": ["success", "error", "cancelled", "unknown"]
+        },
+        "exitCode": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 4294967295
+            }
+          ]
+        },
+        "signal": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^SIG[A-Z0-9]{1,16}$"
+            }
+          ]
+        },
+        "captureScope": {
+          "enum": ["process_pty", "process_pipes", "tool_native"]
+        },
+        "capturePolicy": {
+          "enum": ["complete_required", "best_effort"]
+        },
+        "captureStatus": {
+          "enum": ["pending", "complete", "partial", "unavailable"]
+        },
+        "captureReason": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "quota_exhausted",
+                "size_limit",
+                "producer_lost",
+                "storage_failed",
+                "cancelled"
+              ]
+            }
+          ]
+        },
+        "upstreamTruncated": {
+          "type": "boolean"
+        },
+        "contents": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/descriptor"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "stdout"
+                    }
+                  },
+                  "required": ["role"]
+                }
+              }
+            },
+            "required": ["contents"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "stdout"
+                    }
+                  },
+                  "required": ["role"]
+                },
+                "maxContains": 1
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "stderr"
+                    }
+                  },
+                  "required": ["role"]
+                }
+              }
+            },
+            "required": ["contents"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "stderr"
+                    }
+                  },
+                  "required": ["role"]
+                },
+                "maxContains": 1
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "pty"
+                    }
+                  },
+                  "required": ["role"]
+                }
+              }
+            },
+            "required": ["contents"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "pty"
+                    }
+                  },
+                  "required": ["role"]
+                },
+                "maxContains": 1
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "result"
+                    }
+                  },
+                  "required": ["role"]
+                }
+              }
+            },
+            "required": ["contents"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "result"
+                    }
+                  },
+                  "required": ["role"]
+                },
+                "maxContains": 1
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureScope": {
+                "const": "process_pty"
+              }
+            },
+            "required": ["captureScope"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "items": {
+                  "not": {
+                    "type": "object",
+                    "properties": {
+                      "role": {
+                        "enum": ["stdout", "stderr"]
+                      }
+                    },
+                    "required": ["role"]
+                  }
+                }
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureScope": {
+                "const": "process_pipes"
+              }
+            },
+            "required": ["captureScope"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "items": {
+                  "not": {
+                    "type": "object",
+                    "properties": {
+                      "role": {
+                        "enum": ["pty"]
+                      }
+                    },
+                    "required": ["role"]
+                  }
+                }
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureScope": {
+                "const": "tool_native"
+              }
+            },
+            "required": ["captureScope"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "items": {
+                  "not": {
+                    "type": "object",
+                    "properties": {
+                      "role": {
+                        "enum": ["stdout", "stderr", "pty"]
+                      }
+                    },
+                    "required": ["role"]
+                  }
+                }
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "const": "pending"
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "const": "open"
+                    }
+                  },
+                  "required": ["state"]
+                }
+              }
+            },
+            "required": ["contents"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "items": {
+                  "not": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "const": "open"
+                      }
+                    },
+                    "required": ["state"]
+                  }
+                }
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "const": "complete"
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "const": "sealed"
+                    }
+                  },
+                  "required": ["state"]
+                }
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "const": "unavailable"
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "const": "incomplete"
+                    },
+                    "byteLength": {
+                      "const": 0
+                    }
+                  }
+                }
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "const": "partial"
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "contents": {
+                "allOf": [
+                  {
+                    "type": "array",
+                    "contains": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "const": "incomplete"
+                        }
+                      },
+                      "required": ["state"]
+                    }
+                  },
+                  {
+                    "not": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "const": "incomplete"
+                          },
+                          "byteLength": {
+                            "const": 0
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "required": ["contents"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "enum": ["pending", "complete"]
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "captureReason": {
+                "type": "null"
+              }
+            },
+            "required": ["captureReason"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "captureReason": {
+                "type": "string"
+              }
+            },
+            "required": ["captureReason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "executionStatus": {
+                "const": "unknown"
+              }
+            },
+            "required": ["executionStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "exitCode": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureScope": {
+                "const": "tool_native"
+              }
+            },
+            "required": ["captureScope"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "exitCode": {
+                "type": "null"
+              },
+              "signal": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "if": {
+              "type": "object",
+              "properties": {
+                "exitCode": {
+                  "type": "integer"
+                }
+              },
+              "required": ["exitCode"]
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "signal": {
+                  "type": "null"
+                }
+              },
+              "required": ["signal"]
+            }
+          }
+        }
+      ]
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byteLength", "digest"],
+      "properties": {
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureId",
+        "firstOrdinal",
+        "offset",
+        "segments",
+        "streamId",
+        "toolResult",
+        "type"
+      ],
+      "properties": {
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "type": {
+          "const": "page"
+        },
+        "captureId": {
+          "$ref": "#/$defs/token"
+        },
+        "streamId": {
+          "$ref": "#/$defs/token"
+        },
+        "firstOrdinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "offset": {
+          "$ref": "#/$defs/count"
+        },
+        "segments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/segment"
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message"],
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureReason",
+        "captureStatus",
+        "deliveryStatus",
+        "manifest",
+        "previewTruncated"
+      ],
+      "properties": {
+        "captureStatus": {
+          "enum": ["complete", "partial", "unavailable"]
+        },
+        "captureReason": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "quota_exhausted",
+                "size_limit",
+                "producer_lost",
+                "storage_failed",
+                "cancelled"
+              ]
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/manifestRef"
+            }
+          ]
+        },
+        "previewTruncated": {
+          "type": "boolean"
+        },
+        "deliveryStatus": {
+          "enum": ["pending", "committed", "blocked"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "const": "complete"
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "captureReason": {
+                "type": "null"
+              }
+            },
+            "required": ["captureReason"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "captureReason": {
+                "type": "string"
+              }
+            },
+            "required": ["captureReason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "enum": ["complete", "partial"]
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "manifest": {
+                "type": "object"
+              }
+            },
+            "required": ["manifest"]
+          }
+        }
+      ]
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capture", "executionStatus", "responseParts"],
+      "properties": {
+        "executionStatus": {
+          "enum": ["not_started", "success", "error", "cancelled"]
+        },
+        "responseParts": {
+          "type": "array"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        },
+        "capture": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/capture"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "executionStatus": {
+                "const": "not_started"
+              }
+            },
+            "required": ["executionStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "capture": {
+                "type": "null"
+              }
+            },
+            "required": ["capture"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "capture": {
+                "type": "object"
+              }
+            },
+            "required": ["capture"]
+          }
+        }
+      ]
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argsDigest", "callId", "promptId", "sessionId"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "promptId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "callId": {
+          "$ref": "#/$defs/id"
+        },
+        "argsDigest": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "captureRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bindingGeneration",
+        "capturePolicy",
+        "executionCallId",
+        "sessionId",
+        "tenantId",
+        "turnId"
+      ],
+      "properties": {
+        "tenantId": {
+          "$ref": "#/$defs/id"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "turnId": {
+          "$ref": "#/$defs/id"
+        },
+        "executionCallId": {
+          "$ref": "#/$defs/id"
+        },
+        "bindingGeneration": {
+          "$ref": "#/$defs/generation"
+        },
+        "capturePolicy": {
+          "enum": ["complete_required", "best_effort"]
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryStatus",
+        "executionCallId",
+        "historyRevision",
+        "manifest"
+      ],
+      "properties": {
+        "executionCallId": {
+          "$ref": "#/$defs/id"
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/manifestRef"
+            }
+          ]
+        },
+        "deliveryStatus": {
+          "enum": ["committed", "blocked"]
+        },
+        "historyRevision": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/positiveCount"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "deliveryStatus": {
+                "const": "committed"
+              }
+            },
+            "required": ["deliveryStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "historyRevision": {
+                "type": "integer"
+              }
+            },
+            "required": ["historyRevision"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "historyRevision": {
+                "type": "null"
+              }
+            },
+            "required": ["historyRevision"]
+          }
+        }
+      ]
+    },
+    "executeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capture",
+        "input",
+        "protocolVersion",
+        "reference",
+        "toolName",
+        "toolResult"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "toolName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input": {
+          "type": "object"
+        },
+        "capture": {
+          "$ref": "#/$defs/captureRequest"
+        }
+      }
+    },
+    "statusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "reference", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "afterSequence": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "cancelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "reference", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        }
+      }
+    },
+    "acknowledgeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "receipt", "reference", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "reference": {
+          "$ref": "#/$defs/reference"
+        },
+        "receipt": {
+          "$ref": "#/$defs/receipt"
+        }
+      }
+    },
+    "toolState": {
+      "enum": [
+        "prepared",
+        "executing",
+        "cancel_requested",
+        "settled",
+        "unknown"
+      ]
+    },
+    "executeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "state", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "state": {
+          "$ref": "#/$defs/toolState"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/result"
+              }
+            },
+            "required": ["result"]
+          },
+          "else": {
+            "not": {
+              "type": "object",
+              "properties": {
+                "result": true
+              },
+              "required": ["result"]
+            }
+          }
+        }
+      ]
+    },
+    "cancelResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "state", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "state": {
+          "$ref": "#/$defs/toolState"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/result"
+              }
+            },
+            "required": ["result"]
+          },
+          "else": {
+            "not": {
+              "type": "object",
+              "properties": {
+                "result": true
+              },
+              "required": ["result"]
+            }
+          }
+        }
+      ]
+    },
+    "statusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "state", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "state": {
+          "$ref": "#/$defs/toolState"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "lastSequence": {
+          "$ref": "#/$defs/count"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/result"
+              }
+            },
+            "required": ["result"]
+          },
+          "else": {
+            "not": {
+              "type": "object",
+              "properties": {
+                "result": true
+              },
+              "required": ["result"]
+            }
+          }
+        }
+      ]
+    },
+    "acknowledgeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "state", "toolResult"],
+      "properties": {
+        "protocolVersion": {
+          "const": 3
+        },
+        "toolResult": {
+          "$ref": "#/$defs/toolResult"
+        },
+        "state": {
+          "$ref": "#/$defs/toolState"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/result"
+              }
+            },
+            "required": ["result"]
+          },
+          "else": {
+            "not": {
+              "type": "object",
+              "properties": {
+                "result": true
+              },
+              "required": ["result"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": ["settled", "unknown"]
+            }
+          },
+          "required": ["state"]
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "type": "object",
+                "properties": {
+                  "capture": {
+                    "type": "object",
+                    "properties": {
+                      "deliveryStatus": {
+                        "enum": ["committed", "blocked"]
+                      }
+                    },
+                    "required": ["deliveryStatus"]
+                  }
+                },
+                "required": ["capture"]
+              }
+            },
+            "required": ["result"]
+          }
+        }
+      ]
+    },
+    "bytes": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base64"],
+          "properties": {
+            "base64": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fill"],
+          "properties": {
+            "fill": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["byte", "length"],
+              "properties": {
+                "byte": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "length": {
+                  "$ref": "#/$defs/count"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "segmentReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byteLength", "digest", "ordinal"],
+      "properties": {
+        "ordinal": {
+          "$ref": "#/$defs/count"
+        },
+        "byteLength": {
+          "$ref": "#/$defs/positiveCount"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "sealReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byteLength", "digest", "segmentCount"],
+      "properties": {
+        "segmentCount": {
+          "$ref": "#/$defs/count"
+        },
+        "byteLength": {
+          "$ref": "#/$defs/count"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "prefix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byteLength", "digest", "sealed", "segmentCount"],
+      "properties": {
+        "segmentCount": {
+          "$ref": "#/$defs/count"
+        },
+        "byteLength": {
+          "$ref": "#/$defs/count"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "sealed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "status"],
+      "properties": {
+        "status": {
+          "const": "refused"
+        },
+        "code": {
+          "enum": [
+            "managed_tool_result_invalid",
+            "managed_tool_result_conflict",
+            "managed_tool_result_digest_mismatch"
+          ]
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected", "op", "request"],
+      "properties": {
+        "op": {
+          "enum": ["publish", "seal", "prefix"]
+        },
+        "request": {
+          "type": "object"
+        },
+        "expected": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "publish"
+              }
+            },
+            "required": ["op"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "expected": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["result", "status"],
+                    "properties": {
+                      "status": {
+                        "const": "ok"
+                      },
+                      "result": {
+                        "$ref": "#/$defs/segmentReceipt"
+                      }
+                    }
+                  },
+                  {
+                    "$ref": "#/$defs/refusal"
+                  }
+                ]
+              }
+            },
+            "required": ["expected"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "seal"
+              }
+            },
+            "required": ["op"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "expected": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["result", "status"],
+                    "properties": {
+                      "status": {
+                        "const": "ok"
+                      },
+                      "result": {
+                        "$ref": "#/$defs/sealReceipt"
+                      }
+                    }
+                  },
+                  {
+                    "$ref": "#/$defs/refusal"
+                  }
+                ]
+              }
+            },
+            "required": ["expected"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "prefix"
+              }
+            },
+            "required": ["op"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "expected": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["result", "status"],
+                    "properties": {
+                      "status": {
+                        "const": "ok"
+                      },
+                      "result": {
+                        "$ref": "#/$defs/prefix"
+                      }
+                    }
+                  },
+                  {
+                    "$ref": "#/$defs/refusal"
+                  }
+                ]
+              }
+            },
+            "required": ["expected"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "publish"
+              }
+            },
+            "required": ["op"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "request": {
+                "type": "object",
+                "properties": {
+                  "bytes": {
+                    "$ref": "#/$defs/bytes"
+                  }
+                }
+              }
+            },
+            "required": ["request"]
+          }
+        }
+      ]
+    }
+  }
+}

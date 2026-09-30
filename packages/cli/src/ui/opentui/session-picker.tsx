@@ -29,6 +29,10 @@ import type {
   SessionListItem,
   SessionService,
 } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import { t } from '../../i18n/index.js';
 import {
   filterSessions,
@@ -228,6 +232,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
       try {
         const result: ListSessionsResult = await sessionService.listSessions({
           size: SESSION_PAGE_SIZE,
+          excludeSourceTypes: [
+            AGENT_HOST_SESSION_SOURCE_TYPE,
+            AGENT_SESSION_SOURCE_TYPE,
+          ],
         });
         if (!alive) return;
         setSessionState({
@@ -253,6 +261,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
       const result: ListSessionsResult = await sessionService.listSessions({
         size: SESSION_PAGE_SIZE,
         cursor: sessionState.nextCursor,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       setSessionState((prev) => ({
         sessions: [...prev.sessions, ...result.items],

@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwenlm.github.io/qwen-code/contracts/managed-workspace-binding-v1.schema.json",
+  "title": "Managed Workspace binding v1 conformance fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "digest", "paths", "bindings", "probes"],
+  "properties": {
+    "contractVersion": {
+      "const": 1
+    },
+    "digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/pathCase"
+      }
+    },
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/bindingCase"
+      }
+    },
+    "probes": {
+      "$ref": "#/$defs/probes"
+    }
+  },
+  "$defs": {
+    "caseId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "prefix", "domainTag", "fieldOrder"],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "prefix": {
+          "const": "sha256:"
+        },
+        "domainTag": {
+          "const": "qwen-managed-context-binding-v1"
+        },
+        "fieldOrder": {
+          "const": [
+            "tenantId",
+            "workspaceId",
+            "workspaceGeneration",
+            "storageId",
+            "cwdRelative",
+            "contextConfigRef",
+            "contextRevision"
+          ]
+        }
+      }
+    },
+    "pathCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "input", "expected"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/caseId"
+        },
+        "input": {
+          "type": "string"
+        },
+        "expected": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["cwdRelative"],
+              "properties": {
+                "cwdRelative": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["error"],
+              "properties": {
+                "error": {
+                  "const": "invalid_cwd"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenantId",
+        "workspaceId",
+        "workspaceGeneration",
+        "storageId",
+        "cwdRelative",
+        "contextConfigRef",
+        "contextRevision"
+      ],
+      "properties": {
+        "tenantId": {
+          "type": "string"
+        },
+        "workspaceId": {
+          "type": "string"
+        },
+        "workspaceGeneration": {
+          "type": "string"
+        },
+        "storageId": {
+          "type": "string"
+        },
+        "cwdRelative": {
+          "type": "string"
+        },
+        "contextConfigRef": {
+          "type": "string"
+        },
+        "contextRevision": {
+          "type": "string"
+        }
+      }
+    },
+    "bindingCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "binding", "expected"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/caseId"
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "expected": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["encodedHex", "contextDigest"],
+              "properties": {
+                "encodedHex": {
+                  "type": "string",
+                  "pattern": "^([0-9a-f]{2})+$"
+                },
+                "contextDigest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["error"],
+              "properties": {
+                "error": {
+                  "const": "invalid_binding"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "codePointRanges": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1114111
+          },
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1114111
+          }
+        ],
+        "items": false,
+        "minItems": 2
+      }
+    },
+    "probeTemplate": {
+      "type": "string",
+      "pattern": "^[^{}]*\\{c\\}[^{}]*$"
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codePoints", "binding", "cases"],
+      "properties": {
+        "codePoints": {
+          "$ref": "#/$defs/codePointRanges",
+          "type": "array",
+          "minItems": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/probeCase"
+          }
+        }
+      }
+    },
+    "probeCase": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "template", "accepted"],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/caseId"
+            },
+            "kind": {
+              "const": "path"
+            },
+            "template": {
+              "$ref": "#/$defs/probeTemplate"
+            },
+            "accepted": {
+              "$ref": "#/$defs/codePointRanges"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "kind", "field", "template", "accepted"],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/caseId"
+            },
+            "kind": {
+              "const": "binding"
+            },
+            "field": {
+              "enum": [
+                "tenantId",
+                "workspaceId",
+                "workspaceGeneration",
+                "storageId",
+                "cwdRelative",
+                "contextConfigRef",
+                "contextRevision"
+              ]
+            },
+            "template": {
+              "$ref": "#/$defs/probeTemplate"
+            },
+            "accepted": {
+              "$ref": "#/$defs/codePointRanges"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

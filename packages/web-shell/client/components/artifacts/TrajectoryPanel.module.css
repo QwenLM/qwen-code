@@ -1,8 +1,11 @@
 .panel {
+  container-type: inline-size;
+  container-name: trajectory;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .header {
@@ -21,6 +24,176 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.overviewMetrics {
+  position: relative;
+  z-index: 1003;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: 45px 20px;
+  gap: 0 6px;
+  flex: none;
+  padding: 4px 3px 0;
+  box-sizing: border-box;
+  height: 69px;
+  font-size: 10px;
+}
+
+.metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.metric strong {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.failureCounts {
+  grid-column: 1 / 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+
+.failureCounts[data-has-failures='true'] {
+  color: var(--destructive);
+}
+
+.metricHelp {
+  justify-self: end;
+  color: var(--muted-foreground);
+}
+
+.metricHelp summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.metricHelpContent {
+  position: absolute;
+  z-index: 10;
+  right: 2px;
+  top: 60px;
+  width: min(360px, calc(100% - 4px));
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--foreground) 12%, transparent);
+}
+
+.metricHelpContent p {
+  margin: 4px 0;
+}
+
+.context {
+  height: 42px;
+  line-height: 13px;
+  flex: none;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 28%, var(--background));
+  font-size: 10px;
+}
+
+.contextNotice {
+  height: 13px;
+  flex: none;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selectedLine {
+  height: 20px;
+  flex: none;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.selectedInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.selectedLabel {
+  flex: none;
+  color: var(--muted-foreground);
+  font-weight: 600;
+}
+
+.selectedName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.selectedMeta {
+  flex: none;
+  max-width: 32%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+.detailsButton {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  line-height: 14px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.detailsButton:hover:not(:disabled),
+.detailsButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 30%, var(--border));
+  background: var(--muted);
+}
+
+.detailsButton:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .headerActions {
@@ -75,17 +248,31 @@
   cursor: default;
 }
 
+.errorSlot {
+  height: 32px;
+  flex: none;
+}
+
 .error {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: 6px;
-  padding: 6px 8px;
+  height: 26px;
+  box-sizing: border-box;
+  margin-top: 3px;
+  padding: 2px 8px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--destructive) 12%, transparent);
   color: var(--destructive);
   font-size: 11px;
+}
+
+.error span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tableWrap {
@@ -93,6 +280,10 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.tableWrapWithInspector {
+  min-height: 120px;
 }
 
 .placeholder {
@@ -237,13 +428,19 @@
   font-style: italic;
 }
 
-.metrics {
-  flex-shrink: 0;
+.overviewMetrics,
+.rowMetrics {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10px;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.rowMetrics {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toneError {
@@ -252,4 +449,89 @@
 
 .toneMuted {
   opacity: 0.6;
+}
+
+.foldButton,
+.foldSpacer {
+  width: 18px;
+  flex: 0 0 18px;
+}
+.foldButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.foldButton:hover {
+  background: var(--background);
+  color: var(--foreground);
+}
+.turnPrompt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.foldCount,
+.parentNotice {
+  flex: none;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+.record[data-grouped='true'] {
+  padding-left: 18px;
+}
+.rowMetrics {
+  max-width: 35%;
+}
+.waterfallSlot {
+  display: none;
+}
+@container trajectory (min-width: 760px) {
+  .waterfallSlot {
+    display: flex;
+    flex: 0 0 36%;
+    height: 34px;
+  }
+  .rowMetrics {
+    flex: 0 0 110px;
+  }
+  .record[data-grouped='true'],
+  .record[data-depth='1'] {
+    padding-left: 6px;
+  }
+  .record[data-grouped='true'] .badge {
+    padding-left: 12px;
+    box-sizing: border-box;
+  }
+  .nestMarker {
+    display: none;
+  }
+}
+@container trajectory (max-width: 479px) {
+  .turnSummary {
+    display: none;
+  }
+  .parentNotice,
+  .foldCount {
+    max-width: 75px;
+  }
+  .record {
+    gap: 4px;
+  }
+  .badge {
+    min-width: 38px;
+    max-width: 65px;
+  }
 }

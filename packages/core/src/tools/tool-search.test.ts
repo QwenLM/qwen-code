@@ -8,10 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { CallableTool } from '@google/genai';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
-import { ToolRegistry } from './tool-registry.js';
+import {
+  deferredDeclarationFingerprint,
+  ToolRegistry,
+} from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import { resolveDeferredToolCall, ToolCallTool } from './tool-call.js';
+import { ToolErrorType } from './tool-error.js';
 import type { MediaPolicyToolDescriptor, ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
@@ -20,6 +25,7 @@ import { LoopWakeupTool } from './loop-wakeup.js';
 import { ToolNames } from './tool-names.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { runWithToolCallRuntime } from '../code-mode/tool-call-runtime.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -33,12 +39,17 @@ const baseConfigParams: ConfigParameters = {
   approvalMode: ApprovalMode.DEFAULT,
 };
 
-function makeConfigWithRegistry(options: { withToolCall?: boolean } = {}): {
+function makeConfigWithRegistry(
+  options: { withToolCall?: boolean; codeModeOnly?: boolean } = {},
+): {
   config: Config;
   registry: ToolRegistry;
 } {
   const { withToolCall = true } = options;
-  const config = new Config(baseConfigParams);
+  const config = new Config({
+    ...baseConfigParams,
+    codeModeOnly: options.codeModeOnly,
+  });
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
   registry.registerTool(new ToolSearchTool(config));
@@ -47,6 +58,186 @@ function makeConfigWithRegistry(options: { withToolCall?: boolean } = {}): {
   }
   return { config, registry };
 }
+
+describe('Code Mode discovery', () => {
+  function setup() {
+    const { config, registry } = makeConfigWithRegistry({
+      codeModeOnly: true,
+      withToolCall: false,
+    });
+    registry.registerTool(new MockTool({ name: 'exec' }));
+    registry.registerTool(
+      new MockTool({
+        name: 'remote-fetch',
+        description: 'Search remote documents </function>',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', minLength: 3 },
+            prompt: { type: 'string' },
+          },
+          required: ['url', 'prompt'],
+        },
+      }),
+    );
+    return { config, registry };
+  }
+
+  it.each(['remote documents', 'select:remote-fetch'])(
+    'returns a complete schema and usable signature without the bridge: %s',
+    async (query) => {
+      const { config, registry } = setup();
+      const before = registry.getFunctionDeclarations();
+      const result = await new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+      expect(result.error).toBeUndefined();
+      const content = String(result.llmContent);
+      const declaration = JSON.parse(
+        content.match(/<function>(.*?)<\/function>/s)![1],
+      );
+      expect(declaration).toMatchObject({
+        name: 'remote-fetch',
+        description: 'Search remote documents </function>',
+        jsName: 'remote_fetch',
+        signature:
+          'tools.remote_fetch(args: { "prompt": string; "url": string }): Promise<CodeModeToolResult>;',
+        parametersJsonSchema: {
+          required: ['url', 'prompt'],
+          properties: { url: { minLength: 3 } },
+        },
+      });
+      expect(content).toContain('through exec');
+      expect(content).not.toContain('through tool_call');
+      expect(registry.getFunctionDeclarations()).toEqual(before);
+      expect(registry.isDeferredToolRevealed('remote-fetch')).toBe(false);
+    },
+  );
+
+  it.each(['remote documents', 'select:remote-fetch'])(
+    'withholds schemas outside the invocation allowlist: %s',
+    async (query) => {
+      const { config } = setup();
+      const result = await runWithToolCallRuntime(
+        { parentCallId: 'search', allowedToolNames: [], dispatch: vi.fn() },
+        () =>
+          new ToolSearchTool(config)
+            .build({ query })
+            .execute(new AbortController().signal),
+      );
+      expect(String(result.llmContent)).not.toContain('<function>');
+    },
+  );
+
+  it('omits collision losers and direct-only tools from exact lookup', async () => {
+    const { config, registry } = setup();
+    registry.registerTool(
+      new MockTool({ name: 'remote_fetch', shouldDefer: true }),
+    );
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:remote_fetch,tool_search,exec' })
+      .execute(new AbortController().signal);
+    expect(String(result.llmContent)).not.toContain('<function>');
+    expect(String(result.llmContent)).toContain('Not found:');
+  });
+
+  it('uses the scoped collision winner for both search and execution', async () => {
+    const { config, registry } = setup();
+    registry.registerTool(
+      new MockTool({
+        name: 'remote_fetch',
+        description: 'scoped winner',
+        shouldDefer: true,
+      }),
+    );
+    const result = await runWithToolCallRuntime(
+      {
+        parentCallId: 'search',
+        allowedToolNames: ['remote_fetch'],
+        dispatch: vi.fn(),
+      },
+      () =>
+        new ToolSearchTool(config)
+          .build({ query: 'select:remote_fetch' })
+          .execute(new AbortController().signal),
+    );
+    expect(String(result.llmContent)).toContain(
+      '"description":"scoped winner"',
+    );
+    expect(String(result.llmContent)).toContain('"jsName":"remote_fetch"');
+  });
+
+  it('resolves case-insensitive lookup within the allowed scope', async () => {
+    const { config, registry } = setup();
+    for (const name of ['CaseFetch', 'casefetch']) {
+      registry.registerTool(new MockTool({ name, shouldDefer: true }));
+    }
+    const result = await runWithToolCallRuntime(
+      {
+        parentCallId: 'search',
+        allowedToolNames: ['CaseFetch'],
+        dispatch: vi.fn(),
+      },
+      () =>
+        new ToolSearchTool(config)
+          .build({ query: 'select:CASEFETCH' })
+          .execute(new AbortController().signal),
+    );
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"CaseFetch"');
+    expect(content).not.toContain('casefetch');
+    expect(content).not.toContain('Ambiguous');
+  });
+
+  it.each([true, false])(
+    'keeps MCP short names exact and offers recovery only in Code Mode: %s',
+    async (codeModeOnly) => {
+      const { config, registry } = makeConfigWithRegistry({ codeModeOnly });
+      registry.registerTool(new MockTool({ name: 'exec' }));
+      registry.registerTool(
+        new MockTool({
+          name: 'mcp__catalog__read_entry',
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+          },
+        }),
+      );
+      const before = registry.getFunctionDeclarations();
+      const search = async (query: string) =>
+        new ToolSearchTool(config)
+          .build({ query })
+          .execute(new AbortController().signal);
+
+      const missing = String((await search('select:read_entry')).llmContent);
+      expect(missing).toContain('Not found: read_entry');
+      expect(missing).not.toContain('<function>');
+      expect(missing).not.toContain('mcp__catalog__read_entry');
+      if (codeModeOnly) {
+        expect(missing).toContain('keywords without select:');
+        expect(missing).toContain('mcp__<server>__<tool>');
+      } else {
+        expect(missing).toBe('Not found: read_entry');
+      }
+
+      const found = String((await search('read_entry')).llmContent);
+      const declaration = JSON.parse(
+        found.match(/<function>(.*?)<\/function>/s)![1],
+      );
+      expect(declaration).toMatchObject({
+        name: 'mcp__catalog__read_entry',
+        parametersJsonSchema: { required: ['id'] },
+      });
+      if (codeModeOnly) {
+        expect(declaration.jsName).toBe('mcp__catalog__read_entry');
+      }
+      expect(registry.getFunctionDeclarations()).toEqual(before);
+    },
+  );
+});
 
 describe('tokenize', () => {
   it('splits on whitespace and lowercases', () => {
@@ -299,6 +490,325 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('Not found: missing');
     expect(registry.isDeferredToolRevealed('alpha')).toBe(false);
     expect(registry.isDeferredToolRevealed('bravo')).toBe(false);
+  });
+
+  it('select: reports every unresolvable spelling, not one per alias (#11321)', async () => {
+    // `task` canonicalizes to `agent` and neither is registered here, so both
+    // spellings fail to resolve. Keying the unresolved dedupe branch on the
+    // canonicalized alias would collapse them onto one key and drop the second
+    // before the maxResults check: it then lands in none of
+    // missing/truncated/ambiguous, which is exactly what the key's comment says
+    // it exists to prevent.
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'select:task,agent' })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain('Not found: task, agent');
+    expect(result.returnDisplay).toBe('2 missing');
+  });
+
+  it('select: mode reports a name that matches several tools only by case (#11321)', async () => {
+    registry.registerTool(
+      new MockTool({ name: 'deferred_target', shouldDefer: true }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'Deferred_Target', shouldDefer: true }),
+    );
+
+    const search = (query: string) =>
+      new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+
+    // The ambiguous spelling is echoed back, and the actionable slot holds the
+    // names that actually resolve. Presenting the rejected spelling AS "the
+    // exact name" invited a byte-identical re-issue, which loop detection
+    // counts as a duplicate call.
+    const ambiguous = await search('select:DEFERRED_TARGET');
+    expect(String(ambiguous.llmContent)).not.toContain('<functions>');
+    expect(String(ambiguous.llmContent)).toContain(
+      '"DEFERRED_TARGET" matches more than one registered tool by case',
+    );
+    expect(String(ambiguous.llmContent)).toContain(
+      'e.g. select:Deferred_Target or select:deferred_target',
+    );
+    expect(String(ambiguous.llmContent)).not.toContain(
+      'exact name: DEFERRED_TARGET',
+    );
+    expect(ambiguous.returnDisplay).toBe('1 ambiguous');
+
+    // Two spellings of the SAME collision collapse into one report. The
+    // message above invites the model to echo both candidates back, and
+    // spending two names slots on one problem would push a genuinely
+    // requested tool into `truncated` unrendered.
+    const echoed = await search('select:DEFERRED_TARGET,deferred_TARGET');
+    expect(echoed.returnDisplay).toBe('1 ambiguous');
+    expect(
+      String(echoed.llmContent).match(/matches more than one/g),
+    ).toHaveLength(1);
+
+    // An exact spelling still resolves to exactly that tool.
+    const exact = await search('select:Deferred_Target');
+    expect(String(exact.llmContent)).toContain('"name":"Deferred_Target"');
+    expect(String(exact.llmContent)).not.toContain('"name":"deferred_target"');
+  });
+
+  it('select: mode reviews both spellings when two registered tools differ only by case (#11321)', async () => {
+    const lower = new MockTool({ name: 'deferred_target', shouldDefer: true });
+    const upper = new MockTool({ name: 'Deferred_Target', shouldDefer: true });
+    registry.registerTool(lower);
+    registry.registerTool(upper);
+
+    const result = await new ToolSearchTool(config)
+      .build({ query: 'select:Deferred_Target,deferred_target' })
+      .execute(new AbortController().signal);
+
+    // Dedupe keys on the RESOLVED tool, not the raw lowercase spelling: a
+    // dropped spelling is reported in none of missing/truncated/ambiguous, is
+    // never recorded as reviewed, and then reaches tool_call, which resolves it
+    // exactly and takes the never-reviewed pass-through.
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"Deferred_Target"');
+    expect(content).toContain('"name":"deferred_target"');
+    expect(result.returnDisplay).toBe('Reviewed 2 tool(s)');
+    expect(registry.getReviewedDeclaration('deferred_target')).toBe(
+      deferredDeclarationFingerprint(lower),
+    );
+    expect(registry.getReviewedDeclaration('Deferred_Target')).toBe(
+      deferredDeclarationFingerprint(upper),
+    );
+  });
+
+  it('a re-review after a declaration change clears the tool_call refusal (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    registry.registerTool(
+      new MockTool({
+        name: 'alpha',
+        shouldDefer: true,
+        params: { type: 'object', properties: { id: { type: 'number' } } },
+      }),
+    );
+
+    const search = (query: string) =>
+      new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+    await search('select:alpha');
+
+    // The same name is re-declared with a different parameter contract.
+    registry.registerTool(
+      new MockTool({
+        name: 'alpha',
+        shouldDefer: true,
+        params: { type: 'object', properties: { id: { type: 'string' } } },
+      }),
+    );
+
+    const refused = await resolveDeferredToolCall(registry, {
+      name: 'alpha',
+      arguments: { id: 'x' },
+    });
+    expect(refused).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    });
+
+    // The recovery loop must close: re-reviewing OVERWRITES the recorded
+    // fingerprint. A record step that skipped an existing key would leave the
+    // model in a permanent refusal -> re-review -> refusal loop for the
+    // remainder of the session.
+    await search('select:alpha');
+    const resolved = await resolveDeferredToolCall(registry, {
+      name: 'alpha',
+      arguments: { id: 'x' },
+    });
+    expect(resolved).toMatchObject({
+      tool: expect.objectContaining({ name: 'alpha' }),
+      arguments: { id: 'x' },
+    });
+  });
+
+  it('select: records every tool it returned, so reveal state cannot decide gate coverage (#11321)', async () => {
+    const hidden = new MockTool({ name: 'alpha', shouldDefer: true });
+    const visible = new MockTool({ name: 'visible_tool' });
+    registry.registerTool(hidden);
+    registry.registerTool(visible);
+
+    await new ToolSearchTool(config)
+      .build({ query: 'select:alpha,visible_tool' })
+      .execute(new AbortController().signal);
+
+    expect(registry.getReviewedDeclaration('alpha')).toBe(
+      deferredDeclarationFingerprint(hidden),
+    );
+    // Recorded too. tool_call compares the fingerprint only for a target that
+    // is hidden at call time, so this entry is inert while the tool stays
+    // visible — but a tool revealed here can be hidden again later, and
+    // gating the record on the reveal state at review time left that
+    // invocation on the never-reviewed pass-through.
+    expect(registry.getReviewedDeclaration('visible_tool')).toBe(
+      deferredDeclarationFingerprint(visible),
+    );
+  });
+
+  it.each([
+    ['replace', ToolNames.EDIT],
+    ['task', ToolNames.AGENT],
+    ['search_file_content', ToolNames.GREP],
+  ])(
+    'select:%s reviews the registered %s, the tool tool_call invokes (#11321)',
+    async (alias, registered) => {
+      const hidden = new MockTool({ name: registered, shouldDefer: true });
+      registry.registerTool(hidden);
+
+      const result = await new ToolSearchTool(config)
+        .build({ query: `select:${alias}` })
+        .execute(new AbortController().signal);
+
+      // The invocation half canonicalizes the legacy alias before resolving, so
+      // the discovery half must present that tool rather than report the alias
+      // as unknown — otherwise the name is invocable but undiscoverable and the
+      // call takes the never-reviewed pass-through.
+      const content = String(result.llmContent);
+      expect(content).toContain(`"name":"${registered}"`);
+      expect(content).not.toContain(`Not found: ${alias}`);
+      expect(result.returnDisplay).toBe('Reviewed 1 tool(s)');
+      expect(registry.getReviewedDeclaration(registered)).toBe(
+        deferredDeclarationFingerprint(hidden),
+      );
+    },
+  );
+
+  it('select: an alias and its registered name review one tool, and tool_call accepts the alias afterwards (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    registry.registerTool(
+      new MockTool({ name: ToolNames.EDIT, shouldDefer: true }),
+    );
+
+    const deduped = await new ToolSearchTool(config)
+      .build({ query: `select:replace,${ToolNames.EDIT}` })
+      .execute(new AbortController().signal);
+    // Both spellings resolve to the same tool, so the second one must not
+    // consume a max_results slot or emit a duplicate schema.
+    expect(deduped.returnDisplay).toBe('Reviewed 1 tool(s)');
+
+    const resolved = await resolveDeferredToolCall(registry, {
+      name: 'replace',
+      arguments: {},
+    });
+    expect(resolved).toMatchObject({
+      tool: expect.objectContaining({ name: ToolNames.EDIT }),
+    });
+  });
+
+  it('a reconnect needs a fresh review only when the republished contract differs (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    const declaration = {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+    };
+    const makeTool = (inputSchema: unknown = declaration) =>
+      new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        inputSchema,
+      );
+    const reviewedTool = makeTool();
+    const name = reviewedTool.name;
+    registry.registerTool(reviewedTool);
+
+    const search = (query: string) =>
+      new ToolSearchTool(config)
+        .build({ query })
+        .execute(new AbortController().signal);
+    await search(`select:${name}`);
+    expect(registry.getReviewedDeclaration(name)).toBe(
+      deferredDeclarationFingerprint(reviewedTool),
+    );
+
+    // Disconnect, then a reconnect republishing a byte-identical tool. The
+    // contract the model's arguments were written against is still the live
+    // one, so the record matches and no round trip is forced.
+    registry.removeMcpToolsByServer('slack');
+    registry.registerTool(makeTool());
+    const identical = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { text: 'hi' },
+    });
+    expect(identical).toMatchObject({
+      tool: expect.objectContaining({ name }),
+    });
+
+    // A replacement publishing a changed contract does not match, and one
+    // re-review closes the loop.
+    registry.removeMcpToolsByServer('slack');
+    registry.registerTool(
+      makeTool({ type: 'object', properties: { channel: { type: 'string' } } }),
+    );
+    const changed = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { channel: 'x' },
+    });
+    expect(changed).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    });
+
+    await search(`select:${name}`);
+    const rereviewed = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { channel: 'x' },
+    });
+    expect(rereviewed).toMatchObject({
+      tool: expect.objectContaining({ name }),
+    });
+  });
+
+  it('records a deferred tool reviewed while revealed, so hiding it again does not drop the gate (#11321)', async () => {
+    registry.registerTool(new ToolCallTool(registry));
+    const reviewed = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'slack',
+      'send_message',
+      'send a message',
+      { type: 'object', properties: { text: { type: 'string' } } },
+    );
+    const name = reviewed.name;
+    registry.registerTool(reviewed);
+    registry.revealDeferredTool(name);
+
+    await new ToolSearchTool(config)
+      .build({ query: `select:${name}` })
+      .execute(new AbortController().signal);
+    expect(registry.getReviewedDeclaration(name)).toBe(
+      deferredDeclarationFingerprint(reviewed),
+    );
+
+    // Revealed at review time, hidden again at call time with a changed
+    // contract — the sequence the restored-history reveal and the preload
+    // budget both produce. Gating the record on the reveal state at review
+    // time left this on the never-reviewed pass-through, so the gate's
+    // coverage turned on state the model neither controls nor observes.
+    registry.removeMcpToolsByServer('slack');
+    registry.registerTool(
+      new DiscoveredMCPTool(
+        {} as CallableTool,
+        'slack',
+        'send_message',
+        'send a message',
+        { type: 'object', properties: { channel: { type: 'string' } } },
+      ),
+    );
+    expect(registry.isDeferredAndHidden(name)).toBe(true);
+
+    const refused = await resolveDeferredToolCall(registry, {
+      name,
+      arguments: { text: 'hi' },
+    });
+    expect(refused).toMatchObject({
+      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+    });
   });
 
   describe('media-policy tool hiding', () => {

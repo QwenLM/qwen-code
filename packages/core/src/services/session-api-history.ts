@@ -12,6 +12,40 @@ import type {
   SlashCommandRecordPayload,
 } from './chatRecordingService.js';
 
+const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
+
+type IdentifiedContent = Content & {
+  [API_HISTORY_PROMPT_ID]?: string;
+};
+
+export function markApiHistoryPrompt(
+  content: Content,
+  promptId: unknown,
+): void {
+  if (typeof promptId === 'string' && promptId.length > 0) {
+    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
+  }
+}
+
+export function getApiHistoryPromptId(content: Content): string | undefined {
+  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
+}
+
+/** Returns the unique matching entry at or after `startIndex`, or -1. */
+export function findApiHistoryPromptIndex(
+  history: readonly Content[],
+  promptId: string,
+  startIndex = 0,
+): number {
+  let match = -1;
+  for (let index = startIndex; index < history.length; index++) {
+    if (getApiHistoryPromptId(history[index]!) !== promptId) continue;
+    if (match !== -1) return -1;
+    match = index;
+  }
+  return match;
+}
+
 export interface BuildApiHistoryOptions {
   /**
    * Whether to strip thought parts from the history.
@@ -65,6 +99,9 @@ function appendApiHistoryRecord(
   if (!record.message || record.subtype === 'realtime_message') return;
 
   const message = copyContentForApiHistory(record.message);
+  if (record.type === 'user' && !record.subtype) {
+    markApiHistoryPrompt(message, record.promptId);
+  }
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (
@@ -192,7 +229,11 @@ export class SessionApiHistoryAccumulator {
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
       this.history = Array.isArray(payload.compressedHistory)
-        ? payload.compressedHistory.map(copyContentForApiHistory)
+        ? payload.compressedHistory.map((content, index) => {
+            const copy = copyContentForApiHistory(content);
+            markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            return copy;
+          })
         : [];
       // Compressed history is raw `Content[]` with no source record behind it,
       // so no entry can claim the authoritative notification stamp.

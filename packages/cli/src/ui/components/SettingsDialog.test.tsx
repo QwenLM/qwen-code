@@ -1471,7 +1471,9 @@ describe('SettingsDialog', () => {
 
   describe('String Settings Editing', () => {
     it('should allow editing and committing a string setting', async () => {
-      let settings = createMockSettings({ advisorModel: 'initial' });
+      let settings = createMockSettings({
+        general: { outputLanguage: 'English' },
+      });
       const onSelect = vi.fn();
 
       const { stdin, unmount, rerender } = render(
@@ -1483,7 +1485,9 @@ describe('SettingsDialog', () => {
       // Wait for the dialog to render
       await wait();
 
-      const stringSettingIndex = getDialogSettingKeys().indexOf('advisorModel');
+      const stringSettingIndex = getDialogSettingKeys().indexOf(
+        'general.outputLanguage',
+      );
       expect(stringSettingIndex).toBeGreaterThanOrEqual(0);
       for (let i = 0; i < stringSettingIndex; i++) {
         stdin.write('j'); // Down
@@ -1495,14 +1499,18 @@ describe('SettingsDialog', () => {
       await wait();
 
       // Type a new value
-      stdin.write('new value');
+      stdin.write('French');
       await wait();
 
       // Press Enter to commit
       stdin.write('\r');
       await wait();
 
-      settings = createMockSettings({ advisorModel: 'new value' }, {}, {});
+      settings = createMockSettings(
+        { general: { outputLanguage: 'French' } },
+        {},
+        {},
+      );
       rerender(
         <KeypressProvider kittyProtocolEnabled={false}>
           <SettingsDialog settings={settings} onSelect={onSelect} />
@@ -1523,6 +1531,37 @@ describe('SettingsDialog', () => {
         },
       );
 
+      unmount();
+    });
+  });
+
+  describe('Aux-model selector display', () => {
+    it('redacts userinfo from the persisted visionModel selector row', async () => {
+      const settings = createMockSettings({
+        visionModel: 'o:v\0https://user:sk-secret@h.example/v1',
+      });
+      const onSelect = vi.fn();
+
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+      await wait();
+
+      const index = getDialogSettingKeys().indexOf('visionModel');
+      expect(index).toBeGreaterThanOrEqual(0);
+      for (let i = 0; i < index; i++) {
+        act(() => {
+          stdin.write('j');
+        });
+        await wait(10);
+      }
+
+      const frame = lastFrame();
+      // The selector stays readable; the embedded credential must not render.
+      expect(frame).toContain('o:v (https://h.example/v1)');
+      expect(frame).not.toContain('sk-secret');
       unmount();
     });
   });

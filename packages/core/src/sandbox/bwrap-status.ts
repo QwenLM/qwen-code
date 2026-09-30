@@ -4,50 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type BwrapStatus =
-  | { state: 'confirmed'; exitCode: number }
-  | {
-      state: 'unconfirmed';
-      /**
-       * True when the status wire carried a well-formed bwrap exit-code
-       * record — i.e. the payload got past exec and ran to an exit, so the
-       * run may genuinely have happened and its dirs are worth retaining.
-       * False is a positive attestation that the payload never executed
-       * (a bwrap spawn failure, or a wire with no exit-code record).
-       * Absent means unknown — an oversized or partial wire, or a
-       * non-spawn relay failure — and must never be read as "did not run".
-       */
-      payloadExitObserved?: boolean;
-    }
-  | { state: 'interrupted' | 'running' };
+import {
+  MAX_STATUS_BYTES,
+  sandboxStatusError,
+  type SandboxStatus,
+} from './sandbox-status.js';
 
-export const MAX_STATUS_BYTES = 16 * 1024;
-
-export function sandboxStatusError(status: BwrapStatus): Error | undefined {
-  if (status.state === 'unconfirmed') {
-    // Only a positive no-exec attestation gets the definitive message;
-    // unknown stays on the cautious "may have run" wording so a
-    // retry-deciding caller is never told the payload did not run without
-    // evidence (PR #12067 review, round 2).
-    if (status.payloadExitObserved === false) {
-      return new Error(
-        'Sandbox payload did not run: setup failed before execution (bubblewrap or the payload binary may be missing).',
-      );
-    }
-    return new Error(
-      'Sandbox execution status could not be confirmed. The command may have run; do not automatically retry it.',
-    );
-  }
-  if (status.state === 'interrupted') {
-    return new Error('Sandbox execution was interrupted.');
-  }
-  return undefined;
-}
+export type BwrapStatus = SandboxStatus;
+export { MAX_STATUS_BYTES, sandboxStatusError };
+export type { SandboxStatus };
 
 export function parseBwrapStatus(
   wire: string,
   exitCode: number | null,
-): BwrapStatus {
+): SandboxStatus {
   if (Buffer.byteLength(wire) > MAX_STATUS_BYTES || !wire.endsWith('\n')) {
     return { state: 'unconfirmed' };
   }

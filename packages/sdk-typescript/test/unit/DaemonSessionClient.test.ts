@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { DaemonAttachmentUploadError } from '../../src/daemon/DaemonAttachmentUploadError.js';
 import {
   DaemonClient,
   DaemonPendingPromptLimitError,
@@ -1300,6 +1301,83 @@ describe('DaemonSessionClient', () => {
       calls.filter((call) => call.url.endsWith('/attachments/media-1')),
     ).toHaveLength(2);
   });
+
+  it.each(['create', 'chunk'] as const)(
+    'repairs identity only before chunk upload allocation (%s)',
+    async (failureAt) => {
+      let rejected = false;
+      const size = 524289;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/capabilities'))
+          return jsonResponse(200, {
+            features: ['session_attachment_chunk_upload'],
+          });
+        if (req.url.endsWith('/resume'))
+          return jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: true,
+            clientId: 'client-2',
+            state: {},
+          });
+        if (
+          !rejected &&
+          ((failureAt === 'create' &&
+            req.url.endsWith('/attachment-uploads')) ||
+            (failureAt === 'chunk' && req.url.includes('/chunks?')))
+        ) {
+          rejected = true;
+          return jsonResponse(400, { code: 'invalid_client_id' });
+        }
+        if (req.url.endsWith('/attachment-uploads'))
+          return jsonResponse(201, {
+            uploadId: '12345678-1234-4234-8234-123456789abc',
+          });
+        if (req.url.includes('/chunks?'))
+          return jsonResponse(200, {
+            offset: Math.min(
+              Number(new URL(req.url).searchParams.get('offset')) + 524288,
+              size,
+            ),
+          });
+        if (req.method === 'DELETE') return new Response(null, { status: 204 });
+        return jsonResponse(200, {
+          type: 'resource',
+          attachmentId: 'test.bin',
+          mimeType: 'application/octet-stream',
+          size,
+        });
+      });
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+        },
+      });
+      const upload = session.uploadAttachment(
+        new Blob([new Uint8Array(size)]),
+        'test.bin',
+        'application/octet-stream',
+      );
+      if (failureAt === 'create') {
+        await expect(upload).resolves.toMatchObject({ size });
+        expect(
+          calls.filter((call) => call.url.endsWith('/resume')),
+        ).toHaveLength(1);
+        expect(session.clientId).toBe('client-2');
+      } else {
+        await expect(upload).rejects.toBeInstanceOf(
+          DaemonAttachmentUploadError,
+        );
+        expect(
+          calls.filter((call) => call.url.endsWith('/resume')),
+        ).toHaveLength(0);
+      }
+    },
+  );
 
   it('uploads session attachment through the authenticated session route', async () => {
     const reference = {

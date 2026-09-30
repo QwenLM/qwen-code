@@ -348,6 +348,8 @@ describe('StandaloneApp brand', () => {
     container.remove();
     icon.remove();
     window.localStorage.clear();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   function resolveBrand(brand: WebShellResolvedBrand): void {
@@ -456,5 +458,54 @@ describe('StandaloneApp brand', () => {
 
     expect(stubDocument.title).toBe('QiuQiu Code Web chat');
     expect(stubIcon.href).toBe('data:image/svg+xml,LOGO');
+  });
+
+  it('does not restore an ordinary Runtime session when opening a Managed history link', () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/old-runtime?workspace=removed-workspace&managed=1&managedSession=gateway-session',
+    );
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(testState.props?.sessionId).toBeUndefined();
+    expect(testState.props?.workspaceId).toBeUndefined();
+    expect(
+      new URLSearchParams(window.location.search).get('managedSession'),
+    ).toBe('gateway-session');
+  });
+
+  it('injects the Java provider into the full shell in development mode', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedProvider=java&tenant=tenant-a',
+    );
+    const fetchMock = vi.fn(async () =>
+      Response.json({ data: [], hasMore: false }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    const provider = testState.props?.webShellProps.managedAgentProvider;
+    expect(provider?.kind).toBe('java');
+    expect(provider?.acceptsWorkspaceCwd).toBe(false);
+    expect(provider?.storageKey).toBe(
+      `${window.location.origin}:managed:tenant-a`,
+    );
+
+    await provider?.listSessions({ clientId: 'test-client' });
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(new Headers(request?.headers).get('X-Qwen-Tenant-Id')).toBe(
+      'tenant-a',
+    );
+  });
+
+  it('keeps the daemon Managed provider unless Java is explicitly selected', () => {
+    window.history.replaceState(null, '', '/?managed=1&tenant=tenant-a');
+
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+
+    expect(testState.props?.webShellProps.managedAgentProvider).toBeUndefined();
   });
 });

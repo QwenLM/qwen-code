@@ -14,7 +14,7 @@ import {
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  resolveContainedCwd,
+  resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -203,27 +203,36 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     sendBridgeError: SendBridgeError;
   },
 ): void {
-  app.get('/workspaces/:workspace/git/diff', (req, res) => {
+  app.get('/workspaces/:workspace/git/diff', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/diff';
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
-    void handleDiffList(
-      res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
-      deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/diff',
-      () => runtime.generationGuard?.assertOpen(),
-    );
-  });
-  app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-    if (!runtime) return;
-    void handleDiffFile(
+    const cwd = await resolveSessionManagedGitCwdForRoute(
       req,
       res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
+      runtime,
+      route,
       deps.sendBridgeError,
-      'GET /workspaces/:workspace/git/diff/file',
-      () => runtime.generationGuard?.assertOpen(),
+    );
+    if (cwd === undefined) return;
+    void handleDiffList(res, cwd, deps.sendBridgeError, route, () =>
+      runtime.generationGuard?.assertOpen(),
+    );
+  });
+  app.get('/workspaces/:workspace/git/diff/file', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/git/diff/file';
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+    if (!runtime) return;
+    const cwd = await resolveSessionManagedGitCwdForRoute(
+      req,
+      res,
+      runtime,
+      route,
+      deps.sendBridgeError,
+    );
+    if (cwd === undefined) return;
+    void handleDiffFile(req, res, cwd, deps.sendBridgeError, route, () =>
+      runtime.generationGuard?.assertOpen(),
     );
   });
 }

@@ -11,7 +11,11 @@ import * as path from 'node:path';
 import { restoreCommand } from './restoreCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  findApiHistoryPromptIndex,
+  type Config,
+} from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 
 describe('restoreCommand', () => {
   let mockContext: CommandContext;
@@ -173,7 +177,13 @@ describe('restoreCommand', () => {
 
     it('should restore a tool call and project state', async () => {
       const toolCallData = {
-        history: [{ type: 'user', text: 'do a thing' }],
+        history: [
+          {
+            type: 'user',
+            text: 'do a thing',
+            promptId: 'prompt-abc123',
+          },
+        ],
         clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
         promptId: 'prompt-abc123',
         toolCall: { name: 'run_shell_command', args: 'ls' },
@@ -202,6 +212,35 @@ describe('restoreCommand', () => {
         },
         expect.any(Number),
       );
+    });
+
+    it('re-marks the restored model history so rewind can resolve it', async () => {
+      const toolCallData = {
+        history: [
+          {
+            type: 'user',
+            text: 'do a thing',
+            promptId: 'prompt-abc123',
+          },
+        ],
+        clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
+        promptIds: ['prompt-abc123'],
+        promptId: 'prompt-abc123',
+        toolCall: { name: 'run_shell_command', args: 'ls' },
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'marked-checkpoint.json'),
+        JSON.stringify(toolCallData),
+      );
+      const command = restoreCommand(mockConfig);
+
+      await command?.action?.(mockContext, 'marked-checkpoint');
+
+      // JSON cannot carry the Symbol-keyed identity, so the restored entries
+      // only become rewindable through the persisted parallel array.
+      const installed = mockSetHistory.mock.calls[0]?.[0] as Content[];
+      expect(installed).toHaveLength(1);
+      expect(findApiHistoryPromptIndex(installed, 'prompt-abc123')).toBe(0);
     });
 
     it('should restore even if only toolCall is present', async () => {

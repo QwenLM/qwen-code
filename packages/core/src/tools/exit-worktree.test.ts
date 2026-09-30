@@ -15,6 +15,7 @@ import type { Config } from '../config/config.js';
 import {
   GitWorktreeService,
   WORKTREE_SESSION_FILE,
+  WorktreeSessionMarkerOwnerChangedError,
   worktreeBranchForSlug,
   writeWorktreeSessionMarker,
 } from '../services/gitWorktreeService.js';
@@ -238,6 +239,79 @@ describe('ExitWorktreeTool', () => {
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
     });
 
+    it('refuses remove when the marker sits at nlink 2 in the publish window', async () => {
+      // Publish residue: the marker publisher links the staged sibling onto
+      // the marker path and only then unlinks the sibling, so a crash leaves
+      // `.qwen-session` at nlink 2 with the owner intact. The lenient marker
+      // read must still resolve the owner — a null would read as "no marker"
+      // and let a stranger delete the live worktree and its branch.
+      const wtPath = await provisionWorktree('publish-residue');
+      const markerPath = path.join(wtPath, WORKTREE_SESSION_FILE);
+      await fs.link(
+        markerPath,
+        path.join(wtPath, `${WORKTREE_SESSION_FILE}.deadbeef.tmp`),
+      );
+
+      const otherCfg = {
+        getTargetDir: () => repoRoot,
+        getSessionId: () => 'session-stranger',
+      } as unknown as Config;
+      const result = await new ExitWorktreeTool(otherCfg)
+        .build({ name: 'publish-residue', action: 'remove' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.message).toMatch(
+        /different session.*owner=session-creator/i,
+      );
+      await expect(fs.access(wtPath)).resolves.toBeUndefined();
+      const branches = execFileSync('git', ['branch', '--list'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      });
+      expect(branches).toContain(worktreeBranchForSlug('publish-residue'));
+    });
+
+    it('refuses remove when the marker changes identity mid-read', async () => {
+      // A concurrent ownership transfer publishes through atomicWriteFile
+      // (sibling temp + rename), so the marker path gets a new inode while
+      // the guard holds it open. Reading that as "no marker" would disable
+      // the session-ownership guard exactly when it matters — fail closed.
+      const wtPath = await provisionWorktree('inconclusive-marker');
+      const markerPath = path.join(wtPath, WORKTREE_SESSION_FILE);
+
+      const probe = await fs.open(markerPath, 'r');
+      const prototype = Object.getPrototypeOf(probe) as typeof probe;
+      await probe.close();
+      const originalStat = prototype.stat;
+      const statSpy = vi
+        .spyOn(prototype, 'stat')
+        .mockImplementation(async function (this: typeof probe) {
+          const stats = await originalStat.call(this);
+          return Object.assign(stats, { ino: stats.ino === 1 ? 2 : 1 });
+        });
+      try {
+        const otherCfg = {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => 'session-stranger',
+        } as unknown as Config;
+        const result = await new ExitWorktreeTool(otherCfg)
+          .build({ name: 'inconclusive-marker', action: 'remove' })
+          .execute(new AbortController().signal);
+        expect(result.error?.message).toMatch(
+          /could not be read conclusively/i,
+        );
+      } finally {
+        statSpy.mockRestore();
+      }
+      // The worktree and its branch must survive the refused removal.
+      await expect(fs.access(wtPath)).resolves.toBeUndefined();
+      const branches = execFileSync('git', ['branch', '--list'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      });
+      expect(branches).toContain(worktreeBranchForSlug('inconclusive-marker'));
+    });
+
     it('keep returns success and leaves the worktree + branch intact', async () => {
       const wtPath = await provisionWorktree('keepme');
       const cfg = {
@@ -316,17 +390,17 @@ describe('ExitWorktreeTool', () => {
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
     });
 
-    it('marker also written by writeWorktreeSessionMarker survives round-trip', async () => {
-      // Direct service-level write, then read via the same helper —
-      // covers the exclude-rule path (which is best-effort and may
-      // not fire in unusual test layouts).
+    it('keeps the marker owner stable across legacy writer calls', async () => {
       const wtPath = await provisionWorktree('roundtrip');
-      await writeWorktreeSessionMarker(wtPath, 'rewritten-id');
+      await expect(
+        writeWorktreeSessionMarker(wtPath, 'foreign-owner'),
+      ).rejects.toBeInstanceOf(WorktreeSessionMarkerOwnerChangedError);
+      await writeWorktreeSessionMarker(wtPath, 'session-creator');
       const re = await fs.readFile(
         path.join(wtPath, WORKTREE_SESSION_FILE),
         'utf8',
       );
-      expect(re.trim()).toBe('rewritten-id');
+      expect(re.trim()).toBe('session-creator');
     });
   });
 

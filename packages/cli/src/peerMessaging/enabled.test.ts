@@ -7,6 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   crossSessionMessagingOffScope,
+  crossSessionMessagingSuppression,
+  isCrossSessionMessagingActive,
   isCrossSessionMessagingEnabled,
   isCrossSessionMessagingOptedIn,
 } from './enabled.js';
@@ -47,6 +49,67 @@ describe('isCrossSessionMessagingEnabled', () => {
         }),
       ).toBe(false);
     }
+  });
+});
+
+describe('crossSessionMessagingSuppression', () => {
+  it('names the session-level suppression in force', () => {
+    expect(crossSessionMessagingSuppression({ isSafeMode: () => true })).toBe(
+      'safe-mode',
+    );
+    expect(crossSessionMessagingSuppression({ getBareMode: () => true })).toBe(
+      'bare',
+    );
+    // Both on: safe mode is the stronger claim about what this session may
+    // touch, so it is the more useful one to name.
+    expect(
+      crossSessionMessagingSuppression({
+        isSafeMode: () => true,
+        getBareMode: () => true,
+      }),
+    ).toBe('safe-mode');
+  });
+
+  it('is undefined when neither flag is set, or no config can answer', () => {
+    expect(
+      crossSessionMessagingSuppression({
+        isSafeMode: () => false,
+        getBareMode: () => false,
+      }),
+    ).toBeUndefined();
+    // `CommandContext['services']['config']` is `Config | null`, and a test
+    // double may model neither flag. Neither absence is a suppression: they
+    // are what a reader with no runtime to consult sees.
+    expect(crossSessionMessagingSuppression(null)).toBeUndefined();
+    expect(crossSessionMessagingSuppression(undefined)).toBeUndefined();
+    expect(crossSessionMessagingSuppression({})).toBeUndefined();
+  });
+});
+
+describe('isCrossSessionMessagingActive', () => {
+  const on = { agents: { crossSessionMessaging: true } };
+  const off = { agents: { crossSessionMessaging: false } };
+  const unrestricted = { isSafeMode: () => false, getBareMode: () => false };
+
+  it('is on when the setting is on and no suppression is in force', () => {
+    expect(isCrossSessionMessagingActive(on, unrestricted)).toBe(true);
+    // An unset key is on, so it stays on with nothing suppressing it.
+    expect(isCrossSessionMessagingActive({}, unrestricted)).toBe(true);
+  });
+
+  // Each suppression on its own: a gate answering for only one of them
+  // would leave the other binding an inbox and publishing its socket path.
+  it('is off under either suppression whatever the setting says', () => {
+    expect(isCrossSessionMessagingActive(on, { isSafeMode: () => true })).toBe(
+      false,
+    );
+    expect(isCrossSessionMessagingActive(on, { getBareMode: () => true })).toBe(
+      false,
+    );
+  });
+
+  it('is off when the setting is off even with no suppression', () => {
+    expect(isCrossSessionMessagingActive(off, unrestricted)).toBe(false);
   });
 });
 

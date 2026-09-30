@@ -74,11 +74,11 @@ reject malformed or newer requirements.
 | Events per transaction |               256 |
 | Encoded transaction    |             8 MiB |
 
-`eventsDigest` is SHA-256 over canonical JSON containing only each committed
-event's `sequence`, `eventId`, and `kind`. Object keys are sorted and array order
-is preserved, making the result independent of property insertion order. It is
-an ordered identity digest, not an integrity proof for `sessionKey`,
-`occurredAt`, or payload content.
+`eventsDigest` is SHA-256 over canonical JSON of the complete ordered events,
+including session scope, timestamps, subjects, and payloads. Object keys are
+sorted and array order is preserved. The durable authority introduced in
+#12693 requires this content proof; the earlier foundation's identity-only
+prototype digest is not accepted as a committed journal integrity proof.
 
 `contentDigest` is the idempotency digest of the complete immutable command
 content. An operation with one durable input uses that verified resource's

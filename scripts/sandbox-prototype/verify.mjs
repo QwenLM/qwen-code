@@ -237,6 +237,8 @@ async function verify() {
       workspace,
       installation,
       state,
+      effectiveBackend: 'bwrap',
+      enforcement: 'full',
       filesystem: 'workspace-write',
       network: 'closed',
       ...options,

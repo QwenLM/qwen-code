@@ -6,8 +6,21 @@ import java.util.Objects;
 public final class RuntimeProvisionRequest {
     private final RuntimeScope scope;
     private final String isolationKey;
+    private final String provisionerKind;
+    private final String storageId;
 
     public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey) {
+        this(scope, isolationKey, "legacy");
+    }
+
+    public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey,
+            String provisionerKind) {
+        this(scope, isolationKey, provisionerKind, null);
+    }
+
+    /** A non-null storageId explicitly selects managed-context/1. */
+    public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey,
+            String provisionerKind, String storageId) {
         if (scope == null) {
             throw new IllegalArgumentException("scope is required");
         }
@@ -22,6 +35,25 @@ public final class RuntimeProvisionRequest {
             this.isolationKey = null;
         }
         this.scope = scope;
+        this.provisionerKind = BrokerValues.requireId(provisionerKind,
+                "provisionerKind");
+        this.storageId = storageId == null ? null
+                : ManagedContextProtocol.storageId(storageId);
+        if (isManagedContext()) {
+            if (!requiresDurableIdentity()) {
+                throw new IllegalArgumentException(
+                        "managed context requires durable provisioning");
+            }
+            ManagedContextProtocol.validateScope(this);
+        }
+    }
+
+    public String getStorageId() {
+        return storageId;
+    }
+
+    public boolean isManagedContext() {
+        return storageId != null;
     }
 
     public RuntimeScope getScope() {
@@ -30,6 +62,20 @@ public final class RuntimeProvisionRequest {
 
     public String getIsolationKey() {
         return isolationKey;
+    }
+
+    public String getProvisionerKind() {
+        return provisionerKind;
+    }
+
+    /**
+     * Legacy and static placements keep no recoverable identity, so a READY
+     * binding for them is not required to carry seed, handle, and
+     * attestation facts.
+     */
+    boolean requiresDurableIdentity() {
+        return !"legacy".equals(provisionerKind)
+                && !"static".equals(provisionerKind);
     }
 
     @Override
@@ -42,11 +88,13 @@ public final class RuntimeProvisionRequest {
         }
         RuntimeProvisionRequest other = (RuntimeProvisionRequest) candidate;
         return scope.equals(other.scope)
-                && Objects.equals(isolationKey, other.isolationKey);
+                && Objects.equals(isolationKey, other.isolationKey)
+                && provisionerKind.equals(other.provisionerKind)
+                && Objects.equals(storageId, other.storageId);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(scope, isolationKey);
+        return Objects.hash(scope, isolationKey, provisionerKind, storageId);
     }
 }

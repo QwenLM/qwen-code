@@ -21,6 +21,7 @@ import {
   readAgentMeta,
   writeAgentMeta,
 } from './agent-transcript.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
@@ -78,6 +79,18 @@ describe('BackgroundAgentResumeService', () => {
         serverName?: string;
       }>;
       skillManager?: unknown;
+      /**
+       * Tool names the stub registry reports as registered, on top of any
+       * `currentForkRuntime` declarations. `getInitialChatHistory` ANDs the
+       * caller's `includeAvailableSkillsReminder` with
+       * `toolRegistry.getAllToolNames().includes(ToolNames.SKILL)` (#12838), so
+       * a test asserting that the listing reaches `initialMessages` must also
+       * say the Skill tool is registered. Without it every row answers "no
+       * listing" for the registry's reason rather than the predicate's, and the
+       * negative rows pass vacuously.
+       */
+      registeredToolNames?: string[];
+      toolMode?: ToolMode;
       hookSystem?:
         | {
             fireSubagentStartEvent: ReturnType<typeof vi.fn>;
@@ -117,15 +130,18 @@ describe('BackgroundAgentResumeService', () => {
       getAllTools: vi.fn().mockReturnValue([]),
       getAllToolNames: vi
         .fn()
-        .mockReturnValue(
-          (
-            options.currentForkRuntime?.registeredTools ??
-            options.currentForkRuntime?.advertisedTools ??
-            []
-          )
-            .map((declaration) => declaration.name)
-            .filter((name): name is string => Boolean(name)),
-        ),
+        .mockReturnValue([
+          ...new Set([
+            ...(
+              options.currentForkRuntime?.registeredTools ??
+              options.currentForkRuntime?.advertisedTools ??
+              []
+            )
+              .map((declaration) => declaration.name)
+              .filter((name): name is string => Boolean(name)),
+            ...(options.registeredToolNames ?? []),
+          ]),
+        ]),
       getTool: vi.fn(),
       stop: vi.fn().mockResolvedValue(undefined),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -176,6 +192,7 @@ describe('BackgroundAgentResumeService', () => {
       getHookSystem: () => hookSystem,
       getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,
       getApprovalMode: () => 'default',
+      getToolMode: () => options.toolMode,
       getModel: () => 'parent-model',
       getBareMode: () => false,
       getSandbox: () => undefined,
@@ -1298,6 +1315,174 @@ describe('BackgroundAgentResumeService', () => {
     };
     expect(contextArg.get('hook_context')).toBe('');
   });
+
+  // #12424: the resumed agent is shown the skill listing exactly when
+  // createAgentHeadless leaves its Config a SkillManager.
+  it.each<
+    [
+      string,
+      {
+        tools?: string[] | string | null;
+        disallowedTools?: string[] | string;
+      },
+      boolean,
+      ToolMode?,
+    ]
+  >([
+    ['inherits every tool', {}, true],
+    [
+      'disallows the Skill tool',
+      { tools: ['*'], disallowedTools: [ToolNames.SKILL] },
+      false,
+    ],
+    ['lists tools without skill', { tools: ['read_file'] }, false],
+    // `tools: []` means "inherit everything" at the definition layer, so the
+    // launch keeps the SkillManager and the resume must keep the listing.
+    ['declares an empty tools list', { tools: [] }, true],
+    // Launch reads `config.tools?.length`, which is falsy for `null` too, so
+    // `null` is the wildcard and not the malformed case below.
+    ['declares a null tools value', { tools: null }, true],
+    // Launch hands `"*"` to `resolveToolNames`, whose `for...of` walks it per
+    // character and preserves the `*`, so the launched agent keeps the
+    // wildcard: resume must keep the listing, as base did through
+    // `String.prototype.includes('*')`.
+    ['declares a wildcard tools string', { tools: '*' }, true],
+    // `''` is falsy in launch's `config.tools?.length` test, so `toolConfig`
+    // stays unset and `createAgentHeadless` defaults it to `['*']`.
+    ['declares an empty tools string', { tools: '' }, true],
+    // Only unvalidated SDK `initialize.agents` JSON produces this. Launch walks
+    // the string per character into nine entries naming no tool, so resume must
+    // neither throw nor list.
+    ['declares a non-array tools value', { tools: 'read_file' }, false],
+    // Same ingress, sibling field. Launch resolves a scalar blocklist one
+    // character at a time (`"skill"` → `['s','k','i','l','l']`), so it denies
+    // nothing and the agent keeps the Skill tool: resume must neither throw
+    // (`blocklist.some is not a function`) nor drop the listing.
+    [
+      'declares a non-array disallowedTools value',
+      { disallowedTools: ToolNames.SKILL },
+      true,
+    ],
+    // Under CodeModeOnly a finite list naming `exec` reaches `skill` through
+    // the code-mode gateway, so launch keeps the manager and resume must keep
+    // the listing. Dropping the tool-mode argument at the resume call site —
+    // the parent Config here reports CodeModeOnly — turns this row red.
+    [
+      'names exec without skill under CodeModeOnly',
+      { tools: [ToolNames.EXEC] },
+      true,
+      ToolMode.CodeModeOnly,
+    ],
+    // Same definition, Direct mode: no gateway, so no listing. Pins that the
+    // row above is the tool mode and not the `exec` name doing the work.
+    [
+      'names exec without skill under Direct',
+      { tools: [ToolNames.EXEC] },
+      false,
+    ],
+  ])(
+    'matches the launch-time skill listing when the definition %s',
+    async (_label, toolFields, expectListing, toolMode) => {
+      const sessionId = 'session-skill-listing';
+      const agentId = 'agent-skill-listing';
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        description: 'Resume with skills',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: 'researcher',
+        resolvedApprovalMode: 'auto-edit',
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Resume with skills' }] },
+        }) + '\n',
+        'utf8',
+      );
+      registry.register({
+        agentId,
+        description: 'Resume with skills',
+        subagentType: 'researcher',
+        isBackgrounded: true,
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: 'Resume with skills',
+        outputFile,
+        metaPath,
+      });
+
+      const subagent = {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      };
+      const { service, subagentManager, stubToolRegistry } = createService({
+        toolMode,
+        // The session this resume runs in does have the Skill tool; the rows
+        // below are about `subagentWillHaveSkillTool`, not about #12838's
+        // registry gate. Omitting this made every row answer "no listing" for
+        // the registry's reason and the two negative rows pass vacuously.
+        registeredToolNames: [ToolNames.SKILL],
+        skillManager: {
+          listSkills: vi.fn().mockResolvedValue([
+            {
+              name: 'auto-skill-demo',
+              description: 'Demo project skill',
+              level: 'project',
+              disableModelInvocation: false,
+            },
+          ]),
+          isSkillActive: vi.fn().mockReturnValue(true),
+        },
+      });
+      stubToolRegistry.getAllToolNames.mockReturnValue([ToolNames.SKILL]);
+      subagentManager.loadSubagent.mockResolvedValue({
+        name: 'researcher',
+        color: 'cyan',
+        model: undefined,
+        approvalMode: undefined,
+        ...toolFields,
+      } as never);
+      subagentManager.createAgentHeadless.mockResolvedValue({
+        subagent,
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
+
+      await service.resumeBackgroundAgent(agentId, 'continue');
+
+      // Without this the two negative rows pass vacuously: a resume that never
+      // reached createAgentHeadless renders no listing either.
+      expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+
+      const options = subagentManager.createAgentHeadless.mock.calls[0]?.[2] as
+        | { promptConfigOverrides?: { initialMessages?: unknown[] } }
+        | undefined;
+      const initialMessages = JSON.stringify(
+        options?.promptConfigOverrides?.initialMessages ?? [],
+      );
+      expect(initialMessages.includes('auto-skill-demo')).toBe(expectListing);
+    },
+  );
 
   it('returns only model-visible subagent output when resumed background agents complete', async () => {
     const sessionId = 'session-resume-sanitized';
@@ -3509,6 +3694,201 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
+  it('drops usage-only assistant records while preserving tool history and pending user text', async () => {
+    const sessionId = 'session-pending-user';
+    const agentId = 'agent-pending-user';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Pending user tail',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'usage-only',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [] },
+          usageMetadata: { totalTokenCount: 42 },
+        }),
+        JSON.stringify({
+          uuid: 'call-1',
+          parentUuid: 'usage-only',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  args: { file_path: '/tmp/input.txt' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'result-1',
+          parentUuid: 'call-1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.300Z',
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'result-1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.400Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'working' }] },
+        }),
+        JSON.stringify({
+          uuid: 'u2',
+          parentUuid: 'a1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.500Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'and another thing' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a2',
+          parentUuid: 'u2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.600Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'still working' }] },
+        }),
+        JSON.stringify({
+          uuid: 'u3',
+          parentUuid: 'a2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.700Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'one final constraint' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Pending user tail',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'original task',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    const execute = vi.fn(
+      async (context: { get: (key: string) => unknown }) => {
+        const override = context.get('initial_messages_override') as
+          | Array<{ parts?: Array<{ text?: string }> }>
+          | undefined;
+        expect(override).toBeUndefined();
+        expect(context.get('task_prompt')).toBe('continue work');
+      },
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await service.resumeBackgroundAgent(agentId, 'continue work');
+
+    expect(subagentManager.createAgentHeadless).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        promptConfigOverrides: {
+          initialMessages: [
+            { role: 'user', parts: [{ text: 'original task' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'read-1',
+                    name: 'read_file',
+                    args: { file_path: '/tmp/input.txt' },
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'read-1',
+                    name: 'read_file',
+                    response: { output: 'contents' },
+                  },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'working' }] },
+            { role: 'user', parts: [{ text: 'and another thing' }] },
+            { role: 'model', parts: [{ text: 'still working' }] },
+            { role: 'user', parts: [{ text: 'one final constraint' }] },
+          ],
+        },
+      }),
+    );
+  });
+
   it('drops unfinished nested calls and readiness markers while preserving stable history', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
@@ -3599,6 +3979,22 @@ describe('BackgroundAgentResumeService', () => {
           timestamp: '2026-04-20T00:00:00.500Z',
           type: 'user',
           message: { role: 'user', parts: [{ text: 'and another thing' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a2',
+          parentUuid: 'u2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.600Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'still working' }] },
+        }),
+        JSON.stringify({
+          uuid: 'u3',
+          parentUuid: 'a2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.700Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'one final constraint' }] },
         }),
         JSON.stringify({
           uuid: 'nested-call',
@@ -3811,7 +4207,7 @@ describe('BackgroundAgentResumeService', () => {
     );
 
     expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
-      true,
+      'continued',
     );
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
@@ -3827,7 +4223,9 @@ describe('BackgroundAgentResumeService', () => {
     registry.reset();
 
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(
+      'not_completed',
+    );
   });
 
   it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
@@ -4132,7 +4530,7 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe('fallback');
     expect(dispose).toHaveBeenCalledOnce();
   });
 

@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { sandboxAsset } from '@qwen-code/qwen-code-core/sandbox/bwrap-execution.js';
+import { sandboxAsset } from '@qwen-code/qwen-code-core/sandbox/sandbox-execution.js';
 import type { ShellExecutionSandboxPolicy } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ExecutionSandboxSettings } from './execution-sandbox-settings.js';
 
@@ -16,7 +16,7 @@ export function createExecutionSandboxPolicy(
 ): ShellExecutionSandboxPolicy {
   if (process.platform !== 'linux') {
     throw new Error(
-      'tools.executionSandbox currently requires Linux with bwrap.',
+      'tools.executionSandbox requires Linux with a compatible bwrap or Landlock backend.',
     );
   }
   return {

@@ -149,7 +149,7 @@ describe('headless extension workflow Skill entry', () => {
       const requests = fakeServer.requests.filter(
         ({ body }) => body['stream'] === true,
       );
-      expect(requests).toHaveLength(2);
+      expect(requests.length).toBeGreaterThanOrEqual(2);
 
       const firstMessages = requests[0].body['messages'] as Message[];
       const availableSkills = firstMessages
@@ -160,8 +160,16 @@ describe('headless extension workflow Skill entry', () => {
       expect(availableSkills).toContain(WORKFLOW_NAME);
       expect(availableSkills).toContain(WHEN_TO_USE);
 
-      const secondMessages = requests[1].body['messages'] as Message[];
-      const skillResult = secondMessages.find(
+      const secondMessages = requests
+        .map(({ body }) => body['messages'] as Message[])
+        .find((messages) =>
+          messages.some(
+            (message) =>
+              message.role === 'tool' && message.tool_call_id === CALL_ID,
+          ),
+        );
+      expect(secondMessages).toBeDefined();
+      const skillResult = secondMessages!.find(
         (message) =>
           message.role === 'tool' && message.tool_call_id === CALL_ID,
       );

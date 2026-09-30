@@ -18,7 +18,7 @@ const repoRoot = path.resolve(
 const smokeScript = path.join(
   repoRoot,
   'packages',
-  'desktop-shell',
+  'desktop',
   'scripts',
   'smoke-packaged.js',
 );

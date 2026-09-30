@@ -1359,6 +1359,42 @@ describe('WebFetchTool', () => {
       );
     });
 
+    it('should fall back to http when the upgraded host is unreachable (EHOSTUNREACH/ENETUNREACH)', async () => {
+      // An ICMP host/network unreachable (a firewall REJECT, or a missing
+      // route) fails the opportunistic https upgrade before any handshake,
+      // with no RST for ECONNREFUSED to see — the http fallback must still
+      // fire. (A silently DROPped port instead pends the connect and
+      // surfaces as UND_ERR_CONNECT_TIMEOUT.)
+      for (const code of ['EHOSTUNREACH', 'ENETUNREACH'] as const) {
+        const fetchSpy = vi
+          .spyOn(fetchUtils, 'fetchWithPolicy')
+          .mockRejectedValueOnce(
+            new fetchUtils.FetchError(`connect ${code} 203.0.113.1:443`, code),
+          )
+          .mockResolvedValueOnce(
+            okResponse({ finalUrl: 'http://unreachable.example.com/page' }),
+          );
+        mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+        const result = await new WebFetchTool(mockConfig)
+          .build({ url: 'http://unreachable.example.com/page', prompt: 'read' })
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fetchSpy).toHaveBeenNthCalledWith(
+          1,
+          'https://unreachable.example.com/page',
+          expect.anything(),
+        );
+        expect(fetchSpy).toHaveBeenNthCalledWith(
+          2,
+          'http://unreachable.example.com/page',
+          expect.anything(),
+        );
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('should fall back to http for curated-list hosts like any other', async () => {
       // The old auto-allow suppressed the fallback for preapproved hosts
       // (their grant was https-only). With no auto-allow, a curated docs

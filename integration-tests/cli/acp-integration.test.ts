@@ -16,12 +16,21 @@ import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
+// `session/prompt` is the only request here that waits for a model round trip,
+// and the lanes running this file point it at a real endpoint on a shared
+// runner pool: a healthy turn measures 15-28s and swings several times that
+// night to night, which left the release gate one slow turn away from a red
+// nightly (#12880). Stays under the 300s per-attempt `testTimeout` — the other
+// requests a test makes are local RPCs that answer in milliseconds — so this
+// fixture still reports the reason itself instead of vitest timing out.
+const PROMPT_TIMEOUT_MS = 180_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const IS_SANDBOX =
   process.env['QWEN_SANDBOX'] &&
   process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
 
 type PendingRequest = {
+  method: string;
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
@@ -100,6 +109,7 @@ function setupAcpTest(
 ) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
+  let disposed = false;
   const sessionUpdates: SessionUpdateNotification[] = [];
   const permissionRequests: PermissionRequest[] = [];
   const stderr: string[] = [];
@@ -146,6 +156,32 @@ function setupAcpTest(
     stderr.push(chunk.toString());
   });
 
+  // A dead agent otherwise manifests as a request timeout: the JSON-RPC reply
+  // never arrives, so the caller waits out the whole budget and reports
+  // "timed out" while the exit reason sits unread in the log (#12871). Reject
+  // the in-flight requests with that reason as soon as the child is gone.
+  // `close` rather than `exit` so stderr has finished draining and the tail
+  // below is the whole story. `cleanup()` sets `disposed` before killing, so
+  // teardown cannot reject a promise nobody awaits — an unhandled rejection is
+  // fatal on the github-hosted Linux lane (`dangerouslyIgnoreUnhandledErrors`
+  // is off there).
+  agent.once('close', (code, signal) => {
+    if (disposed) {
+      return;
+    }
+    const stderrTail = stderr.join('').trimEnd().slice(-500);
+    pending.forEach(({ method, timeout, reject }, id) => {
+      clearTimeout(timeout);
+      reject(
+        new Error(
+          `Request ${id} (${method}) rejected: agent exited (code=${code} signal=${signal})` +
+            (stderrTail ? `\nlast agent stderr:\n${stderrTail}` : ''),
+        ),
+      );
+    });
+    pending.clear();
+  });
+
   const rl = createInterface({ input: agent.stdout });
 
   const send = (json: unknown) => {
@@ -159,11 +195,13 @@ function setupAcpTest(
   const sendRequest = (method: string, params?: unknown) =>
     new Promise<unknown>((resolve, reject) => {
       const id = nextRequestId++;
+      const budget =
+        method === 'session/prompt' ? PROMPT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
       const timeout = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`Request ${id} (${method}) timed out`));
-      }, REQUEST_TIMEOUT_MS);
-      pending.set(id, { resolve, reject, timeout });
+      }, budget);
+      pending.set(id, { method, resolve, reject, timeout });
       send({ jsonrpc: '2.0', id, method, params });
     });
 
@@ -301,10 +339,11 @@ function setupAcpTest(
     });
 
   const cleanup = async () => {
+    disposed = true;
     rl.close();
-    agent.kill();
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
+    agent.kill();
     await waitForExit();
     await removeScratchDir(qwenHome);
   };
@@ -874,7 +913,7 @@ function setupAcpTest(
         });
         expect(promptResult).toBeDefined();
       } catch (e) {
-        // Only the harness's own 60s request timeout is acceptable — LLM
+        // Only the harness's own `session/prompt` timeout is acceptable — LLM
         // behavior is non-deterministic. JSON-RPC errors (errors with a
         // `response` property) indicate a real problem and must be surfaced.
         if (

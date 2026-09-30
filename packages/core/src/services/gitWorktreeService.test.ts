@@ -12,6 +12,7 @@ import { GitWorktreeService } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 
 const hoistedMockSimpleGit = vi.hoisted(() => vi.fn());
+const hoistedMockEnv = vi.hoisted(() => vi.fn());
 const hoistedMockCheckIsRepo = vi.hoisted(() => vi.fn());
 const hoistedMockInit = vi.hoisted(() => vi.fn());
 const hoistedMockAdd = vi.hoisted(() => vi.fn());
@@ -68,18 +69,23 @@ describe('GitWorktreeService', () => {
     hoistedMockGetGlobalQwenDir.mockReturnValue('/mock-qwen');
     (isCommandAvailable as Mock).mockReturnValue({ available: true });
 
-    hoistedMockSimpleGit.mockImplementation(() => ({
-      checkIsRepo: hoistedMockCheckIsRepo,
-      init: hoistedMockInit,
-      add: hoistedMockAdd,
-      commit: hoistedMockCommit,
-      revparse: hoistedMockRevparse,
-      raw: hoistedMockRaw,
-      branch: hoistedMockBranch,
-      diff: hoistedMockDiff,
-      merge: hoistedMockMerge,
-      stash: hoistedMockStash,
-    }));
+    hoistedMockSimpleGit.mockImplementation(() => {
+      const git = {
+        env: hoistedMockEnv,
+        checkIsRepo: hoistedMockCheckIsRepo,
+        init: hoistedMockInit,
+        add: hoistedMockAdd,
+        commit: hoistedMockCommit,
+        revparse: hoistedMockRevparse,
+        raw: hoistedMockRaw,
+        branch: hoistedMockBranch,
+        diff: hoistedMockDiff,
+        merge: hoistedMockMerge,
+        stash: hoistedMockStash,
+      };
+      hoistedMockEnv.mockReturnValue(git);
+      return git;
+    });
 
     hoistedMockCheckIsRepo.mockResolvedValue(true);
     hoistedMockInit.mockResolvedValue(undefined);

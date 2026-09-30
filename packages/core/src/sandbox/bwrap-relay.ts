@@ -62,6 +62,10 @@ if (input.isFIFO()) {
     shareInput = false;
   }
 }
+// Initialize Node's shared output descriptors before bwrap restores blocking
+// mode; lazy initialization after spawn would race and re-enable O_NONBLOCK.
+void process.stdout;
+void process.stderr;
 const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
   stdio: [shareInput ? 'inherit' : 'pipe', 'inherit', 'inherit', 'pipe'],
   env,

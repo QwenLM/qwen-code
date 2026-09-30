@@ -861,6 +861,52 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
+  it('renders free-form Advisor guidance in its card', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="advisor-model"
+        resultDisplay={{
+          type: 'advisor_advice',
+          model: 'advisor-model',
+          text: 'Check the retry boundary first.',
+        }}
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('Check the retry boundary first.');
+    expect(lastFrame()).not.toContain('"advisor_advice"');
+  });
+
+  it('renders structured Advisor feedback instead of JSON', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="advisor"
+        description="Consult Advisor"
+        resultDisplay={{
+          type: 'advisor_review',
+          verdict: 'Check the edge case.',
+          risks: 'Retries may be missing.',
+          missingEvidence: 'No failing test output.',
+          recommendation: 'Add a regression test.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('/advisor');
+    expect(output).toContain('Consult Advisor');
+    expect(output).toContain('Verdict');
+    expect(output).toContain('Risks');
+    expect(output).toContain('Missing evidence');
+    expect(output).toContain('Recommendation');
+    expect(output).not.toContain('"advisor_review"');
+  });
+
   it('suppresses todo panel when resultDisplay has unchanged flag', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage

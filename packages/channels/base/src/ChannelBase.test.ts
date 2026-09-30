@@ -3294,6 +3294,7 @@ describe('ChannelBase', () => {
           chatId: 'chat1',
         })),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -12281,6 +12282,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12314,6 +12316,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12363,6 +12366,7 @@ describe('ChannelBase', () => {
           .mockReturnValue(undefined),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12394,6 +12398,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12426,6 +12431,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12470,6 +12476,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue(target),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -12514,6 +12521,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
 
@@ -12537,6 +12545,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn(),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, { router } as unknown as ChannelBaseOptions);
       const newBridge = createBridge();
@@ -12578,6 +12587,7 @@ describe('ChannelBase', () => {
         getTarget: vi.fn().mockReturnValue({ chatId: 'chat1' }),
         handleSessionDied: vi.fn(),
         setBridge: vi.fn(),
+        setChannelRotation: vi.fn(),
       };
       const ch = createChannel({}, {
         router,
@@ -16133,6 +16143,46 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope());
       await ch.handleInbound(envelope());
       expect(bridge.newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts a fresh session after the configured routed-message bound', async () => {
+      const ch = createChannel({ sessionRotation: { maxTurns: 2 } });
+      await ch.handleInbound(envelope({ text: 'first' }));
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: 'third' }));
+
+      expect(vi.mocked(bridge.prompt).mock.calls.map(([id]) => id)).toEqual([
+        's-1',
+        's-1',
+        's-2',
+      ]);
+      expect(ch.retiringSessions).toContain('s-1');
+      expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+      expect(ch.threadMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining('fresh session'),
+          }),
+        ]),
+      );
+    });
+
+    it('announces a shared-session rotation in the chat that triggered it', async () => {
+      const ch = createChannel({
+        sessionScope: 'single',
+        sessionRotation: { maxTurns: 1 },
+      });
+      await ch.handleInbound(envelope({ chatId: 'first-chat' }));
+      await ch.handleInbound(envelope({ chatId: 'second-chat' }));
+
+      expect(ch.threadMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            chatId: 'second-chat',
+            text: expect.stringContaining('fresh session'),
+          }),
+        ]),
+      );
     });
 
     it('creates separate sessions for different senders', async () => {

@@ -6,7 +6,7 @@ import styles from './Markdown.module.css';
 
 /**
  * Plain-text renderer that turns explicit http(s) URLs into anchors. Mirrors
- * MarkdownLink's safety (`isSafeHref`) and desktop-shell routing
+ * MarkdownLink's safety (`isSafeHref`) and desktop-host routing
  * (`useExternalLinkOpener`); text without URLs passes through untouched.
  */
 export const LinkifiedText = memo(function LinkifiedText({

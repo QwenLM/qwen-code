@@ -61,6 +61,8 @@ const EN = {
   'boot.starting': 'Starting Qwen Code...',
   'boot.failed': 'Qwen Code failed to start.',
   'boot.noFolder': 'Open a folder to use Qwen Code.',
+  'boot.preAuthHostGate':
+    'The local port you connect through must be the same port number the Qwen daemon listens on (for example ssh -L 4170:localhost:4170). The pre-auth Host gate of the daemon only accepts a Host header carrying its own bound port, and --allow-origin cannot override it. Alternatively, run the daemon on a non-loopback bind.',
   'onboarding.title': 'Qwen Code',
   'onboarding.subtitle': 'Connect a model provider to start coding with Qwen.',
   'onboarding.cta': 'Get Started',
@@ -84,6 +86,8 @@ const EN = {
     'The message cannot be edited before the session is ready.',
   'composer.editExpired': 'The original message can no longer be edited.',
   'composer.editFailed': 'Failed to edit the message. Please try again.',
+  'composer.editSyncFailed':
+    'Could not confirm the rewind. Please send the message again.',
   'context.included': 'Included',
   'context.excluded': 'Excluded',
   'context.include': 'Include active file context',
@@ -145,6 +149,8 @@ const ZH: Record<ChromeStringKey, string> = {
   'boot.starting': '正在启动 Qwen Code…',
   'boot.failed': 'Qwen Code 启动失败。',
   'boot.noFolder': '请先打开一个文件夹以使用 Qwen Code。',
+  'boot.preAuthHostGate':
+    '你连接所用的本地转发端口必须与 Qwen 守护进程实际监听的端口号一致（例如 ssh -L 4170:localhost:4170）。守护进程的预鉴权 Host 检查只接受携带其自身绑定端口的 Host 头，--allow-origin 无法绕过。也可以改为让守护进程绑定到非 loopback 地址。',
   'onboarding.title': 'Qwen Code',
   'onboarding.subtitle': '连接一个模型服务商，开始使用 Qwen 编码。',
   'onboarding.cta': '开始使用',
@@ -167,6 +173,7 @@ const ZH: Record<ChromeStringKey, string> = {
   'composer.editUnavailable': '会话尚未就绪，暂时无法编辑该消息。',
   'composer.editExpired': '该消息已无法再编辑。',
   'composer.editFailed': '编辑消息失败，请重试。',
+  'composer.editSyncFailed': '未能确认回退，请重新发送该消息。',
   'context.included': '已包含',
   'context.excluded': '已排除',
   'context.include': '包含当前文件上下文',

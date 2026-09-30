@@ -727,41 +727,71 @@ describe('McpClientManager', () => {
     expect(acquire).toHaveBeenCalledTimes(2);
   });
 
-  it('routes single-server discovery through the pool when injected', async () => {
-    const acquireSpy = vi.fn().mockResolvedValue({
-      release: vi.fn(),
-      on: vi.fn(),
-      id: 'srv::abc',
-      serverName: 'srv',
-      entryIndex: 0,
-    });
-    const fakePool = {
-      acquire: acquireSpy,
-      releaseSession: vi.fn(),
-      getBudget: vi.fn().mockReturnValue(undefined),
-    } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
-    const mockConfig = {
-      isTrustedFolder: () => true,
-      getMcpServers: () => ({ srv: {} }),
-      getMcpServerCommand: () => undefined,
-      getTargetDir: () => '/session/worktree',
-      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
-      getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
-      getWorkspaceContext: () => ({}),
-      getDebugMode: () => false,
-      getSessionId: () => 'sid-1',
-      isMcpServerDisabled: () => false,
-    } as unknown as Config;
-    const manager = mkManager({
-      config: mockConfig,
-      options: { pool: fakePool },
-    });
+  it.each([{ result: [] }, { result: [{ restarted: false }] }])(
+    'rejects an unsuccessful pooled repair (%j)',
+    async ({ result }) => {
+      let serverConfig = { command: 'node' };
+      const acquireSpy = vi.fn().mockResolvedValue({
+        release: vi.fn(),
+        updateConfig: vi.fn(),
+        transportId: connectionIdOf('srv', serverConfig),
+        on: vi.fn(),
+        id: 'srv::abc',
+        serverName: 'srv',
+        entryIndex: 0,
+      });
+      const restartByName = vi.fn().mockResolvedValue(result);
+      const fakePool = {
+        restartByName,
+        acquire: acquireSpy,
+        releaseSession: vi.fn(),
+        getBudget: vi.fn().mockReturnValue(undefined),
+      } as unknown as import('./mcp-transport-pool.js').McpTransportPool;
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getMcpServers: () => ({ srv: serverConfig }),
+        getMcpServerCommand: () => undefined,
+        getTargetDir: () => '/session/worktree',
+        getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+        getPromptRegistry: () => ({ removePromptsByServer: vi.fn() }),
+        getWorkspaceContext: () => ({}),
+        getDebugMode: () => false,
+        getSessionId: () => 'sid-1',
+        isMcpServerDisabled: () => false,
+      } as unknown as Config;
+      const manager = mkManager({
+        config: mockConfig,
+        options: { pool: fakePool },
+      });
 
-    await manager.discoverMcpToolsForServer('srv', mockConfig);
+      await manager.discoverMcpToolsForServer('srv', mockConfig, true);
+      expect(restartByName).not.toHaveBeenCalled();
+      await manager.discoverMcpToolsForServer('srv', mockConfig);
+      expect(restartByName).not.toHaveBeenCalled();
+      await expect(
+        manager.discoverMcpToolsForServer('srv', mockConfig, true),
+      ).rejects.toThrow("Failed to reconnect MCP server 'srv'");
+      expect(restartByName).toHaveBeenCalledExactlyOnceWith('srv', {
+        entryIndex: 0,
+      });
 
-    expect(acquireSpy).toHaveBeenCalledTimes(1);
-    expect(McpClient).not.toHaveBeenCalled();
-  });
+      expect(acquireSpy).toHaveBeenCalledTimes(1);
+      expect(McpClient).not.toHaveBeenCalled();
+      serverConfig = { command: 'different' };
+      acquireSpy.mockResolvedValueOnce({
+        release: vi.fn(),
+        updateConfig: vi.fn(),
+        transportId: connectionIdOf('srv', serverConfig),
+        on: vi.fn(),
+        id: 'srv::replacement',
+        serverName: 'srv',
+        entryIndex: 1,
+      });
+      await manager.discoverMcpToolsForServer('srv', mockConfig, true);
+      expect(acquireSpy).toHaveBeenCalledTimes(2);
+      expect(restartByName).toHaveBeenCalledOnce();
+    },
+  );
 
   it('routes readResource through an existing pooled connection', async () => {
     const { MCPServerStatus } = await import('./mcp-client.js');

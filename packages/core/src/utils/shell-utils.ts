@@ -17,6 +17,7 @@ import {
   type ExecFileOptions,
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
+import { resolveWorkspacePath } from './workspaceContext.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -2081,6 +2082,25 @@ export function buildShellExecWarnings(
     return [COMMAND_SUBSTITUTION_WARNING];
   }
   return undefined;
+}
+
+/**
+ * The confirmation warning for a shell-like tool whose `directory` is outside
+ * the workspace. The workspace check follows symlinks, so name the directory
+ * it resolved to: a link inside the workspace that points out would otherwise
+ * be shown by a path that looks internal.
+ */
+export function buildOutsideWorkspaceWarning(directory: string): string {
+  let resolved: string;
+  try {
+    resolved = resolveWorkspacePath(directory);
+  } catch {
+    // Unresolvable: show the directory as given.
+    resolved = path.resolve(directory);
+  }
+  return resolved === path.resolve(directory)
+    ? `Runs outside the workspace in ${directory}`
+    : `Runs outside the workspace in ${resolved} (via ${directory})`;
 }
 
 /**

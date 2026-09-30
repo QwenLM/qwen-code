@@ -10,10 +10,12 @@ const {
   useWakeRepaintMock,
   buildWakeRepaintSpy,
   readCronTasksMock,
+  restoreWorktreeContextMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
   readCronTasksMock: vi.fn(),
+  restoreWorktreeContextMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
@@ -36,6 +38,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     // tests can pin the startup notice's only real source (and its catch
     // fallback) instead of hitting a nonexistent hashed path.
     readCronTasks: readCronTasksMock,
+    // Control the resume-time worktree restore so tests can pin how the
+    // container surfaces its outcomes without a real sidecar on disk.
+    restoreWorktreeContext: restoreWorktreeContextMock,
   };
 });
 
@@ -100,6 +105,9 @@ import {
   describeDeliveryStatus,
   describeDropReason,
   PEER_ADMISSION_LIMITS,
+  markApiHistoryPrompt,
+  CompressionStatus,
+  WorktreeRestoreRefusedError,
   type DropNotice,
   type HeldMessage,
   type SubagentManager,
@@ -616,6 +624,11 @@ describe('AppContainer State Management', () => {
     vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
     readCronTasksMock.mockReset();
     readCronTasksMock.mockResolvedValue([]);
+    restoreWorktreeContextMock.mockReset();
+    restoreWorktreeContextMock.mockResolvedValue({
+      contextMessage: null,
+      session: null,
+    });
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -762,10 +775,14 @@ describe('AppContainer State Management', () => {
     promptId,
   });
 
-  const apiUser = (text: string): Content => ({
-    role: 'user',
-    parts: [{ text }],
-  });
+  const apiUser = (text: string, promptId?: string): Content => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text }],
+    };
+    markApiHistoryPrompt(content, promptId);
+    return content;
+  };
 
   const apiModel = (text: string): Content => ({
     role: 'model',
@@ -822,9 +839,9 @@ describe('AppContainer State Management', () => {
     });
 
     const apiHistory = options.apiHistory ?? [
-      apiUser('first prompt'),
+      apiUser('first prompt', 'prompt-1'),
       apiModel('first response'),
-      apiUser('second prompt'),
+      apiUser('second prompt', 'prompt-2'),
       apiModel('second response'),
     ];
     const getHistoryShallow = vi.fn(() => apiHistory);
@@ -2213,6 +2230,7 @@ describe('AppContainer State Management', () => {
           kind: 'user' as const,
           modelText: 'persistent failure batch',
           turnKey: 'message-queue:persistent',
+          shellMode: true,
         };
       });
       const restoreMessages = vi.fn(() => {
@@ -2253,12 +2271,25 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
+      // #11626: this spread is the only production hop carrying the recorded
+      // shell intent from the queue entry to the router, and an
+      // `objectContaining({ userAdmission })` assertion cannot fail on a
+      // missing `shellMode` key — so pin the key itself.
+      expect(submitQuery).toHaveBeenCalledWith(
+        'persistent failure batch',
+        SendMessageType.UserQuery,
+        undefined,
+        expect.objectContaining({ shellMode: true }),
+      );
       // Deferred: admission failed because a turn is active, and the
       // mid-turn steer drain must not pull the restored batch (a peer
-      // envelope would leak into the turn raw, projection lost).
+      // envelope would leak into the turn raw, projection lost). The restore
+      // carries the same recorded intent, so the retry routes the same way
+      // (#11626).
       expect(restoreMessages).toHaveBeenCalledWith(
         ['persistent failure batch'],
         undefined,
+        true,
         true,
       );
 
@@ -2786,6 +2817,68 @@ describe('AppContainer State Management', () => {
         '/btw next turn',
         true,
         '/btw next turn',
+        false,
+      );
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+    });
+
+    // #11626: Ctrl+Q is not shell-gated — `keyMatchers[Command.QUEUE_MESSAGE]`
+    // calls `handleSubmitAndClear(buffer.text, true)` (InputPrompt.tsx:1810)
+    // after the `if (!shellModeActive) {` block closes at :1808 — and
+    // handleFinalSubmit reaches the deferred leg with no shell-mode gate before
+    // it, so a shell-mode command can be deferred. That entry is also the one
+    // that sits in the queue longest, across exactly the flag flip the recorded
+    // intent exists to survive. The case above pins this leg's non-shell arm, so
+    // the 4th argument is asserted in both directions here: replacing
+    // `shellModeActive` with `false` at AppContainer.tsx:3253 turns this red.
+    it('records shell intent on a Ctrl+Q submission made in shell mode', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn();
+
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('gh workflow list', {
+        deferUntilIdle: true,
+        submittedPrompt: 'gh workflow list',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        'gh workflow list',
+        true,
+        'gh workflow list',
+        true,
       );
       expect(mockSubmitQuery).not.toHaveBeenCalled();
     });
@@ -2888,6 +2981,7 @@ describe('AppContainer State Management', () => {
         '?btw wait for the tool',
         true,
         '?btw wait for the tool',
+        false,
       );
     });
 
@@ -2927,7 +3021,12 @@ describe('AppContainer State Management', () => {
         submittedPrompt: '/settings',
       });
 
-      expect(addMessage).toHaveBeenCalledWith('/settings', true, '/settings');
+      expect(addMessage).toHaveBeenCalledWith(
+        '/settings',
+        true,
+        '/settings',
+        false,
+      );
       expect(handleSlashCommand).not.toHaveBeenCalled();
       expect(submitQuery).not.toHaveBeenCalled();
     });
@@ -2946,7 +3045,7 @@ describe('AppContainer State Management', () => {
         submittedPrompt: '/model',
       });
 
-      expect(addMessage).toHaveBeenCalledWith('/model', false, '/model');
+      expect(addMessage).toHaveBeenCalledWith('/model', false, '/model', false);
       expect(handleSlashCommand).not.toHaveBeenCalled();
       expect(submitQuery).not.toHaveBeenCalled();
     });
@@ -3048,21 +3147,24 @@ describe('AppContainer State Management', () => {
           '</system-reminder>\n\ncontinue the review',
         false,
         'continue the review',
+        false,
       );
       expect(mockQueueMessage).toHaveBeenNthCalledWith(
         2,
         'one more check',
         false,
         'one more check',
+        false,
       );
     });
 
-    // The shell-mode gate is load-bearing only through this call site: a
-    // shell-mode submission goes to bash, where a leading `<system-reminder>`
-    // is a syntax error, and is recorded as the command the user ran. Both arms
-    // go through the real handleFinalSubmit and the real shellModeActive state,
-    // so dropping `shellMode: shellModeActive` from the call turns the shell
-    // arm red while the ordinary arm keeps the assertion from passing vacuously.
+    // The workflow reminder's shell-mode gate is load-bearing through this
+    // call site: a shell-mode submission goes to bash, where a leading
+    // `<system-reminder>` is a syntax error, and is recorded as the command
+    // the user ran. Both arms go through the real handleFinalSubmit and the
+    // real shellModeActive state, so dropping `shellMode: shellModeActive`
+    // from the call turns the shell arm red while the ordinary arm keeps the
+    // assertion from passing vacuously.
     it.each([
       ['a shell-mode submission', true, false],
       ['an ordinary prompt', false, true],
@@ -3070,6 +3172,12 @@ describe('AppContainer State Management', () => {
       'adds the workflow keyword reminder only outside shell mode: %s',
       (_case, shellMode, expectReminder) => {
         const mockQueueMessage = vi.fn();
+        // The mount effect's un-awaited config.initialize() runs the real
+        // initialization against this partial registry mock and rejects
+        // after the test ends (toolRegistry.warmAll etc. missing); vitest
+        // flags the unhandled rejection, which is fatal on Linux. The test
+        // only exercises handleFinalSubmit, so cut the IIFE at the top.
+        vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
         vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
         vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
           getAllToolNames: () => ['workflow'],
@@ -3122,8 +3230,8 @@ describe('AppContainer State Management', () => {
         const submitted = mockQueueMessage.mock.calls[0][0] as string;
         expect(submitted).toContain('gh workflow list');
         // Asserted on the workflow reminder's own text: this call site gates
-        // only that reminder. The other notices the handler can prepend do not
-        // check shell mode yet (#11626).
+        // only that reminder. The other notices the handler prepends gate
+        // shell mode at their own call sites (see the #11626 cases below).
         const workflowReminder = 'includes the "workflow" keyword';
         if (expectReminder) {
           expect(submitted).toContain(workflowReminder);
@@ -3132,6 +3240,158 @@ describe('AppContainer State Management', () => {
         }
       },
     );
+
+    // #11626: a shell-mode submission goes to bash, where a leading
+    // `<system-reminder>` is a syntax error — and the one-shot notice would
+    // be consumed by a submission the model never sees. The reminder must
+    // stay armed until the next model-bound prompt.
+    it('does not prepend or consume the recovered-agents reminder in shell mode', () => {
+      const mockQueueMessage = vi.fn();
+      const consumeSpy = vi
+        .spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
+        .mockReturnValue('Use list_agents to inspect restored agents.');
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('gh workflow list', {
+        submittedPrompt: 'gh workflow list',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledTimes(1);
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        1,
+        'gh workflow list',
+        false,
+        'gh workflow list',
+        true,
+      );
+      expect(consumeSpy).not.toHaveBeenCalled();
+
+      // Still armed: the next model-bound prompt carries the notice.
+      act(() => {
+        capturedUIActions.setShellModeActive(false);
+      });
+      capturedUIActions.handleFinalSubmit('continue the review', {
+        submittedPrompt: 'continue the review',
+      });
+
+      expect(consumeSpy).toHaveBeenCalledTimes(1);
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        2,
+        '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
+          '</system-reminder>\n\ncontinue the review',
+        false,
+        'continue the review',
+        false,
+      );
+    });
+
+    // #11626: the one-shot worktree restore reminder (armed during --resume)
+    // needs the same shell-mode guard as the recovered-agents notice.
+    it('does not prepend or consume the worktree restore reminder in shell mode', async () => {
+      const mockQueueMessage = vi.fn();
+      const startupNoticeSpy = vi
+        .spyOn(mockConfig, 'consumePendingStartupWorktreeNotice')
+        .mockReturnValue('The resumed session ran in worktree /tmp/wt-1.');
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // The startup effect arms pendingWorktreeNoticeRef from the consumed
+      // one-shot Config notice; wait for it before submitting.
+      await vi.waitFor(() => {
+        expect(startupNoticeSpy).toHaveBeenCalled();
+      });
+
+      act(() => {
+        capturedUIActions.setShellModeActive(true);
+      });
+      capturedUIActions.handleFinalSubmit('git status', {
+        submittedPrompt: 'git status',
+      });
+
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        1,
+        'git status',
+        false,
+        'git status',
+        true,
+      );
+
+      // Still armed: the next model-bound prompt carries the notice.
+      act(() => {
+        capturedUIActions.setShellModeActive(false);
+      });
+      capturedUIActions.handleFinalSubmit('continue', {
+        submittedPrompt: 'continue',
+      });
+
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        2,
+        '<system-reminder>\nThe resumed session ran in worktree /tmp/wt-1.\n' +
+          '</system-reminder>\n\ncontinue',
+        false,
+        'continue',
+        false,
+      );
+    });
 
     it('preserves unchanged queue provenance across the input clear before submit', () => {
       const modelText =
@@ -3180,6 +3440,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
     });
 
@@ -3231,6 +3492,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         undefined,
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3243,6 +3505,7 @@ describe('AppContainer State Management', () => {
         `${modelText} with edits`,
         false,
         undefined,
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3255,6 +3518,7 @@ describe('AppContainer State Management', () => {
         `${modelText} `,
         false,
         undefined,
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3272,6 +3536,7 @@ describe('AppContainer State Management', () => {
         'fresh prompt',
         false,
         'fresh prompt',
+        false,
       );
 
       mockQueueMessage.mockClear();
@@ -3285,6 +3550,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         undefined,
+        false,
       );
     });
 
@@ -3332,6 +3598,7 @@ describe('AppContainer State Management', () => {
         stashedText,
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenLastCalledWith('', {
         clearUndoHistory: true,
@@ -3400,6 +3667,7 @@ describe('AppContainer State Management', () => {
         'fresh prompt',
         false,
         'fresh prompt',
+        false,
       );
     });
 
@@ -3429,7 +3697,12 @@ describe('AppContainer State Management', () => {
         submittedPrompt: '   ',
       });
 
-      expect(mockQueueMessage).toHaveBeenCalledWith('   ', false, undefined);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '   ',
+        false,
+        undefined,
+        false,
+      );
     });
 
     it('captures trimmed multiline Unicode input as provenance', () => {
@@ -3462,6 +3735,7 @@ describe('AppContainer State Management', () => {
         ' \n你好 🌏\nsecond line \n ',
         false,
         '你好 🌏\nsecond line',
+        false,
       );
     });
 
@@ -3496,6 +3770,7 @@ describe('AppContainer State Management', () => {
         '@.qwen/tmp/clipboard.png\n\ndescribe this image',
         false,
         'describe this image',
+        false,
       );
     });
 
@@ -3541,6 +3816,7 @@ describe('AppContainer State Management', () => {
         'configured initial prompt',
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenCalledTimes(1);
 
@@ -3551,6 +3827,7 @@ describe('AppContainer State Management', () => {
         stashedText,
         false,
         undefined,
+        false,
       );
       expect(setText).toHaveBeenCalledWith('', {
         clearUndoHistory: true,
@@ -3591,6 +3868,7 @@ describe('AppContainer State Management', () => {
         'vim prompt',
         false,
         undefined,
+        false,
       );
     });
 
@@ -3642,6 +3920,7 @@ describe('AppContainer State Management', () => {
         'register contents',
         false,
         undefined,
+        false,
       );
     });
 
@@ -4395,6 +4674,7 @@ describe('AppContainer State Management', () => {
         modelText,
         false,
         'review this',
+        false,
       );
     });
 
@@ -6137,6 +6417,72 @@ describe('AppContainer State Management', () => {
       ).toBe(true);
     });
 
+    it('surfaces a worktree restore refusal as a WARNING history item', async () => {
+      // An ownership refusal loads the session WITHOUT its worktree
+      // binding — the model is never told the worktree exists, so the lost
+      // binding must be visible, not a console.debug.
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+      restoreWorktreeContextMock.mockImplementation(
+        async (_sidecarPath: string, onWarn?: (error: unknown) => void) => {
+          onWarn?.(
+            new WorktreeRestoreRefusedError(
+              'Worktree marker owner other-session does not match session ' +
+                'session-1; refusing restore and preserving sidecar.',
+            ),
+          );
+          return { contextMessage: null, session: null };
+        },
+      );
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(historyManager.addItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: MessageType.WARNING,
+            text: expect.stringContaining('refusing restore'),
+          }),
+          expect.any(Number),
+        );
+      });
+      // No worktree context message means no INFO restore notice either.
+      expect(historyManager.addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('Active worktree'),
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('announces active scheduled tasks after restoring resumed history', async () => {
       const calls: string[] = [];
       const historyManager = {
@@ -7316,6 +7662,7 @@ describe('AppContainer State Management', () => {
         'second prompt',
         false,
         undefined,
+        false,
       );
       expect(harness.setText).toHaveBeenLastCalledWith('', {
         clearUndoHistory: true,
@@ -7383,7 +7730,22 @@ describe('AppContainer State Management', () => {
 
     it('bails before file restore when the target turn is compressed', async () => {
       const harness = renderRewindHarness({
-        apiHistory: [apiUser('first prompt'), apiModel('first response')],
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          rewindUserItem(3, 'second prompt', 'prompt-2'),
+          { id: 4, type: 'gemini', text: 'second response' },
+          {
+            id: 5,
+            type: 'compression',
+            compression: {
+              isPending: false,
+              originalTokenCount: 100,
+              newTokenCount: 40,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          } as HistoryItem,
+        ],
       });
 
       await runRewind(harness.target, 'both');
@@ -7395,6 +7757,32 @@ describe('AppContainer State Management', () => {
         expect.objectContaining({
           type: 'error',
           text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('names an unresolved identity instead of compression, e.g. after a retry', async () => {
+      // A retry re-sends the prompt unmarked, so the retained turn keeps its
+      // promptId in the UI but has no matching model-history entry.
+      const harness = renderRewindHarness({
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+          apiUser('second prompt'),
+          apiModel('second response'),
+        ],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
         }),
         expect.any(Number),
       );
@@ -7780,6 +8168,58 @@ describe('AppContainer State Management', () => {
         submittedPrompt: 'hello',
       });
       expect(announcementCalls(addItem)).toHaveLength(1);
+    });
+
+    it('seeds the prompt counter past ACP-minted promptIds on resume', async () => {
+      // ACP and headless mint `sessionId########<n>` 1-based and skip
+      // turns that write no record, while the TUI mint is pre-increment.
+      // Seeding the resume from a bare user-message count therefore
+      // re-mints the id the last resumed turn wears; the seed must come
+      // from the highest claimed turn (+1 for the pre-increment mint).
+      const sessionId = mockConfig.getSessionId();
+      const seedPromptCount = vi.fn();
+      mockedUseSessionStats.mockReturnValue({
+        stats: {},
+        seedPromptCount,
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId,
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:03Z',
+          messages: [1, 2, 3].map((turn) => ({
+            uuid: `u${turn}`,
+            parentUuid: null,
+            sessionId,
+            timestamp: `2024-01-01T00:00:0${turn}Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: `turn ${turn}` }] },
+            cwd: '/test/workspace',
+            version: '1.0.0',
+            promptId: `${sessionId}########${turn}`,
+          })),
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: 'u3',
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Seed 4, not the record count 3: the next pre-increment mint is
+      // then `${sessionId}########4`, above every id the transcript wears.
+      await vi.waitFor(() => {
+        expect(seedPromptCount).toHaveBeenCalledWith(4);
+      });
     });
 
     it('does not consume the latch on a whitespace-only prompt', () => {

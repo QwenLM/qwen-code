@@ -3214,6 +3214,38 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should submit on Enter when completion suggestions are still loading', async () => {
+    // The dropdown shows "Loading suggestions..." with an empty list
+    // (showSuggestions true, no suggestions yet) — there is nothing to
+    // accept, so Enter must submit the buffer rather than be swallowed.
+    // Regression for render-derived completion state lagging a fast
+    // `@file` + Enter burst (#13015).
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [],
+      isLoadingSuggestions: true,
+      completionMode: CompletionMode.AT,
+    });
+    props.buffer.setText('@context.txt Inspect this context.');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      '@context.txt Inspect this context.',
+      {
+        deferUntilIdle: false,
+        submittedPrompt: '@context.txt Inspect this context.',
+      },
+    );
+    unmount();
+  });
+
   it('should add a newline on enter when the line ends with a backslash', async () => {
     // This test simulates multi-line input, not submission
     mockBuffer.text = 'first line\\';

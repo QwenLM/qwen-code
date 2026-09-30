@@ -54,7 +54,7 @@ qwen extensions install <marketplace-name>:<plugin-name>
 qwen extensions install <marketplace-github-url>:<plugin-name>
 ```
 
-For example, to install the `prompts.chat` plugin from the [f/awesome-chatgpt-prompts](https://claudemarketplaces.com/plugins/f-awesome-chatgpt-prompts) marketplace:
+For example, to install the `prompts.chat` plugin from the [f/awesome-chatgpt-prompts](https://claudemarketplaces.com/plugins/f-prompts.chat) marketplace:
 
 ```bash
 qwen extensions install f/awesome-chatgpt-prompts:prompts.chat

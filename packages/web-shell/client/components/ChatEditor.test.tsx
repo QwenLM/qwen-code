@@ -157,6 +157,7 @@ const composerCoreState = vi.hoisted(() => ({
   navigatePrevHistory: vi.fn(),
   navigateNextHistory: vi.fn(),
   hasContent: false,
+  pendingImageBatchCount: 0,
   shellMode: false,
   setShellMode: vi.fn(),
   toggleShellMode: vi.fn(),
@@ -246,7 +247,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
-        pendingImageBatchCount: 0,
+        pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
         ingestFiles: composerCoreState.ingestFiles,
@@ -385,6 +386,7 @@ afterEach(() => {
   composerCoreState.submitText.mockReset();
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
+  composerCoreState.pendingImageBatchCount = 0;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
@@ -405,6 +407,8 @@ afterEach(() => {
 interface ChatEditorRenderProps
   extends Pick<
     ComponentProps<typeof ChatEditor>,
+    | 'btwEnabled'
+    | 'isPreparing'
     | 'contextChipPlacement'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
@@ -2101,6 +2105,109 @@ describe('ChatEditor top composer tag tooltip', () => {
       accessibleTooltip?.id,
     );
     expect(tag?.hasAttribute('aria-describedby')).toBe(false);
+  });
+});
+
+describe('ChatEditor BTW in the add menu', () => {
+  async function openBtw(props: ChatEditorRenderProps = {}) {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['addMenu'],
+      btwEnabled: true,
+      ...props,
+    });
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector('[data-testid="composer-add-menu-trigger"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    expect(portalRoot.querySelector('[role="menu"]')).not.toBeNull();
+    return portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-btw"]',
+    );
+  }
+
+  it.each(['', 'Explain this decision'])(
+    'prepares a side question from %j without sending',
+    async (draft) => {
+      composerCoreState.getText.mockReturnValue(draft);
+      const item = await openBtw({ isRunning: true });
+      expect(item?.textContent).toContain('Ask a side question');
+      expect(item?.textContent).toContain('/btw');
+      await act(async () => item!.click());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(composerCoreState.setText).toHaveBeenCalledWith(`/btw ${draft}`);
+      expect(composerCoreState.focus).toHaveBeenCalled();
+      expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/btw', '/btw already asked'])(
+    'keeps the existing prefix in %j',
+    async (draft) => {
+      composerCoreState.getText.mockReturnValue(draft);
+      const item = await openBtw();
+      await act(async () => item!.click());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(composerCoreState.setText).not.toHaveBeenCalled();
+      expect(composerCoreState.focus).toHaveBeenCalled();
+    },
+  );
+
+  it('normalizes an existing uppercase command for the local BTW router', async () => {
+    composerCoreState.getText.mockReturnValue('  /BTW\nquestion');
+    const item = await openBtw();
+    await act(async () => item!.click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(composerCoreState.setText).toHaveBeenCalledWith('/btw\nquestion');
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it.each([
+    { pastedImages: [{ data: 'image', media_type: 'image/png' }] },
+    {
+      pastedFiles: [
+        { name: 'note.txt', media_type: 'text/plain', text: 'note' },
+      ],
+    },
+    {
+      composerTags: [
+        { id: 'file', type: 'file', label: 'note.txt', value: 'note.txt' },
+      ],
+    },
+  ] satisfies ChatEditorRenderProps[])(
+    'explains why attachments cannot become a side question: %j',
+    async (props) => {
+      const item = await openBtw(props);
+      expect(item?.hasAttribute('data-disabled')).toBe(true);
+      expect(item?.textContent).toContain('Remove attachments first');
+      await act(async () => item!.click());
+      expect(composerCoreState.setText).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks pending image ingestion', async () => {
+    composerCoreState.pendingImageBatchCount = 1;
+    const item = await openBtw();
+    expect(item?.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('blocks preparation', async () => {
+    const item = await openBtw({ isPreparing: true });
+    expect(item?.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('requires the main chat to enable the entry', async () => {
+    expect(await openBtw({ btwEnabled: false })).toBeNull();
+  });
+
+  it('hides the entry in shell mode', async () => {
+    composerCoreState.shellMode = true;
+    expect(await openBtw()).toBeNull();
   });
 });
 

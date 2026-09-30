@@ -1678,8 +1678,9 @@ export async function processSingleFileContent(
                     .some((tool) => tool.name === 'zoom_image'));
             let zoomHint = '';
             if (zoomAvailable) {
-              // CodeModeOnly binds zoom_image into `exec` and hides the bridge,
-              // so neither discovery nor `tool_call` applies there.
+              // CodeModeOnly calls zoom_image through `exec`, never `tool_call`;
+              // if its schema is deferred, exec's own guidance points the model
+              // at tool_search.
               const toolName = codeModeOnly ? 'tools.zoom_image' : 'zoom_image';
               zoomHint =
                 codeModeOnly || zoomDeclared

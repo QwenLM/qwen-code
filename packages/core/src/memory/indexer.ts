@@ -10,19 +10,25 @@ import { existsSync } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import {
+  AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
+  getMemoryRootTrustedAnchor,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
+  getUserAutoMemoryRoot,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
+import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
+  scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
+import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const MAX_INDEX_LINE_CHARS = 150;
@@ -243,6 +249,22 @@ export async function rebuildManagedAutoMemoryIndex(
   const content = buildManagedAutoMemoryIndex(docs, metadata);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
+    noFollow: true,
+  });
+  return content;
+}
+
+export async function rebuildAutoMemoryIndexAtRoot(
+  root: string,
+  scope: AutoMemoryScope,
+): Promise<string> {
+  if (!existsSync(root)) return '';
+  await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
+  const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
+  const content = buildManagedAutoMemoryIndex(docs);
+  await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {
+    encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }
@@ -253,10 +275,12 @@ export async function rebuildManagedAutoMemoryIndex(
  * and skips metadata (user memory has no per-project state file).
  */
 export async function rebuildUserAutoMemoryIndex(): Promise<string> {
+  if (!existsSync(getUserAutoMemoryRoot())) return '';
   const docs = await scanUserAutoMemoryTopicDocuments();
   const content = buildManagedAutoMemoryIndex(docs);
   await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
     encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }

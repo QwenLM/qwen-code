@@ -9,6 +9,7 @@ import { promises as fs, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { WorkflowJournal } from './runtime/workflow-journal.js';
 import {
   checkpointFromTask,
   claimInterruptedWorkflowRun,
@@ -305,6 +306,56 @@ describe('claimInterruptedWorkflowRuns', () => {
     await expect(
       fs.access(path.join(root, RUN_ID, 'journal.jsonl')),
     ).resolves.toBeUndefined();
+  });
+
+  it('excludes a pruned suffix from interrupted completion counts', async () => {
+    await leaveRun(checkpoint(), [
+      { type: 'launched', version: 1 },
+      { type: 'started', key: 'prefix', agentId: '1' },
+      { type: 'result', key: 'prefix', agentId: '1', result: 'kept' },
+      { type: 'started', key: 'suffix', agentId: '2' },
+      { type: 'result', key: 'suffix', agentId: '2', result: 'old' },
+    ]);
+    const journal = new WorkflowJournal(
+      path.join(root, RUN_ID, 'journal.jsonl'),
+      root,
+    );
+    await journal.retainReplayPrefix(new Set(['prefix']));
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]!.snapshot).toMatchObject({
+      agentsDispatched: 2,
+      agentsCompleted: 1,
+      status: 'failed',
+    });
+  });
+
+  it('counts only the latest successful attempts when claiming interrupted history', async () => {
+    await leaveRun(checkpoint(), [
+      { type: 'launched', version: 1 },
+      { type: 'started', key: 'prefix', agentId: '1' },
+      { type: 'result', key: 'prefix', agentId: '1', result: 'kept' },
+      { type: 'started', key: 'interrupted', agentId: '2' },
+      { type: 'result', key: 'interrupted', agentId: '2', result: 'old' },
+      { type: 'started', key: 'failed', agentId: '3' },
+      { type: 'result', key: 'failed', agentId: '3', result: 'old' },
+      { type: 'started', key: 'interrupted', agentId: '1' },
+      { type: 'failed', key: 'failed', agentId: '2' },
+    ]);
+
+    const claimed = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]!.snapshot).toMatchObject({
+      agentsDispatched: 3,
+      agentsCompleted: 1,
+      status: 'failed',
+    });
+    expect(await readWorkflowSnapshot(config, RUN_ID)).toEqual(
+      claimed[0]!.snapshot,
+    );
   });
 
   it('leaves a run alone while the process that wrote it is running', async () => {

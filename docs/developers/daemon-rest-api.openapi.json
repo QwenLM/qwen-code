@@ -226,7 +226,7 @@
             }
           },
           "400": {
-            "description": "The workspace, session id, scope, or request is invalid.",
+            "description": "The workspace, session id, scope, or request is invalid. Invalid startupConfig yields invalid_startup_config.",
             "content": {
               "application/json": {
                 "schema": {
@@ -277,6 +277,16 @@
           },
           "default": {
             "description": "Unexpected daemon error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "startup_config_rejected: the requested selection was rejected or could not be confirmed. The daemon attempts to close the new live session and rolls back the rejected session's persisted recording (named by the rejection even when the daemon generated the id), both on a best-effort basis; a close or rollback it could not complete is logged and the definite rejection is still returned. Retryability of a caller-supplied id is self-certifying: retry the create; a 409 session_id_conflict means the id is still occupied.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3192,6 +3202,9 @@
               }
             },
             "additionalProperties": false
+          },
+          "startupConfig": {
+            "$ref": "#/components/schemas/SessionStartupConfig"
           }
         },
         "additionalProperties": false
@@ -3232,7 +3245,8 @@
             "type": "boolean"
           },
           "modelApplied": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Only present on a fresh spawn (attached: false) that carried modelServiceId or startupConfig. Always true for successful startupConfig preparation; for legacy model selection, false means the switch was rejected (surfaced via the model_switch_failed event) and the session runs the agent default model. An attach omits the key or, when it coalesced with an in-flight spawn, reports the spawn owner's outcome — on attach, model_switch_failed is the caller's signal."
           },
           "worktree": {
             "type": "object",
@@ -3264,6 +3278,9 @@
                 "type": "string"
               }
             }
+          },
+          "startupConfigApplied": {
+            "$ref": "#/components/schemas/SessionStartupConfigApplied"
           }
         },
         "additionalProperties": true
@@ -4321,6 +4338,112 @@
           }
         },
         "additionalProperties": false
+      },
+      "SessionStartupConfig": {
+        "type": "object",
+        "required": ["modelServiceId"],
+        "properties": {
+          "modelServiceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "default",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "description": "Optional. Omission selects only the model; it does not apply default or call the reasoning setter."
+          }
+        },
+        "additionalProperties": false,
+        "description": "Requires session_startup_config. Cannot be combined with legacy modelServiceId or single session scope."
+      },
+      "SessionStartupConfigApplied": {
+        "type": "object",
+        "required": ["modelServiceId"],
+        "properties": {
+          "modelServiceId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": ["none", "default", "low", "medium", "high", "xhigh", "max"]
+          },
+          "effectiveReasoning": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                  "state": {
+                    "const": "enabled"
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "xhigh", "max"]
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                  "state": {
+                    "const": "disabled"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                  "state": {
+                    "const": "provider-default"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "description": "Creation-only confirmation. Model-only requests omit reasoningEffort and effectiveReasoning; explicit reasoning requests include both."
+      },
+      "CreateStandaloneSessionRequest": {
+        "type": "object",
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "description": "Required caller-supplied RFC-variant UUID v1-v5 for standalone creation."
+          },
+          "modelServiceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "startupConfig": {
+            "$ref": "#/components/schemas/SessionStartupConfig"
+          },
+          "approvalMode": {
+            "type": "string",
+            "enum": ["plan", "default", "auto-edit", "auto", "yolo"]
+          }
+        },
+        "additionalProperties": false,
+        "description": "Body schema for the separately documented standalone_sessions_v1 lifecycle. startupConfig additionally requires session_startup_config."
       }
     }
   }

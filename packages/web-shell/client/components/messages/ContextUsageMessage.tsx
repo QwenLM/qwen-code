@@ -14,6 +14,12 @@ import styles from './ContextUsageMessage.module.css';
 
 const SENTINEL = 'web-shell:context-usage:v1:';
 
+export function createContextUsageMessageData(
+  status: DaemonSessionContextUsageStatus,
+) {
+  return { type: SENTINEL, status };
+}
+
 export function serializeContextUsageMessage(
   status: DaemonSessionContextUsageStatus,
 ): string {
@@ -22,7 +28,17 @@ export function serializeContextUsageMessage(
 
 export function parseContextUsageMessage(
   content: string,
+  data?: unknown,
 ): DaemonSessionContextUsageStatus | null {
+  const structured = data as
+    | ReturnType<typeof createContextUsageMessageData>
+    | undefined;
+  if (
+    structured?.type === SENTINEL &&
+    typeof structured.status?.usage?.totalTokens === 'number'
+  ) {
+    return structured.status;
+  }
   if (!content.startsWith(SENTINEL)) return null;
   try {
     const parsed = JSON.parse(content.slice(SENTINEL.length));
@@ -219,7 +235,7 @@ function SkillsSection({
   };
 }) {
   const sorted = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
   });
   if (sorted.length === 0) return null;
@@ -316,11 +332,17 @@ export function ContextUsageMessage({
       </div>
       {!hasTokenCount ? (
         <>
+          {/* After /model, /restore or a resume the estimate includes the
+              conversation, so the base-overhead captions would be false. */}
           <div className={styles.estimateHint}>
-            {t('contextUsage.usageUnavailable')}
+            {breakdown.messages > 0
+              ? t('contextUsage.usageEstimatedWithConversation')
+              : t('contextUsage.usageUnavailable')}
           </div>
           <div className={styles.sectionTitle}>
-            {t('contextUsage.estimatedOverhead')}
+            {breakdown.messages > 0
+              ? t('contextUsage.estimatedUsage')
+              : t('contextUsage.estimatedOverhead')}
           </div>
           <div className={styles.metaLine}>
             {t('contextUsage.contextWindow')}: {formatTokens(contextWindowSize)}{' '}
@@ -467,7 +489,7 @@ export function ContextUsageMessage({
               tokens={breakdown.startupContext!}
             />
           )}
-          {hasTokenCount && (
+          {(hasTokenCount || breakdown.messages > 0) && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}

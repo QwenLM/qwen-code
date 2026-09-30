@@ -14,6 +14,7 @@ import {
 import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
+import { ToolSearchTool } from '../tools/tool-search.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
 import { Kind, ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -26,6 +27,93 @@ const TINY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
 
 describe('CodeModeOnly scheduler dispatch', () => {
+  it('searches a scoped deferred tool, executes it, and still validates arguments', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const execute = vi.fn(async () => ({
+      llmContent: 'DEFERRED_RESULT',
+      returnDisplay: 'read',
+    }));
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(new ToolSearchTool(config));
+    registry.registerTool(
+      new MockTool({
+        name: 'deferred-read',
+        shouldDefer: true,
+        kind: Kind.Read,
+        params: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+          required: ['path'],
+        },
+        execute,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({ name: 'secret_read', shouldDefer: true }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+    const declarations = registry.getFunctionDeclarationsFiltered([
+      'tool_search',
+      'deferred-read',
+    ]);
+    const run = async (name: string, args: Record<string, unknown>) => {
+      await scheduler.schedule(
+        {
+          callId: `${name}-${completed.mock.calls.length}`,
+          name,
+          args,
+          isClientInitiated: false,
+          prompt_id: 'lazy-code',
+          codeModeAllowedToolNames: ['deferred-read'],
+        },
+        new AbortController().signal,
+      );
+      return completed.mock.calls.at(-1)![0][0];
+    };
+    const search = await run('tool_search', {
+      query: 'select:deferred-read,secret_read',
+    });
+    expect(search.status).toBe('success');
+    const content = JSON.stringify(search.response.responseParts);
+    expect(content).toContain('tools.deferred_read(args:');
+    expect(content).not.toContain('tools.secret_read(args:');
+    const valid = await run('exec', {
+      source: 'text(await tools.deferred_read({path: "/tmp/test"}));',
+    });
+    expect(valid.status).toBe('success');
+    expect(JSON.stringify(valid.response.responseParts)).toContain(
+      'DEFERRED_RESULT',
+    );
+    expect(execute).toHaveBeenCalledOnce();
+    const invalid = await run('exec', {
+      source: 'text(await tools.deferred_read({}));',
+    });
+    expect(invalid.status).toBe('error');
+    expect(JSON.stringify(invalid.response.responseParts)).toContain(
+      "required property 'path'",
+    );
+    expect(execute).toHaveBeenCalledOnce();
+    expect(
+      registry.getFunctionDeclarationsFiltered([
+        'tool_search',
+        'deferred-read',
+      ]),
+    ).toEqual(declarations);
+  }, 15_000);
+
   it('keeps the Goal permit and termination metadata for a nested proposal', async () => {
     const permit = {
       goalId: 'goal-nested',
@@ -674,6 +762,171 @@ describe('CodeModeOnly scheduler dispatch', () => {
         MessageBusType.HOOK_EXECUTION_RESPONSE,
       );
     }
+  }, 10_000);
+
+  it('delivers nested PreToolUse context with the exec result, not the script value', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (request: {
+            eventName: string;
+            input?: { tool_name?: string; tool_call_id?: string };
+          }) => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-code-mode-test`,
+            success: true,
+            output:
+              request.eventName === 'PreToolUse' &&
+              request.input?.tool_name === 'hook_probe'
+                ? {
+                    hookSpecificOutput: {
+                      hookEventName: 'PreToolUse',
+                      additionalContext: `NESTED_CTX_${request.input.tool_call_id}`,
+                    },
+                  }
+                : {},
+          }),
+        ),
+    };
+    config.setMessageBus(messageBus as unknown as MessageBus);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(
+      new MockTool({
+        name: 'hook_probe',
+        kind: Kind.Read,
+        params: { type: 'object' },
+        execute: vi.fn(async () => ({
+          llmContent: 'PROBE_RAW',
+          returnDisplay: 'probe',
+        })),
+      }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-ctx',
+        name: 'exec',
+        // Consumes the nested result without printing it.
+        args: {
+          source:
+            'const r = JSON.stringify(await tools.hook_probe({})); text(r.includes("PROBE_RAW") && !r.includes("NESTED_CTX") ? "raw" : "changed")',
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-ctx',
+      },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+
+    const [execCall] = completed.mock.calls[0][0] as ToolCall[];
+    expect(execCall.status).toBe('success');
+    const text = JSON.stringify(
+      (execCall as { response: { responseParts: unknown } }).response
+        .responseParts,
+    );
+    expect(text).toContain('raw');
+    expect(text).not.toContain('changed');
+    expect(text.split('NESTED_CTX_exec-ctx:code:1').length - 1).toBe(1);
+  }, 10_000);
+
+  it('delivers nested PostToolUseFailure context with the exec result, not the script error', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (request: {
+            eventName: string;
+            input?: { tool_name?: string; tool_call_id?: string };
+          }) => ({
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-code-mode-test`,
+            success: true,
+            output:
+              request.eventName === 'PostToolUseFailure' &&
+              request.input?.tool_name === 'hook_probe'
+                ? {
+                    hookSpecificOutput: {
+                      hookEventName: 'PostToolUseFailure',
+                      additionalContext: `NESTED_FAIL_${request.input.tool_call_id}`,
+                    },
+                  }
+                : {},
+          }),
+        ),
+    };
+    config.setMessageBus(messageBus as unknown as MessageBus);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+    registry.registerTool(
+      new MockTool({
+        name: 'hook_probe',
+        kind: Kind.Read,
+        params: { type: 'object' },
+        execute: vi.fn(async () => ({
+          llmContent: 'probe failed',
+          returnDisplay: 'probe failed',
+          error: { message: 'probe failed' },
+        })),
+      }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'exec-fail',
+        name: 'exec',
+        // Swallows the nested error without printing it.
+        args: {
+          source:
+            'let seen = ""; try { await tools.hook_probe({}); } catch (error) { seen = String(error && error.message); } text(seen.includes("NESTED_FAIL") ? "changed" : seen ? "raw" : "no error")',
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-fail',
+      },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+
+    const [execCall] = completed.mock.calls[0][0] as ToolCall[];
+    expect(execCall.status).toBe('success');
+    const text = JSON.stringify(
+      (execCall as { response: { responseParts: unknown } }).response
+        .responseParts,
+    );
+    expect(text).toContain('raw');
+    expect(text).not.toContain('changed');
+    expect(text.split('NESTED_FAIL_exec-fail:code:1').length - 1).toBe(1);
   }, 10_000);
 
   it('validates nested arguments before execution', async () => {

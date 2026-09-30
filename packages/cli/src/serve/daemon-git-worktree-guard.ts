@@ -3321,6 +3321,19 @@ async function evaluateBuiltInGuard(
     }
   }
 
+  // Normal tool permission already admitted this call, so the session's own
+  // directory needs no second containment check: whoever admitted it saw the
+  // command. Keep the fallback check for speculative calls that never run
+  // that flow, and for a sub-agent pinned to its own worktree — the boundary
+  // established above is what keeps it out of its siblings and the parent
+  // checkout, and nothing in the permission flow re-establishes it.
+  if (
+    request.permissionChecked === true &&
+    canonicalEffectiveCwd === sessionCwd
+  ) {
+    return { allowed: true };
+  }
+
   // A model-supplied `directory` becomes the containment basis, so it must
   // itself stay inside the effective working directory before it is trusted.
   let startDirectory = canonicalEffectiveCwd;

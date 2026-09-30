@@ -4,7 +4,18 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
-import { ContextUsageMessage } from './ContextUsageMessage';
+import {
+  ContextUsageMessage,
+  createContextUsageMessageData,
+  parseContextUsageMessage,
+  serializeContextUsageMessage,
+} from './ContextUsageMessage';
+import {
+  createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
+} from '@qwen-code/sdk/daemon';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
+import { SystemMessage } from './SystemMessage';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -75,6 +86,88 @@ function render(
 
 describe('ContextUsageMessage', () => {
   it.each(['en', 'zh-CN'] as const)(
+    'renders a large detail snapshot through the real transcript pipeline (%s)',
+    (language) => {
+      const status = makeStatus(1000, false);
+      status.usage.contextWindowSize = 2000;
+      status.usage.breakdown.mcpTools = 800;
+      status.usage.breakdown.messages = 160;
+      status.usage.breakdown.freeSpace = 990;
+      status.usage.showDetails = true;
+      status.usage.mcpTools = Array.from({ length: 800 }, (_, i) => ({
+        name: `server_${i}__查询资源_${'lookup_resource_description_'.repeat(2)}`,
+        tokens: 1,
+      }));
+      status.formattedText = status.usage.mcpTools
+        .map(({ name }) => name)
+        .join('\n');
+      expect(serializeContextUsageMessage(status).length).toBeGreaterThan(
+        100000,
+      );
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        [
+          {
+            type: 'status',
+            text: 'Context Usage',
+            data: createContextUsageMessageData(status),
+            clearActiveText: false,
+          },
+        ],
+      );
+      const message = transcriptBlocksToDaemonMessages(state.blocks)[0];
+      expect(message.role).toBe('system');
+      if (message.role !== 'system') throw new Error('Expected system message');
+      const parsed = parseContextUsageMessage(message.content, message.data);
+      expect(parsed).toEqual(status);
+      expect(parsed?.usage.mcpTools).toHaveLength(800);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          <I18nProvider language={language}>
+            <SystemMessage
+              content={message.content}
+              data={message.data}
+              variant={message.variant}
+            />
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+      expect(container.textContent).toContain(status.usage.mcpTools[0].name);
+      expect(container.textContent).toContain(status.usage.mcpTools[799].name);
+      expect(container.textContent).not.toContain(
+        'web-shell:context-usage:v1:',
+      );
+      expect(container.textContent).not.toContain('[truncated]');
+      expect(container.textContent).not.toContain('�');
+    },
+  );
+
+  it('still parses legacy context snapshots and ignores unrelated data', () => {
+    const status = makeStatus(60, false);
+    const legacy = serializeContextUsageMessage(status);
+    expect(parseContextUsageMessage(legacy)).toEqual(status);
+    expect(parseContextUsageMessage(legacy, { type: 'other' })).toEqual(status);
+    expect(
+      parseContextUsageMessage('plain status', { type: 'other', status }),
+    ).toBeNull();
+    expect(
+      parseContextUsageMessage('plain status', {
+        type: 'web-shell:context-usage:v1:',
+      }),
+    ).toBeNull();
+    expect(
+      parseContextUsageMessage('plain status', {
+        type: 'web-shell:context-usage:v1:',
+        status: { usage: { totalTokens: 'invalid' } },
+      }),
+    ).toBeNull();
+  });
+
+  it.each(['en', 'zh-CN'] as const)(
     'keeps the skill listing row separate from its loaded body cost (%s)',
     (language) => {
       const status = makeStatus(60, false);
@@ -122,6 +215,61 @@ describe('ContextUsageMessage', () => {
       expect(read).not.toHaveBeenCalled();
     },
   );
+
+  it('shows the cached prefix, startup context and unattributed rows only when present (#12235)', () => {
+    const status = makeStatus(60, false);
+    // Rows still sum to the total: 20 + 10 + 5 + 5 + 12 + 8 = 60.
+    Object.assign(status.usage.breakdown, {
+      messages: 0,
+      startupContext: 12,
+      unattributed: 8,
+      cachedTokens: 30,
+    });
+    const text = render(status).textContent;
+    expect(text).toContain('Cached prefix 30 (30.0%)');
+    expect(text).toContain('Startup context 12 (12.0%)');
+    expect(text).toContain('Unattributed 8 (8.0%)');
+
+    const plain = render(makeStatus(60, false)).textContent;
+    expect(plain).not.toContain('Cached prefix');
+    expect(plain).not.toContain('Startup context');
+    expect(plain).not.toContain('Unattributed');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    const status = makeStatus(0, true);
+    status.usage.breakdown.messages = 25;
+    const text = render(status).textContent;
+    expect(text).toContain('Messages 25 (25.0%)');
+    // The captions follow the row. This case renders the EN catalog only:
+    // `render(status)` leaves `language` at its `'en'` default, so the zh-CN
+    // copies of these two captions are not asserted here.
+    expect(text).toContain('The estimates below include the conversation.');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('excluding conversation messages');
+    expect(render(makeStatus(0, true)).textContent).not.toContain('Messages');
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the daemon payload, so an older client
+    // omits it. Absent and `false` are the same state — not loaded — so the
+    // pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 2, loaded: false };
+    const big = { name: 'big-skill', tokens: 5 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const status = makeStatus(60, false);
+      status.usage.showDetails = true;
+      status.usage.skills = skills;
+      const text = render(status).textContent ?? '';
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
+  });
 
   it('separates remaining capacity from free space and clamps exhausted capacity', () => {
     const container = render(makeStatus(60, false));

@@ -48,6 +48,7 @@ const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ authType: undefined })),
   getModel: vi.fn(() => 'gemini-pro'),
   getModelDisplayName: vi.fn(() => 'Gemini Pro'),
+  getModelsConfig: () => ({ getModelDisplayName: () => 'Gemini Pro' }),
   getTargetDir: vi.fn(() => '/projects/qwen-code'),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
@@ -88,6 +89,21 @@ const renderWithProviders = (
 };
 
 describe('<AppHeader />', () => {
+  it('keeps the selected executor model while an advisor runtime is active', () => {
+    const getModelDisplayName = vi.fn((model: string) => model);
+    const { lastFrame } = renderWithProviders(
+      createMockUIState({ currentModel: 'executor-model' }),
+      createSettings(),
+      createMockConfig({
+        getModelDisplayName: () => 'advisor-model',
+        getModelsConfig: () => ({ getModelDisplayName }),
+      }),
+    );
+    expect(lastFrame()).toContain('executor-model');
+    expect(lastFrame()).not.toContain('advisor-model');
+    expect(getModelDisplayName).toHaveBeenCalledWith('executor-model');
+  });
+
   it('shows the working directory', () => {
     const { lastFrame } = renderWithProviders(createMockUIState());
     expect(lastFrame()).toContain('/projects/qwen-code');

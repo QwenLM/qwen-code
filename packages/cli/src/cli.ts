@@ -46,6 +46,10 @@ type BootstrapRoute =
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
+  [
+    'batch <command>',
+    'Run many independent requests through the DashScope Batch API',
+  ],
   ['board <command>', 'Share work with other agents through a board'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
@@ -575,6 +579,10 @@ export async function runCliEntry(
     : undefined;
   acpStartupProfiler?.initializeAcpStartupProfiler();
   acpStartupProfiler?.markAcpStartup('geminiImportStart');
+  // The bin launcher only enables the cache for its in-process fast paths;
+  // this route pays for compiling the whole CLI on every launch without it.
+  const { default: nodeModule } = await import('node:module');
+  nodeModule.enableCompileCache?.();
   const { main } = await import('./llm.js');
   acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();

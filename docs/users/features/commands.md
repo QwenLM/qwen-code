@@ -33,6 +33,7 @@ These commands help you save, restore, and summarize work progress.
 | `/rewind`        | Rewind conversation to a previous turn                                   | `/rewind` or `/rollback`                                      |
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
+| `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
 
 > [!note]
 >
@@ -761,11 +762,13 @@ qwen sessions list --json | jq .
 
 #### `qwen sessions ps`
 
-Lists the Qwen Code sessions registered on this machine right now.
-`sessions list` walks saved transcripts ("what have I worked on"); this
-walks the live-process registry ("what is running at this moment").
-Records left behind by a killed session are swept as they are found. A
-one-shot `qwen -p` run never registers, so it is never shown.
+Lists the Qwen Code session records visible on this machine.
+`sessions list` walks saved transcripts ("what have I worked on"). This
+command shows both the live-process registry and Agent View records marked
+`managed`. Records left behind by a killed session are swept from the registry
+as they are found. A managed record is persistent bookkeeping, not evidence
+that its worker is still alive. A one-shot `qwen -p` run never registers and
+is not shown.
 
 **Flags:**
 
@@ -785,22 +788,32 @@ program drives. Several `serve` or `headless` rows can share one PID: a
 the daemon spawned it, `headless` when a client is driving it directly —
 and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
-session is allowed to do depends on it. See
+session is allowed to do depends on it. An Agent View record marked
+`managed` uses `managed` for KIND and `-` for PID and AGE. It remains a
+separate row when the same session also has a live registry record. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
 format and for how to register a program of your own.
 
 **JSON output (`--json`):**
 
-Outputs JSON Lines on stdout, newest session first. Each line is a JSON
-object with fields:
+Outputs JSON Lines on stdout with managed records first. Registry records
+keep their existing shape:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
 qwenVersion, kind, ipcPath (when peer messaging is available)
 ```
 
+A managed record contains only source-backed data:
+
+```
+sessionId, cwd, managed: true
+```
+
 Nothing else is written to stdout — an empty listing prints nothing at
-all — so `qwen sessions ps --json | jq .` is safe to script against.
+all — so `qwen sessions ps --json | jq .` is safe to script against. If
+the supervisor store cannot be read, registry records still print and the
+reason is written to stderr.
 
 JSON output is raw data: field values are emitted exactly as recorded,
 with no terminal sanitization. Treat them as data, and sanitize before
@@ -812,7 +825,7 @@ rendering them in a terminal.
 # Show the other live sessions
 qwen sessions ps
 
-# Which directories are busy right now?
+# Which directories have a visible session record?
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
@@ -1057,9 +1070,10 @@ waiting out an expiry. Where a held message should surface for those
 sessions is not settled yet.
 
 A session registers unless its own settings turn
-`agents.crossSessionMessaging` off. Turned off, it stays invisible,
-because the only reason to list a session nobody can message would be to
-advertise an address that never answers.
+`agents.crossSessionMessaging` off, or it was started with `--bare` or
+`--safe-mode` — those turn messaging off whatever the setting says. Turned
+off, it stays invisible, because the only reason to list a session nobody
+can message would be to advertise an address that never answers.
 
 ### Programs that are not Qwen Code sessions
 

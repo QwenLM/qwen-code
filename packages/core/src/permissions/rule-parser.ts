@@ -126,6 +126,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ReadMcpResource: 'read_mcp_resource',
   ReadMcpResourceTool: 'read_mcp_resource',
 
+  // Advisor tool
+  advisor: 'advisor',
+  Advisor: 'advisor',
+
   // Agent (subagent) tool
   agent: 'agent',
   Agent: 'agent',
@@ -181,6 +185,14 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   save_memory: 'save_memory',
   SaveMemory: 'save_memory',
   SaveMemoryTool: 'save_memory',
+
+  // Managed memory tools
+  manage_memory: 'manage_memory',
+  ManageMemory: 'manage_memory',
+  ManageMemoryTool: 'manage_memory',
+  search_memory: 'search_memory',
+  SearchMemory: 'search_memory',
+  SearchMemoryTool: 'search_memory',
 
   // Ask User Question tool
   ask_user_question: 'ask_user_question',
@@ -305,6 +317,19 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   // Display image tool
   display_image: 'display_image',
   DisplayImage: 'display_image',
+
+  thread_post: 'thread_post',
+  ThreadPost: 'thread_post',
+  thread_wait: 'thread_wait',
+  ThreadWait: 'thread_wait',
+  thread_block: 'thread_block',
+  ThreadBlock: 'thread_block',
+  thread_review: 'thread_review',
+  ThreadReview: 'thread_review',
+  thread_create: 'thread_create',
+  ThreadCreate: 'thread_create',
+  thread_read: 'thread_read',
+  ThreadRead: 'thread_read',
 
   // Legacy edit tool name
   replace: 'edit',

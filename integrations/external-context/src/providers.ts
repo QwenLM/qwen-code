@@ -220,11 +220,7 @@ export class Mem0CompatibleAdapter
       body,
       signal: input.signal,
     });
-    return parseMem0Items(
-      response,
-      this.preset.search.idField,
-      this.preset.search.contentFields,
-    );
+    return parseMem0Items(response, this.preset.search);
   }
 
   async remember(input: {
@@ -377,8 +373,7 @@ function parseGenericItem(value: unknown): ExternalContextItem | undefined {
 
 function parseMem0Items(
   response: unknown,
-  idField: 'id' | 'memory_id' = 'id',
-  contentFields: ReadonlyArray<'memory' | 'content' | 'text'> = ['memory'],
+  search: Mem0Preset['search'],
 ): readonly ExternalContextItem[] {
   const values =
     isRecord(response) && Array.isArray(response['results'])
@@ -388,13 +383,35 @@ function parseMem0Items(
     throw new Error('External context provider returned an invalid response.');
   }
   return values
-    .map((value) =>
-      isRecord(value)
-        ? parseItemFields(value, idField, contentFields)
-        : undefined,
-    )
+    .map((value) => {
+      if (!isRecord(value)) return undefined;
+      const item = parseItemFields(value, search.idField, search.contentFields);
+      if (item && search.directImportMessages && value['infer'] === false) {
+        item.content = parseDirectImportContent(item.content);
+      }
+      return item;
+    })
     .filter((item): item is ExternalContextItem => item !== undefined)
     .slice(0, MAX_PROVIDER_ITEMS);
+}
+
+function parseDirectImportContent(content: string): string {
+  try {
+    const messages: unknown = JSON.parse(content);
+    if (
+      Array.isArray(messages) &&
+      messages.length === 1 &&
+      isRecord(messages[0]) &&
+      messages[0]['role'] === 'user' &&
+      typeof messages[0]['content'] === 'string' &&
+      messages[0]['content'].length > 0
+    ) {
+      return messages[0]['content'];
+    }
+  } catch {
+    // Older PolarDB direct imports can return plain text.
+  }
+  return content;
 }
 
 function parseItemFields(

@@ -67,10 +67,10 @@ safe integer、非法状态转换，以及不是小写格式的 SHA-256 digest�
 | 单事务 Event 数 |               256 |
 | 编码后事务      |             8 MiB |
 
-`eventsDigest` 对每个已提交事件的 `sequence`、`eventId` 和 `kind` 组成的
-canonical JSON 计算 SHA-256。对象 key 排序，数组顺序保留，因此结果不依赖属性
-插入顺序。它只是有序身份摘要，不是 `sessionKey`、`occurredAt` 或 payload 内容的
-完整性证明。
+`eventsDigest` 对完整有序事件的 canonical JSON 计算 SHA-256，覆盖会话作用域、
+时间戳、subject 和 payload。对象 key 排序，数组顺序保留。#12693 引入的持久化
+权威要求内容完整性证明；此前基础层原型只包含事件身份的摘要不能作为已提交
+journal 的完整性证明。
 
 `contentDigest` 是完整不可变命令内容的幂等摘要。只有一个持久输入的操作使用该
 资源已校验的 digest；包含多个输入的操作，对涵盖所有会改变执行效果字段的

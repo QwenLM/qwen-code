@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { executeBwrap, sandboxAsset } from './bwrap-execution.js';
-import type { BwrapPolicy } from './bwrap-execution.js';
+import { executeSandbox } from './execute-sandbox.js';
+import {
+  sandboxAsset,
+  type ExecutionSandboxPolicy,
+} from './sandbox-execution.js';
 import {
   encodeSandboxWriteRequest,
   MAX_FILE_HEADER_BYTES,
@@ -13,7 +16,7 @@ import {
 } from './file-worker-protocol.js';
 
 export async function writeSandboxFile(
-  policy: BwrapPolicy,
+  policy: ExecutionSandboxPolicy,
   request: SandboxWriteRequest,
   signal: AbortSignal,
 ): Promise<void> {
@@ -29,7 +32,7 @@ export async function writeSandboxFile(
   let diagnostics = '';
   const appendBounded = (current: string, chunk: string) =>
     (current + chunk).slice(-MAX_FILE_HEADER_BYTES);
-  const handle = await executeBwrap(
+  const handle = await executeSandbox(
     policy,
     {
       executable: process.execPath,

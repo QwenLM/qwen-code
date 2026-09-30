@@ -215,6 +215,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <AssistantMessage
             content={message.content}
+            author={message.author}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
@@ -233,6 +234,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ThinkingMessage
             content={message.content}
+            author={message.author}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
@@ -526,6 +528,11 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   if (prev.timestamp !== next.timestamp) return false;
+  if (
+    prev.author?.name !== next.author?.name ||
+    prev.author?.color !== next.author?.color
+  )
+    return false;
   switch (prev.role) {
     case 'user':
       return (

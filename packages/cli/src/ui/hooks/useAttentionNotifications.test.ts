@@ -5,6 +5,8 @@
  */
 // @vitest-environment jsdom
 
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { MessageBusType } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
 import { renderHook } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StreamingState } from '../types.js';
@@ -99,6 +101,30 @@ describe('useAttentionNotifications', () => {
         },
       },
     });
+
+  it('sends the main-session owner with idle hook notifications', () => {
+    const request = vi.fn().mockResolvedValue({ success: true });
+    const config = {
+      getSessionId: () => 'idle-session',
+      getHookSystem: () => ({ runtimeId: 'idle-runtime' }),
+      getMessageBus: () => ({ request }),
+      getDisableAllHooks: () => false,
+    } as unknown as Config;
+    render({ config });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'Notification',
+        owner: {
+          runtimeId: 'idle-runtime',
+          sessionId: 'idle-session',
+          agentId: null,
+        },
+        input: expect.objectContaining({ notification_type: 'idle_prompt' }),
+      }),
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+  });
 
   it('notifies when tool approval is required while unfocused', () => {
     const { rerender } = render();

@@ -1,5 +1,7 @@
 # External Context extension
 
+For normal Mem0 use, configure `memory.mem0` in the main CLI's user settings instead. This private direct integration is the advanced, separately managed profile; it is not required for the bundled path and does not require a separate npm package release.
+
 This private Qwen Code integration connects one interactive CLI process to one
 administrator-bound external context corpus without changing Qwen Core. It has
 three managed deployment variants:
@@ -402,13 +404,16 @@ remain administrator-owned:
 
 The built-in presets are:
 
+- `mem0-v2`: PolarDB-style V2 search with `limit`, V1 direct import, and single-user direct-import message decoding.
+- `mem0-v3`: the same contract as `mem0-platform-v3`.
+- `mem0-oss-2026-08`: the same contract as `mem0-oss-rest-2026-08`.
 - `mem0-platform-v3`: `/v3` Platform API, `Authorization: Token`, fixed
   `appId`.
 - `mem0-oss-rest-2026-08`: stock self-hosted Mem0 `/search` and `/memories`,
   `X-API-Key`, fixed `userId`, and optional `agentId`.
 - `aliyun-polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
-  `/v1/memories`, `Authorization: Token`, fixed `userId`, and optional
-  `agentId`.
+  `/v1/memories`, `Authorization: Token`, fixed `userId`, optional
+  `agentId`, historical `top_k`, and raw search content.
 
 #### Connecting a PolarDB Mem0 instance
 
@@ -445,7 +450,7 @@ the configuration file. PolarDB documents optional `agentId` at the request
 root; use a stable value when memories must be isolated by application.
 
 The preset records the whole protocol, not just one API version. Search always
-sends a maximum of five through the preset's `top_k` field. The engine does not
+sends a maximum of five through the preset's `top_k` or `limit` field. The engine does not
 probe versions or fall back to a different preset. See
 `examples/polardb-mem0.json`, `examples/polardb-mem0-loopback.json`,
 `examples/mem0-oss.json`, and the

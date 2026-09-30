@@ -2,13 +2,24 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.util.UUID;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 
 class JdbcRuntimeBrokerMySqlIT {
     @Test
     void repositoriesPreserveTheirContractsOnMySql() throws Exception {
-        JdbcRepositoryContract.verify(dataSource(), "mysql");
+        // The database outlives the run, so each run needs its own prefix.
+        JdbcRepositoryContract.verify(dataSource(), "mysql-" + UUID.randomUUID());
+    }
+
+    @Test
+    void managedRecoveryKeepsPinsUntilTheOriginalHolderCleanupCompletes() throws Exception {
+        DataSource source = dataSource();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        RuntimeMaintenanceRecoveryTest.verifyBatches(new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("maintenance", new byte[32])), new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "mysql-maintenance-" + java.util.UUID.randomUUID());
     }
 
     @Test

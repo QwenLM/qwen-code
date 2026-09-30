@@ -20,6 +20,10 @@
  * this slice may only touch opentui/**).
  */
 
+import {
+  isAdvisorDisplay,
+  formatAdvisorDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { GoalSnapshotLike } from '../utils/goal-card-view.js';
 import type {
   AnsiToken,
@@ -288,6 +292,7 @@ export function extractAnsiOutput(
 
 /** Stringifies a ToolResultDisplay (string | FileDiff | structured) losslessly. */
 export function renderResultDisplay(display: unknown): string {
+  if (isAdvisorDisplay(display)) return formatAdvisorDisplay(display);
   if (display == null) return '';
   if (typeof display === 'string') return display;
   if (typeof display === 'object') {

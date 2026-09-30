@@ -39,6 +39,9 @@ import {
 } from './workflow-agent-failure.js';
 import { DISPATCH_AFFECTING_AGENT_OPTS } from './workflow-journal.js';
 import { resolveBuiltinToolName } from '../../tools/tool-names.js';
+import { SyntheticOutputTool } from '../../tools/syntheticOutput.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
+import type { WorkflowOrchestratorEmitter } from './workflow-sandbox.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -1209,6 +1212,26 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
+  it('refuses a nested script with a dynamic import before its body runs', async () => {
+    const dispatch = vi.fn(async (prompt: string) => `agent:${prompt}`);
+    const outcome = await new WorkflowOrchestrator(dispatch).run({
+      script: `const before = await agent('parent-first');
+        try { await workflow('child'); return 'resolved'; }
+        catch (e) { return [before, e.message]; }`,
+      args: undefined,
+      resolveSavedWorkflow: async () => ({
+        script: `await agent('child-must-not-run');\nawait import('node:fs');`,
+        name: 'child',
+      }),
+    });
+    const [before, message] = outcome.result as [string, string];
+    expect(before).toBe('agent:parent-first');
+    expect(message).toMatch(/line 2: dynamic import\(\) is not supported/);
+    expect(dispatch.mock.calls.map(([prompt]) => prompt)).toEqual([
+      'parent-first',
+    ]);
+  });
+
   it('does not mirror an unconsumed agent failure after it settles to null', async () => {
     const orchestrator = new WorkflowOrchestrator(() =>
       Promise.reject(new Error('nested-boom')),
@@ -1548,6 +1571,7 @@ describe('WorkflowOrchestrator', () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
         return Promise.resolve();
@@ -1610,6 +1634,12 @@ describe('WorkflowOrchestrator', () => {
     const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async (keys: ReadonlySet<string>) => {
+        const kept = entries.filter(
+          (entry) => entry.type !== 'result' || keys.has(entry.key),
+        );
+        entries.splice(0, entries.length, ...kept);
+      },
       append: async (e: import('./workflow-journal.js').JournalEntry) => {
         entries.push(e);
       },
@@ -1810,6 +1840,7 @@ describe('WorkflowOrchestrator', () => {
     ];
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: async () => {},
       drain: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
@@ -1846,6 +1877,7 @@ describe('WorkflowOrchestrator', () => {
     const keyB = deriveAgentKey(keyA, 'b', {});
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: async () => {},
       drain: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
@@ -1889,6 +1921,7 @@ describe('WorkflowOrchestrator', () => {
     const key = deriveAgentKey(deriveArgsSeed(undefined), 'x', {});
     const journal = {
       path: 'mem',
+      retainReplayPrefix: async () => {},
       append: async () => {},
       drain: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
@@ -2279,7 +2312,10 @@ describe('WorkflowOrchestrator', () => {
         return saw;
       `,
       args: undefined,
-      journal: { append: () => Promise.resolve() } as never,
+      journal: {
+        retainReplayPrefix: async () => {},
+        append: () => Promise.resolve(),
+      } as never,
       resumeReplay: buildReplay(entries),
       scheduler,
       emitter,
@@ -2365,6 +2401,7 @@ describe('WorkflowOrchestrator', () => {
       return `LIVE:${prompt}`;
     });
     const journal2 = {
+      retainReplayPrefix: async () => {},
       append: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
     const scheduler = new WorkflowDispatchScheduler(1);
@@ -2432,7 +2469,10 @@ describe('WorkflowOrchestrator', () => {
                const c = await agent('c');
                return [a, b, c].join('|');`,
       args: undefined,
-      journal: { append: () => Promise.resolve() } as never,
+      journal: {
+        retainReplayPrefix: async () => {},
+        append: () => Promise.resolve(),
+      } as never,
       resumeReplay: buildReplay(entries),
     });
     // 'a' cached; 'B' and 'c' live.
@@ -2461,7 +2501,10 @@ describe('WorkflowOrchestrator', () => {
     await orch2.run({
       script: `await agent('a'); return 1;`,
       args: undefined,
-      journal: { append: () => Promise.resolve() } as never,
+      journal: {
+        retainReplayPrefix: async () => {},
+        append: () => Promise.resolve(),
+      } as never,
       resumeReplay: buildReplay(entries),
       emitter: {
         agentDispatched: () => events.push('dispatched'),
@@ -2498,7 +2541,10 @@ describe('WorkflowOrchestrator', () => {
       const outcome = await orch2.run({
         script: `await agent('a'); await agent('b'); await agent('c'); return 'ok';`,
         args: undefined,
-        journal: { append: () => Promise.resolve() } as never,
+        journal: {
+          retainReplayPrefix: async () => {},
+          append: () => Promise.resolve(),
+        } as never,
         resumeReplay: buildReplay(entries),
       });
       expect(outcome.result).toBe('ok'); // no cap error despite 3 > 2
@@ -2959,6 +3005,118 @@ describe('WorkflowOrchestrator failure-context preservation', () => {
   });
 });
 
+describe('WorkflowOrchestrator schema preflight', () => {
+  const bad = `{ type: 42 }`;
+  const good = `{ type: 'object', required: ['ok'] }`;
+
+  function run(script: string, emitter?: WorkflowOrchestratorEmitter) {
+    const dispatch = vi.fn(async (prompt: string) => ({ ok: prompt }));
+    const outcome = new WorkflowOrchestrator(dispatch).run({
+      script,
+      args: undefined,
+      resolveSavedWorkflow: async () => ({
+        script: `return [await agent('nested-bad', { schema: ${bad} }), await agent('nested-good', { schema: ${good} })];`,
+      }),
+      ...(emitter ? { emitter } : {}),
+    });
+    return { dispatch, outcome };
+  }
+
+  it.each([
+    [
+      'sequential',
+      `return [await agent('bad', { schema: ${bad} }), await agent('good', { schema: ${good} })];`,
+      [null, { ok: 'good' }],
+      ['good'],
+    ],
+    [
+      'parallel',
+      `return await parallel([() => agent('bad', { schema: ${bad} }), () => agent('good', { schema: ${good} })]);`,
+      [null, { ok: 'good' }],
+      ['good'],
+    ],
+    [
+      'pipeline',
+      `return await pipeline(['bad', 'good'], (_prev, item) => agent(item, { schema: item === 'bad' ? ${bad} : ${good} }), (prev) => agent('after ' + JSON.stringify(prev)));`,
+      [null, { ok: 'after {"ok":"good"}' }],
+      ['good', 'after {"ok":"good"}'],
+    ],
+    [
+      'nested',
+      `return await workflow('child');`,
+      [null, { ok: 'nested-good' }],
+      ['nested-good'],
+    ],
+  ])(
+    'settles a refused schema to null without dispatching it (%s)',
+    async (_shape, script, result, dispatched) => {
+      const { dispatch, outcome } = run(script);
+      await expect(outcome).resolves.toMatchObject({ result });
+      expect(dispatch.mock.calls.map((call) => call[0])).toEqual(dispatched);
+    },
+  );
+
+  it('records why the refused agent failed', async () => {
+    const completed: Array<[string | undefined, string | undefined]> = [];
+    const { outcome } = run(
+      `return await agent('bad', { label: 'bad', schema: ${bad} });`,
+      { agentCompleted: (label, error) => completed.push([label, error]) },
+    );
+    await expect(outcome).resolves.toMatchObject({ result: null });
+    expect(completed).toEqual([
+      [
+        'bad',
+        expect.stringMatching(
+          /^agent\(\{schema\}\): is not a valid JSON Schema: /,
+        ),
+      ],
+    ]);
+  });
+
+  it.each([
+    [
+      `try { return await agent('bad', { schema: ${bad} }); } catch (e) { return 'threw'; }`,
+      null,
+    ],
+    [
+      `const settled = await Promise.allSettled([agent('bad', { schema: ${bad} })]); return settled.map((s) => s.status + ':' + JSON.stringify(s.value));`,
+      ['fulfilled:null'],
+    ],
+    [`agent('bad', { schema: ${bad} }); return 'unawaited';`, 'unawaited'],
+  ])(
+    'keeps the refusal inside the script contract without an unhandled rejection: %s',
+    async (script, result) => {
+      let unhandled = 0;
+      const onUnhandled = () => {
+        unhandled += 1;
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const { dispatch, outcome } = run(script);
+        await expect(outcome).resolves.toMatchObject({ result });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(dispatch).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+      expect(unhandled).toBe(0);
+    },
+  );
+
+  it('still lets run-level limits win over a refused schema', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_WORKFLOW_AGENTS', '1');
+    try {
+      const { dispatch, outcome } = run(
+        `await agent('good', { schema: ${good} }); return await agent('bad', { schema: ${bad} });`,
+      );
+      await expect(outcome).rejects.toThrow('maximum of 1 agent() calls');
+      expect(dispatch.mock.calls.map((call) => call[0])).toEqual(['good']);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
   describe('parallel()', () => {
     it('resolves all thunks to a position-aligned array', async () => {
@@ -3198,6 +3356,202 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = envPrev;
       }
     }, 10_000);
+  });
+
+  describe('batch limit', () => {
+    const run = (script: string, dispatch = vi.fn(async () => 'ok')) =>
+      new WorkflowOrchestrator(dispatch).run({ script, args: undefined });
+
+    it.each([0, 1, 4096])('parallel() accepts %i thunks', async (n) => {
+      const outcome = await run(`
+        const r = await parallel(Array.from({ length: ${n} }, (_, i) => () => i));
+        return [r.length, r[0], r[r.length - 1]];`);
+      expect(outcome.result).toEqual(
+        n === 0 ? [0, undefined, undefined] : [n, 0, n - 1],
+      );
+    });
+
+    it('parallel() refuses 4097 thunks without running any of them', async () => {
+      const dispatch = vi.fn(async () => 'ok');
+      const outcome = await run(
+        `let ran = 0;
+        const thunks = Array.from({ length: 4097 }, (_, i) =>
+          () => { ran++; return i === 0 ? agent('x') : i; });
+        try { await parallel(thunks); return 'resolved'; }
+        catch (e) { return [ran, e.message]; }`,
+        dispatch,
+      );
+      const [ran, message] = outcome.result as [number, string];
+      expect(ran).toBe(0);
+      expect(message).toContain('parallel() thunks: 4097 entries');
+      expect(message).toContain('limit of 4096 per call');
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 1, 4096])('pipeline() accepts %i items', async (n) => {
+      const outcome = await run(`
+        const r = await pipeline(Array.from({ length: ${n} }, (_, i) => i), (x) => x * 2);
+        return [r.length, r[r.length - 1]];`);
+      expect(outcome.result).toEqual(
+        n === 0 ? [0, undefined] : [n, (n - 1) * 2],
+      );
+    });
+
+    it('pipeline() refuses 4097 items without running a stage', async () => {
+      const outcome = await run(`
+        let ran = 0;
+        try {
+          await pipeline(Array.from({ length: 4097 }, (_, i) => i), (x) => { ran++; return x; });
+          return 'resolved';
+        } catch (e) { return [ran, e.message]; }`);
+      const [ran, message] = outcome.result as [number, string];
+      expect(ran).toBe(0);
+      expect(message).toContain('pipeline() items: 4097 entries');
+    });
+
+    it.each([0, 1, 4096])('pipeline() accepts %i stages', async (n) => {
+      const outcome = await run(`
+        const stages = Array.from({ length: ${n} }, () => (x) => x + 1);
+        return await pipeline([0], ...stages);`);
+      expect(outcome.result).toEqual([n]);
+    });
+
+    it.each([
+      ['with an item', '[0]'],
+      ['with no items', '[]'],
+    ])(
+      'pipeline() refuses 4097 stages %s without running one',
+      async (_name, items) => {
+        const outcome = await run(`
+        let ran = 0;
+        const stages = Array.from({ length: 4097 }, () => (x) => { ran++; return x; });
+        try { await pipeline(${items}, ...stages); return 'resolved'; }
+        catch (e) { return [ran, e.message]; }`);
+        const [ran, message] = outcome.result as [number, string];
+        expect(ran).toBe(0);
+        expect(message).toContain('pipeline() stages: 4097 entries');
+      },
+    );
+
+    it('counts a sparse list by its length', async () => {
+      const outcome = await run(`
+        const thunks = []; thunks[5000] = () => 1;
+        const items = []; items[5000] = 1;
+        const out = [];
+        try { await parallel(thunks); } catch (e) { out.push(e.message); }
+        try { await pipeline(items, (x) => x); } catch (e) { out.push(e.message); }
+        return out;`);
+      const [p, q] = outcome.result as string[];
+      expect(p).toContain('parallel() thunks: 5001 entries');
+      expect(q).toContain('pipeline() items: 5001 entries');
+    });
+
+    it('keeps the existing handling of short sparse lists', async () => {
+      const outcome = await run(`
+        const out = [];
+        try { await parallel([() => 1, , () => 3]); }
+        catch (e) { out.push(e.message); }
+        out.push(await pipeline([1, , 3], (x) => x * 10));
+        return out;`);
+      const [p, q] = outcome.result as [string, unknown[]];
+      expect(p).toMatch(/array of functions/);
+      expect(q).toEqual([10, null, 30]);
+    });
+
+    it('reports a non-function thunk only after the length passes', async () => {
+      const outcome = await run(`
+        try { await parallel(Array.from({ length: 4097 }, () => 1)); }
+        catch (e) { return e.message; }`);
+      expect(outcome.result).toContain('parallel() thunks: 4097 entries');
+    });
+
+    it('uses one bounded copy, not the input iterator, map or a later length', async () => {
+      const outcome = await run(`
+        let ran = 0;
+        const thunks = [() => { ran++; return 1; }, () => { ran++; return 2; }];
+        thunks[Symbol.iterator] = function* () { for (let i = 0; i < 5000; i++) yield () => i; };
+        thunks.map = () => { throw new Error('map was used'); };
+        const a = await parallel(thunks);
+
+        let reads = 0;
+        const growing = new Proxy([() => 1], {
+          get(target, key) {
+            if (key === 'length') return reads++ === 0 ? 1 : 5000;
+            return target[key];
+          },
+        });
+        const b = await parallel(growing);
+
+        const bad = [];
+        for (const len of [-1, 1.5, 2 ** 53, 'x']) {
+          const p = new Proxy([], { get: (t, k) => (k === 'length' ? len : t[k]) });
+          try { await parallel(p); } catch (e) { bad.push(e.message); }
+        }
+        const throwing = new Proxy([], {
+          get(t, k) { if (k === 'length') throw new Error('boom'); return t[k]; },
+        });
+        try { await pipeline(throwing, (x) => x); } catch (e) { bad.push(e.message); }
+        return { a, b, ran, bad };`);
+      const { a, b, ran, bad } = outcome.result as {
+        a: unknown[];
+        b: unknown[];
+        ran: number;
+        bad: string[];
+      };
+      expect(a).toEqual([1, 2]);
+      expect(ran).toBe(2);
+      expect(b).toEqual([1]);
+      expect(bad).toHaveLength(5);
+      expect(bad.slice(0, 4)).toEqual(
+        Array(4).fill(
+          'parallel() thunks must be an array with a readable length.',
+        ),
+      );
+      expect(bad[4]).toBe(
+        'pipeline() items must be an array with a readable length.',
+      );
+    });
+
+    it('does not limit the total across calls', async () => {
+      const outcome = await run(`
+        const first = await parallel(Array.from({ length: 4096 }, (_, i) => () => i));
+        const second = await pipeline(Array.from({ length: 4096 }, (_, i) => 4096 + i), (x) => x);
+        const all = first.concat(second);
+        return [all.length, all[0], all[4095], all[4096], all[8191]];`);
+      expect(outcome.result).toEqual([8192, 0, 4095, 4096, 8191]);
+    });
+
+    it('is an ordinary rejection: an outer parallel() maps it to null', async () => {
+      const dispatch = vi.fn(async () => 'ok');
+      const outcome = await run(
+        `let inner = 0;
+        return await parallel([
+          () => agent('sibling'),
+          () => parallel(Array.from({ length: 4097 }, () => () => { inner++; return agent('x'); })),
+          () => pipeline([1], ...Array.from({ length: 4097 }, () => (x) => { inner++; return x; })),
+          () => inner,
+        ]);`,
+        dispatch,
+      );
+      expect(outcome.result).toEqual(['ok', null, null, 0]);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not stop a run-level failure from propagating', async () => {
+      const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+      const budget = new WorkflowBudgetImpl(1);
+      budget.recordSpent(1);
+      await expect(
+        new WorkflowOrchestrator(async () => 'unused').run({
+          script: `return await parallel([
+            () => parallel(Array.from({ length: 4097 }, () => () => 1)),
+            () => agent('x'),
+          ]);`,
+          args: undefined,
+          budget,
+        }),
+      ).rejects.toThrow(/token budget exceeded/);
+    });
   });
 
   describe('1000-agent cap', () => {
@@ -3627,8 +3981,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     config: Config;
     calls: StubSubagentCall[];
     disposed: number;
+    registeredToolInstances: unknown[];
   } {
     const calls: StubSubagentCall[] = [];
+    const registeredToolInstances: unknown[] = [];
     let disposed = 0;
     // Schema mode goes through createSchemaConfigOverride → rebuildToolRegistryOnOverride,
     // which calls ov.createToolRegistry() and then copies tools from base.getToolRegistry().
@@ -3638,7 +3994,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const registered = [...(opts.registeredTools ?? [])];
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
-      registerTool: () => {},
+      registerTool: (tool: unknown) => {
+        registeredToolInstances.push(tool);
+      },
     };
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
@@ -3806,6 +4164,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     return {
       config: cfg,
       calls,
+      registeredToolInstances,
       get disposed() {
         return disposed;
       },
@@ -3813,6 +4172,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       config: Config;
       calls: StubSubagentCall[];
       disposed: number;
+      registeredToolInstances: unknown[];
     };
   }
 
@@ -5184,7 +5544,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         finalText: '',
         terminateMode: 'CANCELLED',
         runWithEmitter: (emitter) => {
-          // 3 failed structured_output calls = original attempt + 2 nudges.
+          // The third failed structured_output submission stops the agent.
           for (let i = 1; i <= 3; i++) {
             emitter.emit('tool_call', {
               subagentId: 'sub',
@@ -5220,17 +5580,16 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect((caught as WorkflowAgentFailedError).kind).toBe(
       'no_structured_output',
     );
-    expect(String(caught)).toMatch(
-      /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
+    expect(String(caught)).toContain(
+      'subagent stopped after 3 failed structured_output submissions without a valid result. Last error: validation failed',
     );
   });
 
   // R3 review (wenshao T6 [M2]): when the subagent terminates without
   // ever calling structured_output (model answered in plain text;
   // attempts counter never incremented), the dispatch throws the
-  // accurate "no validation attempt" message — NOT the upstream-
-  // verbatim "after 2 in-conversation nudges" wording (which describes
-  // a different failure mode: 3 validation failures in a row).
+  // accurate "no validation attempt" message — NOT the failed-submission
+  // wording, which describes a different failure mode.
   it('schema-mode: subagent never calls structured_output → "no validation attempt" terminal', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async () => ({
@@ -5288,7 +5647,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // 2-failure recovery transitions had no coverage. A regression
   // inverting the guard, or one where pendingArgs cleanup discards the
   // recovered args, would slip past the previous tests.
-  it('schema-mode: success on 2nd attempt (1 nudge then valid) captures round-2 args', async () => {
+  it('schema-mode: success on 2nd attempt (1 failure then valid) captures round-2 args', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async () => ({
         finalText: '',
@@ -5350,7 +5709,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(result).toEqual({ ok: true, attempt: 2 });
   });
 
-  it('schema-mode: success on 3rd attempt (2 nudges then valid) captures round-3 args', async () => {
+  it('schema-mode: success on 3rd attempt (2 failures then valid) captures round-3 args', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async () => ({
         finalText: '',
@@ -6142,7 +6501,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // structured_output to the allowlist so prepareTools doesn't filter
   // it out of the subagent's tool surface. Without this fix the
   // SyntheticOutputTool was present in the per-call registry but
-  // invisible to the model, producing the silent "after 2 nudges" dead-end.
+  // invisible to the model, producing a silent structured-output dead-end.
   it('schema-mode + agentType restricted tools: structured_output appended to allowlist', async () => {
     const { config, calls } = fakeConfigWithMgr({
       findSubagentByName: async () => ({
@@ -6311,10 +6670,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   // T6 [M2]: a schema-mode dispatch whose subagent terminates via
   // TIMEOUT (10 min cap), MAX_TURNS (50 cap), or ERROR without a
   // structured_output call MUST throw the terminate-mode error, not the
-  // "after 2 in-conversation nudges" terminal. The previous path
-  // misdiagnosed every non-result outcome as a content failure.
+  // structured-output terminal. The previous path misdiagnosed every
+  // non-result outcome as a content failure.
   it.each(['TIMEOUT', 'MAX_TURNS', 'ERROR'])(
-    'schema-mode + terminateMode=%s → "did not complete" terminal, not "after 2 nudges"',
+    'schema-mode + terminateMode=%s → "did not complete" terminal, not a structured-output failure',
     async (mode) => {
       const { config } = fakeConfigWithMgr({
         onCreate: async () => ({
@@ -6334,11 +6693,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   );
 
   // T6 [M2] companion: when the schema-mode dispatch DID see 3 failed
-  // validation attempts (the real "after 2 in-conversation nudges"
-  // path), the upstream-verbatim wording is preserved. This is the
-  // existing 3-failure test, retained here with explicit terminateMode
+  // submissions, the terminal names the count and the last error. This is
+  // the existing 3-failure test, retained here with explicit terminateMode
   // pinning to make the contract unambiguous.
-  it('schema-mode: 3 failed structured_output calls → upstream-verbatim "after 2 nudges"', async () => {
+  it('schema-mode: 3 failed structured_output calls → stopped after 3 failed submissions', async () => {
     const { config } = fakeConfigWithMgr({
       onCreate: async (_call, _ee) => ({
         finalText: '',
@@ -6375,7 +6733,289 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await expect(
       dispatch('extract', { schema: { type: 'object' } }),
     ).rejects.toThrow(
-      /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
+      'subagent stopped after 3 failed structured_output submissions without a valid result. Last error: validation failed',
+    );
+  });
+
+  describe('schema preflight and structured output diagnostics', () => {
+    type Submission = {
+      args?: Record<string, unknown>;
+      success: boolean;
+      error?: string;
+      paired?: boolean;
+    };
+
+    function emitSubmissions(
+      emitter: { emit(event: string, payload: unknown): void },
+      submissions: Submission[],
+    ): void {
+      submissions.forEach((submission, index) => {
+        const callId = `c${index + 1}`;
+        if (submission.paired !== false) {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: index + 1,
+            callId,
+            name: 'structured_output',
+            args: submission.args ?? {},
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: index + 1,
+          });
+        }
+        emitter.emit('tool_result', {
+          subagentId: 'sub',
+          round: index + 1,
+          callId,
+          name: 'structured_output',
+          success: submission.success,
+          ...(submission.error !== undefined
+            ? { error: submission.error }
+            : {}),
+          responseParts: [],
+          resultDisplay: '',
+          durationMs: 1,
+          timestamp: index + 1,
+        });
+      });
+    }
+
+    function dispatchWith(submissions: Submission[], terminateMode = 'GOAL') {
+      const setup = fakeConfigWithMgr({
+        onCreate: async () => ({
+          finalText: 'plain text the script discards',
+          terminateMode,
+          runWithEmitter: (emitter) => emitSubmissions(emitter, submissions),
+        }),
+      });
+      return { ...setup, dispatch: createProductionDispatch(setup.config) };
+    }
+
+    it.each([
+      ['a non-string type', { type: 42 }],
+      ['null', null],
+      ['an array', []],
+      ['a boolean', true],
+      ['an unknown keyword', { type: 'object', propertees: {} }],
+      ['an unresolvable $ref', { $ref: '#/$defs/Missing' }],
+      ['an async schema', { $async: true, type: 'object' }],
+      [
+        'a contradiction',
+        { type: 'object', required: ['x'], additionalProperties: false },
+      ],
+    ])(
+      'refuses %s before provisioning a worktree or creating the subagent',
+      async (_name, schema) => {
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
+        const worktreesBefore = vi.mocked(GitWorktreeService).mock.calls.length;
+        const onCreate = vi.fn(async () => ({
+          finalText: 'must not run',
+          terminateMode: 'GOAL',
+        }));
+        const { config, calls, registeredToolInstances } = fakeConfigWithMgr({
+          onCreate,
+        });
+        const dispatch = createProductionDispatch(config);
+        await expect(
+          dispatch('extract', {
+            schema: schema as object,
+            isolation: 'worktree',
+          }),
+        ).rejects.toThrow(/^agent\(\{schema\}\): /);
+        expect(onCreate).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(0);
+        expect(registeredToolInstances).toHaveLength(0);
+        expect(vi.mocked(GitWorktreeService).mock.calls.length).toBe(
+          worktreesBefore,
+        );
+      },
+    );
+
+    it('dispatches a schema whose properties also match patternProperties', async () => {
+      const { dispatch, calls } = dispatchWith(
+        [{ success: true, args: { foo: 'ok' } }],
+        'CANCELLED',
+      );
+      await expect(
+        dispatch('extract', {
+          schema: {
+            type: 'object',
+            properties: { foo: { type: 'string' } },
+            patternProperties: { '^f': { minLength: 1 } },
+            required: ['foo'],
+          },
+        }),
+      ).resolves.toEqual({ foo: 'ok' });
+      expect(calls).toHaveLength(1);
+    });
+
+    it('gives the structured_output tool this call validator, not the shared one', async () => {
+      const id = 'https://example.com/schemas/workflow-tool-shared-id.json';
+      // The shared validator now holds this $id for another shape.
+      SchemaValidator.validate(
+        { $id: id, type: 'object', required: ['a'] },
+        {},
+      );
+      const { config, registeredToolInstances } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: '', terminateMode: 'GOAL' }),
+      });
+      await createProductionDispatch(config)('extract', {
+        schema: { $id: id, type: 'object', required: ['b'] },
+      }).catch(() => undefined);
+      const tool = registeredToolInstances.find(
+        (candidate) => candidate instanceof SyntheticOutputTool,
+      ) as SyntheticOutputTool | undefined;
+      expect(tool).toBeDefined();
+      expect(() => tool!.build({})).toThrow(/required property 'b'/);
+      expect(() => tool!.build({ b: 1 })).not.toThrow();
+    });
+
+    it.each([
+      [
+        [{ success: false, error: 'first error' }],
+        'subagent completed after 1 failed structured_output submission without a valid result. Last error: first error',
+      ],
+      [
+        [
+          { success: false, error: 'first error' },
+          { success: false, error: 'second error' },
+        ],
+        'subagent completed after 2 failed structured_output submissions without a valid result. Last error: second error',
+      ],
+      [
+        [{ success: false, error: 'first error' }, { success: false }],
+        'subagent completed after 2 failed structured_output submissions without a valid result. Submission 2 reported no error detail; the last error (submission 1): first error',
+      ],
+      [
+        [{ success: false }],
+        'subagent completed after 1 failed structured_output submission without a valid result. The failed submissions reported no error detail.',
+      ],
+    ] as Array<[Submission[], string]>)(
+      'reports the failed submissions of an agent that then answered in plain text (%#)',
+      async (submissions, message) => {
+        const { dispatch } = dispatchWith(submissions);
+        const caught = await dispatch('extract', {
+          schema: { type: 'object' },
+        }).catch((error: unknown) => error);
+        expect(isWorkflowAgentFailedError(caught)).toBe(true);
+        expect((caught as WorkflowAgentFailedError).kind).toBe(
+          'no_structured_output',
+        );
+        expect((caught as Error).message).toBe(message);
+      },
+    );
+
+    it('stops the agent at the third failed submission and names its error', async () => {
+      const seen: boolean[] = [];
+      const { config } = fakeConfigWithMgr({
+        onCreate: async () => ({
+          finalText: '',
+          terminateMode: 'CANCELLED',
+          runWithEmitter: (emitter, signal) => {
+            for (let i = 1; i <= 3; i++) {
+              emitSubmissions(emitter, [
+                { success: false, error: `error ${i}` },
+              ]);
+              seen.push(signal?.aborted ?? false);
+            }
+          },
+        }),
+      });
+      await expect(
+        createProductionDispatch(config)('extract', {
+          schema: { type: 'object' },
+        }),
+      ).rejects.toThrow(
+        'subagent stopped after 3 failed structured_output submissions without a valid result. Last error: error 3',
+      );
+      expect(seen).toEqual([false, false, true]);
+    });
+
+    it('keeps the last error single-line and bounded', async () => {
+      const { dispatch } = dispatchWith([
+        { success: false, error: `bad\u001b[31m\nvalue ${'x'.repeat(2000)}` },
+      ]);
+      const caught = (await dispatch('extract', {
+        schema: { type: 'object' },
+      }).catch((error: unknown) => error)) as Error;
+      // eslint-disable-next-line no-control-regex
+      expect(caught.message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+      expect(caught.message.length).toBeLessThan(800);
+      expect(caught.message).toContain('Last error: badvalue x');
+    });
+
+    it('returns the object its validator accepted, with coercion applied', async () => {
+      const args = { n: '5' };
+      const { dispatch } = dispatchWith([{ success: true, args }], 'CANCELLED');
+      const result = await dispatch('extract', {
+        schema: {
+          type: 'object',
+          properties: { n: { type: 'number' } },
+          required: ['n'],
+        },
+      });
+      expect(result).toEqual({ n: 5 });
+      expect(args).toEqual({ n: '5' });
+    });
+
+    it('counts a reported success whose arguments do not pass as a failed submission', async () => {
+      const { dispatch } = dispatchWith([{ success: true, args: {} }]);
+      await expect(
+        dispatch('extract', {
+          schema: { type: 'object', required: ['answer'] },
+        }),
+      ).rejects.toThrow(
+        /after 1 failed structured_output submission without a valid result\. Last error: structured_output arguments did not pass validation: .*required property 'answer'/,
+      );
+    });
+
+    it('counts a reported success without an observed call as a failed submission', async () => {
+      const { dispatch } = dispatchWith([{ success: true, paired: false }]);
+      await expect(
+        dispatch('extract', { schema: { type: 'object' } }),
+      ).rejects.toThrow(
+        /after 1 failed structured_output submission without a valid result\. Last error: structured_output reported success for a call whose arguments were not observed\./,
+      );
+    });
+
+    it.each(['serially', 'concurrently'])(
+      'validates each schema sharing an $id against itself, %s',
+      async (mode) => {
+        const id = `https://example.com/schemas/workflow-shared-${mode}.json`;
+        const schemaA = { $id: id, type: 'object', required: ['a'] };
+        const schemaB = { $id: id, type: 'object', required: ['b'] };
+        const { config } = fakeConfigWithMgr({
+          onCreate: async (call) => ({
+            finalText: '',
+            terminateMode: 'GOAL',
+            runWithEmitter: (emitter) =>
+              emitSubmissions(
+                emitter,
+                call.options?.taskName === 'for-a'
+                  ? [{ success: true, args: { a: 1 } }]
+                  : [
+                      // As if the tool had let the other shape through.
+                      { success: true, args: { a: 1 } },
+                      { success: true, args: { b: 2 } },
+                    ],
+              ),
+          }),
+        });
+        const dispatch = createProductionDispatch(config);
+        const results =
+          mode === 'serially'
+            ? [
+                await dispatch('for-a', { schema: schemaA }),
+                await dispatch('for-b', { schema: schemaB }),
+              ]
+            : await Promise.all([
+                dispatch('for-a', { schema: schemaA }),
+                dispatch('for-b', { schema: schemaB }),
+              ]);
+        expect(results).toEqual([{ a: 1 }, { b: 2 }]);
+      },
     );
   });
 });

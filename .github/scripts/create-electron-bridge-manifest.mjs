@@ -9,7 +9,7 @@ const assets = fs.readdirSync(options.assets).sort();
 const patterns = {
   macos: [/-arm64\.zip$/i, /-x64\.zip$/i, /-arm64\.dmg$/i, /-x64\.dmg$/i],
   windows: [/-setup\.exe$/i],
-  linux: [/\.AppImage$/i],
+  linux: [/_amd64\.AppImage$/i], // the bridge ships the x64 AppImage only
 };
 const selectedPatterns = patterns[options.platform];
 if (!selectedPatterns) {

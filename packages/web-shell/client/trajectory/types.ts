@@ -90,11 +90,12 @@ export interface TrajectoryRequestRow extends TrajectoryRowBase {
   model?: string;
   /** Folded from the round's assistant block; absent when none carried it. */
   usage?: DaemonTurnUsage;
+  recordId?: string;
   responseId?: string;
   promptId?: string;
   /** Set when a subagent issued the request. */
   subagentId?: string;
-  /** Main-session tool call that spawned the subagent, when resolvable. */
+  /** Tool call that spawned the subagent, when resolvable. */
   parentToolCallId?: string;
 }
 

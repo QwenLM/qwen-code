@@ -2,7 +2,7 @@
 
 [English](2026-09-22-managed-runtime-attestation-contract.md) | [简体中文](2026-09-22-managed-runtime-attestation-contract.zh-CN.md)
 
-Status: contract foundation and attestation-only worker shell implemented; Java Broker wiring remains follow-up work. Updated: 2026-09-23.
+Status: contract foundation and attestation-only worker shell implemented; Java Broker wiring remains follow-up work. Updated: 2026-09-24.
 
 ## Problem
 
@@ -32,7 +32,9 @@ This slice does not add the Hosted profile, Runtime provider, Java `RuntimeTrans
 
 ## Typed Route Manifest
 
-`OWNED_MANAGED_RUNTIME_ROUTES` currently contains the one route implemented by this contract slice:
+`OWNED_MANAGED_RUNTIME_ROUTES` declares the wire contracts owned by this
+component. Its attestation entry is the only route currently implemented and
+admitted:
 
 ```text
 POST /internal/managed-runtime/v2/attest
@@ -42,9 +44,18 @@ responseBodyLimitBytes = 16384
 cacheControl = no-store
 ```
 
-The Express registrar reads its method, path, protocol version, and body limit from this entry. The raw HTTP gate compares the incoming method and unmodified request URL against the same entry. Query strings, trailing slashes, case variants, other methods, and unregistered paths therefore fail with 404 before Express.
+The Express registrar reads its method, path, protocol version, and body limit
+from this entry. The raw HTTP gate compares the incoming method and unmodified
+request URL against this implemented route. Query strings, trailing slashes,
+case variants, other methods, and non-admitted paths therefore fail with 404
+before Express.
 
-This manifest is intentionally not populated with preview-only health, v1 Tool, history, or v2 Tool routes. Each operation is added when its real handler is extracted, in the same change that registers it. This prevents a manifest entry from claiming that a route exists when `main` has no implementation.
+The declaration manifest also contains the future v2 `execute`, `status`, and
+`cancel` contracts so TypeScript and Java can share their wire definition.
+Declaration does not imply admission: the raw gate rejects those routes until
+their real handlers land. Each future handler and its gate admission must be
+added in the same change. Preview-only health, v1 Tool, and history routes are
+not declared.
 
 ## Attestation Request and Response
 
@@ -70,7 +81,7 @@ The language-neutral files live beside the TypeScript contract under `packages/c
 - `managed-runtime-attestation-v2.schema.json` fixes the route metadata, closed request and response shapes, limits, and outcome classes.
 - `managed-runtime-attestation-v2.fixtures.json` contains the canonical identity and cases for credential variants, every immutable identity mismatch, malformed and empty fields, exact error codes, unsupported media types, charsets and content encodings, oversized bodies, and exact-route rejection.
 
-The TypeScript test materializes every case and sends it through `node:http` → the raw manifest gate → Express authentication and JSON parsing → the attestation handler. It checks status, classification, `no-store`, exact success body, and response size.
+The TypeScript test materializes every case and sends it through `node:http` → the raw route gate → Express authentication and JSON parsing → the attestation handler. It checks status, classification, `no-store`, exact success body, and response size.
 
 The Java attestation client reads these same files, sends the canonical request to a real HTTP endpoint, and classifies the response by status. It enforces the 16 KiB limit, the closed field set, and exact success-identity equality; 404 is not retryable. See the [Java client slice](2026-09-23-java-runtime-attestation-client.md). The client still does not implement acquire/execute, and it does not write the result into the Broker service.
 
@@ -78,9 +89,9 @@ The Java attestation client reads these same files, sends the canonical request 
 
 The hidden `qwen managed-runtime-worker` command accepts exactly one JSON boot document on standard input. The closed document carries the v1 boot marker plus the immutable attestation identity, including the per-generation bearer token. Input is capped at 32 KiB, must close within 30 seconds, and fails startup on timeout or unknown fields. Keeping the token on standard input avoids exposing it in command arguments or a long-lived environment variable.
 
-After validating the identity through the same attestation registrar, the process listens on an operating-system-assigned `127.0.0.1` port. The raw listener is wrapped by `ownedManagedRuntimeRouteGate`, so the only admitted operation is the manifest's exact attestation route. The process emits one closed v1 ready record containing its loopback URL and fencing identity, but never the token. `SIGINT` and `SIGTERM` close the listener before the process exits.
+After validating the identity through the same attestation registrar, the process listens on an operating-system-assigned `127.0.0.1` port. The raw listener is wrapped by `ownedManagedRuntimeRouteGate`, so the only admitted operation is the exact attestation route. The process emits one closed v1 ready record containing its loopback URL and fencing identity, but never the token. `SIGINT` and `SIGTERM` close the listener before the process exits.
 
-This shell is an executable ownership boundary for the next Java client and process provisioner. It does not load a model, Harness, tool manifest, Session, or workspace execution engine. Adding any Tool operation requires its real handler and route manifest entry in the same later change.
+This shell is an executable ownership boundary for the next Java client and process provisioner. It does not load a model, Harness, tool manifest, Session, or workspace execution engine. Adding any Tool operation requires its real handler and raw-gate admission in the same later change.
 
 ## Security and Failure Semantics
 
@@ -98,7 +109,7 @@ The Hosted Runtime integration proceeds in this order:
 1. this change starts the attestation-only process, wraps its listener with `ownedManagedRuntimeRouteGate`, and registers `registerManagedRuntimeAttestationRoute`;
 2. make the Java attestation client emit and parse the shared fixture shape with a 16 KiB response cap;
 3. reconcile physical identity before sending credentials, then commit the attestation result with the original database operation generation before opening the local ready gate;
-4. extract each real owned Tool handler and add its route to the manifest in the same commit; and
+4. extract each real owned Tool handler and admit its declared route through the raw gate in the same commit; and
 5. add the Java Broker plus TypeScript worker process E2E and make the cross-language gate required in CI.
 
 ## Validation
@@ -113,7 +124,7 @@ The focused TypeScript suite must pass all fixture cases through a real TCP list
 - Bodies over 16 KiB receive 413, compressed bodies and unsupported JSON charsets or content encodings fail as JSON protocol errors, and every response has `Cache-Control: no-store`.
 - Unknown fields, wrong protocol version, and malformed digests fail as protocol errors; lease and immutable identity differences fail as conflicts.
 - TypeScript and Java consume the same fixture file and agree on all five classifications.
-- The worker rejects malformed, oversized, or non-closed boot input; binds a loopback ephemeral port; emits a token-free ready record; exposes only the manifest route; and terminates cleanly.
+- The worker rejects malformed, oversized, or non-closed boot input; binds a loopback ephemeral port; emits a token-free ready record; admits only the attestation route; and terminates cleanly.
 - No Hosted profile, Runtime provider, Broker transport, public API, or ordinary daemon behavior is introduced.
 
 ## Follow-Up Boundary

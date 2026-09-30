@@ -91,6 +91,33 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(frame).not.toContain('No API response yet');
   });
 
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    const frame = (messages: number) =>
+      render(
+        <ContextUsage
+          modelName="qwen3-coder"
+          totalTokens={0}
+          contextWindowSize={128_000}
+          breakdown={makeBreakdown('warn', { messages })}
+          builtinTools={[]}
+          mcpTools={[]}
+          memoryFiles={[]}
+          skills={[]}
+          isEstimated={true}
+        />,
+      ).lastFrame() ?? '';
+
+    expect(frame(90_000)).toContain('Messages');
+    expect(frame(0)).not.toContain('Messages');
+    // The captions follow the row: an estimated history is not
+    // pre-conversation overhead.
+    expect(frame(90_000)).toContain(
+      'Estimated usage, including the conversation',
+    );
+    expect(frame(90_000)).not.toContain('pre-conversation');
+    expect(frame(0)).toContain('Estimated pre-conversation overhead');
+  });
+
   it('renders the startup context, unattributed and cached prefix rows only when nonzero (#12033)', () => {
     const present = render(
       <ContextUsage
@@ -230,5 +257,37 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(hardLine).toContain('▶');
     // Current tier reads `hard`
     expect(frame).toMatch(/Current tier[\s\S]*hard/);
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the wire type, so a payload from an
+    // older daemon omits it. Absent and `false` are the same state — not
+    // loaded — so the pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const { lastFrame, unmount } = render(
+        <ContextUsage
+          modelName="qwen3-coder"
+          totalTokens={50_000}
+          contextWindowSize={128_000}
+          breakdown={makeBreakdown('safe', { skills: 60 })}
+          builtinTools={[]}
+          mcpTools={[]}
+          memoryFiles={[]}
+          skills={skills}
+          showDetails={true}
+        />,
+      );
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('big-skill');
+      expect(frame.indexOf('big-skill')).toBeLessThan(
+        frame.indexOf('small-skill'),
+      );
+      unmount();
+    }
   });
 });

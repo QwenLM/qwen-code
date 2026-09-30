@@ -28,7 +28,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
-import type { Config } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -57,6 +57,14 @@ import {
 } from '../utils/tool-name-utils.js';
 import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 import { buildMcpClassifierInput } from './mcp-classifier-input.js';
+import {
+  boundedAppLimit,
+  MCP_APP_RESOURCE_MAX_BYTES_CEILING,
+  MCP_APP_RESOURCE_MAX_BYTES_DEFAULT,
+  MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+  MCP_APP_RESOURCE_TIMEOUT_MAX_MS,
+  MCP_APP_RESOURCE_TIMEOUT_MIN_MS,
+} from './mcp-app-resource-limits.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
 
@@ -285,8 +293,15 @@ interface McpReadResourceResult {
 }
 
 const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
-const MCP_APP_RESOURCE_MAX_BYTES = 1024 * 1024;
-const MCP_APP_RESOURCE_TIMEOUT_MS = 10_000;
+
+// `extensionName`/`scope` ride along so a limit warning can name the source
+// that actually declares the server — a `mcpServers.<name>` settings path is
+// destructive advice for an extension-declared server (a same-named settings
+// entry replaces the whole server object) and ineffective for a project one.
+type McpAppResourceLimits = Pick<
+  MCPServerConfig,
+  'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'extensionName' | 'scope'
+>;
 
 // Discriminated union for MCP Content Blocks to ensure type safety.
 type McpTextBlock = {
@@ -360,6 +375,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly appResourceUri?: string,
     private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
+    private readonly appResourceLimits?: McpAppResourceLimits,
+    private readonly onAppResult?: (result: McpAppToolResult) => void,
   ) {
     super(params);
   }
@@ -434,7 +451,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         `Attempting to reconnect MCP server '${this.serverName}'...`,
       );
       const toolRegistry = this.cliConfig.getToolRegistry();
-      await toolRegistry.discoverToolsForServer(this.serverName);
+      await toolRegistry.discoverToolsForServer(
+        this.serverName,
+        this.onAppResult !== undefined,
+      );
 
       const newTool = await toolRegistry.ensureTool(this.registeredToolName);
       if (newTool instanceof DiscoveredMCPTool) {
@@ -510,6 +530,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           newTool['appResourceUri'],
           newTool.appResourceUi,
           this.retryCount + 1,
+          newTool.appResourceLimits,
         );
         if (!newInvocation.canSafelyReplay()) {
           throw new Error(
@@ -561,8 +582,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // A transport error is ambiguous: the MCP server may have applied the
     // side effect before its response was lost. Reusing the original allow
     // decision for an internal reconnect would turn one authorization into
-    // multiple execution attempts, so guarded invocations fail closed.
-    if (this.cliConfig?.getToolInvocationGuard?.()) {
+    // multiple execution attempts. App calls only repair and never replay.
+    if (!this.onAppResult && this.cliConfig?.getToolInvocationGuard?.()) {
       return false;
     }
 
@@ -592,6 +613,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // otherwise fall back to the @google/genai mcpToTool wrapper.
     if (this.mcpClient) {
       return this.executeWithDirectClient(signal, updateOutput);
+    }
+    if (this.onAppResult) {
+      throw new Error('MCP App tool calls require a direct MCP client.');
     }
     return this.executeWithCallableTool(signal);
   }
@@ -671,7 +695,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             // Reset idle timeout on progress
             resetIdleTimeout();
 
-            if (updateOutput) {
+            if (updateOutput && !this.onAppResult) {
               const progressData: McpToolProgressData = {
                 type: 'mcp_tool_progress',
                 progress: progress.progress,
@@ -697,6 +721,22 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (idleTimeoutId) {
         clearTimeout(idleTimeoutId);
         idleTimeoutId = undefined;
+      }
+
+      if (this.onAppResult) {
+        this.onAppResult(callToolResult);
+        const summary = callToolResult.isError
+          ? 'MCP App tool reported an error.'
+          : 'MCP App tool completed.';
+        return {
+          llmContent: summary,
+          returnDisplay: summary,
+          ...(callToolResult.isError
+            ? {
+                error: { message: summary, type: ToolErrorType.MCP_TOOL_ERROR },
+              }
+            : {}),
+        };
       }
 
       // Wrap the raw CallToolResult into the Part[] format that the
@@ -733,6 +773,24 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
+      if (this.onAppResult) {
+        if (signal.aborted) throw createToolCallAbortError();
+        if (
+          idleTimeoutWon ||
+          isExecutionTimeoutFailure(error, this.serverName, signal)
+        ) {
+          throw new StructuredToolError(
+            'MCP App tool call timed out.',
+            ToolErrorType.EXECUTION_TIMEOUT,
+          );
+        }
+        // Repair the connection for later calls without replaying this attempt.
+        if (this.shouldAttemptReconnect(error)) await this.attemptReconnect();
+        throw new StructuredToolError(
+          'MCP App tool call failed.',
+          ToolErrorType.EXECUTION_FAILED,
+        );
+      }
       // `idleTimeoutWon` is our own client-side timer firing, so it is an
       // execution timeout regardless of what the transport thinks.
       if (
@@ -754,6 +812,50 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * `boundedAppLimit` plus the diagnostic the silent fallback otherwise
+   * lacks: `mcpServers` carries no per-key schema, so a hand-edited
+   * `"appResourceMaxBytes": "4194304"` reaches here untyped and would be
+   * dropped without a trace while the limit warning names the key.
+   */
+  private appResourceLimit(
+    value: number | undefined,
+    fallback: number,
+    min: number,
+    max: number,
+    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+  ): number {
+    if (
+      value !== undefined &&
+      (typeof value !== 'number' || !Number.isFinite(value))
+    ) {
+      debugLogger.warn(
+        `Ignoring non-finite MCP App resource limit ${this.appLimitSettingRef(key)} (${typeof value === 'string' ? JSON.stringify(value) : String(value)}); falling back to ${fallback}`,
+      );
+    }
+    return boundedAppLimit(value, fallback, min, max);
+  }
+
+  /**
+   * Name the setting an operator must change, in the source that declares
+   * the server: the `mcpServers.<name>.<key>` settings path is only valid
+   * for settings-declared servers — configuration sources replace whole
+   * server objects by precedence, so a partial same-named settings entry
+   * would shadow an extension's or project's server rather than merge.
+   */
+  private appLimitSettingRef(
+    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
+  ): string {
+    const extensionName = this.appResourceLimits?.extensionName;
+    if (extensionName) {
+      return `${key} for server '${this.serverName}' declared by extension '${extensionName}'`;
+    }
+    if (this.appResourceLimits?.scope === 'project') {
+      return `${key} for server '${this.serverName}' declared in .mcp.json`;
+    }
+    return `mcpServers.${this.serverName}.${key}`;
+  }
+
   private async loadMcpAppDisplay(
     toolResult: McpCallToolResult,
     fallbackText: string,
@@ -761,11 +863,29 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<McpAppResultDisplay | undefined> {
     if (!this.appResourceUri || !this.mcpClient?.readResource) return undefined;
 
-    const timeoutMs = Math.min(
-      this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
-      MCP_APP_RESOURCE_TIMEOUT_MS,
+    const configuredMaxBytes = this.appResourceLimits?.appResourceMaxBytes;
+    const configuredTimeoutMs = this.appResourceLimits?.appResourceTimeoutMs;
+    const maxBytes = this.appResourceLimit(
+      configuredMaxBytes,
+      MCP_APP_RESOURCE_MAX_BYTES_DEFAULT,
+      1,
+      MCP_APP_RESOURCE_MAX_BYTES_CEILING,
+      'appResourceMaxBytes',
     );
-    const timeoutSignal = AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS);
+    const defaultTimeoutMs = boundedAppLimit(
+      this.mcpTimeout,
+      MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+      1,
+      MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+    );
+    const timeoutMs = this.appResourceLimit(
+      configuredTimeoutMs,
+      defaultTimeoutMs,
+      MCP_APP_RESOURCE_TIMEOUT_MIN_MS,
+      MCP_APP_RESOURCE_TIMEOUT_MAX_MS,
+      'appResourceTimeoutMs',
+    );
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
       const resource = await this.mcpClient.readResource(
         { uri: this.appResourceUri },
@@ -795,9 +915,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             : undefined;
       if (!html) throw new Error('resource did not return HTML content');
       const htmlBytes = Buffer.byteLength(html, 'utf8');
-      if (htmlBytes > MCP_APP_RESOURCE_MAX_BYTES) {
+      if (htmlBytes > maxBytes) {
         throw new Error(
-          `resource HTML is ${htmlBytes} bytes, exceeding the ${MCP_APP_RESOURCE_MAX_BYTES} byte (1 MiB) host limit`,
+          `resource HTML is ${htmlBytes} bytes, exceeding the ${maxBytes} byte host limit (${this.appLimitSettingRef('appResourceMaxBytes')})`,
         );
       }
 
@@ -818,11 +938,18 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (signal.aborted) return undefined;
       const cause = getErrorMessage(error);
+      // Raising the general timeout cannot exceed the App resource ceiling.
+      const timeoutKey =
+        (typeof configuredTimeoutMs === 'number' &&
+          Number.isFinite(configuredTimeoutMs)) ||
+        defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS
+          ? 'appResourceTimeoutMs'
+          : 'timeout';
       const reason =
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
         isMcpSdkRequestTimeout(error)
-          ? `resource read timed out (limit: ${timeoutMs} ms)`
+          ? `resource read timed out (limit: ${timeoutMs} ms; ${this.appLimitSettingRef(timeoutKey)})`
           : cause;
       const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
       // On the timeout branch `reason` replaces the underlying message, so
@@ -1060,6 +1187,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly allowInvocationContext: boolean = false,
     readonly appResourceUri?: string,
     readonly appResourceUi?: Record<string, unknown>,
+    readonly appResourceLimits?: McpAppResourceLimits,
+    readonly appVisibility?: readonly string[],
   ) {
     super(
       nameOverride ??
@@ -1132,6 +1261,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      this.appResourceLimits,
+      this.appVisibility,
     );
   }
 
@@ -1156,6 +1287,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       appResourceUi,
+      this.appResourceLimits,
+      this.appVisibility,
     );
   }
 
@@ -1204,11 +1337,37 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      this.appResourceLimits,
+      this.appVisibility,
     );
+  }
+
+  get isAppVisible(): boolean {
+    return (
+      this.appVisibility === undefined || this.appVisibility.includes('app')
+    );
+  }
+
+  get isModelVisible(): boolean {
+    return (
+      this.appVisibility === undefined || this.appVisibility.includes('model')
+    );
+  }
+
+  buildForApp(
+    params: ToolParams,
+    onResult: (result: McpAppToolResult) => void,
+    cliConfig: Config | undefined = this.cliConfig,
+  ): ToolInvocation<ToolParams, ToolResult> {
+    const validationError = this.validateToolParams(params);
+    if (validationError) throw new Error(validationError);
+    return this.createInvocation(params, onResult, cliConfig);
   }
 
   protected createInvocation(
     params: ToolParams,
+    onAppResult?: (result: McpAppToolResult) => void,
+    cliConfig: Config | undefined = this.cliConfig,
   ): ToolInvocation<ToolParams, ToolResult> {
     return new DiscoveredMCPToolInvocation(
       this.mcpTool,
@@ -1219,7 +1378,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.permissionAliases,
       this.trust,
       params,
-      this.cliConfig,
+      cliConfig,
       this.mcpClient,
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,
@@ -1227,6 +1386,9 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      0,
+      this.appResourceLimits,
+      onAppResult,
     );
   }
 }

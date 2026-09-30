@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import type {
   Config,
   ToolCallRequestInfo,
@@ -472,8 +473,10 @@ export function mapToDisplay(
       let renderOutputAsMarkdown = false;
 
       if (
-        trackedCall.status === 'error' ||
+        (trackedCall.status === 'error' &&
+          trackedCall.request.name !== ToolNames.ADVISOR) ||
         trackedCall.tool === undefined ||
+        !('invocation' in trackedCall) ||
         trackedCall.invocation === undefined
       ) {
         displayName =

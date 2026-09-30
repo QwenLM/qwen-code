@@ -1,0 +1,31 @@
+.avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  /* Relative to whatever it sits on, so it still shows on a secondary card. */
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+
+.avatar[data-tinted='true'] {
+  background: color-mix(in srgb, var(--author-color) 22%, transparent);
+  color: color-mix(in srgb, var(--author-color) 75%, var(--foreground));
+}
+
+.sm {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+
+.md {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  font-size: 14px;
+}

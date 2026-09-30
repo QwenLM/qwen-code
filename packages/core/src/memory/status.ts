@@ -33,9 +33,11 @@ export interface ManagedAutoMemoryStatus {
   cursor?: AutoMemoryExtractCursor;
   metadata?: AutoMemoryMetadata;
   extractionRunning: boolean;
+  migrationRunning: boolean;
   topics: ManagedAutoMemoryTopicStatus[];
   extractionTasks: MemoryTaskRecord[];
   dreamTasks: MemoryTaskRecord[];
+  migrationTasks: MemoryTaskRecord[];
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
@@ -79,6 +81,12 @@ export async function getManagedAutoMemoryStatus(
 
   const extractTaskType = 'extract' as const;
   const dreamTaskType = 'dream' as const;
+  const migrationTaskType = 'migration' as const;
+  const allMigrationTasks = manager.listTasksByType(
+    migrationTaskType,
+    projectRoot,
+  );
+  const migrationTasks = allMigrationTasks.slice(0, 8);
 
   return {
     root,
@@ -89,10 +97,14 @@ export async function getManagedAutoMemoryStatus(
     extractionRunning: manager
       .listTasksByType(extractTaskType, projectRoot)
       .some((t) => t.status === 'running'),
+    migrationRunning: allMigrationTasks.some(
+      (task) => task.status === 'running',
+    ),
     topics,
     extractionTasks: manager
       .listTasksByType(extractTaskType, projectRoot)
       .slice(0, 8),
     dreamTasks: manager.listTasksByType(dreamTaskType, projectRoot).slice(0, 5),
+    migrationTasks,
   };
 }

@@ -15,6 +15,9 @@ import { parse as parseYaml } from 'yaml';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const nativePrefixes = [
+  'packages/desktop',
+  // The pre-rename location: nothing should be created under it again, and it
+  // must never enter a workspace set either.
   'packages/desktop-shell',
   'packages/live-host',
   'packages/mobile-shell',

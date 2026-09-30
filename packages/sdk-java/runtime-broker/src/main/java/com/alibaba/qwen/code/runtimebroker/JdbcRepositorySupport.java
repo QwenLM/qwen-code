@@ -31,10 +31,17 @@ final class JdbcRepositorySupport {
 
     static String requestKey(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
+        if (request.isManagedContext()) {
+            return digest("managed-context/1", scope.getTenantId(),
+                    scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
+                    scope.getCanonicalCwd(), scope.getCapabilityDigest(),
+                    scope.getIsolationClass(), request.getIsolationKey(),
+                    request.getProvisionerKind(), request.getStorageId());
+        }
         return digest(scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass(),
-                request.getIsolationKey());
+                request.getIsolationKey(), request.getProvisionerKind());
     }
 
     static String scopeKey(RuntimeScope scope) {
@@ -61,6 +68,12 @@ final class JdbcRepositorySupport {
     }
 
     static Instant databaseNow(Connection connection) throws SQLException {
+        return databaseNowPrecise(connection).truncatedTo(
+                ChronoUnit.SECONDS);
+    }
+
+    static Instant databaseNowPrecise(Connection connection)
+            throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT UNIX_TIMESTAMP(),"
                         + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))")) {
@@ -77,10 +90,15 @@ final class JdbcRepositorySupport {
                     throw new SQLException(
                             "database returned invalid clock precision");
                 }
-                return Instant.ofEpochSecond(epochSeconds, micros * 1_000L)
-                        .truncatedTo(ChronoUnit.SECONDS);
+                return Instant.ofEpochSecond(epochSeconds, micros * 1_000L);
             }
         }
+    }
+
+    static Instant leaseUntil(Instant now, Duration duration) {
+        Instant deadline = now.plus(duration);
+        return deadline.getNano() == 0 ? deadline
+                : deadline.truncatedTo(ChronoUnit.SECONDS).plusSeconds(1);
     }
 
     static void setInstant(PreparedStatement statement, int index,

@@ -30,6 +30,7 @@ const IS_SANDBOX = Boolean(
   SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
 );
 const EVENT_ID = '123e4567-e89b-12d3-a456-426614174000';
+const SETTINGS_MEM0_ENV_KEY = 'QWEN_E2E_MEM0_TOKEN';
 const LONG_CONFIRMATION_CONTENT = [
   'CONFIRM_TOP [visible](https://hidden.example/target) **bold** `code` <u>under</u>',
   ...Array.from(
@@ -46,10 +47,102 @@ const ENVIRONMENT_KEYS = [
   'QWEN_CODE_LEGACY_MCP_BLOCKING',
   'QWEN_EXTERNAL_CONTEXT_CONFIG',
   'MEM0_API_KEY',
+  SETTINGS_MEM0_ENV_KEY,
   'FAKE_MEM0_BASE_URL',
   'NO_PROXY',
   'no_proxy',
 ] as const;
+
+type Mem0HarnessProvider = 'platform-v3' | 'oss-rest';
+
+type WriteScenario = {
+  name: string;
+  provider: Mem0HarnessProvider;
+  approvalMode: string;
+  approveWrite: boolean;
+  expectedRequests: number;
+  expectsMcpConfirmation: boolean;
+  content?: string;
+  verifiesShortLiteral?: boolean;
+  verifiesLongConfirmation?: boolean;
+};
+
+type ManagedWritePaths = { mcpConfigPath?: string };
+
+const WRITE_SCENARIOS: WriteScenario[] = [
+  {
+    name: 'uses two confirmations in default mode',
+    provider: 'platform-v3',
+    approvalMode: 'default',
+    approveWrite: true,
+    expectedRequests: 1,
+    expectsMcpConfirmation: true,
+    content:
+      'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
+    verifiesShortLiteral: true,
+  },
+  {
+    name: 'does not write when content confirmation is rejected',
+    provider: 'platform-v3',
+    approvalMode: 'default',
+    approveWrite: false,
+    expectedRequests: 0,
+    expectsMcpConfirmation: true,
+  },
+  {
+    name: 'asks for content confirmation in auto-edit mode',
+    provider: 'platform-v3',
+    approvalMode: 'auto-edit',
+    approveWrite: true,
+    expectedRequests: 1,
+    expectsMcpConfirmation: true,
+  },
+  {
+    name: 'still asks for content confirmation in YOLO mode',
+    provider: 'platform-v3',
+    approvalMode: 'yolo',
+    approveWrite: true,
+    expectedRequests: 1,
+    expectsMcpConfirmation: false,
+    content:
+      'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
+    verifiesShortLiteral: true,
+  },
+  {
+    name: 'shows long content literally and expands it before approval',
+    provider: 'platform-v3',
+    approvalMode: 'yolo',
+    approveWrite: true,
+    expectedRequests: 1,
+    expectsMcpConfirmation: false,
+    content: LONG_CONFIRMATION_CONTENT,
+    verifiesLongConfirmation: true,
+  },
+  {
+    name: 'uses two confirmations for the OSS REST provider with its credential from settings.env',
+    provider: 'oss-rest',
+    approvalMode: 'default',
+    approveWrite: true,
+    expectedRequests: 1,
+    expectsMcpConfirmation: true,
+  },
+  {
+    name: 'does not write to the OSS REST provider when content confirmation is rejected',
+    provider: 'oss-rest',
+    approvalMode: 'default',
+    approveWrite: false,
+    expectedRequests: 0,
+    expectsMcpConfirmation: true,
+  },
+  {
+    name: 'still asks for content confirmation for the OSS REST provider in YOLO mode',
+    provider: 'oss-rest',
+    approvalMode: 'yolo',
+    approveWrite: true,
+    expectedRequests: 1,
+    expectsMcpConfirmation: false,
+  },
+];
 
 (IS_SANDBOX ? describe.skip : describe)('external context Mem0 write', () => {
   let fakeModel: FakeOpenAIServer | undefined;
@@ -79,56 +172,13 @@ const ENVIRONMENT_KEYS = [
     }
   });
 
-  it.each([
-    {
-      name: 'uses two confirmations in default mode',
-      approvalMode: 'default',
-      approveWrite: true,
-      expectedRequests: 1,
-      expectsMcpConfirmation: true,
-      content:
-        'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
-      verifiesShortLiteral: true,
-    },
-    {
-      name: 'does not write when content confirmation is rejected',
-      approvalMode: 'default',
-      approveWrite: false,
-      expectedRequests: 0,
-      expectsMcpConfirmation: true,
-    },
-    {
-      name: 'asks for content confirmation in auto-edit mode',
-      approvalMode: 'auto-edit',
-      approveWrite: true,
-      expectedRequests: 1,
-      expectsMcpConfirmation: true,
-    },
-    {
-      name: 'still asks for content confirmation in YOLO mode',
-      approvalMode: 'yolo',
-      approveWrite: true,
-      expectedRequests: 1,
-      expectsMcpConfirmation: false,
-      content:
-        'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
-      verifiesShortLiteral: true,
-    },
-    {
-      name: 'shows long content literally and expands it before approval',
-      approvalMode: 'yolo',
-      approveWrite: true,
-      expectedRequests: 1,
-      expectsMcpConfirmation: false,
-      content: LONG_CONFIRMATION_CONTENT,
-      verifiesLongConfirmation: true,
-    },
-  ])('$name', async (scenario) => {
+  it.each(WRITE_SCENARIOS)('$name', async (scenario) => {
     const content = scenario.content ?? '  Keep this\nrepository policy.  ';
     const providerRequests: Array<{
       authorization: string | undefined;
       path: string | undefined;
       body: unknown;
+      apiKey?: string | string[];
     }> = [];
     const mem0 = createServer(async (request, response) => {
       const chunks: Buffer[] = [];
@@ -139,14 +189,24 @@ const ENVIRONMENT_KEYS = [
         authorization: request.headers.authorization,
         path: request.url,
         body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+        ...(scenario.provider === 'oss-rest'
+          ? { apiKey: request.headers['x-api-key'] }
+          : {}),
       });
       response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ status: 'PENDING', event_id: EVENT_ID }));
+      response.end(
+        JSON.stringify(
+          scenario.provider === 'oss-rest'
+            ? { results: [{ id: 'memory-1' }] }
+            : { status: 'PENDING', event_id: EVENT_ID },
+        ),
+      );
     });
     await new Promise<void>((resolve, reject) => {
       mem0.once('error', reject);
       mem0.listen(0, '127.0.0.1', resolve);
     });
+    const address = mem0.address() as AddressInfo;
     closeMem0 = () =>
       new Promise<void>((resolve, reject) => {
         mem0.close((error) => (error ? reject(error) : resolve()));
@@ -161,7 +221,13 @@ const ENVIRONMENT_KEYS = [
         security: { auth: { selectedType: 'openai' } },
       },
     });
-    const paths = await configureManagedWrite(rig, mem0);
+    const paths =
+      scenario.provider === 'oss-rest'
+        ? await configureOssManagedWrite(
+            rig,
+            `http://127.0.0.1:${address.port}`,
+          )
+        : await configureManagedWrite(rig, mem0);
 
     fakeModel = await startFakeOpenAIServer(({ requestIndex }) =>
       requestIndex === 0
@@ -180,8 +246,7 @@ const ENVIRONMENT_KEYS = [
       rig,
       '--approval-mode',
       scenario.approvalMode,
-      '--mcp-config',
-      paths.mcpConfigPath,
+      ...(paths.mcpConfigPath ? ['--mcp-config', paths.mcpConfigPath] : []),
       '--auth-type',
       'openai',
       '--openai-api-key',
@@ -307,20 +372,38 @@ const ENVIRONMENT_KEYS = [
       }
       expect(providerRequests).toHaveLength(scenario.expectedRequests);
       if (scenario.expectedRequests === 1) {
-        expect(providerRequests[0]).toEqual({
-          authorization: 'Token bound-mem0-project-key',
-          path: '/v3/memories/add/',
-          body: {
-            messages: [{ role: 'user', content }],
-            app_id: 'fixed-repository',
-            infer: false,
-          },
-        });
+        if (scenario.provider === 'oss-rest') {
+          expect(providerRequests[0]).toEqual({
+            authorization: undefined,
+            apiKey: 'bound-mem0-project-key',
+            path: '/memories',
+            body: {
+              messages: [{ role: 'user', content }],
+              user_id: 'fixed-repository',
+              infer: false,
+            },
+          });
+        } else {
+          expect(providerRequests[0]).toEqual({
+            authorization: 'Token bound-mem0-project-key',
+            path: '/v3/memories/add/',
+            body: {
+              messages: [{ role: 'user', content }],
+              app_id: 'fixed-repository',
+              infer: false,
+            },
+          });
+        }
         const toolResult = toolResultText(
           fakeModel.requests[1]?.body['messages'],
         );
-        expect(toolResult).toContain('accepted');
-        expect(toolResult).not.toContain('stored');
+        if (scenario.provider === 'oss-rest') {
+          expect(toolResult).toContain('stored');
+          expect(toolResult).toContain('memory-1');
+        } else {
+          expect(toolResult).toContain('accepted');
+          expect(toolResult).not.toContain('stored');
+        }
       }
     } finally {
       ptyProcess.kill();
@@ -332,7 +415,7 @@ const ENVIRONMENT_KEYS = [
 async function configureManagedWrite(
   rig: TestRig,
   mem0: ReturnType<typeof createServer>,
-): Promise<{ mcpConfigPath: string }> {
+): Promise<ManagedWritePaths> {
   const qwenHome = join(rig.testDir!, '.qwen-home');
   const trustedFoldersPath = join(qwenHome, 'trustedFolders.json');
   const approvalsPath = join(qwenHome, 'mcpApprovals.json');
@@ -355,6 +438,7 @@ async function configureManagedWrite(
     includeTools: ['context_search', 'context_remember'],
     trust: true,
   };
+  const address = mem0.address() as AddressInfo;
 
   rig.mkdir('.qwen-home');
   rig.createFile(
@@ -426,7 +510,6 @@ async function configureManagedWrite(
   );
   rig.createFile('fake-mem0-mcp.mjs', fakeMem0McpSource(integrationRoot));
 
-  const address = mem0.address() as AddressInfo;
   process.env['QWEN_HOME'] = qwenHome;
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
@@ -438,6 +521,65 @@ async function configureManagedWrite(
   process.env['NO_PROXY'] = '127.0.0.1,localhost';
   process.env['no_proxy'] = '127.0.0.1,localhost';
   return { mcpConfigPath };
+}
+
+async function configureOssManagedWrite(
+  rig: TestRig,
+  providerOrigin: string,
+): Promise<ManagedWritePaths> {
+  const qwenHome = join(rig.testDir!, '.qwen-home');
+  const trustedFoldersPath = join(qwenHome, 'trustedFolders.json');
+  const systemSettingsPath = join(qwenHome, 'system-settings.json');
+  const integrationRoot = join(
+    import.meta.dirname,
+    '..',
+    '..',
+    'integrations',
+    'external-context',
+  );
+
+  rig.mkdir('.qwen-home');
+  rig.createFile(
+    '.qwen-home/settings.json',
+    JSON.stringify({
+      env: { [SETTINGS_MEM0_ENV_KEY]: 'bound-mem0-project-key' },
+      memory: {
+        mem0: {
+          baseUrl: providerOrigin,
+          protocol: 'mem0-oss-2026-08',
+          envKey: SETTINGS_MEM0_ENV_KEY,
+          scope: { userId: 'fixed-repository' },
+          enableWrites: true,
+        },
+      },
+    }),
+  );
+  const systemSettingsSource = join(
+    integrationRoot,
+    'examples',
+    'managed-mem0-write-system-settings.json',
+  );
+  rig.createFile(
+    '.qwen-home/system-settings.json',
+    await readFile(systemSettingsSource, 'utf8'),
+  );
+  rig.createFile(
+    '.qwen-home/trustedFolders.json',
+    JSON.stringify({ [rig.testDir!]: 'TRUST_FOLDER' }),
+  );
+
+  process.env['QWEN_HOME'] = qwenHome;
+  process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
+  process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+  delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
+  process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
+  delete process.env['QWEN_EXTERNAL_CONTEXT_CONFIG'];
+  delete process.env['MEM0_API_KEY'];
+  delete process.env[SETTINGS_MEM0_ENV_KEY];
+  delete process.env['FAKE_MEM0_BASE_URL'];
+  process.env['NO_PROXY'] = '127.0.0.1,localhost';
+  process.env['no_proxy'] = '127.0.0.1,localhost';
+  return {};
 }
 
 function fakeMem0McpSource(integrationRoot: string): string {

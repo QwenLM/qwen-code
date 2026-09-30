@@ -490,5 +490,8 @@ export function createMemoryScopedAgentConfig(
 
   return deriveConfig(config, {
     getPermissionManager: () => scopedPm as unknown as PermissionManager,
+    // Maintenance agents already carry the writer protocol; session routing
+    // instructions must not replace access through their scoped file tools.
+    getAutoMemoryPrompt: () => '',
   });
 }

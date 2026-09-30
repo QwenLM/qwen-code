@@ -4,6 +4,34 @@
   gap: 4px;
 }
 
+/* Names the agent that wrote the reply, in a transcript several agents share.
+   It sits where a chat app puts a sender, above the text, and stays small so
+   the reply still reads as the assistant's ordinary output. */
+.author {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 2px;
+}
+
+.authorName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinkingAuthor {
+  flex-shrink: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .customFooter {
   margin-top: 8px;
 }

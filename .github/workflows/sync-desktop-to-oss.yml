@@ -100,6 +100,7 @@ jobs:
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
           VERSION: '${{ steps.release.outputs.version }}'
+          SOURCE: '${{ steps.release.outputs.source }}'
         run: |
           set -euo pipefail
           cd dist/desktop
@@ -116,13 +117,23 @@ jobs:
           find . -maxdepth 1 -name '*.deb' -print -quit | grep -q . \
             || { echo "::error::Missing Desktop installer matching *.deb"; exit 1; }
           rm -f desktop-latest.json SHA256SUMS.txt
+          # Mirroring an existing GitHub release has to be able to reproduce the
+          # feed that release actually shipped, so a platform added later (arm64
+          # Linux, #12806) is tolerated as absent here. The artifact path is a
+          # fresh build and stays strict: a leg that failed to upload must fail
+          # the mirror, not be published as missing.
+          manifest_args=()
+          if [ "$SOURCE" = 'release' ]; then
+            manifest_args=(--allow-missing-platform linux-aarch64)
+          fi
           node ../../.github/scripts/create-desktop-update-manifest.mjs \
             --assets . \
             --repository "$GITHUB_REPOSITORY" \
             --tag "desktop-v${VERSION}" \
             --version "$VERSION" \
             --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}" \
-            --output desktop-latest.json
+            --output desktop-latest.json \
+            "${manifest_args[@]}"
           sha256sum -- * > SHA256SUMS.txt
 
       - name: 'Install ossutil'

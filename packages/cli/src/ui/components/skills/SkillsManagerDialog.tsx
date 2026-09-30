@@ -12,11 +12,10 @@
  *      count for hidden matches, avoiding MultiSelect's misleading
  *      `[x]` rendering for disabled items.
  *
- *   2. When saving, locked names are NEVER re-emitted into the workspace
- *      `skills.disabled` write (Option A in the plan). The workspace
- *      entry would be redundant — the higher scope already disables it —
- *      and keeping a clean settings file matches what the user sees in
- *      the dialog (locked rows can't be toggled here at all).
+ *   2. Saving preserves existing workspace declarations for locked skills.
+ *      Locked rows cannot be toggled here, so their `skills.enabled` and
+ *      `skills.disabled` entries are left unchanged; no new entries are
+ *      added for them.
  */
 
 import type React from 'react';

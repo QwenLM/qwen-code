@@ -29,6 +29,355 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 describe('SessionAttachmentStore', () => {
+  it.each(['close', 'delete'] as const)(
+    'invalidates staged uploads on %s',
+    async (operation) => {
+      const store = new SessionAttachmentStore();
+      const { uploadId } = store.createUpload({
+        name: 'test.txt',
+        mimeType: 'text/plain',
+        size: 3,
+      });
+      await store[operation]();
+      expect(() => store.appendUpload(uploadId, 0, Buffer.from('abc'))).toThrow(
+        expect.objectContaining({ status: 404 }),
+      );
+    },
+  );
+
+  it('rejects an oversized chunked upload before staging it', async () => {
+    const store = new SessionAttachmentStore();
+    try {
+      expect(() =>
+        store.createUpload({
+          name: 'large.bin',
+          mimeType: 'application/octet-stream',
+          size: SESSION_ATTACHMENT_MAX_ITEM_BYTES + 1,
+        }),
+      ).toThrow(RangeError);
+      for (let i = 0; i < 8; i++) {
+        expect(() =>
+          store.createUpload({
+            name: 'small.bin',
+            mimeType: 'application/octet-stream',
+            size: 1,
+          }),
+        ).not.toThrow();
+      }
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('keeps existing same-name references available while a new write queues', async () => {
+    const store = new SessionAttachmentStore();
+    try {
+      const old = await store.putAttachment(
+        Buffer.from('old'),
+        'text/plain',
+        'same.txt',
+      );
+      const pending = store.putAttachment(
+        Buffer.from('new'),
+        'text/plain',
+        'same.txt',
+      );
+      expect(() => store.assertReference(old)).not.toThrow();
+      const latest = await pending;
+      expect(latest.attachmentId).not.toBe(old.attachmentId);
+      expect((await store.read(old.attachmentId))?.data.toString()).toBe('old');
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('hides an on-disk final write until commit validation and removes it on revocation', async () => {
+    const store = new SessionAttachmentStore();
+    const originalWrite = fs.writeFile.bind(fs);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let written = false;
+    const write = vi
+      .spyOn(fs, 'writeFile')
+      .mockImplementationOnce(async (...args) => {
+        await originalWrite(...args);
+        written = true;
+        await gate;
+      });
+    let revoked = false;
+    const { uploadId } = store.createUpload({
+      name: 'secret.txt',
+      mimeType: 'text/plain',
+      size: 3,
+    });
+    store.appendUpload(uploadId, 0, Buffer.from('abc'));
+    const reference = {
+      type: 'resource',
+      attachmentId: 'secret.txt',
+      mimeType: 'text/plain',
+      size: 3,
+    };
+    const pending = store.completeUpload(uploadId, undefined, () => {
+      if (revoked) throw new Error('revoked');
+    });
+    const rejected = pending.catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() => expect(written).toBe(true));
+      expect(await store.list()).toEqual([]);
+      expect(() => store.assertReference(reference)).toThrow(
+        expect.objectContaining({ code: 'session_attachment_gone' }),
+      );
+      let readSettled = false;
+      const reading = store.read('secret.txt').then((value) => {
+        readSettled = true;
+        return value;
+      });
+      await Promise.resolve();
+      expect(readSettled).toBe(false);
+      revoked = true;
+      finish();
+      expect(await rejected).toMatchObject({ message: 'revoked' });
+      expect(await reading).toBeUndefined();
+      expect(await store.list()).toEqual([]);
+    } finally {
+      finish();
+      write.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('finishes an earlier read before any later write can create that filename', async () => {
+    const store = new SessionAttachmentStore();
+    await store.putAttachment(Buffer.from('seed'), 'text/plain', 'seed.txt');
+    const originalRead = fs.readFile.bind(fs);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementationOnce(async (...args) => {
+        await gate;
+        return originalRead(...args);
+      });
+    const write = vi.spyOn(fs, 'writeFile');
+    try {
+      const reading = store.read('next.txt');
+      await vi.waitFor(() => expect(read).toHaveBeenCalled());
+      const writing = store.putAttachment(
+        Buffer.from('new'),
+        'text/plain',
+        'next.txt',
+      );
+      await Promise.resolve();
+      expect(write).not.toHaveBeenCalled();
+      finish();
+      expect(await reading).toBeUndefined();
+      await writing;
+      expect((await store.read('next.txt'))?.data.toString()).toBe('new');
+    } finally {
+      finish();
+      read.mockRestore();
+      write.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('reads different published attachments concurrently', async () => {
+    const store = new SessionAttachmentStore();
+    const first = await store.putAttachment(
+      Buffer.from('first'),
+      'text/plain',
+      'first.txt',
+    );
+    const second = await store.putAttachment(
+      Buffer.from('second'),
+      'text/plain',
+      'second.txt',
+    );
+    const originalRead = fs.readFile.bind(fs);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementation(async (...args) => {
+        await gate;
+        return originalRead(...args);
+      });
+    try {
+      const reading = Promise.all([
+        store.read(first.attachmentId),
+        store.read(second.attachmentId),
+      ]);
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+      finish();
+      expect((await reading).map((result) => result?.data.toString())).toEqual([
+        'first',
+        'second',
+      ]);
+    } finally {
+      finish();
+      read.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('keeps a stored name while a same-name write waits behind a read', async () => {
+    const store = new SessionAttachmentStore();
+    const first = await store.putAttachment(
+      Buffer.from('A-bytes'),
+      'text/plain',
+      'data.csv',
+    );
+    const originalRead = fs.readFile.bind(fs);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementationOnce(async (...args) => {
+        await gate;
+        return originalRead(...args);
+      });
+    try {
+      const reading = store.read(first.attachmentId);
+      await vi.waitFor(() => expect(read).toHaveBeenCalled());
+      const writing = store.putAttachment(
+        Buffer.from('B-bytes'),
+        'text/plain',
+        'data.csv',
+      );
+      expect(await store.remove(first.attachmentId)).toBe(false);
+      finish();
+      expect((await reading)?.data.toString()).toBe('A-bytes');
+      expect((await writing).attachmentId).toBe('data (1).csv');
+      expect((await store.read(first.attachmentId))?.data.toString()).toBe(
+        'A-bytes',
+      );
+    } finally {
+      finish();
+      read.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('keeps a rejected final write hidden when failed-write cleanup also fails', async () => {
+    const store = new SessionAttachmentStore();
+    const originalWrite = fs.writeFile.bind(fs);
+    let written = false;
+    const write = vi
+      .spyOn(fs, 'writeFile')
+      .mockImplementationOnce(async (...args) => {
+        await originalWrite(...args);
+        written = true;
+      });
+    const remove = vi
+      .spyOn(fs, 'rm')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('denied'), { code: 'EACCES' }),
+      );
+    try {
+      await expect(
+        store.putAttachment(
+          Buffer.from('abc'),
+          'text/plain',
+          'unpublished.txt',
+          () => {
+            if (written) throw new Error('revoked');
+          },
+        ),
+      ).rejects.toThrow('revoked');
+      expect(await store.read('unpublished.txt')).toBeUndefined();
+      expect(await store.list()).toEqual([]);
+      expect(() =>
+        store.assertReference({
+          type: 'resource',
+          attachmentId: 'unpublished.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        }),
+      ).toThrow();
+    } finally {
+      write.mockRestore();
+      remove.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('keeps receiving uploads out of session copies and wraps storage faults', async () => {
+    const source = new SessionAttachmentStore();
+    const target = new SessionAttachmentStore();
+    const { uploadId } = source.createUpload({
+      name: 'not-copied.txt',
+      mimeType: 'text/plain',
+      size: 3,
+    });
+    source.appendUpload(uploadId, 0, Buffer.from('abc'));
+    try {
+      await target.copyFrom(source);
+      expect(await target.list()).toEqual([]);
+      const cause = Object.assign(new Error('EIO: /private/secret/path'), {
+        code: 'EIO',
+      });
+      const write = vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(cause);
+      try {
+        await expect(
+          source.completeUpload(uploadId, undefined, () => {}),
+        ).rejects.toMatchObject({
+          status: 500,
+          code: 'attachment_upload_storage_failed',
+          message: 'Could not store attachment',
+          cause,
+        });
+      } finally {
+        write.mockRestore();
+      }
+    } finally {
+      await source.close();
+      await target.close();
+    }
+  });
+
+  it('retries completion after a concurrent session copy', async () => {
+    const source = new SessionAttachmentStore();
+    const target = new SessionAttachmentStore();
+    try {
+      await source.putAttachment(Buffer.from('seed'), 'text/plain', 'seed.txt');
+      const { uploadId } = source.createUpload({
+        name: 'queued.txt',
+        mimeType: 'text/plain',
+        size: 3,
+      });
+      source.appendUpload(uploadId, 0, Buffer.from('abc'));
+
+      const completing = source.completeUpload(uploadId, undefined, () => {});
+      const copying = target.copyFrom(source);
+      await expect(completing).rejects.toMatchObject({
+        status: 503,
+        code: 'attachment_upload_store_busy',
+      });
+      await copying;
+
+      const reference = await source.completeUpload(
+        uploadId,
+        undefined,
+        () => {},
+      );
+      expect(reference.attachmentId).toBe('queued.txt');
+      expect((await source.read(reference.attachmentId))?.data.toString()).toBe(
+        'abc',
+      );
+    } finally {
+      await source.close();
+      await target.close();
+    }
+  });
+
   it('does not append the attachment degradation marker twice', () => {
     const once = withAttachmentDegradationMarker([
       { type: 'text', text: 'look at this' },
@@ -554,7 +903,7 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
-  it('keeps a same-name upload protected while its duplicate retries', async () => {
+  it('keeps a same-name upload protected while its duplicate waits', async () => {
     const originalWriteFile = fs.writeFile.bind(fs);
     let firstCreated: (() => void) | undefined;
     let finishFirst: (() => void) | undefined;
@@ -585,16 +934,16 @@ describe('SessionAttachmentStore', () => {
         'notes.txt',
       );
       await created;
-      const duplicate = await store.putAttachment(
+      const duplicate = store.putAttachment(
         new TextEncoder().encode('second'),
         'text/plain',
         'notes.txt',
       );
 
-      expect(duplicate.attachmentId).toBe('notes (1).txt');
       await expect(store.remove('notes.txt')).resolves.toBe(false);
       finishFirst?.();
       const original = await pending;
+      expect((await duplicate).attachmentId).toBe('notes (1).txt');
       await expect(store.read(original.attachmentId)).resolves.toMatchObject({
         data: Buffer.from('first'),
       });

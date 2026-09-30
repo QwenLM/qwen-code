@@ -180,6 +180,34 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    public void resolveAction(
+            HarnessSessionRef session,
+            String actionId,
+            String optionId,
+            long inputRevision,
+            String policyRevision) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        if (actionId == null || !actionId.matches("tool_approval_[0-9a-f]{32}")) {
+            throw new IllegalArgumentException("Invalid actionId");
+        }
+        HttpSupport.Response response =
+                sendMutation(
+                        sessionPath(ref.getHarnessSessionId())
+                                + "/actions/"
+                                + actionId
+                                + "/resolve",
+                        Map.of(
+                                "optionId",
+                                optionId,
+                                "inputRevision",
+                                inputRevision,
+                                "policyRevision",
+                                policyRevision),
+                        ref.getHarnessClientId(),
+                        "POST /session/:id/actions/:id/resolve");
+        DaemonClient.requireStatus(response, 200, "POST /session/:id/actions/:id/resolve");
+    }
+
     public PromptReceipt submitTurn(SubmitHarnessTurn request) {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
@@ -746,10 +774,15 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException(context
                     + " must carry an event watermark for Runtime recovery");
         }
-        return new HarnessSessionRef(sessionId, clientId,
-                capabilities.getBootId(), JsonSupport.requiredString(json,
-                        "workspaceCwd", context), runtimeRecovery,
-                lastEventId, eventEpoch);
+        return new HarnessSessionRef(
+                sessionId,
+                clientId,
+                capabilities.getBootId(),
+                JsonSupport.requiredString(json, "workspaceCwd", context),
+                runtimeRecovery,
+                lastEventId,
+                eventEpoch,
+                JsonSupport.optionalString(json, "approvalMode"));
     }
 
     private HarnessRuntimeRecovery parseRuntimeRecovery(

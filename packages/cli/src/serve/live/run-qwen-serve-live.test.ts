@@ -218,6 +218,16 @@ describe('qwen serve Live Host discovery', () => {
       await fs.readFile(runtimeDiscoveryPath),
       { mode: 0o600 },
     );
+
+    const kill = process.kill.bind(process);
+    const killSpy = vi
+      .spyOn(process, 'kill')
+      .mockImplementation((pid, signal) => {
+        if (pid === 999_999 && signal === 0) {
+          throw Object.assign(new Error('No such process'), { code: 'ESRCH' });
+        }
+        return kill(pid, signal);
+      });
     let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
     try {
       handle = await runQwenServe(
@@ -262,6 +272,7 @@ describe('qwen serve Live Host discovery', () => {
       ).toBe(true);
     } finally {
       await handle?.close();
+      killSpy.mockRestore();
       if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
       else process.env['QWEN_HOME'] = previousQwenHome;
       if (previousRuntimeDir === undefined)

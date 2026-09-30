@@ -60,8 +60,10 @@ import {
   getTaskExecutionRecord,
   getShellToolSemanticDescription,
   getToolDescription,
+  getAdvisorDisplayText,
   getToolSummaryDescription,
   getToolResultSummary,
+  isAdvisorToolName,
   isAskUserQuestionToolName,
   isActiveToolStatus,
   isSkillToolName,
@@ -149,6 +151,7 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'read_file' ||
     name === 'readfile' ||
     isSkillToolName(name) ||
+    isAdvisorToolName(name) ||
     isAskUserQuestionToolName(tool.toolName) ||
     isWorkflowToolName(name)
   );
@@ -1356,6 +1359,7 @@ export const ToolLine = memo(function ToolLine({
     name === 'search' ||
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
+  const isAdvisor = isAdvisorToolName(name);
   const filePreviewAction =
     detailsVisible &&
     (isRead ||
@@ -1398,7 +1402,7 @@ export const ToolLine = memo(function ToolLine({
   // summary visible instead of replacing it with an empty detail area.
   const detailView = hasDetailView(tool);
   const showDescriptionInDetail = expanded && descExpandable;
-  const useMarkdownDetail = isRead;
+  const useMarkdownDetail = isRead || isAdvisor;
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
@@ -1598,6 +1602,9 @@ export const ToolLine = memo(function ToolLine({
                   <ExpandedAskUserQuestionOutput tool={tool} />
                 )}
                 {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
+                {isAdvisor && (
+                  <Markdown content={getAdvisorDisplayText(tool) ?? ''} />
+                )}
               </ToolExpandedCard>
             )}
           </div>

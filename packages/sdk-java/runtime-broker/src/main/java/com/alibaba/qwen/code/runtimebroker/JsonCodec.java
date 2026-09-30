@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
+import com.alibaba.fastjson2.JSONWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
@@ -10,7 +11,7 @@ final class JsonCodec {
     }
 
     static byte[] encode(Object value) {
-        return JSON.toJSONString(value).getBytes(StandardCharsets.UTF_8);
+        return JSON.toJSONBytes(value, JSONWriter.Feature.WriteNulls);
     }
 
     static Map<String, Object> parseObject(byte[] bytes, String context) {

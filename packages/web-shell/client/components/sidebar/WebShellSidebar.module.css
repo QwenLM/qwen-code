@@ -1786,6 +1786,25 @@ button.livePendingSession:hover {
   overflow: hidden;
 }
 
+.footerVersion {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.withVersion:not(.collapsed) .body {
+  margin-bottom: 76px;
+}
+
+.collapsed:has([data-web-shell-update]) .body {
+  margin-bottom: 264px;
+}
+
 .footerPrimary,
 .footerActions {
   display: flex;
@@ -1841,7 +1860,10 @@ button.livePendingSession:hover {
 }
 
 .version {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1;
@@ -1866,6 +1888,15 @@ button.livePendingSession:hover {
   margin-right: 0;
   padding-right: 0;
   margin-bottom: 220px;
+  scrollbar-gutter: auto;
+  /* A visible scrollbar inside the 32px rail has no value and would
+     re-take layout width (re-creating the icon offset) the moment the
+     session list overflows — hide it so the content box stays stable. */
+  scrollbar-width: none;
+}
+
+.collapsed .body::-webkit-scrollbar {
+  display: none;
 }
 
 .collapsed .newTaskNav {

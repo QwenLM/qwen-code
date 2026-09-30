@@ -72,6 +72,9 @@ export interface Mem0ProviderConfig {
 }
 
 export const MEM0_PRESET_IDS = [
+  'mem0-v2',
+  'mem0-v3',
+  'mem0-oss-2026-08',
   'mem0-platform-v3',
   'mem0-oss-rest-2026-08',
   'aliyun-polardb-mysql-2026-08',

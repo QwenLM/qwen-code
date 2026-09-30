@@ -4,7 +4,7 @@ This document explains tool execution confinement on Linux and the existing whol
 
 ## Linux tool execution sandbox
 
-On Linux, install `bwrap` (Bubblewrap) and enable the tool execution boundary in your **User** settings (`~/.qwen/settings.json`, or the directory selected by `QWEN_HOME`) or administrator **System** settings:
+On Linux, install `bwrap` (Bubblewrap) for the strongest supported boundary, then enable the tool execution sandbox in your **User** settings (`~/.qwen/settings.json`, or the directory selected by `QWEN_HOME`) or administrator **System** settings:
 
 ```json
 {
@@ -18,9 +18,13 @@ On Linux, install `bwrap` (Bubblewrap) and enable the tool execution boundary in
 }
 ```
 
-`filesystem` and `network` are required. `backend` defaults to `auto`; both `auto` and `bwrap` currently select bwrap. Landlock is not available in this release. Use `read-only` to deny workspace writes, or `workspace-write` to permit writes inside the current canonical workspace. Each command also gets private scratch space. Ordinary `includeDirectories` settings do not grant write access. Keep the workspace separate from the Qwen installation, user configuration and runtime state directories.
+`filesystem` and `network` are required. `backend` defaults to `auto`, which tries bwrap first. When bwrap is unavailable and `network` is `open`, `auto` can use the bundled Landlock helper on kernels with Landlock ABI 3 or newer. Set `backend` to `bwrap` or `landlock` to require that exact implementation. Landlock cannot enforce `network: closed` or hide explicit masked paths. Either requirement rejects Landlock before any command starts; automatic fallback never discards a remaining path mask. Use `read-only` to deny workspace writes, or `workspace-write` to permit writes inside the current canonical workspace. Each command also gets private scratch space. Ordinary `includeDirectories` settings do not grant write access. Keep the workspace separate from the Qwen installation, user configuration and runtime state directories.
 
-The CLI, model transport, authentication and session storage remain on the host. Shell, terminal `!`, prompt shell interpolation, Monitor, Read/Write/Edit and supported nested in-process Agent/Code Mode calls use the same runtime policy. `network: closed` blocks ordinary host/external IP connections from commands, while `open` shares the host network. Reads remain broad: this mode does not hide host secrets or promise to isolate pathname Unix sockets and host services. Approval and YOLO do not expand the filesystem or network policy.
+The CLI, model transport, authentication and session storage remain on the host. Shell, terminal `!`, prompt shell interpolation, Monitor, Read/Write/Edit and supported nested in-process Agent/Code Mode calls use the same runtime policy. With bwrap, `network: closed` blocks ordinary host/external IP connections from commands, while `open` shares the host network. Reads remain broad: this mode does not hide host secrets or promise to isolate pathname Unix sockets and host services. Approval and YOLO do not expand the filesystem or network policy.
+
+Landlock reports `partial` enforcement because it restricts pathname reads, writes and directory mutations but does not create PID or network namespaces and cannot currently restrict every metadata operation, including `chmod`, `chown`, extended attributes and timestamps. A Landlock command can see host processes and uses host networking. Detached descendants retain the Landlock filesystem restrictions but do not get bwrap's PID-namespace lifetime boundary. Open file descriptors retain their existing access. Qwen Code streams host-backed file and named-FIFO stdin through a pipe instead of passing those descriptors to the payload; sockets, character devices and anonymous pipes can be shared. Output standard streams remain the caller's explicit destinations. The execution-status descriptor closes on payload exec.
+
+Landlock also has a narrower writable device surface: it grants writes to `/dev/null`, but does not create bwrap's private `/dev` and `/proc` mounts. Opening `/dev/full` or `/dev/tty` for writing and creating files in `/dev/shm` are denied, so programs requiring these operations may fail. Use the private scratch directory exposed through `TMPDIR`, `TMP`, and `TEMP` for temporary files. Already-open, caller-provided standard streams keep their existing access. Startup's Landlock policy probe requires `/usr/bin/true`; a host missing it fails the probe even if its kernel supports Landlock.
 
 Workspace settings cannot enable, disable or modify this policy, even in a trusted project. Effective precedence is System over User over SystemDefaults, selecting a complete policy object. Values must be literals; environment substitutions, unknown fields and incomplete objects are rejected. `--bare` and `--safe-mode` retain operator confinement. Changes require a new runtime. A malformed operator settings file fails startup instead of resetting an unknown sandbox policy to empty settings.
 
@@ -37,7 +41,7 @@ qwen sandbox -- sh -c 'printf "confined command\n"'
 qwen -y -p "Update the project and run its tests"
 ```
 
-The report names the tool boundary, requested/effective backend, workspace, filesystem and command network policy. `--verify` checks workspace writes, denial against a file known to be writable on the host, private PID namespace identity and the selected network namespace. Backend setup errors fail before payload execution and never rerun the command on the host. The one-command subcommand forwards literal arguments and redirected stdin while preserving stdout and stderr byte-for-byte; use terminal `!` for interactive PTY commands.
+The report names the tool boundary, requested/effective backend, enforcement level, Landlock ABI when applicable, workspace, filesystem and command network policy. `--verify` checks workspace writes, denial against a file known to be writable on the host, the expected private or shared PID namespace identity, and the selected network namespace. Backend setup errors fail before payload execution and never rerun the command on the host. The one-command subcommand forwards literal arguments and redirected stdin while preserving stdout and stderr byte-for-byte; use terminal `!` for interactive PTY commands.
 
 ### Migrating from whole-CLI bwrap
 

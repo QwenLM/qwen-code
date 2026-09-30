@@ -7,14 +7,35 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildManagedAutoMemoryPrompt,
+  buildStructuredAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
   CONDENSED_TEAM_GUIDANCE,
   CONDENSED_TYPES_SECTION,
   CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+  MEMORY_FRONTMATTER_EXAMPLE,
+  MEMORY_METADATA_ITEM_BOUNDS,
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
+  it('keeps the structured main-model contract minimal', () => {
+    const prompt = buildStructuredAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '/home/user/.qwen/memories',
+      '/tmp/project/.qwen/team-memory',
+    );
+
+    expect(prompt).toContain('complete tree and focused metadata');
+    expect(prompt).toContain('search_memory only when');
+    expect(prompt).toContain(
+      'manage_memory only when the user explicitly asks to remember, update, or forget',
+    );
+    expect(prompt).not.toContain('frontmatter');
+    expect(prompt).not.toContain('usage_scenarios');
+    expect(prompt).not.toContain('## Memory categories');
+    expect(prompt).not.toContain('```markdown');
+  });
+
   it('builds a condensed memory prompt when MEMORY.md is empty', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
@@ -308,11 +329,42 @@ describe('managed auto-memory prompt helpers', () => {
   it('condensed prompt includes maintenance directives', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
-    expect(prompt).toContain('Keep the name, description, and type fields');
+    expect(prompt).toContain(
+      'Keep the name, description, type, category, keywords, and usage_scenarios fields',
+    );
+    expect(prompt).toContain('one independently retrievable fact or rule');
+    expect(prompt).toContain('body near or below 1,200 characters');
+    expect(prompt).toContain('discriminative retrieval terms or short phrases');
+    expect(prompt).toContain('domain-qualified phrases');
     expect(prompt).toContain('Organize memories semantically by topic');
     expect(prompt).toContain(
       'Update or remove memories that turn out to be wrong',
     );
+  });
+
+  it('states the per-item frontmatter bounds in the writer example', () => {
+    const example = MEMORY_FRONTMATTER_EXAMPLE.join('\n');
+
+    expect(example).toContain('at most 64 characters');
+    expect(example).toContain('unique case-insensitively');
+  });
+
+  it('tells writers to double-quote values YAML would misparse', () => {
+    // An unquoted keyword like `git: bisect`, `#1234`, or `!important` is
+    // parsed by YAML as a map / comment / unresolved tag — the hazard list
+    // has no last corner, so the recipe requires quoting unconditionally.
+    const example = MEMORY_FRONTMATTER_EXAMPLE.join('\n');
+
+    const keywordsLine = example
+      .split('\n')
+      .find((line) => line.includes('discriminative retrieval terms'));
+    const scenariosLine = example
+      .split('\n')
+      .find((line) => line.includes('future tasks'));
+    expect(keywordsLine).toContain('double-quote every value');
+    expect(scenariosLine).toContain('double-quote every value');
+    expect(example).not.toContain('starts with "#"');
+    expect(MEMORY_METADATA_ITEM_BOUNDS).toContain('double-quote every');
   });
 
   it('condensed prompt includes read-path behavioral guidance', () => {

@@ -989,10 +989,12 @@ describe('InProcessBackend', () => {
     parentConfig.createToolRegistry = vi.fn().mockResolvedValue(registry);
     const failingBackend = new InProcessBackend(parentConfig as never);
     // Make createChat throw for this test
+    const createChat = vi.fn().mockRejectedValue(new Error('Auth failed'));
     const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
     MockAgentCore.mockImplementationOnce(() => ({
       subagentId: 'mock-id',
       name: 'mock-agent',
+      runInHookFrame: <T>(fn: () => T): T => fn(),
       eventEmitter: {
         on: vi.fn(),
         off: vi.fn(),
@@ -1002,7 +1004,7 @@ describe('InProcessBackend', () => {
         start: vi.fn(),
         getSummary: vi.fn().mockReturnValue({}),
       },
-      createChat: vi.fn().mockRejectedValue(new Error('Auth failed')),
+      createChat,
       prepareTools: vi.fn().mockReturnValue([]),
       getEventEmitter: vi.fn().mockReturnValue({
         on: vi.fn(),
@@ -1023,6 +1025,7 @@ describe('InProcessBackend', () => {
     ).resolves.toBeUndefined();
 
     // Exit callback should have been fired with exit code 1
+    expect(createChat).toHaveBeenCalledTimes(1);
     expect(exitCallback).toHaveBeenCalledWith('agent-fail', 1, null);
     expect(registry.stop).toHaveBeenCalledTimes(1);
     expect(failingBackend.getAgent('agent-fail')).toBeUndefined();
