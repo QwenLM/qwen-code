@@ -8,8 +8,14 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
-import { FatalConfigError } from '../utils/errors.js';
+import {
+  getProjectHash,
+  isSubpath,
+  QWEN_DIR,
+  realpathNearestExisting,
+  sanitizeCwd,
+} from '../utils/paths.js';
+import { FatalConfigError, isNodeError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -635,6 +641,202 @@ export class Storage {
 
   ensureProjectTempDirExists(): void {
     fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
+  }
+
+  cleanOrphanProjectDirs(): {
+    removed: string[];
+    errors: Array<{ entry: string; error: unknown }>;
+  } {
+    const result = {
+      removed: [] as string[],
+      errors: [] as Array<{ entry: string; error: unknown }>,
+    };
+    const projectsDir = path.join(this.runtimeBaseDir, PROJECT_DIR_NAME);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(projectsDir, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') return result;
+      throw error;
+    }
+
+    for (const dirent of entries) {
+      const entry = dirent.name;
+      if (!dirent.isDirectory()) continue;
+      const entryPath = path.join(projectsDir, entry);
+      if (entryPath === this.getProjectDir()) continue;
+      try {
+        const sidecars = Storage.getOrphanSidecars(entryPath, entry);
+        if (!sidecars) continue;
+        sidecars.forEach((sidecar) => fs.unlinkSync(sidecar));
+        // Non-recursive removal preserves anything created after validation.
+        fs.rmdirSync(path.join(entryPath, 'chats'));
+        fs.rmdirSync(entryPath);
+        result.removed.push(entry);
+      } catch (error) {
+        result.errors.push({ entry, error });
+      }
+    }
+    return result;
+  }
+
+  private static getOrphanSidecars(
+    entryPath: string,
+    entryName: string,
+  ): string[] | null {
+    const staleBefore = Date.now() - 24 * 60 * 60 * 1000;
+    const entryStat = fs.lstatSync(entryPath);
+    if (!entryStat.isDirectory() || entryStat.mtimeMs >= staleBefore) {
+      return null;
+    }
+
+    const contents = fs.readdirSync(entryPath, { withFileTypes: true });
+    if (
+      contents.length !== 1 ||
+      contents[0]?.name !== 'chats' ||
+      !contents[0].isDirectory()
+    ) {
+      return null;
+    }
+
+    const chatsDir = path.join(entryPath, 'chats');
+    const files = fs.readdirSync(chatsDir, { withFileTypes: true });
+    if (
+      files.length === 0 ||
+      files.some(
+        (file) => !file.isFile() || !file.name.endsWith('.worktree.json'),
+      )
+    ) {
+      return null;
+    }
+
+    let originalCwd: string | undefined;
+    const sidecars: string[] = [];
+    for (const file of files) {
+      const sidecar = path.join(chatsDir, file.name);
+      if (fs.lstatSync(sidecar).mtimeMs >= staleBefore) return null;
+      const metadata = Storage.readWorktreeMetadata(sidecar);
+      if (!metadata) return null;
+      if (
+        sanitizeCwd(metadata.originalCwd) !== entryName ||
+        !Storage.isTempPath(metadata.originalCwd) ||
+        !Storage.isMissing(metadata.originalCwd) ||
+        !Storage.isManagedWorktree(
+          metadata.originalCwd,
+          metadata.worktreePath,
+        ) ||
+        !Storage.isMissing(metadata.worktreePath) ||
+        (originalCwd !== undefined &&
+          !Storage.pathsEqual(originalCwd, metadata.originalCwd))
+      ) {
+        return null;
+      }
+      originalCwd = metadata.originalCwd;
+      sidecars.push(sidecar);
+    }
+    return sidecars;
+  }
+
+  private static readWorktreeMetadata(
+    filePath: string,
+  ): { originalCwd: string; worktreePath: string } | null {
+    let value: unknown;
+    try {
+      value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (error) {
+      if (error instanceof SyntaxError) return null;
+      throw error;
+    }
+    if (value === null || typeof value !== 'object') return null;
+    const metadata = value as Record<string, unknown>;
+    const fields = [
+      'slug',
+      'worktreePath',
+      'worktreeBranch',
+      'originalCwd',
+      'originalBranch',
+      'originalHeadCommit',
+    ];
+    if (fields.some((field) => typeof metadata[field] !== 'string'))
+      return null;
+    return metadata as { originalCwd: string; worktreePath: string };
+  }
+
+  private static isManagedWorktree(
+    originalCwd: string,
+    worktreePath: string,
+  ): boolean {
+    if (!path.isAbsolute(originalCwd) || !path.isAbsolute(worktreePath)) {
+      return false;
+    }
+    const parent = path.resolve(originalCwd, QWEN_DIR, 'worktrees');
+    const child = path.resolve(worktreePath);
+    return (
+      !Storage.pathsEqual(parent, child) &&
+      isResolvedPathWithinDirectory(child, parent)
+    );
+  }
+
+  private static isTempPath(inputPath: string): boolean {
+    const candidate = realpathNearestExisting(inputPath);
+    const configuredRoot = realpathNearestExisting(os.tmpdir());
+    const roots = Storage.trustedTempParents().some((root) =>
+      isSubpath(root, configuredRoot),
+    )
+      ? [configuredRoot]
+      : [];
+    if (process.platform !== 'win32') {
+      roots.push(realpathNearestExisting('/tmp'));
+    }
+    return roots.some((root) => isSubpath(root, candidate));
+  }
+
+  private static trustedTempParents(): string[] {
+    if (process.platform !== 'win32') {
+      return [
+        '/tmp',
+        '/private/tmp',
+        '/var/folders',
+        '/private/var/folders',
+        '/run/user',
+        '/dev/shm',
+      ];
+    }
+    const roots: string[] = [];
+    const systemRoot = process.env['SystemRoot'] ?? process.env['windir'];
+    if (systemRoot) roots.push(path.win32.join(systemRoot, 'Temp'));
+    const profile = process.env['USERPROFILE'];
+    const localAppData = process.env['LOCALAPPDATA'];
+    if (
+      profile &&
+      localAppData &&
+      path.win32.normalize(localAppData).toLowerCase() ===
+        path.win32.join(profile, 'AppData', 'Local').toLowerCase()
+    ) {
+      roots.push(path.win32.join(localAppData, 'Temp'));
+    }
+    return roots;
+  }
+
+  private static pathsEqual(left: string, right: string): boolean {
+    const a = path.resolve(left);
+    const b = path.resolve(right);
+    return platformFoldsCase() ? a.toLowerCase() === b.toLowerCase() : a === b;
+  }
+
+  private static isMissing(filePath: string): boolean {
+    try {
+      fs.statSync(filePath);
+      return false;
+    } catch (error) {
+      if (
+        isNodeError(error) &&
+        (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+      ) {
+        return true;
+      }
+      throw error;
+    }
   }
 
   static getOAuthCredsPath(): string {
