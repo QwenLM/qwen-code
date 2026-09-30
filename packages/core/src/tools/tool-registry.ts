@@ -1046,19 +1046,19 @@ export class ToolRegistry {
         if (typeof output !== 'string') continue;
         for (const match of output.matchAll(/<function>(.*?)<\/function>/gs)) {
           try {
-            const schema = JSON.parse(match[1]!) as Record<string, unknown>;
-            if (!schema || typeof schema.name !== 'string') continue;
-            const suffix = `\u0000${schema.name}\u0000${JSON.stringify(schema.parametersJsonSchema)}`;
-            const previous = this.reviewedDeferredDeclarations.get(schema.name);
-            if (typeof schema.serverName === 'string') {
-              reviewed.set(schema.name, `${schema.serverName}${suffix}`);
+            const { name, parametersJsonSchema, serverName } = JSON.parse(
+              match[1]!,
+            ) as Record<string, unknown>;
+            if (typeof name !== 'string') continue;
+            const suffix = `\u0000${name}\u0000${JSON.stringify(parametersJsonSchema)}`;
+            const previous = this.reviewedDeferredDeclarations.get(name);
+            if (typeof serverName === 'string') {
+              reviewed.set(name, `${serverName}${suffix}`);
             } else if (previous?.endsWith(suffix)) {
               // Old transcripts did not serialize the MCP server identity.
-              reviewed.set(schema.name, previous);
-            } else if (
-              !(this.getTool(schema.name) instanceof DiscoveredMCPTool)
-            ) {
-              reviewed.set(schema.name, suffix);
+              reviewed.set(name, previous);
+            } else if (!(this.getTool(name) instanceof DiscoveredMCPTool)) {
+              reviewed.set(name, suffix);
             }
           } catch {
             // Truncated or malformed results do not establish a reviewed schema.
