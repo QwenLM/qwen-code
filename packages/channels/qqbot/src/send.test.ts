@@ -478,6 +478,7 @@ describe('purgeSingleScopeOrphans', () => {
   function makeChannelWithRouter(
     router: unknown,
     overrides: Record<string, unknown> = {},
+    bridge: unknown = {},
   ): QQChannelInstance {
     return new QQChannel(
       'test-bot',
@@ -495,7 +496,7 @@ describe('purgeSingleScopeOrphans', () => {
         appSecret: 'test-secret',
         ...overrides,
       },
-      {} as unknown as ChannelAgentBridge,
+      bridge as ChannelAgentBridge,
       { router } as unknown as QQChannelOptions,
     );
   }
@@ -504,7 +505,9 @@ describe('purgeSingleScopeOrphans', () => {
     (ch as unknown as Record<string, unknown>)['purgeSingleScopeOrphans']();
   }
 
-  it("purges single-scope orphans and this channel's unroutable 3-part keys, keeping sibling routes", () => {
+  it('leaves every doomed route in place by default, with no rescue file', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const discardSession = vi.fn().mockResolvedValue(undefined);
     const removeSessionId = vi.fn((sid: string) =>
       ['single-era-1', 'user-era-1'].includes(sid),
     );
@@ -532,7 +535,7 @@ describe('purgeSingleScopeOrphans', () => {
           sessionId: 'normal-1',
           target: { channelName: 'test-bot' },
         },
-        // This channel's user-scope key under thread scope: purged — under
+        // This channel's user-scope key under thread scope: doomed — under
         // thread scope the routing key is `channel:chatId`, so a user-scope
         // key can never resolve again (R8-1).
         {
@@ -560,32 +563,37 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    const ch = makeChannelWithRouter(router);
+    const ch = makeChannelWithRouter(router, {}, { discardSession });
     callPurge(ch);
-    expect(removeSessionId).toHaveBeenCalledTimes(2);
-    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
-    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
-    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-live');
-    expect(removeSessionId).not.toHaveBeenCalledWith('normal-1');
-    expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
-    // The purge reports what it dropped on stderr (thread 57 gate), split by
-    // kind: the user-scope line is the one that says persisted conversations
-    // were deleted, so the two must not be merged under one label.
+    // The default scope change must not delete persisted conversations as a
+    // side effect of upgrading: both doomed predicates are inert until the
+    // operator opts in, including the daemon-side release.
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(writeFileSync)
+        .mock.calls.some((c) =>
+          String(c[0]).endsWith('test-bot-sessions-purged.json'),
+        ),
+    ).toBe(false);
+    // One line names the count, that nothing was removed, and the switch that
+    // would remove them; the two-purge-kind lines must not appear.
     const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(
-      'Purged 1 orphaned single-scope session mapping(s)',
+      'Left 2 orphaned session route(s) in place (nothing removed)',
     );
-    expect(logged).toContain('Purged 1 orphaned user-scope session mapping(s)');
-    // The rescue copy is announced with its path, so an operator can find the
-    // file that holds the routes about to be deleted.
-    expect(logged).toContain('Saved 2 session route(s) about to be purged to');
-    expect(logged).toContain(
-      join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
-    );
+    expect(logged).toContain('set "purgeLegacySessions": true to delete them');
+    expect(logged).not.toContain('Purged ');
+    expect(logged).not.toContain('Saved ');
   });
 
   it('writes the rescue copy of the doomed routes before deleting any of them', () => {
     vi.mocked(writeFileSync).mockClear();
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const removeSessionId = vi.fn(() => true);
     const router = {
       getAll: () => [
@@ -631,7 +639,15 @@ describe('purgeSingleScopeOrphans', () => {
         },
       }),
     );
-    callPurge(makeChannelWithRouter(router));
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        {
+          discardSession,
+        },
+      ),
+    );
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
@@ -640,16 +656,17 @@ describe('purgeSingleScopeOrphans', () => {
     expect(rescueIndex).toBeGreaterThanOrEqual(0);
     const write = calls[rescueIndex];
     expect(write[2]).toEqual({ mode: 0o600 });
-    const rescue = JSON.parse(write[1] as string) as {
+    const records = JSON.parse(write[1] as string) as Array<{
       purgedAt: string;
       sessionScope: string;
       routes: unknown[];
-    };
-    expect(rescue.sessionScope).toBe('thread');
-    expect(Number.isNaN(Date.parse(rescue.purgedAt))).toBe(false);
+    }>;
+    expect(records).toHaveLength(1);
+    expect(records[0].sessionScope).toBe('thread');
+    expect(Number.isNaN(Date.parse(records[0].purgedAt))).toBe(false);
     // Exactly the doomed routes, each tagged with the predicate that matched —
     // the live/sibling routes must not appear.
-    expect(rescue.routes).toEqual([
+    expect(records[0].routes).toEqual([
       {
         kind: 'single',
         key: 'test-bot:__single__',
@@ -670,6 +687,26 @@ describe('purgeSingleScopeOrphans', () => {
     expect(
       vi.mocked(writeFileSync).mock.invocationCallOrder[rescueIndex],
     ).toBeLessThan(removeSessionId.mock.invocationCallOrder[0]);
+    // Both phases ran, and the two purge kinds are reported separately: the
+    // user-scope line is the one that says persisted conversations were
+    // deleted, so the two must not be merged under one label.
+    expect(discardSession).toHaveBeenCalledWith('single-era-1');
+    expect(discardSession).toHaveBeenCalledWith('user-era-1');
+    expect(discardSession).not.toHaveBeenCalledWith('live-thread');
+    expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+    expect(removeSessionId).not.toHaveBeenCalledWith('live-thread');
+    expect(removeSessionId).not.toHaveBeenCalledWith('sibling');
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'Purged 1 orphaned single-scope session mapping(s)',
+    );
+    expect(logged).toContain('Purged 1 orphaned user-scope session mapping(s)');
+    expect(logged).toContain('Saved 2 session route(s) about to be purged to');
+    expect(logged).toContain(
+      join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+    );
+    expect(logged).not.toContain('in place');
   });
 
   it('does not fabricate a cwd for a doomed route whose stored entry has none (negative guard, not regression coverage)', () => {
@@ -700,16 +737,16 @@ describe('purgeSingleScopeOrphans', () => {
         },
       }),
     );
-    callPurge(makeChannelWithRouter(router));
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
       String(c[0]).endsWith('test-bot-sessions-purged.json'),
     );
-    const rescue = JSON.parse(calls[rescueIndex][1] as string) as {
+    const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
       routes: Array<Record<string, unknown>>;
-    };
-    expect(rescue.routes).toEqual([
+    }>;
+    expect(records[0].routes).toEqual([
       {
         kind: 'user',
         key: 'test-bot:u1:c1',
@@ -717,7 +754,7 @@ describe('purgeSingleScopeOrphans', () => {
         target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
       },
     ]);
-    expect('cwd' in rescue.routes[0]).toBe(false);
+    expect('cwd' in records[0].routes[0]).toBe(false);
   });
 
   it("reads a doomed route's cwd from the router's own persisted store", () => {
@@ -756,16 +793,16 @@ describe('purgeSingleScopeOrphans', () => {
               cwd: '/work/stale-global',
             },
           })) as typeof readFileSync);
-    callPurge(makeChannelWithRouter(router));
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
       String(c[0]).endsWith('test-bot-sessions-purged.json'),
     );
-    const rescue = JSON.parse(calls[rescueIndex][1] as string) as {
+    const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
       routes: Array<Record<string, unknown>>;
-    };
-    expect(rescue.routes[0]['cwd']).toBe('/work/router');
+    }>;
+    expect(records[0].routes[0]['cwd']).toBe('/work/router');
   });
 
   it('falls back to the shared sessions file for a supplied router without a persistPath', () => {
@@ -794,16 +831,16 @@ describe('purgeSingleScopeOrphans', () => {
         },
       }),
     );
-    callPurge(makeChannelWithRouter(router));
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
       String(c[0]).endsWith('test-bot-sessions-purged.json'),
     );
-    const rescue = JSON.parse(calls[rescueIndex][1] as string) as {
+    const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
       routes: Array<Record<string, unknown>>;
-    };
-    expect(rescue.routes[0]['cwd']).toBe('/work/standalone');
+    }>;
+    expect(records[0].routes[0]['cwd']).toBe('/work/standalone');
   });
 
   it('coerces persistPath off a real SessionRouter, so a rename cannot silently disable the lookup', async () => {
@@ -840,7 +877,7 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    callPurge(makeChannelWithRouter(router));
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
     expect(removeSessionId).not.toHaveBeenCalled();
     expect(writeFileSync).not.toHaveBeenCalled();
   });
@@ -866,7 +903,10 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    const ch = makeChannelWithRouter(router, { sessionScope: 'threads' });
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'threads',
+      purgeLegacySessions: true,
+    });
     callPurge(ch);
     expect(removeSessionId).not.toHaveBeenCalled();
   });
@@ -892,7 +932,10 @@ describe('purgeSingleScopeOrphans', () => {
         ],
         removeSessionId,
       };
-      const ch = makeChannelWithRouter(router, { sessionScope });
+      const ch = makeChannelWithRouter(router, {
+        sessionScope,
+        purgeLegacySessions: true,
+      });
       callPurge(ch);
       expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
     },
@@ -914,7 +957,10 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    const ch = makeChannelWithRouter(router, { sessionScope: 'threads' });
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'threads',
+      purgeLegacySessions: true,
+    });
     callPurge(ch);
     expect(removeSessionId).not.toHaveBeenCalled();
   });
@@ -947,6 +993,7 @@ describe('purgeSingleScopeOrphans', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        purgeLegacySessions: true,
       },
       { discardSession } as unknown as ChannelAgentBridge,
       { router } as unknown as QQChannelOptions,
@@ -1013,6 +1060,7 @@ describe('purgeSingleScopeOrphans', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        purgeLegacySessions: true,
       },
       { discardSession } as unknown as ChannelAgentBridge,
       { router } as unknown as QQChannelOptions,
@@ -1072,6 +1120,7 @@ describe('purgeSingleScopeOrphans', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        purgeLegacySessions: true,
       },
       {} as unknown as ChannelAgentBridge,
       { router } as unknown as QQChannelOptions,
@@ -1104,7 +1153,10 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    const ch = makeChannelWithRouter(router, { sessionScope: 'user' });
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'user',
+      purgeLegacySessions: true,
+    });
     callPurge(ch);
     expect(removeSessionId).toHaveBeenCalledTimes(1);
     expect(removeSessionId).toHaveBeenCalledWith('single-era-1');
@@ -1140,6 +1192,7 @@ describe('purgeSingleScopeOrphans', () => {
         groups: {},
         appID: 'test-app-id',
         appSecret: 'test-secret',
+        purgeLegacySessions: true,
       },
       { discardSession } as unknown as ChannelAgentBridge,
       { router } as unknown as QQChannelOptions,
@@ -1175,7 +1228,10 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'single',
+      purgeLegacySessions: true,
+    });
     callPurge(ch);
     expect(removeSessionId).not.toHaveBeenCalled();
   });
@@ -1211,12 +1267,210 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
-    const ch = makeChannelWithRouter(router, { sessionScope: 'single' });
+    const ch = makeChannelWithRouter(router, {
+      sessionScope: 'single',
+      purgeLegacySessions: true,
+    });
     callPurge(ch);
     expect(removeSessionId).toHaveBeenCalledTimes(1);
     expect(removeSessionId).toHaveBeenCalledWith('user-scope-1');
     expect(removeSessionId).not.toHaveBeenCalledWith('live-single');
     expect(removeSessionId).not.toHaveBeenCalledWith('sibling-3part');
+  });
+
+  it('deletes nothing when the rescue copy cannot be written (fail closed)', () => {
+    vi.mocked(writeFileSync).mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    const ch = makeChannelWithRouter(
+      router,
+      { purgeLegacySessions: true },
+      { discardSession },
+    );
+    // A deletion that cannot be rescued first is not recoverable by hand, so
+    // the purge must abandon it rather than proceed.
+    expect(() => callPurge(ch)).not.toThrow();
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('rescue write failed');
+    expect(logged).toContain('leaving 1 session route(s) in place');
+    expect(logged).toContain('disk full');
+    expect(logged).not.toContain('Saved ');
+    expect(logged).not.toContain('Purged ');
+  });
+
+  it('appends a second purge record instead of truncating the first', () => {
+    // A real purge deletes the routes it records, so a later run always sees a
+    // different doomed set; the earlier record is then the only copy of routes
+    // that are already gone and must survive the new write.
+    const files = new Map<string, string>();
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+
+    const runPurge = (
+      sender: string,
+      chat: string,
+      sessionId: string,
+    ): void => {
+      const removeSessionId = vi.fn(() => true);
+      const router = {
+        getAll: () => [
+          {
+            key: `test-bot:${sender}:${chat}`,
+            sessionId,
+            target: {
+              channelName: 'test-bot',
+              senderId: sender,
+              chatId: chat,
+            },
+          },
+        ],
+        removeSessionId,
+      };
+      callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+      expect(removeSessionId).toHaveBeenCalledWith(sessionId);
+    };
+    runPurge('u1', 'c1', 'user-era-1');
+    runPurge('u2', 'c2', 'user-era-2');
+
+    const records = JSON.parse(
+      files.get(
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+      ) as string,
+    ) as Array<{ routes: Array<{ sessionId: string }> }>;
+    expect(records).toHaveLength(2);
+    expect(records[0].routes[0].sessionId).toBe('user-era-1');
+    expect(records[1].routes[0].sessionId).toBe('user-era-2');
+  });
+
+  it('keeps a legacy single-object rescue record instead of discarding it', () => {
+    // An earlier build wrote the record as a bare object. It is the only copy
+    // of routes that purge already deleted, so a later purge must carry it into
+    // the new records list rather than replace the file with the new record.
+    const legacy = {
+      purgedAt: '2024-01-01T00:00:00.000Z',
+      sessionScope: 'thread',
+      routes: [{ kind: 'user', key: 'test-bot:u0:c0', sessionId: 'legacy-1' }],
+    };
+    const files = new Map<string, string>([
+      [
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+        JSON.stringify(legacy),
+      ],
+    ]);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+
+    const records = JSON.parse(
+      files.get(
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+      ) as string,
+    ) as Array<{ routes: Array<{ sessionId: string }> }>;
+    expect(records).toHaveLength(2);
+    expect(records[0].routes[0].sessionId).toBe('legacy-1');
+    expect(records[1].routes[0].sessionId).toBe('user-era-1');
+  });
+
+  it('caps the rescue file at MAX_PURGE_RECORDS, dropping the oldest record', () => {
+    const cap = (QQChannel as unknown as { MAX_PURGE_RECORDS: number })
+      .MAX_PURGE_RECORDS;
+    // Seed exactly at the cap: the next purge appends one more, so the oldest
+    // record must roll off and the new record must survive as the last entry.
+    const prior = Array.from({ length: cap }, (_v, i) => ({
+      purgedAt: new Date(i).toISOString(),
+      sessionScope: 'thread',
+      routes: [{ kind: 'user', sessionId: `prior-${i}` }],
+    }));
+    const files = new Map<string, string>([
+      [
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+        JSON.stringify(prior),
+      ],
+    ]);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    const records = JSON.parse(
+      files.get(
+        join('/tmp/test-qwen', 'channels', 'test-bot-sessions-purged.json'),
+      ) as string,
+    ) as Array<{ routes: Array<{ sessionId: string }> }>;
+    expect(records).toHaveLength(cap);
+    expect(records[0].routes[0].sessionId).toBe('prior-1');
+    expect(records.at(-1)!.routes[0].sessionId).toBe('user-era-1');
+    expect(records.some((r) => r.routes[0].sessionId === 'prior-0')).toBe(
+      false,
+    );
   });
 });
 

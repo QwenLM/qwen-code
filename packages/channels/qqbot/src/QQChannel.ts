@@ -210,6 +210,8 @@ export class QQChannel extends ChannelBase {
   private static readonly IDLE_FLUSH_BACKOFF_MS = 4000;
   /** Max buffer length before forcing an immediate flush. */
   private static readonly MAX_BUFFER_LENGTH = 4096;
+  /** Purge records kept in the rescue file, oldest dropped first. */
+  private static readonly MAX_PURGE_RECORDS = 20;
 
   // ── Group / cron fields ────────────────────────────────────────
 
@@ -371,8 +373,9 @@ export class QQChannel extends ChannelBase {
   /** Backup of sessions.json so conversations survive daemon restarts. */
   private readonly sessionsBackupPath: string;
   /**
-   * Rescue copy of the routes the orphan purge deletes, written before the
-   * first deletion so an operator can restore a legacy conversation by hand.
+   * Append-only rescue log of the routes the orphan purge deletes, written
+   * immediately before the first deletion when `purgeLegacySessions` is on, so
+   * an operator can restore a legacy conversation by hand.
    */
   private readonly sessionsPurgedPath: string;
 
@@ -1507,22 +1510,33 @@ export class QQChannel extends ChannelBase {
     chatId: string,
     sessionId: string,
     text: string,
+    anchor?: string | null,
   ): Promise<void> {
     // Capture the anchor once, before the first attempt: a successor turn can
     // overwrite sessionReplyMsgId while a re-attempt is pending, and this
     // turn's text must not go out under the successor's anchor.
     const anchorEntry = this.sessionReplyMsgId.get(sessionId);
-    const captured =
+    const sessionAnchor =
       anchorEntry &&
       Date.now() - anchorEntry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
         ? anchorEntry.msgId
         : undefined;
+    // A caller that knows which turn this text belongs to overrides the lookup
+    // above: by the time such a caller runs, a successor may already own the
+    // session anchor. `null` means the caller knows there is none — deliver
+    // unanchored rather than under the successor's msg_id.
+    const captured =
+      anchor === undefined ? sessionAnchor : (anchor ?? undefined);
     // The attribution label and the reply context are read from per-turn state
     // the successor turn replaces (activePrompts, and the reply context map via
     // getResponseMessageId), so both are captured for the same reason as the
     // anchor: a re-attempt must not describe this text as the successor's turn.
+    // An explicit `null` forbids the reply context too — it resolves through
+    // that same successor-owned state, so using it would anchor the send to the
+    // successor's msg_id, the one thing `null` rules out.
     const sourceLabel = this.getResponseSourceLabel(sessionId);
-    const replyContext = this.resolveResponseReplyContext(sessionId);
+    const replyContext =
+      anchor === null ? undefined : this.resolveResponseReplyContext(sessionId);
     for (let attempt = 1; ; attempt++) {
       try {
         if (captured) {
@@ -1958,8 +1972,11 @@ export class QQChannel extends ChannelBase {
           // permanently, this arm is the only remaining chance to re-stash
           // it; a parked turn with no successor delivers it on its own
           // anchor. handOffSealedPre is idempotent (it clears sealedPre at
-          // its top), so a state that already handed off is a no-op.
-          this.handOffSealedPre(state, sessionId);
+          // its top), so a state that already handed off is a no-op. The seal
+          // this send carried is passed too: a boundary may have re-sealed the
+          // state while it was in flight, and only this chain knows the older
+          // head ever existed.
+          this.handOffSealedPre(state, sessionId, undefined, carriedSeal);
           if (current === state) {
             this.streamState.delete(sessionId);
           }
@@ -2584,13 +2601,25 @@ export class QQChannel extends ChannelBase {
    * `turnIsOver` defaults to the park flag, which is still armed at the four
    * sites that reach here while it is; the pending-exhaustion branch has
    * already consumed it, so it passes the fact explicitly.
+   *
+   * `carriedSeal` is the seal a permanently-failed send captured when it
+   * started (flushAndTrack). A later boundary can re-seal the same state's
+   * residual while that send is in flight, overwriting `sealedPre`; the failed
+   * send carried the older head, which then has no other copy. Both are
+   * recovered here — the older first, since the seal always covers a later
+   * buffer window.
    */
   private handOffSealedPre(
     state: QQStreamState,
     sessionId: string,
     turnIsOver = this.pendingStreamDelete.has(sessionId),
+    carriedSeal?: string,
   ): void {
-    const sealed = state.sealedPre;
+    const liveSeal = state.sealedPre;
+    const sealed =
+      carriedSeal !== undefined && carriedSeal !== liveSeal
+        ? carriedSeal + (liveSeal ?? '')
+        : liveSeal;
     if (sealed === undefined) return;
     state.sealedPre = undefined;
     // The turn this text ends up tagged with: the one an existing stash already
@@ -2607,7 +2636,14 @@ export class QQChannel extends ChannelBase {
     const completionAlreadyRan =
       this.completedTurns.get(sessionId) === taggedTurn;
     if (noSuccessorCanConsume || completionAlreadyRan) {
-      void this.deliverCancelledStash(state.chatId, sessionId, sealed);
+      // The sealed text belongs to this state's turn, so anchor it there: a
+      // successor may already own the session anchor by the time this runs.
+      void this.deliverCancelledStash(
+        state.chatId,
+        sessionId,
+        sealed,
+        state.msgId ?? null,
+      );
       return;
     }
     this.streamOrphanBuffer.set(
@@ -3048,12 +3084,16 @@ export class QQChannel extends ChannelBase {
    * bridge.loadSession and then released here; afterwards they are gone from
    * the persisted file.
    *
-   * Before the first deletion this purge performs, the doomed routes are copied
-   * to `<name>-sessions-purged.json` in the channel state directory so an
-   * operator can restore a legacy conversation by hand. Each record carries the
+   * The destructive half is opt-in via `purgeLegacySessions` (default false):
+   * the default scope changing is not the operator asking to delete persisted
+   * conversations. With it off, the doomed routes are only counted and
+   * reported, and nothing is released. With it on, before the first deletion
+   * the doomed routes are appended to `<name>-sessions-purged.json` in the
+   * channel state directory so an operator can restore a legacy conversation
+   * by hand; if that write fails, nothing is deleted. Each record carries the
    * route's `cwd` when the router's persisted route store still has it, so a
-   * restored route resolves to the same workspace. That rescue file is
-   * best-effort and is never read back automatically.
+   * restored route resolves to the same workspace. The file accumulates purge
+   * records and is never read back automatically.
    *
    * Runs AFTER restoreSessions(): SessionRouter exposes no public API to drop
    * persisted entries before restore (readPersistedEntries/deleteByKey are
@@ -3173,20 +3213,61 @@ export class QQChannel extends ChannelBase {
           });
         }
       }
+      if (doomed.length > 0 && this.qqConfig.purgeLegacySessions !== true) {
+        // A default changing is not an operator request to delete persisted
+        // conversations, so the destructive half is opt-in.
+        process.stderr.write(
+          `[QQ:${this.name}] Left ${doomed.length} orphaned session route(s) in place (nothing removed); set "purgeLegacySessions": true to delete them\n`,
+        );
+        return;
+      }
       if (doomed.length > 0) {
+        // Append to any earlier record instead of truncating it: it is the
+        // only copy of routes a previous purge already deleted. A file that
+        // cannot be read, or does not hold a records list, is reported and
+        // then replaced, so the new record is never silently lost.
+        let earlier: unknown[] = [];
+        try {
+          if (existsSync(this.sessionsPurgedPath)) {
+            const raw: unknown = JSON.parse(
+              readFileSync(this.sessionsPurgedPath, 'utf-8'),
+            );
+            if (Array.isArray(raw)) {
+              earlier = raw;
+            } else if (
+              raw !== null &&
+              typeof raw === 'object' &&
+              Array.isArray((raw as { routes?: unknown }).routes)
+            ) {
+              // An earlier build of this branch wrote a single record as a bare
+              // object. It is the only copy of routes that purge already
+              // deleted, so keep it as one prior record rather than discard it.
+              earlier = [raw];
+            } else {
+              process.stderr.write(
+                `[QQ:${this.name}] purgeSingleScopeOrphans rescue file is not a purge-record list, writing the new record only: ${this.sessionsPurgedPath}\n`,
+              );
+            }
+          }
+        } catch (e) {
+          process.stderr.write(
+            `[QQ:${this.name}] purgeSingleScopeOrphans rescue file unreadable, writing the new record only: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+          );
+        }
         // Self-describing so an operator can restore a route by hand; there is
-        // no automatic restore, and no other path overwrites this file.
-        // Best-effort — a failed write must not abort the purge (same spirit as
-        // backupGlobalSessions).
+        // no automatic restore, and no other path writes this file.
         try {
           writeFileSync(
             this.sessionsPurgedPath,
             JSON.stringify(
-              {
-                purgedAt: new Date().toISOString(),
-                sessionScope: scope,
-                routes: doomed,
-              },
+              [
+                ...earlier,
+                {
+                  purgedAt: new Date().toISOString(),
+                  sessionScope: scope,
+                  routes: doomed,
+                },
+              ].slice(-QQChannel.MAX_PURGE_RECORDS),
               null,
               2,
             ),
@@ -3196,9 +3277,12 @@ export class QQChannel extends ChannelBase {
             `[QQ:${this.name}] Saved ${doomed.length} session route(s) about to be purged to ${this.sessionsPurgedPath}\n`,
           );
         } catch (e) {
+          // Fail closed: without the rescue copy the deletions are not
+          // recoverable by hand, so nothing is removed.
           process.stderr.write(
-            `[QQ:${this.name}] purgeSingleScopeOrphans rescue write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+            `[QQ:${this.name}] purgeSingleScopeOrphans rescue write failed, leaving ${doomed.length} session route(s) in place: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
           );
+          return;
         }
       }
       // Phase 2: perform the deletions exactly as before, one entry at a time.

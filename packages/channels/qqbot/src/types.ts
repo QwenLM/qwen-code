@@ -89,6 +89,13 @@ export interface QQChannelConfig {
   maxFlushRetries?: number;
   /** Max gateway retries per reconnect cycle. Default 5. 0 = unlimited. */
   maxGwRetries?: number;
+  /**
+   * Delete legacy per-user session routes that the current `sessionScope` can
+   * never route to. Default false: the default scope changing is not the
+   * operator asking to delete persisted conversations. Enabling it also
+   * releases the routes' daemon-side sessions.
+   */
+  purgeLegacySessions?: boolean;
 }
 
 /** Robot added to a group. */

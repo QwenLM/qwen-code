@@ -2457,7 +2457,10 @@ describe('Gateway message handling', () => {
     // The purge must run as part of the READY restore chain and drop
     // single-era orphan keys from the router (thread 62 gate: previously the
     // purge had no wiring-level test).
-    const ch = makeChannel({ sessionScope: 'thread' });
+    const ch = makeChannel({
+      sessionScope: 'thread',
+      purgeLegacySessions: true,
+    });
     const pvt = ch as unknown as QQChannelRaw;
     const chp = ch as unknown as Record<string, unknown>;
 

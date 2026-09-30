@@ -5111,6 +5111,46 @@ describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () 
     // that delivers it. Two would mean the sealed residual was silently lost.
     expect(sentContents()).toEqual(['HEAD', 'B', 'B']);
   });
+
+  it('recovers a head an in-flight send carried when a later boundary re-sealed', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<string, { sealedPre?: string }>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // HEAD buffers and boundary 1 seals it before the idle flush takes it.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(stateMap.get('s1')!.sealedPre).toBe('HEAD');
+
+    // The idle flush sends HEAD with that seal and stays pending.
+    let rejectHead!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectHead = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(stateMap.get('s1')!.sealedPre).toBe('HEAD');
+
+    // New text buffers while HEAD is in flight and boundary 2 seals it: the
+    // state's seal now describes the residual 'B', but the seal HEAD actually
+    // carried is still the only copy of the opening.
+    onResponseChunk(ch, 'test-chat', 'B', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(stateMap.get('s1')!.sealedPre).toBe('B');
+
+    // The in-flight HEAD send fails permanently and the entry is dropped.
+    rejectHead(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+    expect(stateMap.has('s1')).toBe(false);
+
+    // Both seals have no other copy: the next send must carry the opening too.
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+    expect(sentContents().at(-1)).toBe('HEADB');
+  });
 });
 
 describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', () => {
@@ -5204,6 +5244,174 @@ describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', (
     setReplyMsgId(ch, 'test-chat', 'msg-B');
     onPromptStart(ch, 'test-chat', 's1', 'msg-B');
     expect(completedTurns.has('s1')).toBe(false);
+  });
+});
+
+describe('R19-2 acceptance: a superseded head must keep its own reply anchor', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    responseMessageIdRef.current = undefined;
+    vi.useRealTimers();
+  });
+
+  it("delivers a superseded turn's head on its own anchor, not the successor's", async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // Turn 1's HEAD is sealed at a boundary and sent under msg-A; that send
+    // stays in flight.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectHead!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectHead = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 2 re-anchors the session to msg-B, then completes while turn 1's
+    // send is still in flight. Completion defers onto the park flag, so msg-B
+    // stays the session anchor and completedTurns records turn 2.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'T2', 's1');
+    await onResponseComplete(ch, 'test-chat', 'T2', 's1');
+    expect(completedTurns.get('s1')).toBe(2);
+
+    // Turn 1's send fails permanently. Turn 2 already ran the completion that
+    // could have consumed a stash tagged turn 2, so turn 1's sealed head is
+    // delivered directly — and must go out on msg-A, the anchor it was written
+    // under, not the successor's msg-B. Only sends after the failed attempt
+    // can prove where the recovered head went.
+    const beforeFailure = mockSendQQMessage.mock.calls.length;
+    rejectHead(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const headBodies = sentBodies()
+      .slice(beforeFailure)
+      .filter(
+        (b) =>
+          (b['markdown'] as { content?: string } | undefined)?.content ===
+          'HEAD',
+      );
+    expect(headBodies).toHaveLength(1);
+    expect(headBodies[0]!['msg_id']).toBe('msg-A');
+  });
+
+  it('delivers a superseded head unanchored when its own turn had no anchor', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { timestamp: number }
+    >;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // Turn 1's anchor is already past its TTL, so its stream entry is built
+    // without one and its HEAD is sent as an active message.
+    sessionAnchors.get('s1')!.timestamp = Date.now() - ttl - 1000;
+
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectHead!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectHead = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 2 owns the session anchor when turn 1's send fails permanently.
+    // Turn 1's head has no anchor of its own, so it must go out unanchored
+    // rather than be re-parented onto the successor's msg-B.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'T2', 's1');
+    await onResponseComplete(ch, 'test-chat', 'T2', 's1');
+
+    const beforeFailure = mockSendQQMessage.mock.calls.length;
+    rejectHead(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const headBodies = sentBodies()
+      .slice(beforeFailure)
+      .filter(
+        (b) =>
+          (b['markdown'] as { content?: string } | undefined)?.content ===
+          'HEAD',
+      );
+    expect(headBodies).toHaveLength(1);
+    expect(headBodies[0]!['msg_id']).toBeUndefined();
+  });
+
+  it('leaves a superseded head unanchored even with a live successor reply context', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const sessionAnchors = chp['sessionReplyMsgId'] as Map<
+      string,
+      { timestamp: number }
+    >;
+    const ttl = (QQChannel as unknown as { REPLY_MSG_ID_TTL_MS: number })
+      .REPLY_MSG_ID_TTL_MS;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+    // Turn 1's anchor is already past its TTL, so its stream entry carries no
+    // msgId and the cancelled-stash handoff passes the `null` sentinel.
+    sessionAnchors.get('s1')!.timestamp = Date.now() - ttl - 1000;
+
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectHead!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectHead = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Turn 2 completes while turn 1's send is in flight, and its reply context
+    // stays live: getResponseMessageId still names msg-B, as it does in the
+    // window before ChannelBase drops the active prompt.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    responseMessageIdRef.current = 'msg-B';
+    (chp['replyContextByMessageId'] as Map<string, unknown>).set('msg-B', {
+      chatId: 'test-chat',
+      msgId: 'msg-B',
+      timestamp: Date.now(),
+    });
+    onResponseChunk(ch, 'test-chat', 'T2', 's1');
+    await onResponseComplete(ch, 'test-chat', 'T2', 's1');
+
+    const beforeFailure = mockSendQQMessage.mock.calls.length;
+    rejectHead(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    // The `null` sentinel means unanchored: the delivery must not re-derive a
+    // msg_id from the live successor reply context.
+    const headBodies = sentBodies()
+      .slice(beforeFailure)
+      .filter(
+        (b) =>
+          (b['markdown'] as { content?: string } | undefined)?.content ===
+          'HEAD',
+      );
+    expect(headBodies).toHaveLength(1);
+    expect(headBodies[0]!['msg_id']).toBeUndefined();
   });
 });
 
