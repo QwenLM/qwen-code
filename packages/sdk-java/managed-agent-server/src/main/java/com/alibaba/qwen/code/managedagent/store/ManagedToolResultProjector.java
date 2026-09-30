@@ -120,13 +120,13 @@ public class ManagedToolResultProjector {
         String itemId = EventIdentity.toolItemId(turnId, source.receiptSequence(),
                 Map.of("toolCallId", binding.path("modelCallId").asText()));
         boolean notStarted = "NOT_STARTED".equals(publication.get("state"));
+        boolean quarantined = number(publication.get("quarantine_mark")) != 0;
         ToolPublicationDataStore data = publications.getIfAvailable();
         JsonNode outcome;
         if (notStarted) {
             outcome = inlineOutcome(source);
         } else {
             require("REFERENCED".equals(publication.get("producer_phase"))
-                            && number(publication.get("quarantine_mark")) == 0
                             && source.outcomeRef().path("resourceId").asText().equals(publication.get("admission_resource_id"))
                             && number(publication.get("receipt_sequence")) == source.receiptSequence()
                             && number(publication.get("receipt_revision")) == source.journalRevision(),
@@ -169,7 +169,8 @@ public class ManagedToolResultProjector {
             }
         }
         String policyVersion = policy.version();
-        boolean publish = policy.publishOriginal(source.tenantId(), source.workspaceId(), source.sessionId());
+        boolean publish = !quarantined
+                && policy.publishOriginal(source.tenantId(), source.workspaceId(), source.sessionId());
         long createdAt = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).getTime();
         List<Artifact> artifacts = new ArrayList<>();
         if (publish && "committed".equals(decision)) {

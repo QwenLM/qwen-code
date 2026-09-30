@@ -508,7 +508,7 @@ public class ManagedAgentService {
                 new SessionCapabilities(
                         true,
                         true,
-                        session.workspace() != null && artifactReads.getAsBoolean(),
+                        session.workspace() != null && !"DELETING".equals(session.status()) && artifactReads.getAsBoolean(),
                         true,
                         session.workspace() == null,
                         true,
@@ -534,7 +534,7 @@ public class ManagedAgentService {
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true, session.workspace() != null && artifactReads.getAsBoolean(), hasActions(session)));
+                new WebShellSessionCapabilities(true, session.workspace() != null && !"DELETING".equals(session.status()) && artifactReads.getAsBoolean(), hasActions(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

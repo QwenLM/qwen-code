@@ -54,7 +54,7 @@ describe('ManagedToolResultPanel', () => {
   };
   async function render(
     sessionId = 'session-1',
-    itemId: string | undefined = 'item-1',
+    itemId: string | null = 'item-1',
   ) {
     await act(async () => {
       root.render(
@@ -62,7 +62,7 @@ describe('ManagedToolResultPanel', () => {
           <ManagedToolResultPanel
             reader={reader}
             sessionId={sessionId}
-            itemId={itemId}
+            itemId={itemId ?? undefined}
             clientId="client"
             onClose={close}
           />
@@ -81,6 +81,46 @@ describe('ManagedToolResultPanel', () => {
       await flush();
     });
   }
+
+  it('keeps listed artifacts and selection when loading another page', async () => {
+    const second = { ...artifact, id: 'artifact-2', byte_length: 6 };
+    vi.mocked(reader.listArtifacts)
+      .mockResolvedValueOnce({
+        data: [{ artifact, access: { can_read_content: true } }],
+        hasMore: true,
+        nextCursor: 'page-2',
+      })
+      .mockResolvedValueOnce({
+        data: [{ artifact: second, access: { can_read_content: true } }],
+        hasMore: false,
+        nextCursor: null,
+      });
+    await render('session-1', null);
+    await click('Load more');
+    expect(document.body.textContent).toContain('stdout · 5 B');
+    expect(document.body.textContent).toContain('stdout · 6 B');
+    expect(
+      document.body.querySelector('button[aria-pressed="true"]')?.textContent,
+    ).toBe('stdout · 5 B');
+  });
+
+  it('preserves the current page and retries the same cursor after paging fails', async () => {
+    vi.mocked(reader.listArtifacts)
+      .mockResolvedValueOnce({
+        data: [{ artifact, access: { can_read_content: true } }],
+        hasMore: true,
+        nextCursor: 'page-2',
+      })
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce({ data: [], hasMore: false, nextCursor: null });
+    await render('session-1', null);
+    await click('Load more');
+    expect(document.body.textContent).toContain('stdout · 5 B');
+    await click('Load more');
+    expect(
+      vi.mocked(reader.listArtifacts).mock.calls.map((call) => call[1]?.cursor),
+    ).toEqual([undefined, 'page-2', 'page-2']);
+  });
 
   it('checks current content access separately from the shared result before reading', async () => {
     vi.mocked(reader.getArtifact).mockResolvedValue({

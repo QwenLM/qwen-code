@@ -213,3 +213,55 @@ describe('java managed agent event projector', () => {
     ]);
   });
 });
+
+it('reports cancellation consistently for live and restored result-less tools', () => {
+  const live = [
+    projectJavaAgentEvent({
+      sequence: 1,
+      eventId: 'e1',
+      sessionId: 's',
+      turnId: 't',
+      itemId: 'i',
+      type: 'item.tool_call.updated',
+      createdAt: 100,
+      terminal: false,
+      data: {
+        status: 'in_progress',
+        toolCallId: 'call',
+        toolName: 'run_shell_command',
+      },
+    })!,
+    projectJavaAgentEvent({
+      sequence: 2,
+      eventId: 'e2',
+      sessionId: 's',
+      turnId: 't',
+      type: 'turn.cancelled',
+      createdAt: 200,
+      terminal: true,
+      data: {},
+    })!,
+  ];
+  const snapshot = projectJavaAgentItem({
+    itemId: 'i',
+    sessionId: 's',
+    turnId: 't',
+    type: 'tool_call',
+    role: 'assistant',
+    status: 'cancelled',
+    content: [],
+    attributes: { toolCallId: 'call', toolName: 'run_shell_command' },
+    firstSequence: 1,
+    lastSequence: 2,
+    createdAt: 100,
+    updatedAt: 200,
+  });
+  const liveMessages = managedEventsToMessages(live, '[truncated]');
+  const restoredMessages = managedEventsToMessages(snapshot, '[truncated]');
+  expect(restoredMessages[0]).toMatchObject({
+    tools: [{ status: 'failed', wasCancelled: true }],
+  });
+  expect(liveMessages[0]).toMatchObject({
+    tools: [{ status: 'failed', wasCancelled: true }],
+  });
+});

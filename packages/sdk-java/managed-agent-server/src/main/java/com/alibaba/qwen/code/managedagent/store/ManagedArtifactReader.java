@@ -21,7 +21,9 @@ public class ManagedArtifactReader {
     public boolean supported() { return publications.getIfAvailable() != null; }
 
     public boolean available(Artifact artifact) {
-        if (!supported()) { return false; }
+        if (!supported()) {
+            return false;
+        }
         try {
             check(artifact);
             return true;
@@ -35,7 +37,10 @@ public class ManagedArtifactReader {
     }
 
     public InputStream open(Artifact artifact, Runnable guard) {
-        return verified(artifact).open(() -> { guard.run(); check(artifact); });
+        return verified(artifact).open(() -> {
+            guard.run();
+            check(artifact);
+        });
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length) {
@@ -43,7 +48,10 @@ public class ManagedArtifactReader {
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length, Runnable guard) {
-        return verified(artifact).readRange(offset, length, () -> { guard.run(); check(artifact); });
+        return verified(artifact).readRange(offset, length, () -> {
+            guard.run();
+            check(artifact);
+        });
     }
 
     private ToolPublicationDataStore.VerifiedStream verified(Artifact artifact) {

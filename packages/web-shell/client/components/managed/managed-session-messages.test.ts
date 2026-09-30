@@ -16,6 +16,54 @@ function event(
 }
 
 describe('Managed transcript projection', () => {
+  it('preserves existing output when a result has no preview or a shorter excerpt', () => {
+    const source = { ...result, session_id: 's1', turn_id: 'p1' };
+    const output = 'complete output';
+    for (const preview of [undefined, { text: 'partial', truncated: true }]) {
+      const messages = managedEventsToMessages(
+        [
+          event(1, 'tool_completed', { toolCallId: 'call', output }),
+          event(2, 'tool_result_updated', {
+            itemId: 'item-1',
+            toolCallId: 'call',
+            result: { ...source, preview },
+          }),
+        ],
+        '[truncated]',
+      );
+      expect(messages[0]).toMatchObject({ tools: [{ rawOutput: output }] });
+    }
+  });
+
+  it('marks a result-only excerpt as truncated and accepts later complete output', () => {
+    const source = {
+      ...result,
+      session_id: 's1',
+      turn_id: 'p1',
+      preview: { text: 'partial', truncated: true },
+    };
+    const update = event(1, 'tool_result_updated', {
+      itemId: 'item-1',
+      toolCallId: 'call',
+      result: source,
+    });
+    expect(managedEventsToMessages([update], '[truncated]')[0]).toMatchObject({
+      tools: [{ rawOutput: 'partial\n[truncated]' }],
+    });
+    expect(
+      managedEventsToMessages(
+        [
+          update,
+          event(2, 'tool_completed', {
+            toolCallId: 'call',
+            output: 'complete output',
+          }),
+        ],
+        '[truncated]',
+      )[0],
+    ).toMatchObject({ tools: [{ rawOutput: 'complete output' }] });
+  });
+
   it('attaches a late result to its original turn without settling a new response', () => {
     const source = { ...result, session_id: 's1', turn_id: 'p1' };
     const events = [
@@ -179,7 +227,7 @@ describe('Managed transcript projection', () => {
         ],
         '[truncated]',
       )[0],
-    ).toMatchObject({ tools: [{ status: 'failed' }] });
+    ).toMatchObject({ tools: [{ status: 'failed', wasCancelled: true }] });
   });
 
   it('marks a truncated input summary before a tool result exists', () => {

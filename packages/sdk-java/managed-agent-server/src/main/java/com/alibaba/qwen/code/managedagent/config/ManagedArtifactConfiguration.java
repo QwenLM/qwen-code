@@ -13,7 +13,7 @@ public class ManagedArtifactConfiguration {
         var settings = properties.getArtifacts();
         return new ManagedArtifactPolicy() {
             public String version() {
-                return "o3-v1:" + settings.isPublishOriginal() + ":"
+                return "o3-v1:" + settings.isEnabled() + ":" + settings.isPublishOriginal() + ":"
                         + settings.isPublishPreview();
             }
 

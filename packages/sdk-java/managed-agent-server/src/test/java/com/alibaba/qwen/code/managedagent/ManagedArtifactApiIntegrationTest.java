@@ -56,6 +56,15 @@ class ManagedArtifactApiIntegrationTest {
                 : ToolPublicationStoreTest.apiFixture(new DriverManagerDataSource(mysql,
                         System.getProperty("qwen.o3.mysql.user", "root"),
                         System.getProperty("qwen.o3.mysql.password", "")));
+        configureApi();
+        var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
+        stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
+        stderr = artifacts.stream().filter(a -> "stderr".equals(a.streamId())).findFirst().orElseThrow().descriptor();
+        itemId = fixture.sessions().findSnapshot("tenant-1", "session-1").orElseThrow()
+                .items().getFirst().itemId();
+    }
+
+    private void configureApi() {
         fixture.jdbc().update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
                 + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant-1', 'workspace-1', 1, 'storage-1', 'Test', 'config', 'policy', 'ACTIVE')");
@@ -67,6 +76,14 @@ class ManagedArtifactApiIntegrationTest {
         sessions = new ManagedAgentService(fixture.sessions(), new RequestDigests(),
                 mock(HarnessCoordinator.class), mock(HarnessConnector.class),
                 new ManagedWorkspaceRegistry(fixture.jdbc()));
+        var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext();
+        context.registerBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class,
+                fixture::properties);
+        context.registerBean(com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader.class,
+                fixture::reader);
+        context.registerBean(ManagedAgentService.class, () -> sessions);
+        context.refresh();
+        context.close();
         ManagedArtifactPolicy policy = new ManagedArtifactPolicy() {
             public String version() { return fixture.policy().version(); }
             public boolean publishOriginal(String tenant, String workspace, String session) { return true; }
@@ -82,11 +99,15 @@ class ManagedArtifactApiIntegrationTest {
                 .setControllerAdvice(new ApiExceptionHandler())
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(JSON))
                 .addFilters(new RequestIdFilter(), new TenantContextFilter(JSON)).build();
-        var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
-        stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
-        stderr = artifacts.stream().filter(a -> "stderr".equals(a.streamId())).findFirst().orElseThrow().descriptor();
-        itemId = fixture.sessions().findSnapshot("tenant-1", "session-1").orElseThrow()
-                .items().getFirst().itemId();
+    }
+
+    @Test
+    void advertisesConfiguredArtifactReadsUntilSessionDeletion() {
+        assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isTrue();
+        assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isTrue();
+        fixture.jdbc().update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = 'session-1'");
+        assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
+        assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
     }
 
     @Test
@@ -189,6 +210,24 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(response -> schema("WebShellArtifactPage", response.getResponse().getContentAsString())).andReturn();
         assertThat(JSON.readTree(second.getResponse().getContentAsString()).path("data").get(0).path("artifact").path("id"))
                 .isNotEqualTo(firstPage.path("data").get(0).path("artifact").path("id"));
+    }
+
+    @Test
+    void quarantineBeforeFirstProjectionPreservesExecutionFactsWithoutContent() throws Exception {
+        fixture = ToolPublicationStoreTest.quarantinedApiFixture();
+        configureApi();
+        mvc.perform(asReader(get(ROOT + "/items/" + itemId + "/tool-result")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.result.execution_status").value("success"))
+                .andExpect(jsonPath("$.result.capture_status").value("complete"))
+                .andExpect(jsonPath("$.result.delivery_status").value("committed"))
+                .andExpect(jsonPath("$.result.artifacts").isEmpty())
+                .andExpect(jsonPath("$.result.preview").doesNotExist())
+                .andExpect(jsonPath("$.access.can_read_content").value(false));
+        mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").isEmpty());
+        assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class))
+                .isTrue();
     }
 
     @Test

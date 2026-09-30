@@ -75,6 +75,7 @@ class ToolPublicationStoreTest {
     private Map<String, byte[]> apiObjects;
     private String apiFailNextObject;
     private boolean keepApiFixture;
+    private boolean quarantineBeforeProjection;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcToolExecutionRepository executions;
     private ToolPublicationStore store;
@@ -781,7 +782,19 @@ class ToolPublicationStoreTest {
                 "stdout", 3, 0)).isEmpty();
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 2, 2)).hasMessageContaining("Invalid publication range");
+        if (quarantineBeforeProjection) {
+            jdbc.update("UPDATE qwen_tool_publication SET quarantined = TRUE WHERE publication_id = 'pub-1'");
+        }
         JsonNode projected = projectPublicReceipt(data);
+        if (quarantineBeforeProjection) {
+            assertThat(projected.path("execution_status").asText()).isEqualTo("success");
+            assertThat(projected.path("capture_status").asText()).isEqualTo("complete");
+            assertThat(projected.path("delivery_status").asText()).isEqualTo("committed");
+            assertThat(projected.has("preview")).isFalse();
+            assertThat(projected.path("artifacts")).isEmpty();
+            apiReader = new ManagedArtifactReader(publicationProvider(data));
+            return;
+        }
         assertThat(projected.path("preview").path("text").asText()).isEqualTo("abc");
         var artifacts = publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 1);
         assertThat(artifacts.hasMore()).isTrue();
@@ -1591,6 +1604,13 @@ class ToolPublicationStoreTest {
     static ApiFixture apiFixture() {
         var fixture = new ToolPublicationStoreTest();
         fixture.setup();
+        return apiFixture(fixture);
+    }
+
+    static ApiFixture quarantinedApiFixture() {
+        var fixture = new ToolPublicationStoreTest();
+        fixture.setup();
+        fixture.quarantineBeforeProjection = true;
         return apiFixture(fixture);
     }
 

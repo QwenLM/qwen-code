@@ -162,10 +162,31 @@ export function managedEventsToMessages(
         tool.status =
           result.execution_status === 'success' ? 'completed' : 'failed';
         tool.wasCancelled = result.execution_status === 'cancelled';
-        tool.rawOutput = result.preview?.text;
+        if (result.preview && tool.rawOutput === undefined) {
+          tool.rawOutput =
+            result.preview.text +
+            (result.preview.truncated ? `\n${truncatedLabel}` : '');
+        }
         tool.endTime ??= event.at;
       }
-      if (tool.toolResult) continue;
+      if (tool.toolResult) {
+        if (
+          event.type === 'tool_completed' &&
+          typeof data['output'] === 'string'
+        ) {
+          const output =
+            data['output'] +
+            (data['truncated'] === true ? `\n${truncatedLabel}` : '');
+          if (
+            data['truncated'] !== true ||
+            typeof tool.rawOutput !== 'string' ||
+            output.length > tool.rawOutput.length
+          ) {
+            tool.rawOutput = output;
+          }
+        }
+        continue;
+      }
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
         tool.startTime = event.at;
@@ -189,6 +210,7 @@ export function managedEventsToMessages(
       for (const tool of tools.values()) {
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
+          tool.wasCancelled = event.type === 'cancelled';
           tool.endTime = event.at;
         }
       }

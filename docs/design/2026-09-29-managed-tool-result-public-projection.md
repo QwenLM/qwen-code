@@ -6,7 +6,7 @@ Status: implementation in this change, disabled by default pending deployment va
 
 ## 1. Baselines and objective
 
-Research used main at `be1ebc74d7f5b0bdce2b88a6565d4940d5a6b3c0`, O2 [#12894](https://github.com/QwenLM/qwen-code/pull/12894) at `0172d5ecae7a3a11824665800211241d24472cd6`, and the [original result design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-tool-result-artifacts.md). O2 is an unmerged dependency at this baseline. The implementation is rebased onto O2 `e3d64a49b61e9569213f2964901a7ea5cab8b07f`, including its latest retry and cancellation fixes. Reconcile its final interfaces before merging; local tests do not establish real OSS or different-host readiness.
+Research used main at `be1ebc74d7f5b0bdce2b88a6565d4940d5a6b3c0`, O2 [#12894](https://github.com/QwenLM/qwen-code/pull/12894) at `0172d5ecae7a3a11824665800211241d24472cd6`, and the [original result design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-tool-result-artifacts.md). O2 is an unmerged dependency at this baseline. The implementation is rebased onto main `3b18cfe5e4ab7ea72f1a92736186dacf753bf727` after O2 merged, including its latest retry and cancellation fixes; local tests do not establish real OSS or different-host readiness.
 
 O3 makes a durably recorded tool result discoverable and readable through the Java public API and Managed WebShell. A user can inspect a bounded preview and download an authorized immutable output after the Runtime and Harness have gone. Live events and restored history identify the same result. A successful command, complete capture, committed delivery, and currently readable content remain separate facts.
 
@@ -89,6 +89,8 @@ Use the same Java item-ID helper as existing tool projection: public Turn ID plu
 
 All object I/O happens outside SQL transactions. The final short transaction locks the public Session and then the result row, verifies the claim/source/policy version, and checks that the Session is neither `DELETING` nor `DELETED`. Recheck the frozen root, receipt pointer, and current catalog quarantine/representation state in SQL: a concurrent quarantine must not become an available download mapping. It commits public metadata, Artifact mappings, the `item.tool_result.updated` event, and work completion together. Publish SSE only after commit using the existing event publisher. No active Turn, Harness process, or dispatch lease is required.
 
+If content is quarantined before projection, verified receipt metadata still projects without Artifact mappings or shared previews. Quarantine during the final commit retries the projection so that the next attempt publishes metadata only. Invalid metadata identity or digests remain terminal failures.
+
 ### 4.3 Minimal persisted data
 
 These are logical tables and fields, not reserved migration numbers:
@@ -96,7 +98,9 @@ These are logical tables and fields, not reserved migration numbers:
 | Record                      | Required data and constraints                                                                                                                                                                                                                                                                                                                    |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `managed_agent_tool_result` | Unique full Session scope plus original receipt execution identity; immutable receipt references and digest; resolved publication/binding identity; public Turn and Item IDs; projection schema/version; bounded approved descriptor; pending/ready/retryable/unsupported/quarantined/suppressed work state; bounded retry time and claim fence. |
-| `managed_agent_artifact`    | Unique source result, manifest revision, stream ID, and representation policy version; opaque public ID; original-byte representation length/digest; private root mapping; source receipt reference; public availability; creation sequence. No raw output body.                                                                                 |
+| `managed_agent_artifact`    | Unique `(result_id, stream_id)`; Artifact ID includes manifest revision and representation policy version; opaque public ID; original-byte representation length/digest; private root mapping; source receipt reference; public availability; creation sequence. No raw output body.                                                             |
+
+The current migration enforces one Artifact per `(result_id, stream_id)`. Artifact IDs also include the manifest revision and policy version. A separately reviewed reprojection requires a migration that widens this unique key before a second representation can be stored.
 
 Generate stable opaque result/Artifact IDs using SHA-256 over a versioned, length-prefixed encoding of the complete scoped source identity and representation identity. Store and test the encoding with golden fixtures; do not hash ambiguous string concatenations or arbitrary JSON order. IDs are discoverable identifiers, never credentials. Rebuilding from retained source facts must reproduce the same IDs.
 
@@ -118,7 +122,7 @@ Results can become public after `turn.completed`. Reducers apply the result to t
 
 ## 5. Public contract and event recovery
 
-The canonical OpenAPI remains the source for Java contract tests and generated WebShell types. This change implements the seven routes below with handlers and conformance tests in OpenAPI v1.22.0, plus Flyway V21 on the pinned O2 branch. Reconcile these version numbers against main when the O2 dependency lands, including concurrent contract work such as [#12998](https://github.com/QwenLM/qwen-code/pull/12998).
+The canonical OpenAPI remains the source for Java contract tests and generated WebShell types. This change implements the seven routes below with handlers and conformance tests in OpenAPI v1.24.0, plus Flyway V23 after rebasing onto main and reconciling the merged O2 migrations and concurrent contract work such as [#12998](https://github.com/QwenLM/qwen-code/pull/12998).
 
 | Surface        | Operation                                                                                                         |
 | -------------- | ----------------------------------------------------------------------------------------------------------------- |

@@ -249,11 +249,15 @@ public class ManagedToolResultStore {
         if (projection.descriptor().path("execution_status").asText().equals("not_started")) {
             require("NOT_STARTED".equals(row.get("state")), "Original not-started proof changed");
         } else {
-            require("REFERENCED".equals(row.get("producer_phase")) && ((Number) row.get("quarantine_mark")).intValue() == 0
+            require("REFERENCED".equals(row.get("producer_phase"))
                             && source.outcomeRef().path("resourceId").asText().equals(row.get("admission_resource_id"))
                             && ((Number) row.get("receipt_sequence")).longValue() == source.receiptSequence()
                             && ((Number) row.get("receipt_revision")).longValue() == source.journalRevision(),
-                    "Original publication receipt changed or is quarantined");
+                    "Original publication receipt changed");
+            if (((Number) row.get("quarantine_mark")).intValue() != 0
+                    && (!projection.artifacts().isEmpty() || projection.descriptor().has("preview"))) {
+                throw new IllegalStateException("Publication was quarantined during projection");
+            }
         }
     }
 

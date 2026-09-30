@@ -38,8 +38,8 @@ export function ManagedToolResultPanel({
   const [result, setResult] = useState<ManagedToolResult>();
   const [artifacts, setArtifacts] = useState<ManagedArtifact[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
-  const [cursor, setCursor] = useState<string>();
   const [nextCursor, setNextCursor] = useState<string>();
+  const pageAbort = useRef<AbortController | undefined>(undefined);
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
@@ -69,7 +69,6 @@ export function ManagedToolResultPanel({
       } else {
         const page = await reader.listArtifacts(sessionId, {
           ...options,
-          cursor,
           limit: 50,
         });
         if (abort.signal.aborted) return;
@@ -86,8 +85,40 @@ export function ManagedToolResultPanel({
       .finally(() => {
         if (!abort.signal.aborted) setLoading(false);
       });
-    return () => abort.abort();
-  }, [reader, sessionId, clientId, itemId, cursor, revision]);
+    return () => {
+      abort.abort();
+      pageAbort.current?.abort();
+    };
+  }, [reader, sessionId, clientId, itemId, revision]);
+
+  const loadMore = async () => {
+    if (!nextCursor || loading) return;
+    const abort = new AbortController();
+    pageAbort.current = abort;
+    setLoading(true);
+    setError(undefined);
+    try {
+      const page = await reader.listArtifacts(sessionId, {
+        clientId,
+        signal: abort.signal,
+        cursor: nextCursor,
+        limit: 50,
+      });
+      if (abort.signal.aborted) return;
+      setArtifacts((current) => [
+        ...new Map(
+          [...current, ...page.data.map((entry) => entry.artifact)].map(
+            (artifact) => [artifact.id, artifact],
+          ),
+        ).values(),
+      ]);
+      setNextCursor(page.hasMore ? (page.nextCursor ?? undefined) : undefined);
+    } catch (failure) {
+      if (!abort.signal.aborted) setError(failure);
+    } finally {
+      if (!abort.signal.aborted) setLoading(false);
+    }
+  };
 
   const selected = ownsContent
     ? artifacts.find((artifact) => artifact.id === selectedId)
@@ -114,7 +145,6 @@ export function ManagedToolResultPanel({
           <Button
             variant="outline"
             onClick={() => {
-              setCursor(undefined);
               setRevision((value) => value + 1);
             }}
           >
@@ -163,7 +193,11 @@ export function ManagedToolResultPanel({
           </div>
         )}
         {ownsContent && nextCursor && (
-          <Button variant="outline" onClick={() => setCursor(nextCursor)}>
+          <Button
+            variant="outline"
+            disabled={loading}
+            onClick={() => void loadMore()}
+          >
             {t('managed.more')}
           </Button>
         )}

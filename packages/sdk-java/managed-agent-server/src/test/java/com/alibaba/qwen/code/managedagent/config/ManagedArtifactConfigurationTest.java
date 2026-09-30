@@ -36,7 +36,9 @@ class ManagedArtifactConfigurationTest {
         settings.setPublishPreview(true);
         assertThat(policy.version()).isNotEqualTo(originalVersion);
         assertThat(policy.publishPreview("tenant", "workspace", "session")).isTrue();
+        String previewVersion = policy.version();
         settings.setEnabled(false);
+        assertThat(policy.version()).isNotEqualTo(previewVersion);
         assertThat(policy.publishOriginal("tenant", "workspace", "session")).isFalse();
         assertThat(policy.readOriginal("tenant", "actor", "workspace", "session")).isFalse();
     }

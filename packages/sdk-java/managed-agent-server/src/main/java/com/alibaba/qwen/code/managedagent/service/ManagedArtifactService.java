@@ -30,6 +30,7 @@ public class ManagedArtifactService {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Logger LOG = LoggerFactory.getLogger(ManagedArtifactService.class);
     private static final int RANGE_LIMIT = 1024 * 1024;
+    private static final Pattern ARTIFACT_ID = Pattern.compile("artifact_[0-9a-f]{64}");
     private static final Pattern RANGE = Pattern.compile("^bytes=([0-9]*)-([0-9]*)$");
     private final ManagedAgentService sessions;
     private final ManagedToolResultStore results;
@@ -74,26 +75,32 @@ public class ManagedArtifactService {
     public WebShellPage<ArtifactResponse> page(TenantContext tenant, String sessionId,
             String cursor, int limit) {
         SessionRecord session = session(tenant, sessionId);
-        if (limit < 1 || limit > 100) { throw badRequest("invalid_limit", "Limit must be between 1 and 100."); }
+        if (limit < 1 || limit > 100) {
+            throw badRequest("invalid_limit", "Limit must be between 1 and 100.");
+        }
         Long watermark = null;
         Long before = null;
         String beforeId = null;
         if (cursor != null && !cursor.isBlank()) {
             try {
-                if (cursor.length() > 2048) { throw new IllegalArgumentException(); }
+                if (cursor.length() > 2048) {
+                    throw new IllegalArgumentException();
+                }
                 var decoded = JSON.readTree(Base64.getUrlDecoder().decode(cursor));
                 if (decoded.size() != 6 || decoded.path("v").asInt() != 1
                         || !tenant.tenantId().equals(decoded.path("tenant").asText())
                         || !sessionId.equals(decoded.path("session").asText())
                         || !decoded.path("watermark").canConvertToLong()
                         || !decoded.path("before").canConvertToLong()
-                        || !decoded.path("id").asText().matches("artifact_[0-9a-f]{64}")) {
+                        || !ARTIFACT_ID.matcher(decoded.path("id").asText()).matches()) {
                     throw new IllegalArgumentException();
                 }
                 watermark = decoded.path("watermark").longValue();
                 before = decoded.path("before").longValue();
                 beforeId = decoded.path("id").asText();
-                if (watermark < 0 || before < 0 || before > watermark) { throw new IllegalArgumentException(); }
+                if (watermark < 0 || before < 0 || before > watermark) {
+                    throw new IllegalArgumentException();
+                }
             } catch (IOException | IllegalArgumentException error) {
                 throw badRequest("invalid_cursor", "Artifact cursor is invalid.");
             }
@@ -125,7 +132,9 @@ public class ManagedArtifactService {
         tenant.requireActorId();
         SessionRecord session = sessions.requireReadableSession(tenant.tenantId(), tenant.actorId(), sessionId);
         if (!settings.isEnabled() || !reader.supported() || session.workspace() == null
-                || "DELETING".equals(session.status())) { throw notFound(); }
+                || "DELETING".equals(session.status())) {
+            throw notFound();
+        }
         return session;
     }
 
@@ -137,12 +146,16 @@ public class ManagedArtifactService {
     private void requireContent(TenantContext tenant, Artifact artifact) {
         var source = artifact.source();
         SessionRecord session = session(tenant, source.sessionId());
-        if (!source.workspaceId().equals(session.workspace().getWorkspaceId())) { throw notFound(); }
+        if (!source.workspaceId().equals(session.workspace().getWorkspaceId())) {
+            throw notFound();
+        }
         if (!policy.readOriginal(tenant.tenantId(), tenant.actorId(), source.workspaceId(), source.sessionId())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "artifact_content_forbidden",
                     "The current actor cannot read original artifact bytes.");
         }
-        if (!reader.available(artifact)) { throw unavailable(); }
+        if (!reader.available(artifact)) {
+            throw unavailable();
+        }
     }
 
     public void content(TenantContext tenant, String sessionId, String artifactId, String revision,
@@ -150,18 +163,26 @@ public class ManagedArtifactService {
         session(tenant, sessionId);
         Artifact artifact = stored(tenant, sessionId, artifactId);
         requireContent(tenant, artifact);
-        if (revision == null || revision.isBlank()) { throw badRequest("revision_required", "A fixed revision is required."); }
+        if (revision == null || revision.isBlank()) {
+            throw badRequest("revision_required", "A fixed revision is required.");
+        }
         var descriptor = artifact.descriptor();
-        if (!revision.equals(descriptor.path("revision").asText())) { throw notFound(); }
+        if (!revision.equals(descriptor.path("revision").asText())) {
+            throw notFound();
+        }
         String etag = "\"" + descriptor.path("sha256").asText() + "\"";
         if (ifMatch != null && !matches(ifMatch, etag)) {
             throw new ApiException(HttpStatus.PRECONDITION_FAILED, "artifact_revision_mismatch",
                     "The artifact validator does not match.");
         }
-        if (ifRange != null && !etag.equals(ifRange.trim())) { range = null; }
+        if (ifRange != null && !etag.equals(ifRange.trim())) {
+            range = null;
+        }
         long size = descriptor.path("byte_length").longValue();
         Selection selection;
-        try { selection = select(range, size); }
+        try {
+            selection = select(range, size);
+        }
         catch (ApiException error) {
             if (error.getStatus() == HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE) {
                 response.setHeader("Content-Range", "bytes */" + size);
@@ -177,7 +198,9 @@ public class ManagedArtifactService {
         long timeout = settings.getReadTimeout().toNanos();
         long sent = 0;
         Runnable guard = () -> {
-            if (System.nanoTime() - started > timeout) { throw unavailable(); }
+            if (System.nanoTime() - started > timeout) {
+                throw unavailable();
+            }
             requireContent(tenant, artifact);
         };
         try {
@@ -203,8 +226,12 @@ public class ManagedArtifactService {
                 }
             }
         } catch (RuntimeException error) {
-            if (response.isCommitted()) { throw new IOException("Artifact stream interrupted", error); }
-            if (error instanceof ApiException api) { throw api; }
+            if (response.isCommitted()) {
+                throw new IOException("Artifact stream interrupted", error);
+            }
+            if (error instanceof ApiException api) {
+                throw api;
+            }
             throw unavailable();
         } finally {
             readers.release();
@@ -235,8 +262,12 @@ public class ManagedArtifactService {
     record Selection(long offset, long length, boolean partial) { }
 
     static Selection select(String range, long size) {
-        if (range == null) { return new Selection(0, size, false); }
-        if (range.contains(",")) { throw badRequest("unsupported_range", "Only one byte range is supported."); }
+        if (range == null) {
+            return new Selection(0, size, false);
+        }
+        if (range.contains(",")) {
+            throw badRequest("unsupported_range", "Only one byte range is supported.");
+        }
         var matcher = RANGE.matcher(range.trim());
         if (!matcher.matches() || matcher.group(1).isEmpty() && matcher.group(2).isEmpty()) {
             throw badRequest("invalid_range", "Invalid byte range.");
@@ -251,22 +282,30 @@ public class ManagedArtifactService {
             } else {
                 start = Long.parseLong(matcher.group(1));
                 end = matcher.group(2).isEmpty() ? size - 1 : Long.parseLong(matcher.group(2));
-                if (!matcher.group(2).isEmpty() && end < start) { throw new NumberFormatException(); }
+                if (!matcher.group(2).isEmpty() && end < start) {
+                    throw new NumberFormatException();
+                }
                 end = Math.min(size - 1, end);
             }
-        } catch (NumberFormatException error) { throw badRequest("invalid_range", "Invalid byte range."); }
+        } catch (NumberFormatException error) {
+            throw badRequest("invalid_range", "Invalid byte range.");
+        }
         if (size == 0 || start >= size || end < start) {
             throw new ApiException(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "range_not_satisfiable",
                     "The range does not intersect this representation.");
         }
         long length = end - start + 1;
-        if (length > RANGE_LIMIT) { throw badRequest("range_too_large", "A range may contain at most 1048576 bytes."); }
+        if (length > RANGE_LIMIT) {
+            throw badRequest("range_too_large", "A range may contain at most 1048576 bytes.");
+        }
         return new Selection(start, length, true);
     }
 
     static boolean matches(String condition, String etag) {
         for (String candidate : condition.split(",")) {
-            if ("*".equals(candidate.trim()) || etag.equals(candidate.trim())) { return true; }
+            if ("*".equals(candidate.trim()) || etag.equals(candidate.trim())) {
+                return true;
+            }
         }
         return false;
     }
