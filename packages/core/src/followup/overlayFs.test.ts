@@ -158,6 +158,31 @@ describe('OverlayFs', () => {
       await expect(overlay.applyToReal()).rejects.toThrow(/file\.ts/);
     });
 
+    it('ignores a redirected path nothing was ever written to', async () => {
+      // `redirectWrite` registers the path so later reads see the overlay, but for a
+      // file that does not exist yet it only makes the directory — no overlay file is
+      // created. A tool that redirects a write and then fails (an `edit` of a path
+      // that is not there) leaves exactly that: an entry with nothing behind it.
+      // Counting it as "could not apply" rejects the whole accept, discarding edits
+      // that did land, even though this entry has no content to copy.
+      const neverWritten = join(testDir, 'brand-new.ts');
+      await overlay.redirectWrite(neverWritten);
+
+      const realFile = join(testDir, 'src', 'app.ts');
+      await mkdir(join(testDir, 'src'), { recursive: true });
+      await writeFile(realFile, 'original');
+      await writeFile(await overlay.redirectWrite(realFile), 'edited');
+
+      const applied = await overlay.applyToReal();
+
+      // Resolves: there is no real failure here to report.
+      expect(applied).toContain(realFile);
+      expect(applied).not.toContain(neverWritten);
+      expect(await readFile(realFile, 'utf-8')).toBe('edited');
+      // Nothing was ever written, so nothing is created on the real side either.
+      expect(existsSync(neverWritten)).toBe(false);
+    });
+
     it('lands the files it can and reports the one it cannot', async () => {
       // A file that cannot be copied must not stop the others: the point of
       // collecting the failures is that the writable ones still land.
