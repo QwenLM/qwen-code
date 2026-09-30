@@ -7,7 +7,10 @@
 import * as crypto from 'node:crypto';
 import {
   ExtensionManager,
+  parseBooleanEnvFlag,
   redactUrlCredentials,
+  resolveExtensionTelemetryProxy,
+  resolveUsageStatisticsEnabled,
   stripAnsiAndControl,
   type ClaudeMarketplaceConfig,
   type ExtensionSetting,
@@ -205,6 +208,27 @@ export interface CreateExtensionsControllerDeps {
   maxExtensionOperationHistory?: number;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  /**
+   * The resolved environment of the runtime that owns `boundWorkspace` —
+   * `buildRuntimeEnvironment`'s `effectiveEnv`, the same value
+   * `resolveSetupGithubProxy(boundWorkspace, deps.env, ...)` receives. It is
+   * never the daemon's ambient `process.env`: one daemon hosts every
+   * workspace, so an ambient value is not attributable to this one.
+   *
+   * Scoped to `boundWorkspace`, not to every manager this controller builds:
+   * `createExtensionManager` applies it only when `workspaceDir ===
+   * boundWorkspace`. A manager with no attributable env — another hosted
+   * workspace, or this one after its runtime left `active` — resolves proxy
+   * from that directory's own settings alone, and resolves consent from those
+   * settings plus an ambient *opt-out* only: `QWEN_USAGE_STATISTICS_ENABLED`
+   * is not in `DEFAULT_EXCLUDED_ENV_VARS`, and `loadEnvironment` writes parsed
+   * `.env` keys into `process.env` without restoring them, so an ambient
+   * opt-IN can belong to some other hosted repo and must not re-open this
+   * one's gate. A secondary runtime's own env is not visible here;
+   * attributing it would need a `workspaceDir`-keyed resolver rather than
+   * this single field.
+   */
+  env?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /** Shared coordinator for the legacy adapter and V2 global operations. */
@@ -303,15 +327,19 @@ export function createExtensionsController(
     interactions?: ExtensionInteractionHandlers,
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
-    // One trust-gated load per call, shared by the locale and the trust
-    // fallback below. `skipLoadEnvironment` keeps this workspace's own
-    // `.env` / `settings.env` out of the daemon's shared `process.env`: one
-    // daemon hosts every workspace, so writing there leaks one repo's values
-    // into every other workspace's resolution for the process lifetime.
-    // `consumeCorruptionEnvVars: false` because this load surfaces neither
-    // the corruption marker nor the recovery notice, and the pair is
-    // one-shot: the default would spend it here and leave the load that does
-    // surface it nothing to report for the rest of the daemon's life.
+    // One trust-gated load per call, shared by the locale, the trust fallback
+    // and the telemetry options below. `skipLoadEnvironment` keeps this
+    // workspace's own `.env` / `settings.env` out of the daemon's shared
+    // `process.env`: one daemon hosts every workspace, so writing there leaks
+    // one repo's values into every other workspace's resolution for the
+    // process lifetime. The trust options are what `resolveExtensionLocale`
+    // used to resolve on its own, so both now read one consistent view of the
+    // same workspace file.
+    // `consumeCorruptionEnvVars: false` because this load surfaces neither the
+    // corruption marker nor the recovery notice, and the pair is one-shot: the
+    // default (`?? true`) would delete it here and leave the load that does
+    // surface it nothing to report for the rest of the daemon's life. The
+    // extensions routes already read it this way (`workspace-extensions.ts`).
     const settings = loadSettings(
       workspaceDir,
       workspaceTrusted === undefined
@@ -323,6 +351,46 @@ export function createExtensionsController(
             consumeCorruptionEnvVars: false,
           },
     ).merged;
+    // `deps.env` is the bound runtime's LIVE env delegate: every read goes
+    // through `requirePrimaryRuntime()`, which throws once that entry leaves
+    // `active` — something the trust reconciler does in normal operation. So
+    // bind the term to the one workspace this controller owns (a manager built
+    // for another directory must not inherit its consent or proxy), and
+    // tolerate a non-active runtime so a property read cannot throw out of a
+    // route that is serving a different workspace.
+    const runtimeEnv = ((): Readonly<NodeJS.ProcessEnv> | undefined => {
+      if (workspaceDir !== boundWorkspace || !deps.env) return undefined;
+      try {
+        return { ...deps.env };
+      } catch {
+        return undefined;
+      }
+    })();
+    // Consent term for the no-attributable-env case. Passing `undefined`
+    // through would land on `resolveUsageStatisticsEnabled`'s `env =
+    // process.env` default, i.e. resolve the opt-in from the daemon's shared
+    // ambient env — which is not neutral: `loadEnvironment` writes parsed
+    // `.env` keys into `process.env` in no-override mode and never restores
+    // them, `canApplyParsedEnvKey` has no trust gate, and
+    // `QWEN_USAGE_STATISTICS_ENABLED` is excluded from neither
+    // `DEFAULT_EXCLUDED_ENV_VARS` nor `PROJECT_ENV_HARDCODED_EXCLUSIONS`. So
+    // one hosted repo publishing `QWEN_USAGE_STATISTICS_ENABLED=1` would
+    // re-open the gate for a different workspace whose own settings opt out,
+    // and that workspace's extension lifecycle events would upload (#12770).
+    // The narrowing is one-directional on purpose: an ambient *opt-out* is an
+    // operator decision about this daemon and must still close every gate
+    // here, while an ambient *opt-in* is not this workspace's to inherit.
+    const ambientConsent = parseBooleanEnvFlag(
+      process.env['QWEN_USAGE_STATISTICS_ENABLED'],
+    );
+    const consentEnv: Readonly<NodeJS.ProcessEnv> =
+      runtimeEnv ??
+      (ambientConsent === false
+        ? {
+            QWEN_USAGE_STATISTICS_ENABLED:
+              process.env['QWEN_USAGE_STATISTICS_ENABLED'],
+          }
+        : {});
     return new ExtensionManager({
       workspaceDir,
       locale: resolveExtensionLocale(settings),
@@ -330,6 +398,22 @@ export function createExtensionsController(
         workspaceTrusted ??
         getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
           'trusted',
+      // Consent and proxy resolve against the bound runtime's environment
+      // when there is one, never against the ambient `process.env` that every
+      // hosted workspace shares and that no workspace's settings load may
+      // write to (see `skipLoadEnvironment` above). With no attributable env
+      // — a manager built for another hosted directory, or for this one after
+      // its runtime left `active` — proxy stays settings-only, because an
+      // ambient proxy is not this workspace's and would route its RUM uploads
+      // through an egress path it never configured, and consent keeps only the
+      // ambient opt-out (see `consentEnv` above): both terms then resolve from
+      // that directory's own settings, except that an operator's daemon-wide
+      // opt-out still closes the gate.
+      usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+        settings.privacy?.usageStatisticsEnabled,
+        consentEnv,
+      ),
+      proxy: resolveExtensionTelemetryProxy(settings.proxy, runtimeEnv ?? {}),
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??

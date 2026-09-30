@@ -348,6 +348,16 @@ export function ThreadsRoute({
     );
   }
 
+  const { createShare, listShares, revokeShare } = client;
+  const shares =
+    createShare && listShares && revokeShare
+      ? {
+          create: createShare,
+          list: async (agentId: string) => (await listShares(agentId)).shares,
+          revoke: revokeShare,
+        }
+      : undefined;
+
   // Outside the shell's chat column (an embedded Agents page with no chat to
   // switch to) the same conversation opens in place, with a way back.
   if (openId && detail) {
@@ -439,6 +449,7 @@ export function ThreadsRoute({
           void mutate(() => client.updateAgent(id, patch))
         }
         onOpenAgentBuilder={() => setCreatingAgent(true)}
+        {...(shares ? { shares } : {})}
         {...(onOpenDefinitions ? { onOpenDefinitions } : {})}
         {...(capabilities ? { capabilities } : {})}
         workspaceCwd={workspaceCwd}
