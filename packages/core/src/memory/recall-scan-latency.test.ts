@@ -52,7 +52,13 @@ const REPEATS = 5;
 // magnitude. A scan that has blown up still reddens the release; one that
 // merely drifted is caught by the strict bound off shared runners, where
 // the property this test is named for is actually asserted.
-const SHARED_CI = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true;
+// GitHub-hosted lanes (`GitHub Actions NNN`) are shared VMs too: the
+// 1000-file cold scan measures ~2x the author-machine baseline there
+// (best-of-5 201-226ms against the 125ms bound), so the strict bound cannot
+// hold on them either — only the order-of-magnitude bound means anything.
+const SHARED_CI =
+  process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true ||
+  process.env['RUNNER_NAME']?.startsWith('GitHub Actions') === true;
 const FAST_RESULT_CEILING_MS = SHARED_CI
   ? INITIAL_BUDGET_MS * 10
   : INITIAL_BUDGET_MS / 2;
