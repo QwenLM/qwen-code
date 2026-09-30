@@ -34,16 +34,21 @@ public final class ToolPublicationCollector {
 
     @Scheduled(fixedDelay = 1000)
     public synchronized void tick() {
-        try { runOnce(); }
-        catch (RuntimeException error) {
+        try {
+            runOnce();
+        } catch (RuntimeException error) {
             LOG.warn("Tool output collection will retry: {}", error.getClass().getSimpleName());
         }
     }
 
     public synchronized boolean runOnce() {
-        if (!properties.getToolPublication().isGcEnabled()) { return false; }
+        if (!properties.getToolPublication().isGcEnabled()) {
+            return false;
+        }
         Claim claim = claim();
-        if (claim == null) { return false; }
+        if (claim == null) {
+            return false;
+        }
         try {
             var page = jdbc.query("SELECT slot_key, object_key FROM qwen_tool_publication_object"
                             + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ? ORDER BY slot_key LIMIT 100",
@@ -51,15 +56,24 @@ public final class ToolPublicationCollector {
                     claim.scope(), claim.publication(), claim.cursor());
             objects.requireUnversioned();
             for (var object : page) {
-                if (!renew(claim)) { return false; }
-                if (object.key() != null) { objects.deleteIfPresent(object.key()); }
+                if (!renew(claim)) {
+                    return false;
+                }
+                if (object.key() != null) {
+                    objects.deleteIfPresent(object.key());
+                }
             }
             boolean confirmed = Boolean.TRUE.equals(transactions.execute(status -> confirm(claim, page)));
-            if (!confirmed) { defer(claim); }
+            if (!confirmed) {
+                defer(claim);
+            }
             return confirmed;
         } catch (RuntimeException error) {
-            try { defer(claim); }
-            catch (RuntimeException later) { error.addSuppressed(later); }
+            try {
+                defer(claim);
+            } catch (RuntimeException later) {
+                error.addSuppressed(later);
+            }
             throw error;
         }
     }
@@ -86,7 +100,9 @@ public final class ToolPublicationCollector {
                         + " qwen_tool_publication WHERE (retention_state = 'RETIRING' AND gc_next_at <= ?)"
                         + " OR (retention_state = 'DELETING' AND gc_next_at <= ? AND (gc_owner = ? OR gc_claim_until <= ?))"
                         + " ORDER BY gc_next_at, scope_key, publication_id LIMIT 1", time, time, owner, time);
-        if (candidates.isEmpty()) { return null; }
+        if (candidates.isEmpty()) {
+            return null;
+        }
         var candidate = candidates.getFirst();
         return transactions.execute(status -> {
             String tenant = (String) candidate.get("tenant_id");
@@ -96,7 +112,9 @@ public final class ToolPublicationCollector {
                     + " AND publication_id = ? FOR UPDATE", candidate.get("scope_key"), candidate.get("publication_id"));
             long now = ToolPublicationRetentionStore.now(jdbc);
             if ("RETIRING".equals(row.get("retention_state"))) {
-                if (ToolPublicationRetentionStore.number(row, "gc_next_at") > now) { return null; }
+                if (ToolPublicationRetentionStore.number(row, "gc_next_at") > now) {
+                    return null;
+                }
                 Duration grace = properties.getToolPublication().getDeletionGrace();
                 var observed = retention.candidate(row, grace);
                 if (observed.blocker() != null) {
@@ -127,7 +145,9 @@ public final class ToolPublicationCollector {
         if (!"DELETING".equals(row.get("retention_state")) || !owner.equals(row.get("gc_owner"))
                 || ToolPublicationRetentionStore.number(row, "gc_generation") != claim.generation()
                 || ToolPublicationRetentionStore.number(row, "gc_claim_until") <= ToolPublicationRetentionStore.now(jdbc)
-                || !claim.cursor().equals(row.get("gc_cursor"))) { return false; }
+                || !claim.cursor().equals(row.get("gc_cursor"))) {
+            return false;
+        }
         String cursor = page.isEmpty() ? claim.cursor() : page.getLast().slot();
         Long remaining = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
                         + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ?", Long.class,
