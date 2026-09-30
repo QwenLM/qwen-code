@@ -160,6 +160,9 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, changed, workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("idempotency_conflict");
             request("GET", "/v1/agents/sessions/" + session, null, null, "other", 404);
+            // The approval run registers its own reader and answers only the initial Turn;
+            // later Turns are covered by the files run.
+            if (approvals) continue;
             // A later Turn runs under the creator's grants: another actor who can read the
             // Session keeps the refusal, and the creator's second Turn runs the file tools again.
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read,"
@@ -227,7 +230,7 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
         }
-        assertThat(modelRequests).hasSize(18);
+        assertThat(modelRequests).hasSize(approvals ? 8 : 18);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -260,7 +263,7 @@ class HostedPublicWorkspaceIT {
         request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(18);
+        assertThat(modelRequests).hasSize(approvals ? 8 : 18);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
