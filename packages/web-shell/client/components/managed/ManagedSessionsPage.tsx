@@ -435,9 +435,11 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
-              <p className="text-muted-foreground">
-                {t('managed.workspaceExecutionUnavailable')}
-              </p>
+              {!summary.capabilities.workspaceTurns && (
+                <p className="text-muted-foreground">
+                  {t('managed.workspaceExecutionUnavailable')}
+                </p>
+              )}
             </div>
           )}
           {summary?.failure && (
