@@ -135,6 +135,11 @@ function ManagedSessionsContent({
     sessionId: string;
     itemId?: string;
   }>();
+  useEffect(() => setOutputTarget(undefined), [provider, sessionId]);
+  useEffect(() => {
+    if (detail.summary && !detail.summary.capabilities.artifacts)
+      setOutputTarget(undefined);
+  }, [detail.summary]);
   const openResult = useCallback(
     (itemId: string) => {
       if (sessionId) setOutputTarget({ sessionId, itemId });
@@ -578,7 +583,7 @@ function ManagedSessionsContent({
           {outputTarget &&
             outputTarget.sessionId === sessionId &&
             sessionId &&
-            summary?.capabilities.artifacts &&
+            (!summary || summary.capabilities.artifacts) &&
             provider.toolResults && (
               <ManagedToolResultPanel
                 key={`${sessionId}:${outputTarget.itemId ?? 'all'}`}

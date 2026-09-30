@@ -4,6 +4,7 @@ import type {
 } from './managed-tool-result-types';
 
 export const artifact: ManagedArtifact = {
+  object: 'agent.artifact',
   id: 'artifact-1',
   session_id: 'session-1',
   result_id: 'result-1',
@@ -28,4 +29,33 @@ export const result: ManagedToolResult = {
   capture_scope: 'process_pipes',
   upstream_truncated: false,
   artifacts: [artifact],
+};
+
+export const notStartedResult: ManagedToolResult = {
+  ...result,
+  execution_status: 'not_started',
+  capture_status: null,
+  capture_scope: null,
+  upstream_truncated: null,
+  delivery_status: 'blocked',
+  artifacts: [],
+};
+export const blockedResult: ManagedToolResult = {
+  ...result,
+  execution_status: 'error',
+  capture_status: 'unavailable',
+  delivery_status: 'blocked',
+  reason_code: 'storage_failed',
+  upstream_truncated: null,
+  artifacts: [],
+};
+export const previewOnlyResult: ManagedToolResult = {
+  ...result,
+  preview: {
+    text: 'approved excerpt',
+    truncated: true,
+    stream_id: 'stdout',
+    source_start: 0,
+    source_end: 5,
+  },
 };

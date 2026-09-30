@@ -8,7 +8,13 @@ import {
   MANAGED_OUTPUT_PAGE_BYTES,
 } from './ManagedToolResultPanel';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
-import { artifact, result } from './managed-tool-result.test-fixtures';
+import {
+  artifact,
+  result,
+  notStartedResult,
+  blockedResult,
+  previewOnlyResult,
+} from './managed-tool-result.test-fixtures';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 describe('ManagedToolResultPanel', () => {
@@ -208,12 +214,16 @@ describe('ManagedToolResultPanel', () => {
         ?.length,
     ).toBe(MANAGED_OUTPUT_PAGE_BYTES);
     const calls = vi.mocked(reader.readRange).mock.calls.length;
-    for (let index = 0; index < 2; index++) await click('Previous page');
+    for (let index = 0; index < 3; index++) await click('Previous page');
     expect(reader.readRange).toHaveBeenCalledTimes(calls);
     await click('Previous page');
-    expect(vi.mocked(reader.readRange).mock.calls.length).toBeGreaterThan(
-      calls,
+    expect(reader.readRange).toHaveBeenLastCalledWith(
+      large,
+      MANAGED_OUTPUT_PAGE_BYTES - 3,
+      3,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    expect(reader.readRange).toHaveBeenCalledTimes(calls + 2);
     expect(
       vi
         .mocked(reader.readRange)
@@ -222,7 +232,7 @@ describe('ManagedToolResultPanel', () => {
   });
 
   it('shows expiry and requires explicit refresh rather than reading latest implicitly', async () => {
-    vi.mocked(reader.readRange).mockRejectedValue(
+    vi.mocked(reader.readRange).mockRejectedValueOnce(
       new JavaManagedAgentHttpError(410, 'expired', 'expired'),
     );
     await render();
@@ -232,6 +242,9 @@ describe('ManagedToolResultPanel', () => {
     expect(reader.getResult).toHaveBeenCalledTimes(1);
     await click('Refresh output');
     expect(reader.getResult).toHaveBeenCalledTimes(2);
+    expect(
+      document.body.querySelector('[data-managed-output-bytes]')?.textContent,
+    ).toBe('hello');
   });
 
   it('shows the localized denial text when a content read is forbidden', async () => {
@@ -267,28 +280,217 @@ describe('ManagedToolResultPanel', () => {
     expect(document.body.textContent).not.toContain('wrong session');
   });
 
+  it('retains four full pages while returning to the first page', async () => {
+    const large = { ...artifact, byte_length: 8 * MANAGED_OUTPUT_PAGE_BYTES };
+    vi.mocked(reader.getResult).mockResolvedValue({
+      result: { ...result, artifacts: [large] },
+      access: { can_read_content: true },
+    });
+    vi.mocked(reader.getArtifact).mockResolvedValue({
+      artifact: large,
+      access: { can_read_content: true },
+    });
+    vi.mocked(reader.readRange).mockImplementation(
+      async (_artifact, _offset, length) => new Uint8Array(length).fill(65),
+    );
+    await render();
+    for (let i = 0; i < 3; i++) await click('Next page');
+    const before = vi.mocked(reader.readRange).mock.calls.length;
+    for (let i = 0; i < 3; i++) await click('Previous page');
+    expect(reader.readRange).toHaveBeenCalledTimes(before);
+  });
+
+  it('rejects unavailable and mismatched metadata without reading content', async () => {
+    vi.mocked(reader.getArtifact).mockResolvedValue({
+      artifact: { ...artifact, availability: 'unavailable' },
+      access: { can_read_content: true },
+    });
+    await render();
+    expect(reader.readRange).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('unavailable');
+    vi.mocked(reader.getArtifact).mockResolvedValue({
+      artifact: { ...artifact, revision: 'b'.repeat(64) },
+      access: { can_read_content: true },
+    });
+    await click('Refresh output');
+    expect(reader.readRange).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('changed');
+  });
+
+  it('aborts a download when the panel unmounts', async () => {
+    let signal: AbortSignal | undefined;
+    vi.mocked(reader.downloadArtifact).mockImplementation(
+      async (_artifact, options) => {
+        signal = options?.signal;
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      },
+    );
+    await render();
+    await click('Download');
+    expect(signal?.aborted).toBe(false);
+    await act(async () => root.unmount());
+    expect(signal?.aborted).toBe(true);
+    // Keep afterEach safe after this intentional unmount.
+    root = createRoot(container);
+  });
+
   it('clears cached content when the provider changes even for the same Session ID', async () => {
     await render();
     expect(
       document.body.querySelector('[data-managed-output-bytes]')?.textContent,
     ).toBe('hello');
-    const oldSignal = vi.mocked(reader.getArtifact).mock.calls[0][2].signal!;
-    const readRange = vi.fn();
-    reader = {
+    let release!: (
+      value: Awaited<ReturnType<ManagedToolResultReader['getResult']>>,
+    ) => void;
+    const fresh = {
       ...reader,
-      readRange,
+      getResult: vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      ),
       getArtifact: vi
         .fn()
-        .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        .mockResolvedValue({ artifact, access: { can_read_content: true } }),
+      readRange: vi.fn().mockResolvedValue(new TextEncoder().encode('fresh')),
     };
+    reader = fresh;
     await render();
-    expect(oldSignal.aborted).toBe(true);
     expect(
       document.body.querySelector('[data-managed-output-bytes]'),
     ).toBeNull();
-    expect(document.body.textContent).toContain(
-      'Original output is not available to your account.',
-    );
-    expect(readRange).not.toHaveBeenCalled();
+    await act(async () => {
+      release({ result, access: { can_read_content: true } });
+      await flush();
+    });
+    expect(
+      document.body.querySelector('[data-managed-output-bytes]')?.textContent,
+    ).toBe('fresh');
+    expect(fresh.readRange).toHaveBeenCalledTimes(1);
   });
+
+  it('preserves a boundary emoji after its predecessor is evicted and checks the lookback', async () => {
+    const bytes = new Uint8Array(9 * MANAGED_OUTPUT_PAGE_BYTES).fill(65);
+    bytes.set(
+      new TextEncoder().encode('😀'),
+      3 * MANAGED_OUTPUT_PAGE_BYTES - 2,
+    );
+    const large = { ...artifact, byte_length: bytes.length };
+    vi.mocked(reader.getResult).mockResolvedValue({
+      result: { ...result, artifacts: [large] },
+      access: { can_read_content: true },
+    });
+    vi.mocked(reader.getArtifact).mockResolvedValue({
+      artifact: large,
+      access: { can_read_content: true },
+    });
+    vi.mocked(reader.readRange).mockImplementation(
+      async (_artifact, offset, length) => bytes.slice(offset, offset + length),
+    );
+    await render();
+    for (let i = 0; i < 7; i++) await click('Next page');
+    for (let i = 0; i < 4; i++) await click('Previous page');
+    const text = document.body.querySelector(
+      '[data-managed-output-bytes]',
+    )?.textContent;
+    expect(text?.startsWith('😀')).toBe(true);
+    expect(text).not.toContain('�');
+    expect(
+      vi.mocked(reader.readRange).mock.calls.map((call) => [call[1], call[2]]),
+    ).toContainEqual([3 * MANAGED_OUTPUT_PAGE_BYTES - 3, 3]);
+  });
+
+  it('downloads the selected revision with a signal and shows sink failures', async () => {
+    vi.mocked(reader.downloadArtifact).mockRejectedValue(
+      new Error('save failed'),
+    );
+    await render();
+    await click('Download');
+    expect(reader.downloadArtifact).toHaveBeenCalledWith(
+      artifact,
+      expect.objectContaining({
+        clientId: 'client',
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(document.body.textContent).toContain('save failed');
+    await click('Close output');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads an empty artifact without issuing a byte request', async () => {
+    const empty = { ...artifact, byte_length: 0 };
+    vi.mocked(reader.getResult).mockResolvedValue({
+      result: { ...result, artifacts: [empty] },
+      access: { can_read_content: true },
+    });
+    vi.mocked(reader.getArtifact).mockResolvedValue({
+      artifact: empty,
+      access: { can_read_content: true },
+    });
+    await render();
+    expect(reader.readRange).not.toHaveBeenCalled();
+    expect(
+      document.body.querySelector('[data-managed-output-bytes]')?.textContent,
+    ).toBe('Empty output (0 bytes)');
+  });
+
+  it('resets the page when selecting another stream', async () => {
+    const large = { ...artifact, byte_length: MANAGED_OUTPUT_PAGE_BYTES * 2 };
+    const other = {
+      ...artifact,
+      id: 'artifact-2',
+      stream_role: 'stderr' as const,
+    };
+    vi.mocked(reader.getResult).mockResolvedValue({
+      result: { ...result, artifacts: [large, other] },
+      access: { can_read_content: true },
+    });
+    vi.mocked(reader.getArtifact).mockImplementation(async (_session, id) => ({
+      artifact: id === large.id ? large : other,
+      access: { can_read_content: true },
+    }));
+    vi.mocked(reader.readRange).mockImplementation(
+      async (a, _offset, length) =>
+        a.id === other.id
+          ? new TextEncoder().encode('other')
+          : new Uint8Array(length).fill(65),
+    );
+    await render();
+    await click('Next page');
+    await click('stderr · 5 B');
+    expect(reader.readRange).toHaveBeenLastCalledWith(
+      other,
+      0,
+      MANAGED_OUTPUT_PAGE_BYTES,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(
+      document.body.querySelector('[data-managed-output-bytes]')?.textContent,
+    ).toBe('other');
+  });
+  it.each([
+    [notStartedResult, 'Command not executed'],
+    [blockedResult, 'Output delivery blocked'],
+    [previewOnlyResult, 'approved excerpt'],
+  ])(
+    'renders shared execution/capture facts when raw access is denied: %s',
+    async (fixture, expected) => {
+      vi.mocked(reader.getResult).mockResolvedValue({
+        result: fixture,
+        access: { can_read_content: false },
+      });
+      vi.mocked(reader.getArtifact).mockResolvedValue({
+        artifact,
+        access: { can_read_content: false },
+      });
+      await render();
+      expect(document.body.textContent).toContain(expected);
+      expect(reader.readRange).not.toHaveBeenCalled();
+      expect(reader.downloadArtifact).not.toHaveBeenCalled();
+    },
+  );
 });

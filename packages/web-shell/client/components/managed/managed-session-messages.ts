@@ -107,6 +107,7 @@ export function managedEventsToMessages(
         tools.get(key) ?? (legacyKey ? tools.get(legacyKey) : undefined);
       const result = readResult(data['result'], event);
       if (!tool) {
+        if (event.turnId === currentTurnId) settle();
         tool = {
           callId: key,
           toolName:

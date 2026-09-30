@@ -34,12 +34,17 @@ vi.mock('../MessageList', () => ({
     messages,
     hasOlderHistory,
     onLoadOlderHistory,
+    onToolResultOpen,
   }: {
     messages: unknown[];
     hasOlderHistory: boolean;
     onLoadOlderHistory: () => Promise<void>;
+    onToolResultOpen?: (itemId: string) => void;
   }) => (
     <>
+      <button onClick={() => onToolResultOpen?.('item-1')}>
+        Open tool output
+      </button>
       <pre data-testid="messages">{JSON.stringify(messages)}</pre>
       {hasOlderHistory && (
         <button onClick={() => void onLoadOlderHistory()}>Older history</button>
@@ -49,7 +54,7 @@ vi.mock('../MessageList', () => ({
 }));
 
 import { ManagedSessionsPage } from './ManagedSessionsPage';
-import { artifact } from './managed-tool-result.test-fixtures';
+import { artifact, result } from './managed-tool-result.test-fixtures';
 
 function summary(
   sessionId = 's1',
@@ -731,5 +736,111 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ lastEventId: 3 }),
     );
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+  it('keeps an open output panel mounted while refreshing the session', async () => {
+    const ready = summary('s1', {
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(ready);
+    const listArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: true } }],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const readRange = vi
+      .fn()
+      .mockResolvedValue(new TextEncoder().encode('hello'));
+    provider = {
+      ...provider,
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts,
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: true } }),
+        readRange,
+        downloadArtifact: vi.fn(),
+      },
+    };
+    await render('s1');
+    const click = async (label: string) => {
+      const button = [...document.body.querySelectorAll('button')].find(
+        (n) => n.textContent === label,
+      );
+      expect(button).toBeTruthy();
+      await act(async () => {
+        button!.click();
+        await flush();
+      });
+    };
+    await click('Outputs');
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    let complete!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await click('Refresh');
+    const during = document.body.querySelector('[role="dialog"]') !== null;
+    await act(async () => {
+      complete(ready);
+      await flush();
+    });
+    expect(during).toBe(true);
+    expect(listArtifacts).toHaveBeenCalledTimes(1);
+    expect(readRange).toHaveBeenCalledTimes(1);
+    mocks.client.getSession.mockResolvedValueOnce(summary('s1'));
+    await click('Refresh');
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    await click('Refresh');
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => {
+      complete(ready);
+      await flush();
+    });
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+  it('forwards a message tool-result selection to its exact item', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: true, canCancel: false, artifacts: true },
+      }),
+    );
+    const getResult = vi.fn().mockResolvedValue({
+      result: { ...result, session_id: 's1', artifacts: [] },
+      access: { can_read_content: false },
+    });
+    provider = {
+      ...provider,
+      toolResults: {
+        canDownload: false,
+        getResult,
+        getArtifact: vi.fn(),
+        listArtifacts: vi.fn(),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    await render('s1');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find((n) => n.textContent === 'Open tool output')!
+        .click();
+      await flush();
+    });
+    expect(getResult).toHaveBeenCalledWith(
+      's1',
+      'item-1',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 });

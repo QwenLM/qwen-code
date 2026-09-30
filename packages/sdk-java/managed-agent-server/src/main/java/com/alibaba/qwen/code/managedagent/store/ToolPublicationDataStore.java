@@ -1305,20 +1305,39 @@ public final class ToolPublicationDataStore {
 
     void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
             long revision, long sequence) {
-        var rows = jdbc.queryForList("SELECT producer_phase, admission_resource_id,"
+        require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
+                outcomeRef, revision, sequence), "Publication receipt is unavailable");
+    }
+
+    Map<String, Map<String, Object>> referencedPublications(JsonNode key, List<String> ids) {
+        Map<String, Map<String, Object>> result = new java.util.HashMap<>();
+        if (ids.isEmpty()) {
+            return result;
+        }
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(scope(key));
+        arguments.add(text(key, "tenantId"));
+        arguments.add(text(key, "workspaceId"));
+        arguments.add(text(key, "sessionId"));
+        arguments.addAll(ids);
+        var rows = jdbc.queryForList("SELECT publication_id, producer_phase, admission_resource_id,"
                 + " receipt_revision, receipt_sequence, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
-                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?"
-                + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?",
-                scope(key), publicationId, text(key, "tenantId"), text(key, "workspaceId"),
-                text(key, "sessionId"));
-        require(rows.size() == 1, "Publication is unavailable");
-        var row = rows.get(0);
-        require("REFERENCED".equals(row.get("producer_phase"))
-                && ((Number) row.get("quarantined")).intValue() == 0
-                && text(outcomeRef, "resourceId").equals(row.get("admission_resource_id"))
+                + " FROM qwen_tool_publication WHERE scope_key = ?"
+                + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id IN ("
+                + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", arguments.toArray());
+        for (var row : rows) {
+            result.put((String) row.get("publication_id"), row);
+        }
+        return result;
+    }
+
+    static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
+        return row != null && "REFERENCED".equals(row.get("producer_phase"))
+                && row.get("quarantined") instanceof Number mark && mark.intValue() == 0
+                && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
+                && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
                 && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
-                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence,
-                "Publication receipt is unavailable");
+                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
     }
 
     private VerifiedStream verifiedStream(JsonNode key, String publicationId,
@@ -1571,7 +1590,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private static String scope(JsonNode key) {
+    static String scope(JsonNode key) {
         require(key != null && key.isObject(), "Invalid publication scope");
         return hash(JSON.createArrayNode().add(text(key, "tenantId"))
                 .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());

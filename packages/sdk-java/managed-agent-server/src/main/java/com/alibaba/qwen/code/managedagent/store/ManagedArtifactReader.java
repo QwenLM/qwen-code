@@ -5,6 +5,9 @@ import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore.Artifact;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.InputStream;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.stream.Collectors;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -21,15 +24,25 @@ public class ManagedArtifactReader {
     public boolean supported() { return publications.getIfAvailable() != null; }
 
     public boolean available(Artifact artifact) {
-        if (!supported()) {
-            return false;
+        return availability(List.of(artifact)).get(artifact.descriptor().path("id").asText());
+    }
+
+    public Map<String, Boolean> availability(List<Artifact> artifacts) {
+        Map<String, Boolean> result = new HashMap<>();
+        var data = publications.getIfAvailable();
+        for (var group : artifacts.stream().collect(Collectors.groupingBy(
+                artifact -> artifact.source().sessionKey().toString())).values()) {
+            var rows = data == null ? Map.<String, Map<String, Object>>of()
+                    : data.referencedPublications(group.getFirst().source().sessionKey(),
+                            group.stream().map(Artifact::publicationId).distinct().toList());
+            for (var artifact : group) {
+                var source = artifact.source();
+                result.put(artifact.descriptor().path("id").asText(), ToolPublicationDataStore.referenced(
+                        rows.get(artifact.publicationId()), source.outcomeRef(),
+                        source.journalRevision(), source.receiptSequence()));
+            }
         }
-        try {
-            check(artifact);
-            return true;
-        } catch (IllegalArgumentException error) {
-            return false;
-        }
+        return result;
     }
 
     public InputStream open(Artifact artifact) {
@@ -37,6 +50,7 @@ public class ManagedArtifactReader {
     }
 
     public InputStream open(Artifact artifact, Runnable guard) {
+        guard.run();
         return verified(artifact).open(() -> {
             guard.run();
             check(artifact);
@@ -48,6 +62,11 @@ public class ManagedArtifactReader {
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length, Runnable guard) {
+        ToolPublicationContract.require(offset >= 0 && length >= 0 && length <= 1024 * 1024
+                        && offset <= artifact.descriptor().path("byte_length").asLong()
+                        && length <= artifact.descriptor().path("byte_length").asLong() - offset,
+                "Artifact range is invalid");
+        guard.run();
         return verified(artifact).readRange(offset, length, () -> {
             guard.run();
             check(artifact);

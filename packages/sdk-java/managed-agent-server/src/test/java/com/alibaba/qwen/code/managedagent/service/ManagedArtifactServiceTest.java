@@ -33,7 +33,20 @@ class ManagedArtifactServiceTest {
                 "bytes=0-1048576", "bytes=0-", "bytes=-1048577"}) {
             assertThatThrownBy(() -> ManagedArtifactService.select(range, 2_000_000))
                     .as(range).isInstanceOfSatisfying(ApiException.class,
-                            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST));
+                            error -> {
+                                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                                String code =
+                                        range.contains(",")
+                                                ? "unsupported_range"
+                                                : java.util.List.of(
+                                                                        "bytes=0-1048576",
+                                                                        "bytes=0-",
+                                                                        "bytes=-1048577")
+                                                                .contains(range)
+                                                        ? "range_too_large"
+                                                        : "invalid_range";
+                                assertThat(error.getCode()).isEqualTo(code);
+                            });
         }
     }
 

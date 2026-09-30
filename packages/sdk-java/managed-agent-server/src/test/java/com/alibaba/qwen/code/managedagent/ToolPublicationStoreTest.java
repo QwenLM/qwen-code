@@ -3,19 +3,20 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
+
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.api.ApiException;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -28,9 +29,20 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -43,17 +55,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
-import org.flywaydb.core.Flyway;
-import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 class ToolPublicationStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -74,6 +75,7 @@ class ToolPublicationStoreTest {
     private ManagedArtifactReader apiReader;
     private Map<String, byte[]> apiObjects;
     private String apiFailNextObject;
+    private ToolPublicationDataStore apiPublications;
     private boolean keepApiFixture;
     private boolean quarantineBeforeProjection;
     private JdbcRuntimeBindingRepository bindings;
@@ -561,6 +563,7 @@ class ToolPublicationStoreTest {
         assertThat(blockedPublic.path("execution_status").asText()).isEqualTo("error");
         assertThat(blockedPublic.path("capture_status").asText()).isEqualTo("unavailable");
         assertThat(blockedPublic.path("delivery_status").asText()).isEqualTo("blocked");
+        assertThat(blockedPublic.path("reason_code").asText()).isEqualTo("storage_failed");
         assertThat(blockedPublic.path("upstream_truncated").isNull()).isTrue();
         assertThat(blockedPublic.path("artifacts")).isEmpty();
         String objectKey = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object"
@@ -792,6 +795,7 @@ class ToolPublicationStoreTest {
             assertThat(projected.path("delivery_status").asText()).isEqualTo("committed");
             assertThat(projected.has("preview")).isFalse();
             assertThat(projected.path("artifacts")).isEmpty();
+            apiPublications = data;
             apiReader = new ManagedArtifactReader(publicationProvider(data));
             return;
         }
@@ -811,9 +815,16 @@ class ToolPublicationStoreTest {
                 .stream().filter(artifact -> artifact.streamId().equals("stdout")).findFirst().orElseThrow();
         jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
         assertThat(publicReader.readRange(stdout, 1, 2)).isEqualTo("bc".getBytes(StandardCharsets.UTF_8));
+        var guardCalls = new java.util.concurrent.atomic.AtomicInteger();
+        assertThatThrownBy(() -> publicReader.readRange(stdout, 1, 2, () -> {
+            if (guardCalls.incrementAndGet() == 2) {
+                throw new IllegalStateException("revoked mid-range");
+            }
+        })).hasMessage("revoked mid-range");
         // Restore the lease only for the existing private-reader corruption checks.
         jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2099-01-01 00:00:00'");
         if (keepApiFixture) {
+            apiPublications = data;
             apiReader = publicReader;
             apiObjects = objects;
             return;
@@ -1599,7 +1610,304 @@ class ToolPublicationStoreTest {
 
     record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
             ManagedAgentStore sessions, ManagedArtifactReader reader, ManagedAgentProperties properties,
-            ManagedArtifactPolicy policy, ManagedWorkspaceRegistry workspaces) { }
+            ManagedArtifactPolicy policy, ManagedWorkspaceRegistry workspaces,
+            ToolPublicationDataStore publications) {}
+
+    static ApiFixture largeApiFixture(int total) throws Exception {
+        var fixture = new ToolPublicationStoreTest();
+        fixture.setup();
+        var jdbc = fixture.jdbc;
+        var manager = fixture.manager;
+        var sessions = fixture.sessions;
+        var executions = fixture.executions;
+        var bindings = fixture.bindings;
+        var binding = fixture.binding;
+        var revision = fixture.revision;
+        var sequence = fixture.sequence;
+        var commitDigest = fixture.commitDigest;
+        long allocation =
+                total
+                        + ToolPublicationContract.PRODUCER_BYTES
+                        + ToolPublicationContract.ADMISSION_BYTES;
+        var store =
+                new ToolPublicationStore(
+                        jdbc,
+                        manager,
+                        sessions,
+                        executions,
+                        bindings,
+                        new ToolPublicationStore.Capacity(total, allocation, allocation, 1));
+        store.apply(
+                fixture.request("reserve").put("captureBytes", total),
+                WRITER_TOKEN,
+                PUBLICATION_TOKEN);
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        ToolPublicationObjectStore bucket =
+                new ToolPublicationObjectStore() {
+                    @Override
+                    public void putIfAbsent(String key, byte[] bytes) {
+                        objects.putIfAbsent(key, bytes.clone());
+                    }
+
+                    @Override
+                    public InputStream open(String key) {
+                        return new ByteArrayInputStream(objects.get(key));
+                    }
+
+                    @Override
+                    public void requireUnversioned() {}
+                };
+        var data =
+                new ToolPublicationDataStore(
+                        jdbc,
+                        manager,
+                        store,
+                        sessions,
+                        bucket,
+                        Duration.ofMinutes(2),
+                        Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        byte[] segment = "A".repeat(total / 2).getBytes(StandardCharsets.UTF_8);
+        data.publishSegment(
+                key,
+                "pub-1",
+                PUBLICATION_TOKEN,
+                "operation-1",
+                "stdout",
+                0,
+                segment,
+                digest("A".repeat(total / 2)));
+
+        data.publishSegment(
+                key,
+                "pub-1",
+                PUBLICATION_TOKEN,
+                "operation-second",
+                "stdout",
+                1,
+                "A".repeat(total / 2).getBytes(StandardCharsets.UTF_8),
+                digest("A".repeat(total / 2)));
+        data.seal(
+                        key,
+                        "pub-1",
+                        PUBLICATION_TOKEN,
+                        "operation-seal",
+                        "stdout",
+                        2,
+                        total,
+                        digest("A".repeat(total)))
+                .path("segmentCount")
+                .asInt();
+        data.seal(
+                key,
+                "pub-1",
+                PUBLICATION_TOKEN,
+                "operation-seal-empty",
+                "stderr",
+                0,
+                0,
+                digest(""));
+
+        ObjectNode page =
+                JSON.createObjectNode()
+                        .put("toolResult", "managed-tool-result/1")
+                        .put("type", "page")
+                        .put("captureId", "capture-1")
+                        .put("streamId", "stdout")
+                        .put("firstOrdinal", 0)
+                        .put("offset", 0);
+        page.putArray("segments")
+                .add(
+                        JSON.createObjectNode()
+                                .put("byteLength", total / 2)
+                                .put("digest", digest("A".repeat(total / 2))))
+                .add(
+                        JSON.createObjectNode()
+                                .put("byteLength", total / 2)
+                                .put("digest", digest("A".repeat(total / 2))));
+
+        JsonNode ref =
+                data.publishResource(
+                        key,
+                        "pub-1",
+                        PUBLICATION_TOKEN,
+                        "operation-3",
+                        "page:stdout:0",
+                        "managed-tool-result-page",
+                        page.toString().getBytes(StandardCharsets.UTF_8));
+
+        ObjectNode manifest =
+                JSON.createObjectNode()
+                        .put("toolResult", "managed-tool-result/1")
+                        .put("type", "manifest")
+                        .put("tenantId", "tenant-1")
+                        .put("sessionId", "session-1")
+                        .put("turnId", "turn-1")
+                        .put("executionCallId", "execution-1")
+                        .put("callId", "runtime-call-1")
+                        .put(
+                                "invocationDigest",
+                                binding.path("reference").path("argsDigest").asText())
+                        .put("bindingGeneration", "1")
+                        .put("captureId", "capture-1")
+                        .put("revision", 1)
+                        .put("executionStatus", "success")
+                        .put("exitCode", 0)
+                        .putNull("signal")
+                        .put("captureScope", "process_pipes")
+                        .put("capturePolicy", "complete_required")
+                        .put("captureStatus", "complete")
+                        .putNull("captureReason")
+                        .put("upstreamTruncated", false);
+        ObjectNode content =
+                JSON.createObjectNode()
+                        .put("streamId", "stdout")
+                        .put("role", "stdout")
+                        .put("mimeType", "application/octet-stream")
+                        .put("state", "sealed")
+                        .put("byteLength", total)
+                        .put("digest", digest("A".repeat(total)));
+        content.putArray("missingRanges");
+        ObjectNode body = JSON.createObjectNode();
+        ObjectNode pageLink =
+                JSON.createObjectNode().put("segmentCount", 2).put("byteLength", total);
+        pageLink.set("ref", ref);
+        body.putArray("pages").add(pageLink);
+        content.set("body", body);
+        manifest.putArray("contents").add(content);
+        ObjectNode stderr =
+                JSON.createObjectNode()
+                        .put("streamId", "stderr")
+                        .put("role", "stderr")
+                        .put("mimeType", "application/octet-stream")
+                        .put("state", "sealed")
+                        .put("byteLength", 0)
+                        .put("digest", digest(""));
+        stderr.putArray("missingRanges");
+        ObjectNode emptyBody = JSON.createObjectNode();
+        emptyBody.putArray("pages");
+        stderr.set("body", emptyBody);
+        ((com.fasterxml.jackson.databind.node.ArrayNode) manifest.path("contents")).add(stderr);
+        JsonNode manifestRef =
+                data.publishResource(
+                        key,
+                        "pub-1",
+                        PUBLICATION_TOKEN,
+                        "operation-manifest",
+                        "manifest:1",
+                        "managed-tool-result-manifest",
+                        manifest.toString().getBytes(StandardCharsets.UTF_8));
+        ObjectNode capture =
+                JSON.createObjectNode()
+                        .put("captureStatus", "complete")
+                        .putNull("captureReason")
+                        .put("previewTruncated", false)
+                        .put("deliveryStatus", "pending");
+        capture.set("manifest", manifestRef);
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts");
+        envelope.set("capture", capture);
+        data.finish(
+                        key,
+                        "pub-1",
+                        PUBLICATION_TOKEN,
+                        "operation-finish",
+                        envelope.toString().getBytes(StandardCharsets.UTF_8))
+                .path("producerPhase")
+                .asText();
+
+        store.apply(fixture.request("fence"), WRITER_TOKEN, null);
+
+        ObjectNode outcome =
+                JSON.createObjectNode().put("schemaVersion", 1).put("decision", "committed");
+        outcome.set("envelope", envelope);
+        outcome.set("manifestRef", manifestRef);
+        ObjectNode history =
+                JSON.createObjectNode()
+                        .put("messageId", "22222222-2222-4222-8222-222222222222")
+                        .put("timestamp", "2026-09-28T00:00:00Z")
+                        .put("model", "test");
+        history.putArray("parts").addObject().put("text", "done");
+        outcome.set("history", history);
+        JsonNode admission =
+                data.prepareAdmission(key, "pub-1", "writer-1", 1, WRITER_TOKEN, outcome);
+
+        ObjectNode receiptPayload =
+                JSON.createObjectNode()
+                        .put("executionCallId", "execution-1")
+                        .put("historyRevision", sequence + 1);
+        receiptPayload.set("toolOutcomeRef", admission);
+        receiptPayload.set("resultRef", manifestRef);
+        receiptPayload.putArray("resources").add(manifestRef);
+        String recordBytes = fixture.event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
+        long receiptSequence = sequence + 1;
+        var commit =
+                new ManagedSessionStoreModels.CommitTransactionRequest(
+                        "workspace-1",
+                        "writer-1",
+                        1,
+                        revision,
+                        sequence,
+                        "transaction-receipt",
+                        "recordToolResult",
+                        "execution-1",
+                        admission.path("digest").asText(),
+                        receiptSequence,
+                        receiptSequence,
+                        1,
+                        digest(recordBytes),
+                        commitDigest,
+                        digest(recordBytes),
+                        1,
+                        null,
+                        2,
+                        Base64.getEncoder()
+                                .encodeToString(recordBytes.getBytes(StandardCharsets.UTF_8)),
+                        digest(recordBytes),
+                        List.of(
+                                new ManagedSessionStoreModels.CommitResource(
+                                        admission.path("resourceId").asText(),
+                                        "managed-tool-outcome",
+                                        1,
+                                        admission.path("byteLength").asLong(),
+                                        admission.path("digest").asText(),
+                                        null),
+                                new ManagedSessionStoreModels.CommitResource(
+                                        manifestRef.path("resourceId").asText(),
+                                        "managed-tool-result-manifest",
+                                        1,
+                                        manifestRef.path("byteLength").asLong(),
+                                        manifestRef.path("digest").asText(),
+                                        null)));
+        var admissions = new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
+        admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
+
+        fixture.insertPublicSession();
+        var results = fixture.publicResults;
+        var properties = fixture.projectionProperties;
+        var beans = new org.springframework.beans.factory.support.StaticListableBeanFactory();
+        beans.addBean("publication", data);
+        var provider = beans.getBeanProvider(ToolPublicationDataStore.class);
+        var policy = publicationPolicy();
+        new ManagedToolResultProjector(
+                        results,
+                        jdbc,
+                        provider,
+                        new ManagedArtifactReader(provider),
+                        policy,
+                        properties)
+                .project(results.claim().orElseThrow());
+        return new ApiFixture(
+                jdbc,
+                manager,
+                results,
+                fixture.publicSessions,
+                new ManagedArtifactReader(provider),
+                properties,
+                policy,
+                fixture.publicWorkspaces,
+                data);
+    }
 
     static ApiFixture apiFixture() {
         var fixture = new ToolPublicationStoreTest();
@@ -1624,7 +1932,22 @@ class ToolPublicationStoreTest {
         fixture.keepApiFixture = true;
         fixture.publishesImmutableSegmentAndResourceUnderOriginalAuthorization();
         return new ApiFixture(fixture.jdbc, fixture.manager, fixture.publicResults, fixture.publicSessions,
-                fixture.apiReader, fixture.projectionProperties, publicationPolicy(), fixture.publicWorkspaces);
+                fixture.apiReader, fixture.projectionProperties, publicationPolicy(), fixture.publicWorkspaces,
+                fixture.apiPublications);
+    }
+
+    @Test
+    void publishesASixKiBPreviewWithoutPrematureTruncation() throws Exception {
+        var fixture = largeApiFixture(6144);
+        var result =
+                JSON.readTree(
+                        fixture.jdbc()
+                                .queryForObject(
+                                        "SELECT descriptor_json FROM managed_agent_tool_result",
+                                        String.class));
+        assertThat(result.path("preview").path("text").asText()).isEqualTo("A".repeat(6144));
+        assertThat(result.path("preview").path("source_end").asInt()).isEqualTo(6144);
+        assertThat(result.path("preview").path("truncated").asBoolean()).isFalse();
     }
 
     @Test
@@ -1633,6 +1956,9 @@ class ToolPublicationStoreTest {
         assertThat(jdbc.queryForObject("SELECT producer_phase FROM qwen_tool_publication", String.class)).isEqualTo("OPEN");
         assertThat(jdbc.queryForObject("SELECT receipt_sequence FROM qwen_tool_publication", Long.class)).isNull();
         jdbc.update("DELETE FROM managed_agent_tool_result");
+        jdbc.update(
+                "UPDATE qwen_managed_session_journal_head SET o3_backfill_pending = TRUE,"
+                    + " o3_backfill_through = NULL");
         for (int i = 0; i < 4; i++) {
             publicResults.backfillOnePage();
         }
@@ -1642,6 +1968,7 @@ class ToolPublicationStoreTest {
         assertThat(result.path("capture_status").isNull()).isTrue();
         assertThat(result.path("capture_scope").isNull()).isTrue();
         assertThat(result.path("upstream_truncated").isNull()).isTrue();
+        assertThat(result.path("artifacts").isArray()).isTrue();
         assertThat(result.path("artifacts")).isEmpty();
         publicSessions.appendPublicEventIfAbsent("tenant-1", "session-1", "turn_public_1", "item.tool_call.updated",
                 Map.of("toolCallId", "model-1", "status", "in_progress"), false, "late-tool-update");
@@ -1705,6 +2032,80 @@ class ToolPublicationStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isZero();
     }
 
+    @Test
+    void lapsedCurrentClaimBacksOffWithoutPublishing() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        var provider = publicationProvider(null);
+        var claim = publicResults.claim().orElseThrow();
+        jdbc.update("UPDATE managed_agent_tool_result SET claim_until = 1");
+        new ManagedToolResultProjector(
+                        publicResults,
+                        jdbc,
+                        provider,
+                        new ManagedArtifactReader(provider),
+                        publicationPolicy(),
+                        projectionProperties)
+                .project(claim);
+        var row =
+                jdbc.queryForMap(
+                        "SELECT work_state, failure_code, next_attempt_at FROM"
+                            + " managed_agent_tool_result");
+        assertThat(row.get("work_state")).isEqualTo("RETRYABLE");
+        assertThat(row.get("failure_code")).isEqualTo("projection_claim_lapsed");
+        assertThat(((Number) row.get("next_attempt_at")).longValue())
+                .isGreaterThan(System.currentTimeMillis());
+        assertThat(publicResults.claim()).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class))
+                .isZero();
+    }
+
+    @Test
+    void missingPublicTurnIsDistinctFromAnUnsupportedProducer() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        jdbc.update("DELETE FROM managed_agent_turn");
+        var provider = publicationProvider(null);
+        new ManagedToolResultProjector(
+                        publicResults,
+                        jdbc,
+                        provider,
+                        new ManagedArtifactReader(provider),
+                        publicationPolicy(),
+                        projectionProperties)
+                .project(publicResults.claim().orElseThrow());
+        assertThat(
+                        jdbc.queryForObject(
+                                "SELECT failure_code FROM managed_agent_tool_result", String.class))
+                .isEqualTo("public_turn_mapping_missing");
+    }
+
+    @Test
+    void tickPublishesOneReceiptOnlyWhenEnabled() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        var provider = publicationProvider(null);
+        var projector = new ManagedToolResultProjector(publicResults, jdbc, provider,
+                new ManagedArtifactReader(provider), publicationPolicy(), projectionProperties);
+        projectionProperties.getArtifacts().setEnabled(false);
+        projector.tick();
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("SELECT claim_generation FROM managed_agent_tool_result", Long.class)).isZero();
+        projectionProperties.getArtifacts().setEnabled(true);
+        projector.tick();
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("READY");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isEqualTo(1);
+    }
+
+    @Test
+    void newHeadsSkipHistoricalBackfill() {
+        ordinaryNotStartedReceipt();
+        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM qwen_managed_session_journal_head", Boolean.class)).isFalse();
+        jdbc.update("DELETE FROM managed_agent_tool_result");
+        publicResults.backfillOnePage();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isZero();
+    }
+
     private void ordinaryNotStartedReceipt() {
         reserve();
         var execution = executions.findByExecutionCallId("execution-1");
@@ -1731,6 +2132,18 @@ class ToolPublicationStoreTest {
         var crashedClaim = publicResults.claim().orElseThrow();
         jdbc.update("UPDATE managed_agent_tool_result SET claim_until = 1 WHERE result_id = ?", crashedClaim.source().id());
         var replacement = publicResults.claim().orElseThrow();
+        projector.project(crashedClaim);
+        assertThat(
+                        jdbc.queryForObject(
+                                "SELECT work_state FROM managed_agent_tool_result", String.class))
+                .isEqualTo("LEASED");
+        assertThat(
+                        jdbc.queryForObject(
+                                "SELECT claim_generation FROM managed_agent_tool_result",
+                                Long.class))
+                .isEqualTo(replacement.generation());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class))
+                .isZero();
         projector.project(replacement);
         projector.project(crashedClaim);
         assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class)).isEqualTo("READY");

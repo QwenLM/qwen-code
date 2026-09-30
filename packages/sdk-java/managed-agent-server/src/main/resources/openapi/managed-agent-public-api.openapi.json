@@ -670,7 +670,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Authorized persisted tool result resource.",
+            "description": "Authorized artifact metadata page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2810,7 +2810,7 @@
         "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
-            "description": "Authorized persisted tool result resource.",
+            "description": "Authorized persisted artifact metadata.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2891,7 +2891,7 @@
         "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
-            "description": "Authorized persisted tool result resource.",
+            "description": "Authorized artifact metadata page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3066,7 +3066,7 @@
         "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
-            "description": "Authorized persisted tool result resource.",
+            "description": "Authorized persisted artifact metadata.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4240,6 +4240,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "object",
           "id",
           "session_id",
           "result_id",
@@ -4252,6 +4253,9 @@
           "created_at"
         ],
         "properties": {
+          "object": {
+            "const": "agent.artifact"
+          },
           "id": {
             "type": "string",
             "minLength": 1,
@@ -8840,7 +8844,8 @@
           },
           "projection_revision": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "description": "This implementation projects each result once at revision 1. Monotonic consumers reject duplicate or stale replay events; reprojection requires a separately reviewed migration and producer."
           },
           "execution_status": {
             "type": "string",
@@ -8865,17 +8870,12 @@
           },
           "delivery_status": {
             "type": "string",
-            "enum": [
-              "pending",
-              "committed",
-              "blocked"
-            ]
+            "enum": ["pending", "committed", "blocked"],
+            "description": "O3 emits committed or blocked from the durable receipt. Pending is reserved for future producers and is not emitted by this implementation."
           },
           "capture_scope": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": ["string", "null"],
+            "enum": ["process_pty", "process_pipes", "tool_native", null]
           },
           "upstream_truncated": {
             "type": [
@@ -8884,11 +8884,16 @@
             ]
           },
           "reason_code": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "maxLength": 128
+            "type": ["string", "null"],
+            "maxLength": 128,
+            "enum": [
+              "quota_exhausted",
+              "size_limit",
+              "producer_lost",
+              "storage_failed",
+              "cancelled",
+              null
+            ]
           },
           "preview": {
             "anyOf": [
@@ -9041,7 +9046,8 @@
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 100
+            "maximum": 100,
+            "default": 20
           }
         }
       }

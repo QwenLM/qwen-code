@@ -118,7 +118,17 @@ For historical receipts, scan each retained journal with a fixed captured high w
 
 Persist the backfill high watermark and last scanned private journal revision in a small per-Session checkpoint, committing page inserts and checkpoint advancement together. This is scan progress, not a third resource-reference table. Never reuse the public Snapshot's `covered_sequence` for this cursor.
 
-Results can become public after `turn.completed`. Reducers apply the result to the settled Item without restarting the Turn or adding another terminal event. A later projection revision replaces only the result view. Receipt sequence, public event sequence, manifest revision, and projection revision are distinct counters.
+Results can become public after `turn.completed`. Reducers apply the result to the settled Item without restarting the Turn or adding another terminal event. Consumers can accept later revisions, but this slice does not produce a second projection. Receipt sequence, public event sequence, manifest revision, and projection revision are distinct counters.
+
+### Review follow-up: implemented queue and read boundaries
+
+Current receipts are parsed once with the extension records and captured with a batched source lookup/insert inside the journal transaction, including while public projection is disabled. New journal heads start with historical backfill complete. Heads that predate O3 enter an indexed pending queue; each page atomically advances its fixed watermark checkpoint and clears the pending marker when drained or quarantined. Claim selection reads one indexed eligible head for each of PENDING, RETRYABLE, and expired LEASED, rather than sorting the entire eligible backlog. A lapsed current claim enters bounded retry backoff; a superseded generation cannot modify its replacement.
+
+Projection runs on a dedicated single-thread scheduler, while existing Harness, lifecycle, and message schedules retain the default scheduler. A READY source is not reclaimed: this implementation emits projection_revision 1 exactly once. Replay consumers retain monotonic revision guards for duplicate/stale events; supporting a second policy projection requires the separately reviewed representation migration above. Public delivery pending is reserved; accepted receipts currently publish committed or blocked. Missing public Turn mapping has its own unsupported diagnostic.
+
+Metadata evaluates the current raw-read policy once per request and batches publication availability checks per Session scope. Content requests retain fresh authorization and catalog checks at every chunk boundary. An initial guard and range bounds run before metadata closure reads. Fixed-revision reads still verify the complete immutable metadata closure; reducing closure verification or throttling current grants is not part of this change. Audit records distinguish denied, rejected, interrupted, and completed reads, including completed zero-byte streams.
+
+The preview source window is up to 8 KiB, with independent UTF-8 byte and 200-line limits. WebShell retains four pages including lookback bytes, keeps an output panel mounted across a same-Session refresh, and settles assistant text before a new result row in the current Turn. Transient 429/503 content reads retry the identical request once after Retry-After (a maximum five-second wait; a longer Retry-After is returned as an error without an early retry); cancellation also aborts that wait. Java-produced contract fixtures are compared on every normal test run, normalizing only timestamps and randomly assigned event IDs.
 
 ## 5. Public contract and event recovery
 

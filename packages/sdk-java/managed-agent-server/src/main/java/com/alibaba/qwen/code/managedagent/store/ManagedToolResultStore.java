@@ -10,6 +10,8 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -53,30 +55,46 @@ public class ManagedToolResultStore {
     // The caller holds the journal transaction. This hook performs no object I/O.
     void capture(String tenant, String workspace, String session, long revision, long firstSequence,
             int eventCount, byte[] records) {
+        List<JsonNode> events = new ArrayList<>();
         int index = -1;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
             index++;
             JsonNode record = ToolPublicationContract.readJson(line.getBytes(StandardCharsets.UTF_8));
             JsonNode event = record.path("managedSession");
-            if (!"managed_session_event_v1".equals(record.path("subtype").asText())
-                    || !"tool.receipt".equals(event.path("kind").asText())) {
-                continue;
+            if ("managed_session_event_v1".equals(record.path("subtype").asText())
+                    && "tool.receipt".equals(event.path("kind").asText())) {
+                require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
+                        "Tool receipt has an invalid journal position");
+                events.add(event);
             }
-            require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
-                    "Tool receipt has an invalid journal position");
+        }
+        captureEvents(tenant, workspace, session, revision, events);
+    }
+
+    void captureEvents(String tenant, String workspace, String session, long revision, List<JsonNode> events) {
+        Map<String, Source> sources = new LinkedHashMap<>();
+        for (JsonNode event : events) {
             Source source = source(tenant, workspace, session, revision, event);
-            String prior = jdbc.query("SELECT source_digest FROM managed_agent_tool_result WHERE result_id = ?",
-                    (r, n) -> r.getString(1), source.id()).stream().findFirst().orElse(null);
-            if (prior != null) {
-                require(prior.equals(source.sourceDigest()), "Tool receipt source changed");
-                continue;
-            }
-            jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key,"
-                            + " tenant_id, workspace_id, session_id, source_json, source_digest)"
-                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", source.id(), scope(tenant, session),
-                    identity("execution", source.executionCallId().isEmpty() ? "sequence:" + source.receiptSequence()
-                            : source.executionCallId()).substring(10), tenant, workspace, session,
-                    JSON.valueToTree(source).toString(), source.sourceDigest());
+            Source prior = sources.putIfAbsent(source.id(), source);
+            require(prior == null || prior.sourceDigest().equals(source.sourceDigest()), "Tool receipt source changed");
+        }
+        if (sources.isEmpty()) {
+            return;
+        }
+        var existing = jdbc.queryForList("SELECT result_id, source_digest FROM managed_agent_tool_result"
+                + " WHERE result_id IN (" + String.join(",", Collections.nCopies(sources.size(), "?")) + ")",
+                sources.keySet().toArray());
+        for (var row : existing) {
+            Source source = sources.remove((String) row.get("result_id"));
+            require(source.sourceDigest().equals(row.get("source_digest")), "Tool receipt source changed");
+        }
+        if (!sources.isEmpty()) {
+            jdbc.batchUpdate("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key,"
+                    + " tenant_id, workspace_id, session_id, source_json, source_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    sources.values().stream().map(source -> new Object[] {source.id(), scope(tenant, session),
+                            identity("execution", source.executionCallId().isEmpty() ? "sequence:" + source.receiptSequence()
+                                    : source.executionCallId()).substring(10), tenant, workspace, session,
+                            JSON.valueToTree(source).toString(), source.sourceDigest()}).toList());
         }
     }
 
@@ -86,8 +104,7 @@ public class ManagedToolResultStore {
             transactions.executeWithoutResult(status -> {
                 var heads = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, journal_revision,"
                         + " o3_backfill_revision, o3_backfill_through FROM qwen_managed_session_journal_head"
-                        + " WHERE o3_backfill_error IS NULL AND (o3_backfill_through IS NULL"
-                        + " OR o3_backfill_revision < o3_backfill_through)"
+                        + " WHERE o3_backfill_pending = TRUE AND o3_backfill_error IS NULL"
                         + " ORDER BY tenant_id, session_id LIMIT 1 FOR UPDATE");
                 if (heads.isEmpty()) {
                     return;
@@ -117,12 +134,12 @@ public class ManagedToolResultStore {
                     require(after == through, "Backfill journal is incomplete");
                 }
                 jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_revision = ?,"
-                                + " o3_backfill_through = ? WHERE tenant_id = ? AND session_id = ?",
-                        after, through, tenant, session);
+                                + " o3_backfill_through = ?, o3_backfill_pending = ? WHERE tenant_id = ? AND session_id = ?",
+                        after, through, after < through, tenant, session);
             });
         } catch (IllegalArgumentException error) {
             if (selected[0] != null) {
-                jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_error = 'invalid_journal'"
+                jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_error = 'invalid_journal', o3_backfill_pending = FALSE"
                         + " WHERE tenant_id = ? AND session_id = ?", selected[0], selected[1]);
             }
             throw error;
@@ -132,10 +149,16 @@ public class ManagedToolResultStore {
     public Optional<Claim> claim() {
         return Optional.ofNullable(transactions.execute(status -> {
             long now = now();
-            var rows = jdbc.queryForList("SELECT result_id, source_json, claim_generation FROM"
-                    + " managed_agent_tool_result WHERE (work_state IN ('PENDING', 'RETRYABLE')"
-                    + " AND next_attempt_at <= ?) OR (work_state = 'LEASED' AND claim_until <= ?)"
-                    + " ORDER BY next_attempt_at, result_id LIMIT 1 FOR UPDATE", now, now);
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (String state : List.of("PENDING", "RETRYABLE", "LEASED")) {
+                String due = "LEASED".equals(state) ? "claim_until" : "next_attempt_at";
+                rows.addAll(jdbc.queryForList("SELECT result_id, source_json, claim_generation, "
+                        + due + " AS due_at FROM managed_agent_tool_result WHERE work_state = ? AND "
+                        + due + " <= ? ORDER BY " + due + ", result_id LIMIT 1 FOR UPDATE", state, now));
+            }
+            rows.sort(java.util.Comparator.<Map<String, Object>>comparingLong(
+                    row -> ((Number) row.get("due_at")).longValue())
+                    .thenComparing(row -> (String) row.get("result_id")));
             if (rows.isEmpty()) {
                 return null;
             }
@@ -191,8 +214,11 @@ public class ManagedToolResultStore {
             var rows = jdbc.queryForList("SELECT work_state, claim_generation, claim_until, source_digest FROM"
                     + " managed_agent_tool_result WHERE result_id = ? FOR UPDATE", source.id());
             if (rows.isEmpty() || !"LEASED".equals(rows.getFirst().get("work_state"))
-                    || ((Number) rows.getFirst().get("claim_generation")).longValue() != claim.generation()
-                    || ((Number) rows.getFirst().get("claim_until")).longValue() <= now()) {
+                    || ((Number) rows.getFirst().get("claim_generation")).longValue() != claim.generation()) {
+                return false;
+            }
+            if (((Number) rows.getFirst().get("claim_until")).longValue() <= now()) {
+                fail(claim, "RETRYABLE", "projection_claim_lapsed");
                 return false;
             }
             require(source.sourceDigest().equals(rows.getFirst().get("source_digest")), "Projection source changed");
@@ -240,8 +266,8 @@ public class ManagedToolResultStore {
     private void verifyCatalog(Source source, Projection projection) {
         var rows = jdbc.queryForList("SELECT state, producer_phase, binding_digest, admission_resource_id,"
                         + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication"
-                        + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
-                source.tenantId(), source.workspaceId(), source.sessionId(), projection.publicationId());
+                        + " WHERE scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
+                ToolPublicationDataStore.scope(source.sessionKey()), source.tenantId(), source.workspaceId(), source.sessionId(), projection.publicationId());
         require(rows.size() == 1, "Original publication disappeared");
         var row = rows.getFirst();
         require(ToolPublicationContract.bindingDigest(projection.binding()).equals(row.get("binding_digest")),

@@ -19,7 +19,7 @@ import type {
 } from './managed-tool-result-types';
 
 export const MANAGED_OUTPUT_PAGE_BYTES = 64 * 1024;
-const MAX_CACHE_BYTES = 4 * MANAGED_OUTPUT_PAGE_BYTES;
+const MAX_CACHE_BYTES = 4 * (MANAGED_OUTPUT_PAGE_BYTES + 3);
 
 export function ManagedToolResultPanel({
   reader,

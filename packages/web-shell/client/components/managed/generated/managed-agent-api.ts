@@ -355,6 +355,8 @@ export interface components {
             text: string;
         };
         PublicArtifact: {
+            /** @constant */
+            object: "agent.artifact";
             id: string;
             session_id: string;
             result_id: string;
@@ -851,16 +853,22 @@ export interface components {
             session_id: string;
             turn_id: string;
             item_id: string;
+            /** @description This implementation projects each result once at revision 1. Monotonic consumers reject duplicate or stale replay events; reprojection requires a separately reviewed migration and producer. */
             projection_revision: number;
             /** @enum {string} */
             execution_status: "success" | "error" | "cancelled" | "not_started";
             /** @enum {string|null} */
             capture_status: "complete" | "partial" | "unavailable" | null;
-            /** @enum {string} */
+            /**
+             * @description O3 emits committed or blocked from the durable receipt. Pending is reserved for future producers and is not emitted by this implementation.
+             * @enum {string}
+             */
             delivery_status: "pending" | "committed" | "blocked";
-            capture_scope: string | null;
+            /** @enum {string|null} */
+            capture_scope: "process_pty" | "process_pipes" | "tool_native" | null;
             upstream_truncated: boolean | null;
-            reason_code?: string | null;
+            /** @enum {string|null} */
+            reason_code?: "quota_exhausted" | "size_limit" | "producer_lost" | "storage_failed" | "cancelled" | null;
             preview?: components["schemas"]["ToolResultPreview"] | null;
             artifacts: components["schemas"]["PublicArtifact"][];
         };
@@ -891,6 +899,7 @@ export interface components {
         WebShellArtifactQueryRequest: {
             sessionId: string;
             cursor?: string | null;
+            /** @default 20 */
             limit?: number;
         };
     };
@@ -1549,7 +1558,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Authorized persisted tool result resource. */
+            /** @description Authorized persisted artifact metadata. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1618,7 +1627,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Authorized persisted tool result resource. */
+            /** @description Authorized artifact metadata page. */
             200: {
                 headers: {
                     [name: string]: unknown;

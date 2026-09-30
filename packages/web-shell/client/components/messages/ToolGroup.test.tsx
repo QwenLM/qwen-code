@@ -25,7 +25,12 @@ import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
-import { result as managedResult } from '../managed/managed-tool-result.test-fixtures';
+import {
+  result as managedResult,
+  notStartedResult,
+  blockedResult,
+  previewOnlyResult,
+} from '../managed/managed-tool-result.test-fixtures';
 
 vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -211,6 +216,21 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it.each([
+    [notStartedResult, 'Command not executed'],
+    [blockedResult, 'Output delivery blocked'],
+    [previewOnlyResult, 'Command succeeded'],
+  ])(
+    'renders the shared result facts in tool summaries: %s',
+    (result, expected) => {
+      const container = renderToolLine(
+        makeTool({ toolResult: result }),
+        { onToolResultOpen: vi.fn() },
+        {},
+      );
+      expect(container.textContent).toContain(expected);
+    },
+  );
   it('rerenders a result-only revision change and opens its canonical Item', () => {
     const onOpen = vi.fn();
     const customization = {};

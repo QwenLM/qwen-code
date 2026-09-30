@@ -2,11 +2,41 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+
 class ManagedToolResultProjectorTest {
+    @Test
+    void disabledTickDoesNoWorkAndEnabledTickStopsAfterEightClaims() {
+        var store = org.mockito.Mockito.mock(ManagedToolResultStore.class);
+        var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
+        var factory = new org.springframework.beans.factory.support.StaticListableBeanFactory();
+        var projector =
+                org.mockito.Mockito.spy(
+                        new ManagedToolResultProjector(
+                                store,
+                                org.mockito.Mockito.mock(
+                                        org.springframework.jdbc.core.JdbcTemplate.class),
+                                factory.getBeanProvider(ToolPublicationDataStore.class),
+                                org.mockito.Mockito.mock(ManagedArtifactReader.class),
+                                org.mockito.Mockito.mock(
+                                        com.alibaba.qwen.code.managedagent.service
+                                                .ManagedArtifactPolicy.class),
+                                properties));
+        projector.tick();
+        org.mockito.Mockito.verifyNoInteractions(store);
+        var claim = new ManagedToolResultStore.Claim(null, 1);
+        org.mockito.Mockito.when(store.claim()).thenReturn(java.util.Optional.of(claim));
+        org.mockito.Mockito.doNothing().when(projector).project(claim);
+        properties.getArtifacts().setEnabled(true);
+        projector.tick();
+        org.mockito.Mockito.verify(store).backfillOnePage();
+        org.mockito.Mockito.verify(store, org.mockito.Mockito.times(8)).claim();
+        org.mockito.Mockito.verify(projector, org.mockito.Mockito.times(8)).project(claim);
+    }
+
     @Test
     void limitsDecodedInvalidUtf8ByEncodedBytesWithoutSplittingCharacters() {
         byte[] raw = new byte[4096];

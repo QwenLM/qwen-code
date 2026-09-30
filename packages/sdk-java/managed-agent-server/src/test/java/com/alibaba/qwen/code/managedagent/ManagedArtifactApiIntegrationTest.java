@@ -26,36 +26,35 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWr
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.Base64;
+import java.util.Set;
+
 class ManagedArtifactApiIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String ROOT = "/v1/agents/sessions/session-1";
-    private ToolPublicationStoreTest.ApiFixture fixture;
-    private ManagedAgentService sessions;
-    private MockMvc mvc;
-    private JsonNode stdout;
-    private JsonNode stderr;
-    private String itemId;
+    ToolPublicationStoreTest.ApiFixture fixture;
+    ManagedAgentService sessions;
+    MockMvc mvc;
+    JsonNode stdout;
+    JsonNode stderr;
+    String itemId;
 
     @BeforeEach
     void setup() {
-        String mysql = System.getProperty("qwen.o3.mysql.url");
-        fixture = mysql == null ? ToolPublicationStoreTest.apiFixture()
-                : ToolPublicationStoreTest.apiFixture(new DriverManagerDataSource(mysql,
-                        System.getProperty("qwen.o3.mysql.user", "root"),
-                        System.getProperty("qwen.o3.mysql.password", "")));
+        fixture = ToolPublicationStoreTest.apiFixture();
         configureApi();
         var artifacts = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts();
         stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
@@ -64,7 +63,7 @@ class ManagedArtifactApiIntegrationTest {
                 .items().getFirst().itemId();
     }
 
-    private void configureApi() {
+    void configureApi() {
         fixture.jdbc().update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
                 + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant-1', 'workspace-1', 1, 'storage-1', 'Test', 'config', 'policy', 'ACTIVE')");
@@ -125,23 +124,32 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(jsonPath("$.result.capture_status").value("complete"))
                 .andExpect(jsonPath("$.result.delivery_status").value("committed"))
                 .andExpect(jsonPath("$.access.can_read_content").value(true))
-                .andExpect(response -> schema("WebShellToolResultResponse", response.getResponse().getContentAsString()))
+                .andExpect(response ->
+                                        contract(
+                                                "getToolResult",
+                                                "WebShellToolResultResponse", response.getResponse().getContentAsString()))
                 .andReturn().getResponse().getContentAsString();
         assertThat(result).doesNotContain("publicationId", "manifestRef", "object_key", "writerToken", "runtime-call-1");
         var list = mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(2))
-                .andExpect(response -> schema("PublicArtifactList", response.getResponse().getContentAsString()))
+                .andExpect(response ->
+                                        contract(
+                                                "listArtifacts",
+                                                "PublicArtifactList", response.getResponse().getContentAsString()))
                 .andReturn().getResponse().getContentAsString();
         mvc.perform(asReader(bytes(stdout)).header("Range", "bytes=1-2")
                         .header("If-Match", "\"" + stdout.path("sha256").asText() + "\""))
                 .andExpect(status().isPartialContent()).andExpect(content().bytes(new byte[] {'b', 'c'}))
                 .andExpect(header().string("Content-Range", "bytes 1-2/3"))
                 .andExpect(header().string("Content-Length", "2"))
+                .andExpect(header().string("Repr-Digest", reprDigest()))
+                .andExpect(response -> binaryContract(response.getResponse()))
                 .andExpect(header().string("X-Content-Type-Options", "nosniff"))
                 .andExpect(header().string("Cache-Control", "private, no-store, no-transform"));
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isOk())
                 .andExpect(content().bytes("abc".getBytes(StandardCharsets.UTF_8)))
-                .andExpect(header().exists("Repr-Digest"));
+                .andExpect(header().string("Repr-Digest", reprDigest()))
+                .andExpect(response -> binaryContract(response.getResponse()));
         mvc.perform(asReader(bytes(stderr))).andExpect(status().isOk()).andExpect(content().bytes(new byte[0]))
                 .andExpect(header().string("Content-Length", "0"));
         mvc.perform(asReader(bytes(stdout)).header("If-Match", "\"outdated\""))
@@ -152,16 +160,23 @@ class ManagedArtifactApiIntegrationTest {
                 .isEqualTo("SEALED");
         assertThat(fixture.sessions().findEvents("tenant-1", "session-1", 0, 100)).hasSize(1);
 
-        String output = System.getProperty("qwen.o3.fixture-output");
-        if (output != null) {
             var fixtureJson = JSON.createObjectNode();
             fixtureJson.set("toolResult", JSON.readTree(result));
             fixtureJson.set("artifactList", JSON.readTree(list));
             fixtureJson.set("transcript", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", null, 100)));
             String before = Long.toString(fixture.sessions().requireSession("tenant-1", "session-1").lastSequence() + 1);
             fixtureJson.set("events", JSON.valueToTree(sessions.transcript("tenant-1", "reader", "session-1", before, 100).events()));
+        String output = System.getProperty("qwen.o3.fixture-output");
+        if (output != null) {
             Files.writeString(Path.of(output), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(fixtureJson));
         }
+        JsonNode committed =
+                JSON.readTree(
+                        Files.readString(
+                                Path.of(
+                                        "../../web-shell/client/components/managed/managed-tool-result.java-fixture.json")));
+        assertThat(JSON.readTree(normalizeTimes(fixtureJson).toString()))
+                .isEqualTo(JSON.readTree(normalizeTimes(committed).toString()));
     }
 
     @Test
@@ -176,7 +191,10 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(status().isNotFound());
         mvc.perform(asActor(get(ROOT + "/artifacts/" + stdout.path("id").asText()), "tenant-1", "metadata-reader"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.access.can_read_content").value(false))
-                .andExpect(response -> schema("WebShellArtifactResponse", response.getResponse().getContentAsString()));
+                .andExpect(response ->
+                                contract(
+                                        "getArtifact",
+                                        "WebShellArtifactResponse", response.getResponse().getContentAsString()));
         mvc.perform(asActor(bytes(stdout), "tenant-1", "metadata-reader").header("Range", "malformed"))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.error.code").value("artifact_content_forbidden"))
                 .andExpect(header().doesNotExist("Content-Range"));
@@ -191,23 +209,35 @@ class ManagedArtifactApiIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(JSON.writeValueAsString(java.util.Map.of("sessionId", "session-1", "itemId", itemId))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.result.item_id").value(itemId))
-                .andExpect(response -> schema("WebShellToolResultResponse", response.getResponse().getContentAsString()));
+                .andExpect(response ->
+                                contract(
+                                        "getWebShellToolResult",
+                                        "WebShellToolResultResponse", response.getResponse().getContentAsString()));
         mvc.perform(asReader(post("/api/agent/web-shell/v1/artifacts/get"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(JSON.writeValueAsString(java.util.Map.of("sessionId", "session-1", "artifactId", stdout.path("id").asText()))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.artifact.byte_length").value(3))
-                .andExpect(response -> schema("WebShellArtifactResponse", response.getResponse().getContentAsString()));
+                .andExpect(response ->
+                                contract(
+                                        "getWebShellArtifact",
+                                        "WebShellArtifactResponse", response.getResponse().getContentAsString()));
         var first = mvc.perform(asReader(post("/api/agent/web-shell/v1/artifacts/query"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"sessionId\":\"session-1\",\"limit\":1}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.hasMore").value(true))
-                .andExpect(response -> schema("WebShellArtifactPage", response.getResponse().getContentAsString())).andReturn();
+                .andExpect(response ->
+                                        contract(
+                                                "queryWebShellArtifacts",
+                                                "WebShellArtifactPage", response.getResponse().getContentAsString())).andReturn();
         JsonNode firstPage = JSON.readTree(first.getResponse().getContentAsString());
         var second = mvc.perform(asReader(post("/api/agent/web-shell/v1/artifacts/query"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(JSON.writeValueAsString(java.util.Map.of("sessionId", "session-1", "limit", 1,
                                 "cursor", firstPage.path("nextCursor").asText()))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.hasMore").value(false))
-                .andExpect(response -> schema("WebShellArtifactPage", response.getResponse().getContentAsString())).andReturn();
+                .andExpect(response ->
+                                        contract(
+                                                "queryWebShellArtifacts",
+                                                "WebShellArtifactPage", response.getResponse().getContentAsString())).andReturn();
         assertThat(JSON.readTree(second.getResponse().getContentAsString()).path("data").get(0).path("artifact").path("id"))
                 .isNotEqualTo(firstPage.path("data").get(0).path("artifact").path("id"));
     }
@@ -244,13 +274,183 @@ class ManagedArtifactApiIntegrationTest {
         mvc.perform(asReader(bytes(stdout))).andExpect(status().isNotFound());
     }
 
+    @Test
+    void rejectsInvalidCursorLimitsAndRangesWithStableCodes() throws Exception {
+        for (String limit : new String[] {"0", "101"}) {
+            mvc.perform(asReader(get(ROOT + "/artifacts").param("limit", limit)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error.code").value("invalid_limit"));
+        }
+        for (String cursor :
+                new String[] {
+                    "invalid",
+                    Base64.getUrlEncoder()
+                            .withoutPadding()
+                            .encodeToString(
+                                    JSON.createObjectNode()
+                                            .put("v", 1)
+                                            .put("tenant", "other-tenant")
+                                            .put("session", "session-1")
+                                            .put("watermark", 1)
+                                            .put("before", 1)
+                                            .put("id", stdout.path("id").asText())
+                                            .toString()
+                                            .getBytes(StandardCharsets.UTF_8))
+                }) {
+            mvc.perform(asReader(get(ROOT + "/artifacts").param("cursor", cursor)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error.code").value("invalid_cursor"));
+        }
+        for (String[] range :
+                new String[][] {{"bad", "invalid_range"}, {"bytes=0-1,2-2", "unsupported_range"}}) {
+            mvc.perform(asReader(bytes(stdout)).header("Range", range[0]))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error.code").value(range[1]));
+        }
+        mvc.perform(asReader(get(ROOT + "/artifacts/" + stdout.path("id").asText() + "/content")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("revision_required"));
+    }
+
+    @Test
+    void ifRangeUsesTheWholeRepresentationWhenItsValidatorDoesNotMatch() throws Exception {
+        mvc.perform(
+                        asReader(bytes(stdout))
+                                .header("Range", "bytes=1-2")
+                                .header("If-Range", "\"" + stdout.path("sha256").asText() + "\""))
+                .andExpect(status().isPartialContent())
+                .andExpect(content().bytes(new byte[] {'b', 'c'}));
+        mvc.perform(
+                        asReader(bytes(stdout))
+                                .header("Range", "bytes=1-2")
+                                .header("If-Range", "\"old\""))
+                .andExpect(status().isOk())
+                .andExpect(content().bytes("abc".getBytes(StandardCharsets.UTF_8)))
+                .andExpect(header().doesNotExist("Content-Range"));
+    }
+
+    @Test
+    void hidesMetadataFromActorsWithoutGrantsAndAllWebBodyRoutesFromForeignTenants()
+            throws Exception {
+        for (String path :
+                new String[] {
+                    ROOT + "/items/" + itemId + "/tool-result",
+                    ROOT + "/artifacts",
+                    ROOT + "/artifacts/" + stdout.path("id").asText()
+                }) {
+            mvc.perform(asActor(get(path), "tenant-1", "no-grant"))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        }
+        for (String route : new String[] {"tool-results/get", "artifacts/get", "artifacts/query"}) {
+            var body = JSON.createObjectNode().put("sessionId", "session-1");
+            if (route.equals("tool-results/get")) {
+                body.put("itemId", itemId);
+            }
+            if (route.equals("artifacts/get")) {
+                body.put("artifactId", stdout.path("id").asText());
+            }
+            mvc.perform(
+                            asActor(
+                                            post("/api/agent/web-shell/v1/" + route),
+                                            "other-tenant",
+                                            "reader")
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(body.toString()))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        }
+    }
+
+    @Test
+    void contractRejectsUnknownCaptureScopesAndReasons() throws Exception {
+        var result = fixture.results().findResult("tenant-1", "session-1", itemId).orElseThrow();
+        var contract = OpenApiContract.load();
+        for (String field : new String[] {"capture_scope", "reason_code"}) {
+            var changed = result.deepCopy();
+            ((com.fasterxml.jackson.databind.node.ObjectNode) changed).put(field, "unknown");
+            assertThat(contract.validate("/components/schemas/PublicToolResult", changed)).isNotEmpty();
+        }
+    }
+
     private static MockHttpServletRequestBuilder bytes(JsonNode artifact) {
         return get(ROOT + "/artifacts/" + artifact.path("id").asText() + "/content")
                 .param("revision", artifact.path("revision").asText());
     }
 
-    private static void schema(String name, String json) throws Exception {
-        assertThat(OpenApiContract.load().validate("/components/schemas/" + name, JSON.readTree(json))).isEmpty();
+    private static void contract(String operationId, String component, String json)
+            throws Exception {
+        var contract = OpenApiContract.load();
+        String response = contract.responsePointer(contract.operation(operationId), 200);
+        String schema = response + "/content/application~1json/schema";
+        assertThat(contract.node(schema).path("$ref").asText())
+                .isEqualTo("#/components/schemas/" + component);
+        assertThat(contract.validate(schema, JSON.readTree(json))).isEmpty();
+    }
+
+    private static void binaryContract(
+            org.springframework.mock.web.MockHttpServletResponse response) {
+        var contract = OpenApiContract.load();
+        String pointer =
+                contract.responsePointer(
+                        contract.operation("getArtifactContent"), response.getStatus());
+        assertThat(
+                        contract.node(pointer + "/content/application~1octet-stream/schema/format")
+                                .asText())
+                .isEqualTo("binary");
+        for (String name :
+                Set.of(
+                        "ETag",
+                        "Repr-Digest",
+                        "Content-Length",
+                        "Content-Disposition",
+                        "Accept-Ranges",
+                        "Cache-Control")) {
+            assertThat(contract.node(pointer + "/headers/" + name).isMissingNode())
+                    .as(name)
+                    .isFalse();
+            assertThat(response.getHeader(name)).as(name).isNotBlank();
+        }
+        assertThat(contract.node(pointer + "/headers/Content-Range").isMissingNode())
+                .isEqualTo(response.getStatus() == 200);
+        if (response.getStatus() == 206) {
+            assertThat(response.getHeader("Content-Range")).isNotBlank();
+        } else {
+            assertThat(response.getHeader("Content-Range")).isNull();
+        }
+    }
+
+    private static String reprDigest() throws Exception {
+        return "sha-256=:"
+                + Base64.getEncoder()
+                        .encodeToString(
+                                MessageDigest.getInstance("SHA-256")
+                                        .digest("abc".getBytes(StandardCharsets.UTF_8)))
+                + ":";
+    }
+
+    private static JsonNode normalizeTimes(JsonNode value) {
+        JsonNode copy = value.deepCopy();
+        if (copy.isObject()) {
+            for (var field : copy.properties()) {
+                if (Set.of("created_at", "createdAt", "updatedAt").contains(field.getKey())) {
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) copy).put(field.getKey(), 0);
+                } else if ("eventId".equals(field.getKey())) {
+                    assertThat(field.getValue().asText()).matches("evt_[0-9a-f]{32}");
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) copy)
+                            .put(field.getKey(), "evt_fixture");
+                } else {
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) copy)
+                            .set(field.getKey(), normalizeTimes(field.getValue()));
+                }
+            }
+        } else if (copy.isArray()) {
+            for (int index = 0; index < copy.size(); index++) {
+                ((com.fasterxml.jackson.databind.node.ArrayNode) copy)
+                        .set(index, normalizeTimes(copy.get(index)));
+            }
+        }
+        return copy;
     }
 
     private static MockHttpServletRequestBuilder asReader(MockHttpServletRequestBuilder request) {

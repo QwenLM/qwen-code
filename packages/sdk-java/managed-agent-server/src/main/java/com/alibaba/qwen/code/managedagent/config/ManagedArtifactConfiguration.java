@@ -4,9 +4,22 @@ import com.alibaba.qwen.code.managedagent.service.ManagedArtifactPolicy;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 @Configuration
 public class ManagedArtifactConfiguration {
+    @Bean
+    @ConditionalOnMissingBean(name = "taskScheduler")
+    public ThreadPoolTaskScheduler taskScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.build();
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler managedArtifactScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-artifact-").build();
+    }
+
     @Bean
     @ConditionalOnMissingBean(ManagedArtifactPolicy.class)
     public ManagedArtifactPolicy managedArtifactPolicy(ManagedAgentProperties properties) {

@@ -276,16 +276,43 @@ export class JavaManagedAgentClient {
     headers.set('if-match', `"${artifact.sha256}"`);
     if (range) headers.set('range', range);
     const path = `/v1/agents/sessions/${encodeURIComponent(artifact.session_id)}/artifacts/${encodeURIComponent(artifact.id)}/content`;
-    const response = await this.fetchImpl(
-      `${this.baseUrl}${path}?revision=${encodeURIComponent(artifact.revision)}`,
-      {
-        method: 'GET',
-        headers,
-        credentials: this.credentials,
-        signal,
-        redirect: 'error',
-      },
-    );
+    let response: Response;
+    for (let attempt = 0; ; attempt++) {
+      response = await this.fetchImpl(
+        `${this.baseUrl}${path}?revision=${encodeURIComponent(artifact.revision)}`,
+        {
+          method: 'GET',
+          headers,
+          credentials: this.credentials,
+          signal,
+          redirect: 'error',
+        },
+      );
+      if (attempt > 0 || ![429, 503].includes(response.status)) break;
+      const retryAfter = response.headers.get('retry-after');
+      const delay =
+        retryAfter === null
+          ? 1000
+          : Number.isFinite(Number(retryAfter))
+            ? Number(retryAfter) * 1000
+            : Date.parse(retryAfter) - Date.now();
+      const wait = Number.isFinite(delay) ? Math.max(0, delay) : 1000;
+      if (wait > 5000) break;
+      await response.body?.cancel();
+      signal?.throwIfAborted();
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, wait);
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    }
     if (!response.ok) throw await toHttpError(response);
     if (
       response.headers.get('etag') !== `"${artifact.sha256}"` ||

@@ -17,6 +17,8 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.HexFormat;
 import java.util.concurrent.Semaphore;
 import java.util.regex.Pattern;
@@ -57,12 +59,19 @@ public class ManagedArtifactService {
         SessionRecord session = session(tenant, sessionId);
         var result = results.findResult(tenant.tenantId(), sessionId, itemId)
                 .orElseThrow(ManagedArtifactService::notFound).deepCopy();
-        boolean canRead = false;
+        List<Artifact> artifacts = new ArrayList<>();
         for (var reference : result.path("artifacts")) {
-            var artifact = results.findArtifact(tenant.tenantId(), sessionId,
-                    reference.path("id").asText()).orElseThrow(ManagedArtifactService::notFound);
-            var view = view(tenant, session, artifact);
-            ((ObjectNode) reference).setAll((ObjectNode) view.artifact());
+            artifacts.add(results.findArtifact(tenant.tenantId(), sessionId,
+                    reference.path("id").asText()).orElseThrow(ManagedArtifactService::notFound));
+        }
+        boolean sessionRead = !artifacts.isEmpty() && policy.readOriginal(tenant.tenantId(), tenant.actorId(),
+                session.workspace().getWorkspaceId(), session.sessionId());
+        var availability = reader.availability(artifacts);
+        boolean canRead = false;
+        for (int index = 0; index < artifacts.size(); index++) {
+            var artifact = artifacts.get(index);
+            var view = view(artifact, availability.get(artifact.descriptor().path("id").asText()), sessionRead);
+            ((ObjectNode) result.path("artifacts").get(index)).setAll((ObjectNode) view.artifact());
             canRead |= view.access().canReadContent();
         }
         return new ToolResultResponse(result, new ArtifactAccess(canRead));
@@ -115,17 +124,23 @@ public class ManagedArtifactService {
             next = Base64.getUrlEncoder().withoutPadding().encodeToString(
                     position.toString().getBytes(StandardCharsets.UTF_8));
         }
-        return new WebShellPage<>(page.artifacts().stream().map(a -> view(tenant, session, a)).toList(),
-                next, page.hasMore());
+        boolean sessionRead = !page.artifacts().isEmpty()
+                && policy.readOriginal(tenant.tenantId(), tenant.actorId(),
+                        session.workspace().getWorkspaceId(), session.sessionId());
+        var availability = reader.availability(page.artifacts());
+        return new WebShellPage<>(page.artifacts().stream().map(a -> view(a,
+                availability.get(a.descriptor().path("id").asText()), sessionRead)).toList(), next, page.hasMore());
     }
 
     private ArtifactResponse view(TenantContext tenant, SessionRecord session, Artifact artifact) {
+        return view(artifact, reader.available(artifact), policy.readOriginal(tenant.tenantId(), tenant.actorId(),
+                session.workspace().getWorkspaceId(), session.sessionId()));
+    }
+
+    private static ArtifactResponse view(Artifact artifact, boolean available, boolean sessionRead) {
         var descriptor = (ObjectNode) artifact.descriptor().deepCopy();
-        boolean available = reader.available(artifact);
         descriptor.put("availability", available ? "available" : "unavailable");
-        return new ArtifactResponse(descriptor, new ArtifactAccess(available
-                && policy.readOriginal(tenant.tenantId(), tenant.actorId(),
-                        session.workspace().getWorkspaceId(), session.sessionId())));
+        return new ArtifactResponse(descriptor, new ArtifactAccess(available && sessionRead));
     }
 
     private SessionRecord session(TenantContext tenant, String sessionId) {
@@ -160,83 +175,93 @@ public class ManagedArtifactService {
 
     public void content(TenantContext tenant, String sessionId, String artifactId, String revision,
             String range, String ifMatch, String ifRange, HttpServletResponse response) throws IOException {
-        session(tenant, sessionId);
-        Artifact artifact = stored(tenant, sessionId, artifactId);
-        requireContent(tenant, artifact);
-        if (revision == null || revision.isBlank()) {
-            throw badRequest("revision_required", "A fixed revision is required.");
-        }
-        var descriptor = artifact.descriptor();
-        if (!revision.equals(descriptor.path("revision").asText())) {
-            throw notFound();
-        }
-        String etag = "\"" + descriptor.path("sha256").asText() + "\"";
-        if (ifMatch != null && !matches(ifMatch, etag)) {
-            throw new ApiException(HttpStatus.PRECONDITION_FAILED, "artifact_revision_mismatch",
-                    "The artifact validator does not match.");
-        }
-        if (ifRange != null && !etag.equals(ifRange.trim())) {
-            range = null;
-        }
-        long size = descriptor.path("byte_length").longValue();
-        Selection selection;
-        try {
-            selection = select(range, size);
-        }
-        catch (ApiException error) {
-            if (error.getStatus() == HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE) {
-                response.setHeader("Content-Range", "bytes */" + size);
-            }
-            throw error;
-        }
-        if (!readers.tryAcquire()) {
-            response.setHeader("Retry-After", "1");
-            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "artifact_read_limit",
-                    "The artifact reader limit has been reached.");
-        }
-        long started = System.nanoTime();
-        long timeout = settings.getReadTimeout().toNanos();
+        boolean acquired = false;
         long sent = 0;
-        Runnable guard = () -> {
-            if (System.nanoTime() - started > timeout) {
-                throw unavailable();
-            }
-            requireContent(tenant, artifact);
-        };
+        String outcome = "denied";
         try {
-            if (selection.partial()) {
-                byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), guard);
-                guard.run();
-                headers(response, artifact, etag, selection, size);
-                response.getOutputStream().write(bytes);
-                sent = bytes.length;
-            } else {
-                try (var input = reader.open(artifact, guard)) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int count = input.read(buffer);
+            session(tenant, sessionId);
+            Artifact artifact = stored(tenant, sessionId, artifactId);
+            requireContent(tenant, artifact);
+            outcome = "rejected";
+            if (revision == null || revision.isBlank()) {
+                throw badRequest("revision_required", "A fixed revision is required.");
+            }
+            var descriptor = artifact.descriptor();
+            if (!revision.equals(descriptor.path("revision").asText())) {
+                throw notFound();
+            }
+            String etag = "\"" + descriptor.path("sha256").asText() + "\"";
+            if (ifMatch != null && !matches(ifMatch, etag)) {
+                throw new ApiException(HttpStatus.PRECONDITION_FAILED, "artifact_revision_mismatch",
+                        "The artifact validator does not match.");
+            }
+            if (ifRange != null && !etag.equals(ifRange.trim())) {
+                range = null;
+            }
+            long size = descriptor.path("byte_length").longValue();
+            Selection selection;
+            try {
+                selection = select(range, size);
+            }
+            catch (ApiException error) {
+                if (error.getStatus() == HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE) {
+                    response.setHeader("Content-Range", "bytes */" + size);
+                }
+                throw error;
+            }
+            if (!readers.tryAcquire()) {
+                response.setHeader("Retry-After", "1");
+                throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "artifact_read_limit",
+                        "The artifact reader limit has been reached.");
+            }
+            acquired = true;
+            outcome = "interrupted";
+            long started = System.nanoTime();
+            long timeout = settings.getReadTimeout().toNanos();
+            Runnable guard = () -> {
+                if (System.nanoTime() - started > timeout) {
+                    throw unavailable();
+                }
+                requireContent(tenant, artifact);
+            };
+            try {
+                if (selection.partial()) {
+                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), guard);
                     guard.run();
                     headers(response, artifact, etag, selection, size);
-                    response.flushBuffer();
-                    while (count != -1) {
+                    response.getOutputStream().write(bytes);
+                    sent = bytes.length;
+                } else {
+                    try (var input = reader.open(artifact, guard)) {
+                        byte[] buffer = new byte[64 * 1024];
+                        int count = input.read(buffer);
                         guard.run();
-                        response.getOutputStream().write(buffer, 0, count);
-                        sent += count;
-                        count = input.read(buffer);
+                        headers(response, artifact, etag, selection, size);
+                        response.flushBuffer();
+                        while (count != -1) {
+                            guard.run();
+                            response.getOutputStream().write(buffer, 0, count);
+                            sent += count;
+                            count = input.read(buffer);
+                        }
                     }
                 }
+            } catch (RuntimeException error) {
+                if (response.isCommitted()) {
+                    throw new IOException("Artifact stream interrupted", error);
+                }
+                if (error instanceof ApiException api) {
+                    throw api;
+                }
+                throw unavailable();
             }
-        } catch (RuntimeException error) {
-            if (response.isCommitted()) {
-                throw new IOException("Artifact stream interrupted", error);
-            }
-            if (error instanceof ApiException api) {
-                throw api;
-            }
-            throw unavailable();
+            outcome = "completed";
         } finally {
-            readers.release();
-            LOG.info("artifact_read tenant={} actor={} session={} artifact={} bytes={}",
-                    tenant.tenantId(), tenant.actorId(), sessionId, artifactId, sent);
+            if (acquired) {
+                readers.release();
+            }
+            LOG.info("artifact_read tenant={} actor={} session={} artifact={} outcome={} bytes={}",
+                    tenant.tenantId(), tenant.actorId(), sessionId, artifactId, outcome, sent);
         }
     }
 

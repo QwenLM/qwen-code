@@ -252,3 +252,77 @@ describe('Managed transcript projection', () => {
     });
   });
 });
+
+it('preserves the order of assistant / current-turn result / assistant', () => {
+  const event = (
+    id: number,
+    type: ManagedAgentSessionEvent['type'],
+    data: unknown,
+  ): ManagedAgentSessionEvent => ({
+    id,
+    at: id,
+    type,
+    sessionId: 's1',
+    turnId: 'p1',
+    data,
+  });
+  const messages = managedEventsToMessages(
+    [
+      event(1, 'assistant_delta', { text: 'Before' }),
+      event(2, 'tool_result_updated', {
+        itemId: 'item-1',
+        result: {
+          ...result,
+          session_id: 's1',
+          turn_id: 'p1',
+          artifacts: result.artifacts.map((a) => ({ ...a, session_id: 's1' })),
+        },
+      }),
+      event(3, 'assistant_delta', { text: 'After' }),
+    ],
+    '[truncated]',
+  );
+  expect(messages.map(({ role }) => role)).toEqual([
+    'assistant',
+    'tool_group',
+    'assistant',
+  ]);
+  expect(messages[0]).toMatchObject({ content: 'Before' });
+  expect(messages[2]).toMatchObject({ content: 'After' });
+});
+
+it('rejects every documented malformed result identity/status arm', () => {
+  const source = { ...result, session_id: 's1', turn_id: 'p1' };
+  const invalid = [
+    { id: 1 },
+    { session_id: 'foreign' },
+    { turn_id: 'foreign' },
+    { item_id: 'foreign' },
+    { projection_revision: 0 },
+    { projection_revision: 1.5 },
+    { projection_revision: 9007199254740992 },
+    { execution_status: 'unknown' },
+    { artifacts: {} },
+  ];
+  for (const change of invalid) {
+    const messages = managedEventsToMessages(
+      [
+        {
+          id: 1,
+          at: 1,
+          type: 'tool_result_updated',
+          sessionId: 's1',
+          turnId: 'p1',
+          data: { itemId: 'item-1', result: { ...source, ...change } },
+        },
+      ],
+      '[truncated]',
+    );
+    expect(
+      messages
+        .flatMap((message) => ('tools' in message ? (message.tools ?? []) : []))
+        .map((tool) => tool.toolResult)
+        .filter(Boolean),
+    ).toEqual([]);
+  }
+});

@@ -166,11 +166,11 @@ public class ManagedSessionStore {
                             + " lease_token_hash, journal_revision,"
                             + " committed_sequence, activation_epoch,"
                             + " compacted_through_revision, recovery_status,"
-                            + " created_at, updated_at) VALUES (?, ?, ?, ?,"
+                            + " o3_backfill_through, o3_backfill_pending, created_at, updated_at) VALUES (?, ?, ?, ?,"
                             + " 'ACTIVE', 1, ?, TIMESTAMPADD(MICROSECOND, ?,"
                             + " CAST(? AS DATETIME(6))),"
                             + " ?, 0, 0, 0, 0, 'READY',"
-                            + " ?, ?)",
+                            + " 0, FALSE, ?, ?)",
                     tenantId, request.workspaceId(), sessionId,
                     STORAGE_VERSION, request.writerId(),
                     initialLeaseUntil.getNanos() / 1_000,
@@ -345,7 +345,7 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
-        extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+        var receiptEvents = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
                 validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
@@ -403,8 +403,7 @@ public class ManagedSessionStore {
                 request.latestCheckpointResourceId(), now, tenantId,
                 sessionId);
         if (toolResults != null) {
-            toolResults.capture(tenantId, request.workspaceId(), sessionId,
-                    revision, request.firstSequence(), request.eventCount(), validated.recordBytes());
+            toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),

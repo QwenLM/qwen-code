@@ -15,6 +15,8 @@ import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -26,6 +28,8 @@ import org.springframework.stereotype.Component;
 public class ManagedToolResultProjector {
     private static final Logger LOG = LoggerFactory.getLogger(ManagedToolResultProjector.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Pattern ANSI = Pattern.compile("\\x1B\\[[0-?]*[ -/]*[@-~]");
+    private static final Pattern CONTROLS = Pattern.compile("[\\p{Cntrl}&&[^\\n\\t]]");
     private final ManagedToolResultStore store;
     private final JdbcTemplate jdbc;
     private final ObjectProvider<ToolPublicationDataStore> publications;
@@ -44,7 +48,8 @@ public class ManagedToolResultProjector {
         this.properties = properties;
     }
 
-    @Scheduled(fixedDelayString = "${qwen.managed-agent.artifacts.projection-interval:1000}")
+    @Scheduled(scheduler = "managedArtifactScheduler",
+            fixedDelayString = "${qwen.managed-agent.artifacts.projection-interval:1000}")
     public void tick() {
         if (!properties.getArtifacts().isEnabled()) {
             return;
@@ -77,6 +82,8 @@ public class ManagedToolResultProjector {
             } else {
                 store.complete(claim, projection, policy.version());
             }
+        } catch (NoSuchElementException error) {
+            store.fail(claim, "UNSUPPORTED", "public_turn_mapping_missing");
         } catch (IllegalArgumentException error) {
             store.fail(claim, "QUARANTINED", "tool_result_source_invalid");
         } catch (RuntimeException | IOException error) {
@@ -86,8 +93,9 @@ public class ManagedToolResultProjector {
 
     private Projection resolve(Source source) throws IOException {
         store.verifySource(source);
-        var candidates = jdbc.queryForList("SELECT p.*, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication p WHERE tenant_id = ?"
+        var candidates = jdbc.queryForList("SELECT p.*, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication p WHERE scope_key = ? AND tenant_id = ?"
                         + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
+                ToolPublicationDataStore.scope(source.sessionKey()),
                 source.tenantId(), source.workspaceId(), source.sessionId(),
                 ToolPublicationContract.sha256(source.executionCallId().getBytes(StandardCharsets.UTF_8)));
         if (candidates.isEmpty()) {
@@ -109,7 +117,7 @@ public class ManagedToolResultProjector {
                         + " WHERE t.tenant_id = ? AND t.session_id = ? AND t.prompt_id = ?",
                 source.tenantId(), source.sessionId(), binding.path("turnId").asText());
         if (turns.isEmpty()) {
-            return null;
+            throw new NoSuchElementException("Public Turn mapping is missing");
         }
         require(turns.size() == 1 && source.tenantId().equals(turns.getFirst().get("tenant_id"))
                         && source.sessionId().equals(turns.getFirst().get("session_id"))
@@ -182,7 +190,8 @@ public class ManagedToolResultProjector {
                                 && streamId.equals(stream.path("role").asText()), "Unsupported public stream");
                 String id = ManagedToolResultStore.identity("artifact", "1", source.id(),
                         manifestRef.path("digest").asText(), streamId, policyVersion);
-                ObjectNode descriptor = JSON.createObjectNode().put("id", id).put("session_id", source.sessionId())
+                ObjectNode descriptor = JSON.createObjectNode().put("object", "agent.artifact")
+                        .put("id", id).put("session_id", source.sessionId())
                         .put("result_id", source.id()).put("revision", stream.path("digest").asText())
                         .put("stream_role", streamId).put("byte_length", stream.path("byteLength").asLong())
                         .put("sha256", stream.path("digest").asText()).put("media_type", "application/octet-stream")
@@ -213,11 +222,10 @@ public class ManagedToolResultProjector {
             Artifact selected = artifacts.stream().filter(artifact -> artifact.descriptor().path("byte_length").asLong() > 0)
                     .findFirst().orElse(artifacts.getFirst());
             long size = selected.descriptor().path("byte_length").asLong();
-            int length = (int) Math.min(4096, size);
+            int length = (int) Math.min(8192, size);
             byte[] bytes = reader.readRange(selected, 0, length);
-            String text = new String(bytes, StandardCharsets.UTF_8)
-                    .replaceAll("\\x1B\\[[0-?]*[ -/]*[@-~]", "")
-                    .replaceAll("[\\p{Cntrl}&&[^\\n\\t]]", "");
+            String text = CONTROLS.matcher(ANSI.matcher(new String(bytes, StandardCharsets.UTF_8))
+                    .replaceAll("")).replaceAll("");
             String bounded = boundPreview(text);
             boolean truncated = size > length || bounded.length() < text.length();
             text = bounded;
