@@ -98,10 +98,12 @@ say explicitly what each one should read and whether it may edit files.
   `phase()` between groups rather than per dispatch.
 - `schema` (JSON Schema object) — the subagent must deliver its result by
   calling `structured_output` with arguments matching the schema; agent()
-  resolves to the validated object. After two in-conversation nudges without a
-  valid result, it resolves to null and the failure is recorded as "subagent
-  completed without calling StructuredOutput (after 2 in-conversation nudges)";
-  check for null.
+  resolves to the validated object. A schema that does not compile, or that
+  requires a property its own object forbids, makes agent() resolve to null
+  without starting the agent. Each failed submission hands its error back to
+  the agent, and the third failed submission stops it. With no valid result
+  agent() resolves to null and the failure states how many submissions failed
+  and the last error; check for null.
 - `agentType` (string) — resolves against the declarative-agents registry
   (`.qwen/agents/<name>.md`, project then user then built-in). Unresolved names
   make the admitted agent() resolve to null and record "agent({agentType}):
@@ -348,6 +350,13 @@ Runs appear in the background-tasks view and the `/workflows` dialog (live
 phase tree, token usage, cooperative pause/resume, cancel);
 `run_in_background: true` returns a run handle immediately in the interactive
 TUI and delivers completion through the conversation.
+
+Saved `/<name>` commands typed in the interactive TUI's ink renderer stay in the foreground:
+watch the live tool card; `/workflows <runId>` shows the run after it settles.
+Completion displays the result and delivers it to the model through a
+notification, without another user prompt.
+The OpenTUI renderer does not yet run client-scheduled tools; there, ask the
+model to call `Workflow({ name: '<name>' })` instead.
 
 ## Worked example
 

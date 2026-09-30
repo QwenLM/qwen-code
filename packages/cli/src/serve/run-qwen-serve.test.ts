@@ -55,6 +55,7 @@ import { isLoopbackBind } from './loopback-binds.js';
 import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
+import * as spawnChannelModule from '@qwen-code/acp-bridge/spawnChannel';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   journalGrowthPoolMb,
@@ -96,6 +97,8 @@ import type {
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
+import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
+import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
   workspaceRegistrationId,
   WorkspaceRegistrationStore,
@@ -5669,6 +5672,72 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
+  it('wires every workspace service to workspace-control liveness', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-control-liveness-')),
+    );
+    const workspaces = ['primary', 'secondary', 'added'].map((name) => {
+      const cwd = path.join(tmpDir, name);
+      fs.mkdirSync(cwd);
+      return cwd;
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    // Another engine keeps the runtime live while workspace control is not.
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () =>
+        Object.assign(makeRuntimeBridge(), {
+          isWorkspaceControlLive: vi.fn().mockReturnValue(false),
+        }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const createWorkspaceService = vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: workspaces.slice(0, 2),
+        token: 'control-liveness-token',
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      await handle.runtimeReady;
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer control-liveness-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: workspaces[2] }),
+      });
+      expect(added.status).toBe(201);
+      const liveness = new Map(
+        createWorkspaceService.mock.calls.map(([deps]) => [
+          deps.boundWorkspace,
+          deps.isChannelLive?.(),
+        ]),
+      );
+      for (const cwd of workspaces) {
+        expect(liveness.get(canonicalizeWorkspace(cwd))).toBe(false);
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('accepts an explicit zero channel idle timeout', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-idle-timeout-')),
@@ -5881,6 +5950,622 @@ describe('runQwenServe telemetry validation', () => {
       ]);
     } finally {
       await handle.close();
+    }
+  });
+});
+
+describe('runQwenServe paired execution engines', () => {
+  let tmpDir: string | undefined;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  });
+
+  type BuiltBridge = Parameters<typeof acpBridge.createAcpSessionBridge>[0];
+
+  // A paired Bridge reads owners, and its prompt ledger reads transcripts,
+  // from its own runtime's session storage: a Managed owner written there is
+  // refused on restore, and the ledger sees that transcript's last record.
+  async function expectOwnSessionStorage(options: BuiltBridge) {
+    const workspaceCwd = options.boundWorkspace!;
+    const sessionId = crypto.randomUUID();
+    const uuid = crypto.randomUUID();
+    const transcript = new qwenCore.SessionService(workspaceCwd, {
+      runtimeBaseDir: options.artifactSnapshotRuntimeBaseDir,
+    }).getSessionTranscriptPath(sessionId);
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(
+      transcript,
+      `${JSON.stringify({
+        uuid,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_execution_engine',
+        cwd: workspaceCwd,
+        systemPayload: { version: 1, engine: 'managed' },
+      })}\n`,
+    );
+    await expect(
+      options.executionEngines!.select({
+        operation: 'load',
+        request: { workspaceCwd, sessionId },
+        daemonOwnedStandalone: false,
+      }),
+    ).rejects.toMatchObject({
+      errorKind: 'session_execution_engine_unavailable',
+    });
+    expect(options.promptLedger?.transcriptTailUuid?.(sessionId)).toBe(uuid);
+  }
+
+  // Each spawn factory created so far, keyed to the session directory of the
+  // environment it was created for.
+  function spawnFactoryStorage() {
+    return new Map(
+      vi
+        .mocked(spawnChannelModule.createSpawnChannelFactory)
+        .mock.results.map((result, index) => [
+          result.value,
+          (
+            mockCreateSpawnChannelFactoryOptions[index]?.['sourceEnv'] as
+              | NodeJS.ProcessEnv
+              | undefined
+          )?.['QWEN_RUNTIME_DIR'],
+        ]),
+    );
+  }
+
+  // Boots a daemon over two startup workspaces, adds a registered and a
+  // scratch workspace, and reports what each Bridge was built with.
+  async function bootWorkspaceRuntimes(
+    root: string,
+    workspaces: { primary: string; secondary: string; added: string },
+    paired: boolean,
+  ) {
+    const createFactory = vi.mocked(
+      spawnChannelModule.createSpawnChannelFactory,
+    );
+    createFactory.mockClear();
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        primaryWorkspace: canonicalizeWorkspace(workspaces.primary),
+        workspaces: [],
+      }),
+      add: vi.fn().mockResolvedValue(true),
+      removeByIds: vi.fn().mockResolvedValue(1),
+    } as unknown as WorkspaceRegistrationStore;
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [workspaces.primary, workspaces.secondary],
+        token: 'paired-token',
+        // Options that are off or unset by default, so a paired Bridge that
+        // reset one would differ.
+        enableSessionShell: true,
+        restoreAskUserQuestion: true,
+        maxPendingPromptsPerSession: 7,
+        eventRingSize: 1234,
+        compactedReplayMaxBytes: 2_345_678,
+        maxJournalEvents: 3456,
+        maxJournalBytes: 4_567_890,
+        channelIdleTimeoutMs: 45_678,
+        initializeTimeoutMs: 12_345,
+        sessionReapIntervalMs: 23_456,
+        sessionIdleTimeoutMs: 3_456_789,
+        sessionPromptSettledCloseGraceMs: 4567,
+        permissionResponseTimeoutMs: 56_789,
+        serveWebShell: false,
+        ...(paired ? { experimentalPairedEngines: true } : {}),
+      },
+      {
+        preheatBridge: false,
+        workspaceRegistrationStore: store,
+        daemonLogBaseDir: path.join(root, 'debug'),
+        liveConversationWorkspace: new ConversationWorkspace({
+          homeDir: path.join(root, 'home'),
+        }),
+        liveDiscoveryStableBaseDir: path.join(root, 'stable'),
+      },
+    );
+    try {
+      const headers = {
+        Authorization: 'Bearer paired-token',
+        'Content-Type': 'application/json',
+      };
+      const added = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cwd: workspaces.added, persist: false }),
+      });
+      expect(added.status).toBe(201);
+      const scratch = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ kind: 'scratch' }),
+      });
+      expect(scratch.status).toBe(201);
+      const scratchCwd = ((await scratch.json()) as { cwd: string }).cwd;
+      expect(createBridge).toHaveBeenCalledTimes(4);
+      const factoryStorage = spawnFactoryStorage();
+      return {
+        options: createBridge.mock.calls.map(([options]) => options),
+        factoryStorage,
+        scratchCwd,
+      };
+    } finally {
+      await handle.close();
+      createBridge.mockRestore();
+    }
+  }
+
+  it('pairs the startup, added and scratch runtimes from their own factory and storage, changing nothing else', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-engines-')),
+    );
+    const workspaces = {
+      primary: path.join(tmpDir, 'primary'),
+      secondary: path.join(tmpDir, 'secondary'),
+      added: path.join(tmpDir, 'added'),
+    };
+    // Give every runtime its own session storage, so a runtime that read
+    // another runtime's owners could not pass the restore check below. The
+    // scratch runtime stores sessions under the stubbed QWEN_HOME.
+    delete process.env['QWEN_RUNTIME_DIR'];
+    vi.stubEnv('QWEN_HOME', path.join(tmpDir, 'qwen-home'));
+    const storageOf = (dir: string) => `${dir}-sessions`;
+    for (const dir of Object.values(workspaces)) {
+      fs.mkdirSync(path.join(dir, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.qwen', 'settings.json'),
+        JSON.stringify({ advanced: { runtimeOutputDir: storageOf(dir) } }),
+      );
+    }
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+
+    const plain = await bootWorkspaceRuntimes(tmpDir, workspaces, false);
+    const paired = await bootWorkspaceRuntimes(tmpDir, workspaces, true);
+
+    for (const run of [plain, paired]) {
+      expect(run.options.map((option) => option.boundWorkspace)).toEqual(
+        [
+          workspaces.primary,
+          workspaces.secondary,
+          workspaces.added,
+          run.scratchCwd,
+        ].map(canonicalizeWorkspace),
+      );
+      expect(
+        run.options.map((option) => option.artifactSnapshotRuntimeBaseDir),
+      ).toEqual([
+        storageOf(workspaces.primary),
+        storageOf(workspaces.secondary),
+        storageOf(workspaces.added),
+        path.join(tmpDir, 'qwen-home'),
+      ]);
+    }
+    for (const run of [plain, paired]) {
+      for (const option of run.options) {
+        expect(option.sessionAttachmentsRoot).toBe(
+          sessionAttachmentsRoots(
+            option.boundWorkspace!,
+            option.artifactSnapshotRuntimeBaseDir!,
+          ).root,
+        );
+      }
+    }
+    for (const option of plain.options) {
+      expect(option.executionEngines).toBeUndefined();
+      expect(option.sessionShellCommandEnabled).toBe(true);
+      expect(plain.factoryStorage.get(option.channelFactory)).toBe(
+        option.artifactSnapshotRuntimeBaseDir,
+      );
+    }
+    // Each boot creates a new scratch directory, and the scratch runtime's
+    // attachments root is derived from it, as checked above.
+    const withoutScratchPaths = (run: typeof plain) =>
+      run.options.map((option) =>
+        option.boundWorkspace === canonicalizeWorkspace(run.scratchCwd)
+          ? Object.fromEntries(
+              Object.entries(option).filter(
+                ([key]) =>
+                  key !== 'boundWorkspace' && key !== 'sessionAttachmentsRoot',
+              ),
+            )
+          : option,
+      );
+    expect(comparableBridgeOptions(withoutScratchPaths(paired))).toEqual(
+      comparableBridgeOptions(withoutScratchPaths(plain)),
+    );
+    for (const option of paired.options) {
+      expect(option.channelFactory).toBeUndefined();
+      const engines = option.executionEngines!;
+      expect(paired.factoryStorage.get(engines.legacy)).toBe(
+        option.artifactSnapshotRuntimeBaseDir,
+      );
+      await expect(
+        engines.select({
+          operation: 'spawn',
+          request: { workspaceCwd: option.boundWorkspace! },
+          daemonOwnedStandalone: false,
+        }),
+      ).resolves.toBe('legacy');
+      await expectOwnSessionStorage(option);
+    }
+  });
+
+  it('builds a fresh pair for each runtime that a trust change replaces', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-replacement-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    // Each workspace names its own session storage, which applies once it is
+    // trusted, so a replacement that read another runtime's owners fails.
+    delete process.env['QWEN_RUNTIME_DIR'];
+    vi.stubEnv('QWEN_HOME', path.join(tmpDir, 'qwen-home'));
+    const storageOf = (dir: string) => `${dir}-sessions`;
+    for (const dir of [primary, secondary]) {
+      fs.mkdirSync(path.join(dir, '.qwen'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.qwen', 'settings.json'),
+        JSON.stringify({ advanced: { runtimeOutputDir: storageOf(dir) } }),
+      );
+    }
+    vi.spyOn(trustPolicyRuntime, 'readDaemonTrustPolicySnapshot')
+      .mockResolvedValueOnce({
+        revision: 'boot-untrusted',
+        folderTrustEnabled: true,
+        ideTrust: undefined,
+        trustedFolders: {},
+      } as Awaited<
+        ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+      >)
+      .mockResolvedValue({
+        revision: 'reconciled-trusted',
+        folderTrustEnabled: false,
+        ideTrust: undefined,
+        trustedFolders: {},
+      } as Awaited<
+        ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
+      >);
+    vi.mocked(spawnChannelModule.createSpawnChannelFactory).mockClear();
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxSessions: 1,
+        serveWebShell: false,
+        experimentalPairedEngines: true,
+      },
+      { resolveOnListen: true, daemonLogBaseDir: path.join(tmpDir, 'debug') },
+    );
+    try {
+      await handle.runtimeReady;
+      const built = (cwd: string) =>
+        createBridge.mock.calls
+          .map(([options]) => options)
+          .filter((options) => options.boundWorkspace === cwd);
+      for (const dir of [primary, secondary]) {
+        const cwd = canonicalizeWorkspace(dir);
+        await vi.waitFor(() => expect(built(cwd)).toHaveLength(2), {
+          timeout: 10_000,
+        });
+        const [boot, replacement] = built(cwd);
+        expect(boot!.executionEngines).toBeDefined();
+        expect(replacement!.channelFactory).toBeUndefined();
+        expect(replacement!.executionEngines).toBeDefined();
+        expect(replacement!.executionEngines).not.toBe(boot!.executionEngines);
+        expect(replacement!.executionEngines!.legacy).not.toBe(
+          boot!.executionEngines!.legacy,
+        );
+        expect(replacement!.artifactSnapshotRuntimeBaseDir).toBe(
+          storageOf(dir),
+        );
+        expect(
+          spawnFactoryStorage().get(replacement!.executionEngines!.legacy),
+        ).toBe(storageOf(dir));
+        await expectOwnSessionStorage(replacement!);
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the Conversations runtime on a single factory', async () => {
+    // The Conversations settings name the runtime directory holding its task.
+    delete process.env['QWEN_RUNTIME_DIR'];
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-paired-conversations-')),
+    );
+    const workspace = path.join(tmpDir, 'workspace');
+    const secondary = path.join(tmpDir, 'secondary');
+    const home = path.join(tmpDir, 'home');
+    const runtimeDir = path.join(tmpDir, 'runtime');
+    fs.mkdirSync(workspace);
+    fs.mkdirSync(secondary);
+    fs.mkdirSync(home);
+    const liveConversationWorkspace = new ConversationWorkspace({
+      homeDir: home,
+    });
+    const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+    fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+    fs.writeFileSync(
+      path.join(canonicalRoot, '.qwen', 'settings.json'),
+      JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+    );
+    await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+      qwenCore.updateCronTasks(canonicalRoot, () => [
+        {
+          id: 'live-task',
+          cron: '0 9 * * *',
+          prompt: 'p',
+          recurring: true,
+          createdAt: 1_700_000_000_000,
+          lastFiredAt: null,
+          sessionId: 'live-session',
+          sessionOwnedByTask: false,
+        },
+      ]),
+    );
+    vi.spyOn(
+      scheduledTaskKeepalive,
+      'startScheduledTaskKeepalive',
+    ).mockReturnValue({
+      stop: vi.fn(),
+      activeWork: false,
+      tick: vi.fn().mockResolvedValue(undefined),
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(
+        () =>
+          ({
+            ...makeRuntimeBridge(),
+            recordHeartbeat: vi.fn(),
+            resumeSession: vi.fn().mockResolvedValue({}),
+            setLiveScreenContextCaptureHandler: vi.fn(),
+            setLiveTaskToolRequestHandler: vi.fn(),
+            setLiveSpeakToUserHandler: vi.fn(),
+          }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    const optionsFor = (cwd: string) =>
+      createBridge.mock.calls.find(
+        ([options]) => options.boundWorkspace === cwd,
+      )?.[0];
+    const boot = async (paired: boolean) => {
+      createBridge.mockClear();
+      vi.mocked(spawnChannelModule.createSpawnChannelFactory).mockClear();
+      mockCreateSpawnChannelFactoryOptions.length = 0;
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: [workspace, secondary],
+          maxSessions: 1,
+          serveWebShell: false,
+          ...(paired ? { experimentalPairedEngines: true } : {}),
+        },
+        {
+          liveConversationWorkspace,
+          liveDiscoveryStableBaseDir: path.join(tmpDir!, 'stable'),
+          daemonLogBaseDir: path.join(tmpDir!, 'debug'),
+          resolveOnListen: true,
+        },
+      );
+      try {
+        await handle.runtimeReady;
+        await vi.waitFor(
+          () => {
+            expect(optionsFor(canonicalRoot)).toBeDefined();
+          },
+          { timeout: 10_000 },
+        );
+        return {
+          conversations: optionsFor(canonicalRoot)!,
+          ordinary: [workspace, secondary].map(
+            (cwd) => optionsFor(canonicalizeWorkspace(cwd))!,
+          ),
+          factoryStorage: spawnFactoryStorage(),
+        };
+      } finally {
+        await handle.close();
+      }
+    };
+
+    const plain = await boot(false);
+    const paired = await boot(true);
+    expect(paired.conversations.executionEngines).toBeUndefined();
+    // Its single factory is still the one created for its own runtime.
+    expect(paired.factoryStorage.get(paired.conversations.channelFactory)).toBe(
+      runtimeDir,
+    );
+    // Nothing else about it changes either, including its lease marker.
+    expect(comparableBridgeOptions([paired.conversations])).toEqual(
+      comparableBridgeOptions([plain.conversations]),
+    );
+    // The ordinary runtimes of the same daemon are paired.
+    for (const ordinary of paired.ordinary) {
+      expect(ordinary.channelFactory).toBeUndefined();
+      expect(ordinary.executionEngines).toBeDefined();
+    }
+  });
+});
+
+describe('runQwenServe deployment profiles', () => {
+  it('rejects paired engines with the Hosted Harness profile before listening', async () => {
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: isolatedTestRuntimeDir,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          experimentalPairedEngines: true,
+        }),
+      ).rejects.toThrow(
+        '--profile hosted-harness does not pair execution engines.',
+      );
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
+  it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
+    );
+    fs.mkdirSync(path.join(workspace, '.qwen'));
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    const originalCreateServeApp = serverModule.createServeApp;
+    const createApp = vi
+      .spyOn(serverModule, 'createServeApp')
+      .mockImplementation((...args) => originalCreateServeApp(...args));
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        },
+      );
+      expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
+        false,
+      );
+    } finally {
+      await handle?.close();
+      createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Hosted Harness bootstrap private until its runtime is ready', async () => {
+    const { handle } = await startDeferredDaemon(isolatedTestRuntimeDir, {
+      serveOptions: {
+        profile: 'hosted-harness',
+        serveWebShell: false,
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      },
+    });
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(401);
+      const headers = { Authorization: 'Bearer secret-token' };
+      expect(
+        (await fetch(`${handle.url}/capabilities`, { headers })).status,
+      ).toBe(503);
+      expect(
+        (await fetch(`${handle.url}/daemon/status`, { headers })).status,
+      ).toBe(404);
+      expect((await fetch(`${handle.url}/workspace`, { headers })).status).toBe(
+        404,
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
+    { experimentalManagedAgents: true },
+    { experimentalManagedRuntimeWorker: true },
+    { experimentalManagedRuntimeAutoLocal: true },
+    { experimentalManagedRuntimeUrl: 'http://127.0.0.1:8080' },
+    { experimentalManagedRuntimeToken: 'test-token' },
+    { managedRuntimeBrokerUrl: 'http://127.0.0.1:8080' },
+    { managedRuntimeBrokerToken: 'test-token' },
+  ])('rejects before listening: %j', async (option) => {
+    const listen = vi
+      .spyOn(net.Server.prototype, 'listen')
+      .mockImplementation(() => {
+        throw new Error('Unexpected listener for an unavailable mode.');
+      });
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: isolatedTestRuntimeDir,
+          ...option,
+        }),
+      ).rejects.toThrow(
+        /not (available|implemented)|require --profile hosted-harness/,
+      );
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
+  it('rejects a hosted localhost name that resolves outside loopback before listening', async () => {
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: 'localhost',
+            mode: 'http-bridge',
+            workspace: isolatedTestRuntimeDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bindHostnameLookup: async () => ({
+              address: '192.0.2.1',
+              family: 4,
+            }),
+          },
+        ),
+      ).rejects.toThrow(/outside the loopback interface/);
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
     }
   });
 });

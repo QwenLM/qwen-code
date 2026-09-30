@@ -563,6 +563,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      batchAutoCollect: {
+        type: 'boolean',
+        label: 'Batch Auto Collect',
+        category: 'General',
+        requiresRestart: true,
+        default: true,
+        description:
+          "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",
+        showInDialog: false,
+      },
       showSessionRecap: {
         type: 'boolean',
         label: 'Show Session Recap',
@@ -1554,15 +1564,70 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  batch: {
+    type: 'object',
+    label: 'Batch',
+    category: 'Model',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.',
+    showInDialog: false,
+    properties: {
+      model: {
+        type: 'string',
+        label: 'Batch Model',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.',
+        showInDialog: false,
+      },
+      authType: {
+        type: 'string',
+        label: 'Batch Auth Type',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Batch Model Base URL',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Optional exact modelProviders baseUrl to distinguish entries with the same model ID.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  advisorMaxUses: {
+    type: 'integer',
+    label: 'Advisor Session Call Limit',
+    category: 'Model',
+    requiresRestart: true,
+    default: 0,
+    minimum: 0,
+    description:
+      'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
+    showInDialog: true,
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',
     category: 'Model',
-    requiresRestart: false,
+    requiresRestart: true,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
-    showInDialog: true,
+      'Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.',
+    showInDialog: false,
   },
 
   visionModel: {
@@ -2347,6 +2412,16 @@ const SETTINGS_SCHEMA = {
           'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
         showInDialog: false,
       },
+      enableStructuredRecall: {
+        type: 'boolean',
+        label: 'Enable Structured Memory Recall',
+        category: 'Memory',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Switch memory recall from the flat MEMORY.md listing to the structured protocol: hierarchical memory tree, focused subtree, and the search_memory tool. Off by default — while off, the metadata migration that would make the corpus structured-ready is never scheduled, so the protocol costs no background model calls. Override with QWEN_CODE_MEMORY_STRUCTURED_RECALL=0|1.',
+        showInDialog: false,
+      },
     },
   },
 
@@ -2754,7 +2829,10 @@ const SETTINGS_SCHEMA = {
           required: ['filesystem', 'network'],
           additionalProperties: false,
           properties: {
-            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            backend: {
+              type: 'string',
+              enum: ['auto', 'bwrap', 'landlock'],
+            },
             filesystem: {
               type: 'string',
               enum: ['read-only', 'workspace-write'],
@@ -2770,7 +2848,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+          'Expose ordinary tools through the isolated exec JavaScript tool. Load deferred descriptions and schemas on demand with tool_search; if search is unavailable, include all allowed signatures in exec. Direct control tools remain available. Ignored in safe and bare modes.',
         showInDialog: true,
       },
       sandbox: {
@@ -2886,7 +2964,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 0,
             description:
-              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). Defaults to 0, which performs no threshold-based preload; ordinary deferred tools normally stay behind the stable ToolSearch + ToolCall bridge, at the cost of one tool_search round trip before first use. Raise it to N so that, when every eligible deferred schema fits within N% of the context window, all are declared upfront for direct calls with no bridge round trip; otherwise they stay behind the bridge while both bridge tools are registered. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge while it is registered; when either bridge tool is unregistered (tools.toolSearch.enabled false denies both; a tool_search or tool_call deny rule removes one) the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct tool mode. CodeModeOnly hides both bridge tools, keeps full nested schemas for callable deferred tools in exec, and skips deferred reminders and this warning; tools.eager does not make them unreachable or save their schema tokens. In direct mode they stay registered, so a direct call by their own name is still evaluated and approved normally. Separate paths can still declare deferred tools at 0: tools.visible; the live-history compatibility scan on every tool-set refresh (including resume, MCP discovery, first plan-mode entry, and subagent definition changes); the incomplete-bridge eager fallback; and daemon ACP late registration, which explicitly reveals and pins create_sub_session.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). Defaults to 0, which performs no threshold-based preload; ordinary deferred tools normally stay behind the stable ToolSearch + ToolCall bridge, at the cost of one tool_search round trip before first use. Raise it to N so that, when every eligible deferred schema fits within N% of the context window, all are declared upfront for direct calls with no bridge round trip; otherwise they stay behind the bridge while both bridge tools are registered. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge while it is registered; when either bridge tool is unregistered (tools.toolSearch.enabled false denies both; a tool_search or tool_call deny rule removes one) the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct tool mode. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager also reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed tool signatures. In direct mode they stay registered, so a direct call by their own name is still evaluated and approved normally. Separate paths can still declare deferred tools at 0: tools.visible; the live-history compatibility scan on every tool-set refresh (including resume, MCP discovery, first plan-mode entry, and subagent definition changes); the incomplete-bridge eager fallback; and daemon ACP late registration, which explicitly reveals and pins create_sub_session.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -3068,7 +3146,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct tool mode. CodeModeOnly hides both bridge tools, keeps full nested schemas for callable deferred tools in exec, and skips deferred reminders and this warning; tools.eager does not make them unreachable or save their schema tokens. In direct mode they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and sessions whose live history contains a direct call to a still-hidden demoted tool, which any tool-set refresh (resume, MCP discovery, the first plan-mode entry in a session, a subagent definition change) re-declares. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct tool mode. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager also reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed tool signatures. In direct mode they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and sessions whose live history contains a direct call to a still-hidden demoted tool, which any tool-set refresh (resume, MCP discovery, the first plan-mode entry in a session, a subagent definition change) re-declares. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {

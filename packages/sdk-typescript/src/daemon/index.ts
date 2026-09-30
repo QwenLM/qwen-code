@@ -22,6 +22,7 @@ export {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
@@ -96,6 +97,7 @@ export {
   type DaemonUnarchiveStandaloneSessionsResult,
   type RestoreStandaloneSessionRequest,
 } from './standalone-sessions.js';
+export { DaemonStartupConfigError } from './session-startup-config.js';
 export {
   asKnownDaemonEvent,
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
@@ -568,6 +570,7 @@ export type {
   DaemonWorkspaceRemovalResult,
   DaemonRuntimeStopRequest,
   DaemonRuntimeStopSession,
+  DaemonRuntimeStopChannel,
   DaemonRuntimeStopResult,
   DaemonRuntimeStopSnapshot,
   DaemonRuntimeStopOption,
@@ -597,6 +600,7 @@ export type {
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   HistoricalBranchSessionRequest,
+  WorktreeBranchSessionRequest,
   DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
@@ -636,6 +640,8 @@ export type {
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
+  DaemonMcpAppToolCall,
+  DaemonMcpAppToolResult,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -715,6 +721,7 @@ export type {
   DaemonLogIssue,
   DaemonLogMode,
   DaemonStatusReport,
+  DaemonUpdateStatus,
   DaemonStatusReportDetail,
   DaemonStatusReportIssue,
   DaemonStatusReportLevel,
@@ -844,6 +851,8 @@ export type {
   SetModelResult,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
+  SessionStartupConfig,
+  SessionStartupConfigApplied,
   SetSessionLanguageResult,
   SetUserLanguageResult,
   KnownDaemonSessionArtifactChangeAction,
