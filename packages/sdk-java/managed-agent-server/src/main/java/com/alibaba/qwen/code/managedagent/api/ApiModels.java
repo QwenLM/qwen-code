@@ -8,6 +8,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 import java.util.Map;
+import jakarta.validation.constraints.NotNull;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 
 public final class ApiModels {
     private ApiModels() {
@@ -67,14 +69,17 @@ public final class ApiModels {
             long contextRevision, String state) {
     }
 
-    public record SessionCapabilities(boolean items, boolean snapshots,
-            boolean artifacts, boolean resync,
+    public record SessionCapabilities(
+            boolean items,
+            boolean snapshots,
+            boolean artifacts,
+            boolean resync,
             @JsonProperty("session_lifecycle") boolean sessionLifecycle,
-            boolean tasks) {
-    }
+            boolean tasks,
+            boolean actions) {}
 
     public record WebShellSessionCapabilities(boolean tasks,
-            boolean workspaceTurns) {
+            boolean actions, boolean workspaceTurns) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -95,13 +100,38 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record PublicCommandOperation(String id,
-            @JsonProperty("session_id") String sessionId, String type,
+    public record PublicCommandOperation(
+            String id,
+            @JsonProperty("session_id") String sessionId,
+            String type,
             String status,
             @JsonProperty("admission_stage") String admissionStage,
             @JsonProperty("delivery_state") String deliveryState,
             @JsonProperty("receipt_id") String receiptId,
-            boolean replayed) {
+            boolean replayed,
+            @JsonProperty("action_resolution") JsonNode actionResolution,
+            @JsonProperty("failure_code") String failureCode) {
+        public PublicCommandOperation(
+                String id,
+                String sessionId,
+                String type,
+                String status,
+                String admissionStage,
+                String deliveryState,
+                String receiptId,
+                boolean replayed) {
+            this(
+                    id,
+                    sessionId,
+                    type,
+                    status,
+                    admissionStage,
+                    deliveryState,
+                    receiptId,
+                    replayed,
+                    null,
+                    null);
+        }
     }
 
     public record PublicList<T>(String object, List<T> data,
@@ -206,10 +236,38 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record WebShellCommandOperation(String operationId,
-            String sessionId, String type, String status,
-            String admissionStage, String deliveryState, String receiptId,
-            boolean replayed) {
+    public record WebShellCommandOperation(
+            String operationId,
+            String sessionId,
+            String type,
+            String status,
+            String admissionStage,
+            String deliveryState,
+            String receiptId,
+            boolean replayed,
+            JsonNode actionResolution,
+            String failureCode) {
+        public WebShellCommandOperation(
+                String operationId,
+                String sessionId,
+                String type,
+                String status,
+                String admissionStage,
+                String deliveryState,
+                String receiptId,
+                boolean replayed) {
+            this(
+                    operationId,
+                    sessionId,
+                    type,
+                    status,
+                    admissionStage,
+                    deliveryState,
+                    receiptId,
+                    replayed,
+                    null,
+                    null);
+        }
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -246,6 +304,61 @@ public final class ApiModels {
             long createdAt, Long startedAt, Long settledAt,
             List<String> artifactRefs, List<String> actionCapabilities) {
     }
+
+    public record PermissionResponse(
+            @NotBlank String kind,
+            @JsonProperty("input_revision") JsonNode inputRevision,
+            @JsonProperty("policy_revision") @NotBlank @Size(max = 128) String policyRevision,
+            @JsonProperty("option_id") @NotBlank @Size(max = 128) String optionId) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellPermissionResponse(
+            @NotBlank String kind,
+            JsonNode inputRevision,
+            @NotBlank @Size(max = 128) String policyRevision,
+            @NotBlank @Size(max = 128) String optionId) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellActionQueryRequest(
+            @NotBlank String sessionId, @Size(max = 512) String cursor, Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellActionGetRequest(
+            @NotBlank String sessionId, @NotBlank @Size(max = 128) String actionId) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record WebShellActionRespondRequest(
+            @Size(max = 128) String requestId,
+            @NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String actionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotNull @Valid WebShellPermissionResponse response) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Action request field: " + name);
+        }
+    }
+
+    public record PublicActionList(
+            List<JsonNode> data,
+            @JsonProperty("has_more") boolean hasMore,
+            @JsonProperty("next_cursor") String nextCursor) {}
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {

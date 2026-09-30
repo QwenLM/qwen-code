@@ -62,10 +62,24 @@ class HostedPublicWorkspaceIT {
     private int port;
     private Path decoy;
     private String node;
+    private boolean approvals;
+    private final java.util.Set<String> answered = new java.util.HashSet<>();
 
     @Test
     @Timeout(150)
     void publicCreationRunsFilesThroughProductionWorkspaceBinding() throws Exception {
+        runFiles();
+    }
+
+    @Test
+    @Timeout(150)
+    void ownerAnswersHostedApprovalsThroughBothSurfaces() throws Exception {
+        approvals = true;
+        runFiles();
+        assertThat(answered).hasSize(4);
+    }
+
+    private void runFiles() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the CLI first").isRegularFile();
         node = System.getProperty("node.executable");
@@ -107,6 +121,7 @@ class HostedPublicWorkspaceIT {
                         jdbc.queryForList("SELECT event_type, data_json FROM managed_agent_event WHERE session_id = ?", session),
                         modelRequests.size(), Files.readString(temporary.resolve("harness.log"))).isNotEqualTo("FAILED");
             }).untilAsserted(() -> {
+                if (approvals) answerActions(session, webShell);
                 assertThat(modelFailure.get()).isNull();
                 assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE session_id = ?",
                         String.class, session)).isEqualTo("COMPLETED");
@@ -274,6 +289,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
+        if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -311,6 +327,41 @@ class HostedPublicWorkspaceIT {
                 tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                         + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+        if (approvals) jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create) VALUES (?, ?, ?, TRUE, FALSE)",
+                tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void answerActions(String session, boolean web) throws Exception {
+        JsonNode capability = request("GET", "/v1/agents/sessions/" + session, null, null, "actor", 200);
+        assertThat(capability.at("/capabilities/actions").asBoolean()).isTrue();
+        JsonNode page = web ? request("POST", "/api/agent/web-shell/v1/actions/query",
+                Map.of("sessionId", session), null, "actor", 200)
+                : request("GET", "/v1/agents/sessions/" + session + "/actions", null, null, "actor", 200);
+        assertThat(page.path("data").size()).isLessThanOrEqualTo(1);
+        for (JsonNode action : page.path("data")) {
+            String id = action.path(web ? "actionId" : "id").asText();
+            if (!answered.add(id)) continue;
+            String route = web ? "/api/agent/web-shell/v1/actions/respond"
+                    : "/v1/agents/sessions/" + session + "/actions/" + id + "/responses";
+            Map<String, Object> response = web ? Map.of("kind", "permission", "optionId", "allow",
+                    "inputRevision", action.path("inputRevision").asLong(), "policyRevision", action.path("policyRevision").asText())
+                    : Map.of("kind", "permission", "option_id", "allow", "input_revision", action.path("input_revision").asLong(),
+                            "policy_revision", action.path("policy_revision").asText());
+            Map<String, Object> body = web ? Map.of("sessionId", session, "actionId", id, "idempotencyKey", id,
+                    "requestId", "d6b-action", "response", response) : response;
+            assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
+            JsonNode operation = request("POST", route, body, id, "actor", 202);
+            String op = operation.path(web ? "operationId" : "id").asText();
+            JsonNode replay = request("POST", route, body, id, "actor", 202);
+            assertThat(replay.path(web ? "operationId" : "id").asText()).isEqualTo(op);
+            assertThat(replay.path("replayed").asBoolean()).isTrue();
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                JsonNode settled = request("GET", "/v1/agents/sessions/" + session + "/operations/" + op,
+                        null, null, "actor", 200);
+                assertThat(settled.path("status").asText()).isEqualTo("completed");
+                assertThat(settled.at("/action_resolution/outcome").asText()).isEqualTo("decided");
+            });
+        }
     }
 
     private void startHarness(Path cli, int harnessPort, int brokerPort) throws Exception {

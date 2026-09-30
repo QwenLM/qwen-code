@@ -44,6 +44,7 @@ qwen:
       token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN:}'
       capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST:}'
       approval-mode: '${QWEN_MANAGED_AGENT_APPROVAL_MODE:yolo}'
+      approval-timeout: '${QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:10m}'
       connect-timeout: '5s'
       request-timeout: '30s'
       heartbeat-interval: '30s'

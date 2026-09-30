@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.24.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement."
+    "version": "1.25.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations. v1.23 settles the planned task event and cancel semantics: a durable retention floor, committed-prefix publication, stable cursors, Artifact visibility before expiry, bounded backlog under archival failure, ordered idempotent cancellation and command outcomes. Clients tolerate unknown optional event fields across minor versions. Task events and cancel remain planned. v1.24 serves the read-only Session MCP catalog as partial (Stage H1), projecting display metadata and schemas from committed records without Runtime identities, credentials or production profile enablement. v1.25 implements permission Actions (Stage D6b) on both surfaces: list, get and respond, projected from the Session's action.changed records; a WebShell permission Action carries inputRevision, policyRevision, functionCallId, toolName and expiresAt, its option ids allow and deny are stable, a Turn has at most one requested approval at a time, and a response is a durable command operation carrying requestId."
   },
   "servers": [
     {
@@ -1261,7 +1261,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "listSessionActions",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Authorized pending Actions; use original action lookup to query terminal state.",
@@ -1277,13 +1277,15 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "parameters": [
@@ -1293,7 +1295,8 @@
           {
             "$ref": "#/components/parameters/ListLimit"
           }
-        ]
+        ],
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}": {
@@ -1308,7 +1311,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getSessionAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Current durable Action view, including terminal decisions.",
@@ -1324,15 +1327,18 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses": {
@@ -1347,7 +1353,7 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "respondToSessionAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Response durably queued for the original arbiter. 202 is not final approval.",
@@ -1363,13 +1369,16 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "parameters": [
@@ -1386,7 +1395,8 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/close": {
@@ -1521,7 +1531,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "queryWebShellActions",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1537,13 +1547,15 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "requestBody": {
@@ -1555,14 +1567,15 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/get": {
       "post": {
         "tags": ["WebShell"],
         "operationId": "getWebShellAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1578,13 +1591,15 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "requestBody": {
@@ -1596,14 +1611,15 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/respond": {
       "post": {
         "tags": ["WebShell"],
         "operationId": "respondWebShellAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1619,13 +1635,16 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "requestBody": {
@@ -1637,7 +1656,8 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/sessions/close": {
@@ -2931,7 +2951,14 @@
       "SessionCapabilities": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "snapshots", "artifacts", "resync", "tasks"],
+        "required": [
+          "items",
+          "snapshots",
+          "artifacts",
+          "resync",
+          "tasks",
+          "actions"
+        ],
         "properties": {
           "items": {
             "type": "boolean"
@@ -2962,8 +2989,7 @@
           },
           "actions": {
             "type": "boolean",
-            "default": false,
-            "x-qwen-implementation-status": "planned"
+            "default": false
           },
           "session_lifecycle": {
             "type": "boolean",
@@ -3843,7 +3869,7 @@
       },
       "WebShellSessionCapabilities": {
         "type": "object",
-        "required": ["tasks"],
+        "required": ["tasks", "actions"],
         "properties": {
           "workspaceContext": {
             "type": "boolean",
@@ -3862,8 +3888,7 @@
           },
           "actions": {
             "type": "boolean",
-            "default": false,
-            "x-qwen-implementation-status": "planned"
+            "default": false
           },
           "sessionLifecycle": {
             "type": "boolean",
@@ -4696,8 +4721,7 @@
             "type": "string",
             "maxLength": 1024
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "ActionQuestion": {
         "type": "object",
@@ -4758,8 +4782,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "PermissionAction": {
         "type": "object",
@@ -4774,7 +4797,9 @@
           "policy_revision",
           "created_at",
           "expires_at",
-          "options"
+          "options",
+          "function_call_id",
+          "tool_name"
         ],
         "properties": {
           "id": {
@@ -4825,9 +4850,23 @@
             "items": {
               "$ref": "#/components/schemas/ActionOption"
             }
+          },
+          "turn_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "function_call_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -4842,7 +4881,8 @@
               "required": ["decision_receipt_id"]
             }
           }
-        ]
+        ],
+        "description": "At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs."
       },
       "QuestionAction": {
         "type": "object",
@@ -4936,7 +4976,7 @@
             "$ref": "#/components/schemas/QuestionAction"
           }
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicActionList": {
         "type": "object",
@@ -4957,8 +4997,7 @@
             "type": ["string", "null"],
             "maxLength": 512
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "QuestionAnswer": {
         "type": "object",
@@ -5020,8 +5059,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "QuestionResponse": {
         "type": "object",
@@ -5061,7 +5099,7 @@
             "$ref": "#/components/schemas/QuestionResponse"
           }
         ],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Validate IDs, required answers, selection cardinality, text eligibility and current responder permission against the original Action. Unknown/expired/cancelled/conflicting revisions cannot grant execution."
       },
       "ActionResolution": {
@@ -5075,7 +5113,8 @@
             "maxLength": 128
           },
           "outcome": {
-            "enum": ["vote_recorded", "decided"]
+            "enum": ["vote_recorded", "decided"],
+            "description": "D6 supports decided only; vote_recorded is planned."
           },
           "receipt_id": {
             "type": "string",
@@ -5088,7 +5127,7 @@
             "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -5168,15 +5207,13 @@
             "maxLength": 128
           },
           "action_resolution": {
-            "$ref": "#/components/schemas/ActionResolution",
-            "x-qwen-implementation-status": "planned"
+            "$ref": "#/components/schemas/ActionResolution"
           },
           "failure_code": {
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "x-qwen-implementation-status": "planned",
-            "description": "Why the operation failed. Required for a failed task_cancel, which proves non-acceptance and no further delivery. Close, archive and delete retry until they complete, so they never report one."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
           },
           "replayed": {
             "type": "boolean"
@@ -5371,7 +5408,7 @@
             "$ref": "#/components/schemas/WebShellQuestionAction"
           }
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellActionResolution": {
         "type": "object",
@@ -5384,7 +5421,8 @@
             "maxLength": 128
           },
           "outcome": {
-            "enum": ["vote_recorded", "decided"]
+            "enum": ["vote_recorded", "decided"],
+            "description": "D6 supports decided only; vote_recorded is planned."
           },
           "receiptId": {
             "type": "string",
@@ -5397,7 +5435,7 @@
             "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -5555,15 +5593,13 @@
             "maxLength": 128
           },
           "actionResolution": {
-            "$ref": "#/components/schemas/WebShellActionResolution",
-            "x-qwen-implementation-status": "planned"
+            "$ref": "#/components/schemas/WebShellActionResolution"
           },
           "failureCode": {
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "x-qwen-implementation-status": "planned",
-            "description": "Why the operation failed. Required for a failed task_cancel, which proves non-acceptance and no further delivery. Close, archive and delete retry until they complete, so they never report one."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
           },
           "replayed": {
             "type": "boolean"
@@ -5834,7 +5870,9 @@
           "policyRevision",
           "createdAt",
           "expiresAt",
-          "options"
+          "options",
+          "functionCallId",
+          "toolName"
         ],
         "properties": {
           "actionId": {
@@ -5885,9 +5923,23 @@
             "items": {
               "$ref": "#/components/schemas/WebShellActionOption"
             }
+          },
+          "turnId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "functionCallId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "toolName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -5902,7 +5954,8 @@
               "required": ["decisionReceiptId"]
             }
           }
-        ]
+        ],
+        "description": "At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs."
       },
       "WebShellPermissionResponse": {
         "type": "object",
@@ -5927,8 +5980,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionPage": {
         "type": "object",
@@ -5949,8 +6001,7 @@
             "type": ["string", "null"],
             "maxLength": 512
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionSource": {
         "type": "object",
@@ -5970,8 +6021,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionResponseRequest": {
         "oneOf": [
@@ -5982,7 +6032,7 @@
             "$ref": "#/components/schemas/WebShellQuestionResponse"
           }
         ],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Validate IDs, required answers, selection cardinality, text eligibility and current responder permission against the original Action. Unknown/expired/cancelled/conflicting revisions cannot grant execution."
       },
       "WebShellActionOption": {
@@ -6004,8 +6054,7 @@
             "type": "string",
             "maxLength": 1024
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellQuestionResponse": {
         "type": "object",
@@ -6066,8 +6115,7 @@
             "maximum": 100,
             "default": 20
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionGetRequest": {
         "type": "object",
@@ -6083,8 +6131,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionRespondRequest": {
         "type": "object",
@@ -6107,9 +6154,12 @@
           },
           "response": {
             "$ref": "#/components/schemas/WebShellActionResponseRequest"
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellLifecycleRequest": {
         "type": "object",

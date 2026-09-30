@@ -51,7 +51,7 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 [简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
-Actions (Java routes planned): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
+Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
 [简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
 ## Prerequisites
@@ -278,12 +278,20 @@ Harness or Runtime Broker credentials.
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
 Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
 adapter uses the same admission. This requires the Hosted Harness and HTTP
-Session Store, `yolo` approval mode, and a `local-process`, `session`-isolated
+Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
 header alone does not authenticate an actor.
+
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
+`auto-edit`, the Session creator can list, inspect and answer pending permission
+Actions through the public API or WebShell. Responses are durable, idempotent
+operations; their final result follows the committed Harness decision.
+`QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
+The approval mode is pinned at Session creation and must be confirmed by the
+Harness on creation and load.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
 through `POST /v1/agents/sessions`. The server chooses the fixed
@@ -463,11 +471,18 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes copied full-chain scripts for a future integration.
-Their expected `dist/managed-runtime-worker.js` artifact is not built, so the
-commands below describe intended verification, not passing evidence for this
-integration. The G0 integration test instead starts the supported Hosted Harness
-and worker modes through the packaged `dist/cli.js`.
+The full-chain script starts Spring with its embedded Runtime Broker and runs
+both the Hosted Harness and the worker from the packaged `dist/cli.js`: the
+Harness as `node dist/cli.js serve --profile hosted-harness`, and each worker,
+launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
+separate worker bundle exists. The G0 integration test
+(`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
+
+The real-model run below has not been executed as evidence for this
+integration, so treat it as intended verification, not passing evidence. The
+script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
+starts its own temporary MySQL server and exits before starting anything else
+when a command or a required file is missing.
 
 Build the required artifacts first, then run:
 

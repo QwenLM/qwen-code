@@ -52,6 +52,8 @@ import java.util.regex.Pattern;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
@@ -78,6 +80,18 @@ public class ManagedAgentService {
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
+    private ManagedActionStore actions;
+
+    @Autowired
+    void setActions(ManagedActionStore actions) {
+        this.actions = actions;
+    }
+
+    private boolean hasActions(SessionRecord session) {
+        return session.workspace() != null
+                && actions != null
+                && !"yolo".equals(actions.approvalMode(session.tenantId(), session.sessionId()));
+    }
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
@@ -464,18 +478,29 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
-        return new PublicSession(session.sessionId(), "agent.session",
-                session.agentId(), session.agentRevision(),
+        return new PublicSession(
+                session.sessionId(),
+                "agent.session",
+                session.agentId(),
+                session.agentRevision(),
                 session.status().toLowerCase(),
-                session.createdAt() / 1000, session.updatedAt() / 1000,
-                metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence(), session.replayFloorSequence(),
-                store.findSnapshotCoveredSequence(session.tenantId(),
-                        session.sessionId()),
+                session.createdAt() / 1000,
+                session.updatedAt() / 1000,
+                metadata,
+                activeTurn == null ? null : publicTurn(activeTurn),
+                session.lastSequence(),
+                session.replayFloorSequence(),
+                store.findSnapshotCoveredSequence(session.tenantId(), session.sessionId()),
                 // A Workspace-bound Session has no lifecycle operations yet;
                 // every Session serves its task list and detail (H0c).
-                new SessionCapabilities(true, true, false, true,
-                        session.workspace() == null, true),
+                new SessionCapabilities(
+                        true,
+                        true,
+                        false,
+                        true,
+                        session.workspace() == null,
+                        true,
+                        hasActions(session)),
                 publicWorkspace(session));
     }
 
@@ -485,15 +510,20 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         EventRecord environmentEvent = store.findLatestEnvironmentEvent(
                 session.tenantId(), session.sessionId()).orElse(null);
-        return new WebShellSession(session.sessionId(), session.title(),
-                session.agentId(), session.status().toLowerCase(),
-                session.createdAt(), session.updatedAt(),
+        return new WebShellSession(
+                session.sessionId(),
+                session.title(),
+                session.agentId(),
+                session.status().toLowerCase(),
+                session.createdAt(),
+                session.updatedAt(),
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
-                session.lastSequence(), webShellWorkspace(session),
-                // Every Session serves its task list and detail; the tasks
-                // come from the Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true,
+                session.lastSequence(),
+                webShellWorkspace(session),
+                // Every Session serves its task list and detail; the tasks come from the
+                // Stage H records its Session store holds (H0c).
+                new WebShellSessionCapabilities(true, hasActions(session),
                         maySubmitWorkspaceTurn(session, actorId)));
     }
 

@@ -2347,19 +2347,24 @@ describe('Hosted Harness no-tool session', () => {
           });
       const admitted = await send();
       expect(admitted.status).toBe(202);
-      await vi.waitFor(async () => {
-        const transcript = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/transcript`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(transcript.body.events).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: terminalType,
-              promptId: PROMPT_ID,
-            }),
-          ]),
-        );
-      });
+      // The default 1s waitFor timeout races the settlement retry's durable
+      // writes on contended CI runners; the assertions are unchanged.
+      await vi.waitFor(
+        async () => {
+          const transcript = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(transcript.body.events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: terminalType,
+                promptId: PROMPT_ID,
+              }),
+            ]),
+          );
+        },
+        { timeout: 10_000 },
+      );
       expect(failed).toBe(true);
       expect(state.model).toHaveBeenCalledTimes(modelCalls);
       const status = await headers(
@@ -2388,19 +2393,22 @@ describe('Hosted Harness no-tool session', () => {
           payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
         });
       expect(next.status).toBe(202);
-      await vi.waitFor(async () => {
-        const transcript = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/transcript`),
-        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-        expect(transcript.body.events).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: 'turn_complete',
-              promptId: nextPromptId,
-            }),
-          ]),
-        );
-      });
+      await vi.waitFor(
+        async () => {
+          const transcript = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(transcript.body.events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'turn_complete',
+                promptId: nextPromptId,
+              }),
+            ]),
+          );
+        },
+        { timeout: 10_000 },
+      );
       expect(state.model).toHaveBeenCalledTimes(modelCalls + 1);
       await headers(supertest(server).delete(`/session/${SESSION_ID}`));
     },
