@@ -145,16 +145,17 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * predicate stays shape-based because it is also the fallback for callers that
  * hold only raw `Content[]`.
  *
- * Residual, still open: a FAILED live notification turn whose entry carries no
- * reminders (no plan mode, no output style, no active todo chain) is a
- * single-envelope user entry and is still trimmed — provenance does NOT reach
- * it, because the delivered turn (`recordNotification`, client.ts) and the
- * cold persisted record (`recordNotificationStrict`) both funnel through the
- * same `createNotificationRecord` and so carry an identical
- * `provenance: 'system'` + `subtype: 'notification'` stamp. The only field that
- * differs is `backgroundTurn`, and the `channelTask` admission branch runs it
- * with `backgroundTurnContext.exit(...)`, so it is not a reliable discriminator.
- * Closing that needs a distinguishing record field or a daemon-side re-drive.
+ * The same shape collision exists between a cold record and a FAILED live
+ * notification turn whose entry carries no reminders (no plan mode, no output
+ * style, no active todo chain): both are single-envelope user entries, and
+ * both records carry `provenance: 'system'` + `subtype: 'notification'`.
+ * `backgroundTurn` cannot separate them — the `channelTask` admission branch
+ * runs the turn with `backgroundTurnContext.exit(...)` — so the recorder
+ * stamps the turn's own entry `deliveredTurn: true` when `client.ts` sends it
+ * (chatRecordingService.ts), and the projection's count excludes delivered
+ * entries. A failed delivered turn is therefore left in place and classifies
+ * as the textbook `interrupted_prompt` documented above; only records whose
+ * turn never ran are trimmed.
  *
  * Needed at all because the record's `subtype: 'notification'` and
  * `provenance: 'system'` cannot ride along on `Content` (that type comes from

@@ -392,6 +392,21 @@ export interface ChatRecord {
   /** Goal identity and logical turn that owned this model-facing record. */
   goalContext?: GoalTurnPermit;
   backgroundTurn?: BackgroundNotificationTurn;
+  /**
+   * `true` on a `subtype: 'notification'` record whose automatic turn was
+   * actually delivered to the model: `LlmClient.sendMessageStream` stamps it
+   * when it records the turn's user entry (`client.ts`), so the stamp exists
+   * even where the admission branch runs outside `backgroundTurnContext`.
+   * Records persisted BEFORE their turn ran (`recordNotificationStrict`, the
+   * pre-send `recordNotification` copies) carry no stamp. This is the only
+   * reliable separator between the two — both share `provenance: 'system'` +
+   * `subtype: 'notification'`, and `backgroundTurn` vanishes on the
+   * `channelTask` admission branch (`backgroundTurnContext.exit`). Session
+   * recovery trims only undelivered notification records: a
+   * delivered-but-unanswered entry is an `interrupted_prompt` — a turn that
+   * ran and errored — not a cold notification nobody owes a response.
+   */
+  deliveredTurn?: boolean;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -2374,12 +2389,18 @@ export class ChatRecordingService {
    * Records a background agent notification.
    * Stored as a user-role message with subtype 'notification' so the
    * UI restores it as an info item, not a user turn.
+   *
+   * `deliveredTurn` must be `true` exactly when the record IS the user entry
+   * of a notification turn being sent to the model right now (the
+   * `client.ts` send path); copies persisted before the turn runs leave it
+   * unset so session recovery can still trim them.
    */
   recordNotification(
     message: PartListUnion,
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     this.recordNotificationLike(
       message,
@@ -2387,6 +2408,7 @@ export class ChatRecordingService {
       displayText,
       backgroundTask,
       goalContext,
+      deliveredTurn,
     );
   }
 
@@ -2416,6 +2438,7 @@ export class ChatRecordingService {
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): void {
     try {
       const record = this.createNotificationRecord(
@@ -2424,6 +2447,7 @@ export class ChatRecordingService {
         displayText,
         backgroundTask,
         goalContext,
+        deliveredTurn,
       );
       this.appendRecord(record);
     } catch (error) {
@@ -2437,12 +2461,14 @@ export class ChatRecordingService {
     displayText?: string,
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
+    deliveredTurn?: boolean,
   ): ChatRecord {
     return {
       ...this.createBaseRecord('user'),
       subtype,
       provenance: 'system',
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+      ...(deliveredTurn ? { deliveredTurn: true } : {}),
       message: createUserContent(message),
       systemPayload: displayText
         ? {

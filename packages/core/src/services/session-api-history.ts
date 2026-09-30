@@ -135,7 +135,7 @@ function hasUniqueToolResult(history: Content[], toolCallId: unknown): boolean {
 
 /**
  * Whether `record` is one the recorder stamped as a system-injected background
- * notification rather than user input.
+ * notification rather than user input — AND whose automatic turn never ran.
  *
  * `createNotificationRecord` (chatRecordingService.ts) is the only producer of
  * `subtype: 'notification'` and it always pairs it with `provenance: 'system'`.
@@ -146,16 +146,32 @@ function hasUniqueToolResult(history: Content[], toolCallId: unknown): boolean {
  * out. `'cron'` is deliberately excluded: `recordCronPrompt` reuses the same
  * `provenance` but carries a user-authored prompt, and the shape predicate
  * this signal refines never trimmed those.
+ *
+ * `deliveredTurn` is excluded for the opposite reason: `client.ts` stamps it
+ * on the user entry of a notification turn it actually sends, so a
+ * delivered-but-unanswered entry (the turn failed mid-stream before any
+ * `functionCall`, leaving the bare-envelope entry as the tail) must stay
+ * classifiable as the `interrupted_prompt` it is, not be trimmed like a cold
+ * record the daemon persisted before the turn ran. The stamp is the only
+ * reliable separator between the two — the shapes are identical and
+ * `backgroundTurn` vanishes on the `channelTask` admission branch. Pre-stamp
+ * transcripts simply keep the old behaviour: their delivered records are
+ * unmarked, so they read as cold.
  */
 function isSystemNotificationRecord(record: ChatRecord): boolean {
-  return record.provenance === 'system' && record.subtype === 'notification';
+  return (
+    record.provenance === 'system' &&
+    record.subtype === 'notification' &&
+    record.deliveredTurn !== true
+  );
 }
 
 export class SessionApiHistoryAccumulator {
   private history: Content[] = [];
   /**
    * Per-entry companion to {@link history}: `true` when the entry was appended
-   * from a record the recorder stamped as a system-injected notification.
+   * from a record the recorder stamped as a system-injected notification whose
+   * turn never ran (see {@link isSystemNotificationRecord}).
    *
    * Kept as a parallel array because the authoritative stamp lives on the
    * `ChatRecord` and cannot ride along on `Content` (that type comes from
@@ -285,15 +301,18 @@ export class SessionApiHistoryAccumulator {
   /**
    * The same projection as {@link finish}, plus how many TRAILING entries of
    * the returned history came from records the recorder stamped as
-   * system-injected background notifications.
+   * system-injected background notifications whose turn never ran.
    *
    * This is the authoritative provenance signal that `Content` cannot carry
    * (its type comes from `@google/genai`). Session recovery uses it to tell a
    * real user prompt that happens to look like a `<task-notification>`
    * envelope from a cold notification record — the two are identical by shape,
-   * and only the record's own stamp separates them. A trailing COUNT rather
-   * than a full index set is all a consumer needs, because the only question
-   * ever asked is how far back from the end the notification run reaches.
+   * and only the record's own stamp separates them. A notification entry whose
+   * turn WAS delivered (`deliveredTurn` on the source record) is not counted:
+   * left unanswered it is an interrupted prompt, not a cold record, so it must
+   * stay classifiable. A trailing COUNT rather than a full index set is all a
+   * consumer needs, because the only question ever asked is how far back from
+   * the end the cold-notification run reaches.
    *
    * The count is derived here, alongside the entries, so it survives
    * `stripThoughtsFromHistory` dropping entries: the flags are filtered in

@@ -4029,6 +4029,13 @@ export class LlmClient {
       // is the model-bound payload, so a resumed session restores the
       // same info item. Without this they were the one top-level
       // interaction missing from chat recording entirely.
+      //
+      // `deliveredTurn: true` because this record IS the turn's user entry,
+      // written as the turn is being sent: it is what separates a turn that
+      // ran and errored (recoverable `interrupted_prompt`) from a cold
+      // notification record the daemon persisted before the turn ever ran,
+      // which no other persisted field can tell apart (`backgroundTurn`
+      // vanishes on the `channelTask` admission branch).
       this.config
         .getChatRecordingService()
         ?.recordNotification(
@@ -4036,6 +4043,7 @@ export class LlmClient {
           options?.notificationDisplayText,
           undefined,
           goalPermit,
+          /* deliveredTurn */ true,
         );
     }
 
