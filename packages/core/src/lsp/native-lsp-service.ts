@@ -59,6 +59,23 @@ import { globSync } from 'glob';
 const debugLogger = createDebugLogger('LSP');
 
 /**
+ * Build the rejection for a diagnostics query in which every selected server
+ * failed its pull request; a partial failure still returns the surviving
+ * servers' results, so this is only reached when nothing was retrieved.
+ */
+function allDiagnosticRequestsFailed(
+  failures: Array<{ name: string; error: unknown }>,
+): Error {
+  const detail = failures
+    .map(
+      ({ name, error }) =>
+        `${name}: ${(error as Error)?.message || String(error)}`,
+    )
+    .join('; ');
+  return new Error(`All LSP diagnostic requests failed (${detail})`);
+}
+
+/**
  * Mapping from LSP language identifiers to file extensions, only for cases
  * where the language ID does NOT match the file extension directly.
  * Languages whose ID is already a valid extension (e.g. "cpp", "java", "go")
@@ -542,6 +559,34 @@ export class NativeLspService {
         entry[1].status === 'READY' &&
         entry[1].connection !== undefined &&
         (!serverName || entry[0] === serverName),
+    );
+  }
+
+  /**
+   * Ready handles for a diagnostics query, rejecting states that an empty
+   * ready set would otherwise report as a clean result: no matching server,
+   * a server that failed or never started, and a server still starting up.
+   */
+  private getDiagnosticHandles(
+    serverName?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+    const handles = this.getReadyHandles(serverName);
+    if (handles.length > 0) {
+      return handles;
+    }
+    const states = Array.from(this.serverManager.getHandles())
+      .filter(([name]) => !serverName || name === serverName)
+      .map(([name, handle]) =>
+        handle.status === 'READY' && !handle.connection
+          ? `${name} has no active connection`
+          : `${name} is ${handle.status.toLowerCase().replace(/_/g, ' ')}`,
+      );
+    throw new Error(
+      states.length > 0
+        ? `No LSP server is ready to provide diagnostics (${states.join('; ')})`
+        : serverName
+          ? `No LSP server named ${serverName} is configured or running`
+          : 'No LSP servers are configured or running',
     );
   }
 
@@ -1751,8 +1796,9 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const allDiagnostics: LspDiagnostic[] = [];
+    const failures: Array<{ name: string; error: unknown }> = [];
 
     for (const [name, handle] of handles) {
       // A sync failure must reject, not report incomplete diagnostics as clean.
@@ -1784,15 +1830,19 @@ export class NativeLspService {
           }
         }
       } catch (error) {
-        // Fall back to cached diagnostics from publishDiagnostics notifications
-        // This is handled by the notification handler if implemented
+        // A failed pull is not a clean result: keep partial results from
+        // healthier servers, but reject when every server failed.
         debugLogger.warn(
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
         );
+        failures.push({ name, error });
       }
     }
 
+    if (failures.length === handles.length) {
+      throw allDiagnosticRequestsFailed(failures);
+    }
     return allDiagnostics;
   }
 
@@ -1803,8 +1853,9 @@ export class NativeLspService {
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const results: LspFileDiagnostics[] = [];
+    const failures: Array<{ name: string; error: unknown }> = [];
 
     for (const [name, handle] of handles) {
       const connection = handle.connection;
@@ -1895,7 +1946,10 @@ export class NativeLspService {
           }
         }
       } catch (error) {
+        // A failed pull is not a clean result: keep partial results from
+        // healthier servers, but reject when every server failed.
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+        failures.push({ name, error });
       }
 
       if (results.length >= limit) {
@@ -1903,6 +1957,9 @@ export class NativeLspService {
       }
     }
 
+    if (failures.length === handles.length) {
+      throw allDiagnosticRequestsFailed(failures);
+    }
     return results.slice(0, limit);
   }
 

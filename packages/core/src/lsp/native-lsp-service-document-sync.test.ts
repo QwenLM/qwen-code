@@ -1603,21 +1603,25 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
-  it('preserves the existing workspace diagnostics request failure handling', async () => {
+  it('rejects a failed workspace diagnostics pull instead of reporting clean', async () => {
     await run(service.hover({ uri, range }));
     const error = new Error('unsupported workspace pull diagnostics');
     connection.request.mockRejectedValue(error);
-    expect(await run(service.workspaceDiagnostics())).toEqual([]);
+    await expect(run(service.workspaceDiagnostics())).rejects.toThrow(
+      'unsupported workspace pull diagnostics',
+    );
     expect(logger.warn).toHaveBeenLastCalledWith(
       'LSP workspace/diagnostic failed for test:',
       error,
     );
   });
 
-  it('preserves the existing diagnostics request failure handling', async () => {
+  it('rejects a failed diagnostics pull instead of reporting clean', async () => {
     const error = new Error('unsupported pull diagnostics');
     connection.request.mockRejectedValue(error);
-    expect(await run(service.diagnostics(uri))).toEqual([]);
+    await expect(run(service.diagnostics(uri))).rejects.toThrow(
+      'unsupported pull diagnostics',
+    );
     expect(logger.warn).toHaveBeenLastCalledWith(
       'LSP textDocument/diagnostic failed for test:',
       error,
@@ -2592,5 +2596,123 @@ describe('NativeLspService disk document synchronization', () => {
     await run(service.workspaceSymbols('fn'));
     expect(Date.now() - before).toBe(DEFAULT_LSP_WARMUP_DELAY_MS);
     expect(handle.warmedUp).toBe(true);
+  });
+
+  describe('diagnostics failure visibility', () => {
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects at the service layer when every %s pull fails',
+      async (operation) => {
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow('server exploded');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports a rejected %s pull as a tool error, not a clean result',
+      async (operation) => {
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('server exploded');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports %s as a tool error when no server is ready',
+      async (operation) => {
+        handle.status = 'FAILED';
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('failed');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names a starting server as pending for %s instead of reporting clean',
+      async (operation) => {
+        handle.status = 'IN_PROGRESS';
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('in progress');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'still displays a successful empty %s report as clean',
+      async (operation) => {
+        connection.request.mockResolvedValue({ kind: 'full', items: [] });
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps a valid %s diagnostic with an empty-string message',
+      async (operation) => {
+        const emptyMessageDiagnostic = { range, severity: 1, message: '' };
+        connection.request.mockImplementation(async (method) =>
+          method === 'workspace/diagnostic'
+            ? {
+                items: [
+                  { uri, kind: 'full', items: [emptyMessageDiagnostic] },
+                ],
+              }
+            : { kind: 'full', items: [emptyMessageDiagnostic] },
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('1 issues');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps partial %s results when another server fails',
+      async (operation) => {
+        const healthyConnection = createConnection();
+        healthyConnection.request.mockImplementation(async (method) =>
+          method === 'workspace/diagnostic'
+            ? {
+                items: [
+                  {
+                    uri,
+                    kind: 'full',
+                    items: [{ range, severity: 2, message: 'real warning' }],
+                  },
+                ],
+              }
+            : { kind: 'full', items: [{ range, severity: 2, message: 'real warning' }] },
+        );
+        const healthyHandle: LspServerHandle = {
+          ...handle,
+          connection: healthyConnection,
+        };
+        (
+          service as unknown as { serverManager: unknown }
+        ).serverManager = {
+          getHandles: () =>
+            new Map([
+              ['test', handle],
+              ['healthy', healthyHandle],
+            ]),
+          warmupTypescriptServer: vi.fn(),
+          isTypescriptServer: () => false,
+        };
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('real warning');
+      },
+    );
   });
 });
