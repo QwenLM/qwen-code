@@ -259,11 +259,20 @@ describe('mcp add command', () => {
     });
   });
 
-  it('should treat --no-exclude-tools as an empty list instead of crashing', async () => {
-    await parser.parseAsync('add my-server /path/to/server --no-exclude-tools');
+  it('should treat negated tool flags as unset instead of crashing', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server --no-include-tools --no-exclude-tools',
+    );
 
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
-      'my-server': expect.objectContaining({ excludeTools: [] }),
+      'my-server': expect.not.objectContaining({
+        includeTools: expect.anything(),
+      }),
+    });
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.not.objectContaining({
+        excludeTools: expect.anything(),
+      }),
     });
   });
 
@@ -602,6 +611,22 @@ describe('mcp add command', () => {
             }),
           }),
         }),
+      );
+    });
+
+    it('should treat --no-oauth-scopes as unset instead of crashing', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport http --no-oauth-scopes',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        {
+          'oauth-server': expect.not.objectContaining({
+            oauth: expect.anything(),
+          }),
+        },
       );
     });
   });

@@ -13,10 +13,15 @@ import type {
   MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
-// `--no-include-tools` makes yargs put a boolean `false` in the array.
+// A negated flag (`--no-include-tools`) makes yargs put a boolean `false` in
+// the array. With no string values the list is unset (no filter), not empty
+// (allow none).
 function splitCommaList(values: unknown[] | undefined): string[] | undefined {
-  return values
-    ?.filter((value): value is string => typeof value === 'string')
+  const strings = values?.filter(
+    (value): value is string => typeof value === 'string',
+  );
+  if (!strings?.length) return undefined;
+  return strings
     .flatMap((value) => value.split(','))
     .map((value) => value.trim())
     .filter(Boolean);
@@ -41,7 +46,7 @@ async function addMcpServer(
     oauthRedirectUri?: string;
     oauthAuthorizationUrl?: string;
     oauthTokenUrl?: string;
-    oauthScopes?: string[];
+    oauthScopes?: unknown[];
   },
 ) {
   const {
@@ -77,10 +82,7 @@ async function addMcpServer(
 
   let newServer: Partial<MCPServerConfig> = {};
 
-  const scopes = oauthScopes
-    ?.flatMap((s) => s.split(','))
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const scopes = splitCommaList(oauthScopes);
 
   const hasOAuth = Boolean(
     oauthClientId ||
@@ -344,7 +346,7 @@ export const addCommand: CommandModule = {
           | string
           | undefined,
         oauthTokenUrl: argv['oauthTokenUrl'] as string | undefined,
-        oauthScopes: argv['oauthScopes'] as string[] | undefined,
+        oauthScopes: argv['oauthScopes'] as unknown[] | undefined,
       },
     );
   },
