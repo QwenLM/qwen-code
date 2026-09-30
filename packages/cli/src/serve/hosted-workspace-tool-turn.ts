@@ -29,6 +29,7 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
+import { waitForTurn } from './hosted-turn-wait.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
@@ -116,27 +117,6 @@ export class HostedToolRecoveryRequiredError extends Error {
       'Hosted tool turn requires recovery; its original work was not released.',
       { cause },
     );
-  }
-}
-
-async function waitForTurn<T>(
-  work: Promise<T>,
-  signal: AbortSignal,
-): Promise<T> {
-  signal.throwIfAborted();
-  let onAbort: () => void = () => undefined;
-  try {
-    const result = await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        onAbort = () => reject(signal.reason);
-        signal.addEventListener('abort', onAbort, { once: true });
-      }),
-    ]);
-    signal.throwIfAborted();
-    return result;
-  } finally {
-    signal.removeEventListener('abort', onAbort);
   }
 }
 

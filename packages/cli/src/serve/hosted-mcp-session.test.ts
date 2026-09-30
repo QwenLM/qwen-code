@@ -973,3 +973,91 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   expect(mcp.getCatalogs()).toEqual([original]);
   await mcp.close();
 });
+
+it.each(['intent', 'acquire', 'dispatch_started'] as const)(
+  'preserves the original configuration when initialization aborts during %s',
+  async (phase) => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let entered = false;
+    let resumed = false;
+    const commit = session.authority.commitExtensionRecord.bind(
+      session.authority,
+    );
+    const acquire = vi
+      .mocked(HostedWorkspaceBroker.prototype.acquire)
+      .getMockImplementation()!;
+    if (phase === 'acquire') {
+      vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockImplementation(
+        async function (this: HostedWorkspaceBroker) {
+          entered = true;
+          await pending;
+          await acquire.call(this);
+          resumed = true;
+        },
+      );
+    } else {
+      vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
+        async (...args) => {
+          const result = await commit(...args);
+          if (
+            args[1].domain === 'mcp_configuration' &&
+            parseMcpConfiguration(args[1].record).run.execution === phase
+          ) {
+            entered = true;
+            await pending;
+            resumed = true;
+          }
+          return result;
+        },
+      );
+    }
+    const abort = new AbortController();
+    const reason = new Error('cancel initialization');
+    const initializing = mcp
+      .ensureReady(abort.signal)
+      .catch((error: unknown) => error);
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      const before =
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0];
+      abort.abort(reason);
+      expect(await initializing).toBe(reason);
+      await expect(mcp.close()).rejects.toBeInstanceOf(
+        HostedMcpRecoveryRequiredError,
+      );
+      expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+      expect(requests).toHaveLength(0);
+      loseAck = phase === 'dispatch_started';
+      finish();
+      await vi.waitFor(() => expect(resumed).toBe(true));
+      if (phase === 'dispatch_started') {
+        await vi.waitFor(() =>
+          expect(
+            requests.filter((request) => request.kind === 'mcp-configure'),
+          ).toHaveLength(1),
+        );
+        await mcp.ensureReady();
+        expect(
+          requests.filter((request) => request.kind === 'mcp-configure'),
+        ).toHaveLength(1);
+        expect(mcp.getCatalogs()).toHaveLength(1);
+      } else {
+        expect(requests).toHaveLength(0);
+      }
+      const after =
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0];
+      expect(after.recordId).toBe(before.recordId);
+      expect(parseMcpConfiguration(after.record).runtimeSessionId).toBe(
+        parseMcpConfiguration(before.record).runtimeSessionId,
+      );
+      await mcp.close();
+      if (phase !== 'dispatch_started') expect(requests).toHaveLength(0);
+    } finally {
+      finish();
+      await initializing;
+    }
+  },
+);

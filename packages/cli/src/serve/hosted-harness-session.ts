@@ -513,7 +513,8 @@ export function registerHostedHarnessSessionRoutes(
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
         });
       try {
-        await session.mcp?.ensureReady();
+        await session.mcp?.ensureReady(abort.signal);
+        abort.signal.throwIfAborted();
         const authority = session.managed.authority;
         const contentRef = await session.managed.resources.publish(
           'managed-input',
@@ -523,6 +524,7 @@ export function registerHostedHarnessSessionRoutes(
           'managed-admission',
           Buffer.from(JSON.stringify({ promptId, digest })),
         );
+        abort.signal.throwIfAborted();
         await authority.submitInput(
           {
             operation: 'submitInput',

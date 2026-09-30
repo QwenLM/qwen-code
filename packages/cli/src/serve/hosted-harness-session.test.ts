@@ -108,7 +108,7 @@ function store() {
   };
 }
 
-async function mcpApp(unknownConfigure = false) {
+async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
   const brokerOwners = new Set<string>();
@@ -181,13 +181,11 @@ async function mcpApp(unknownConfigure = false) {
     sessionScope: 'thread',
     managedSessionStore: store(),
     toolProfile: 'hosted-workspace-mcp/1',
-    mcpServers: [
-      {
-        serverId: 'demo',
-        serverRevision: 1,
-        definitionDigest: 'a'.repeat(64),
-      },
-    ],
+    mcpServers: serverIds.map((serverId) => ({
+      serverId,
+      serverRevision: 1,
+      definitionDigest: 'a'.repeat(64),
+    })),
   });
   expect(created.status).toBe(200);
   const authorize = (request: supertest.Test) =>
@@ -275,6 +273,202 @@ describe('Hosted Harness no-tool session', () => {
       ).toBe(204);
     },
   );
+
+  it.each(['cancel', 'deadline'] as const)(
+    'stops first-prompt MCP initialization after %s without admitting input or configuring another server',
+    async (ending) => {
+      const { server, authorize, requests, replies } = await mcpApp(false, [
+        'demo',
+        'second',
+      ]);
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+      const original = control.getMockImplementation()!;
+      const admit = vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'submitInput',
+      );
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      let configurationId: string | undefined;
+      let returned = false;
+      control.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        const response = await original.call(this, operation);
+        if (
+          operation.kind === 'mcp-configure' &&
+          operation.serverId === 'demo'
+        ) {
+          configurationId = operation.operationId;
+          replies.set(configurationId, {
+            operationId: configurationId,
+            state: 'outcome_unknown',
+          });
+          await pending;
+          replies.set(configurationId, response);
+          returned = true;
+        }
+        return response;
+      });
+      const prompt = [{ type: 'text', text: 'cancel initial discovery' }];
+      const send = (id: string, deadlineMs?: number) =>
+        authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send(
+          {
+            prompt,
+            promptId: id,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+            ...(deadlineMs === undefined ? {} : { deadlineMs }),
+          },
+        );
+      let response: supertest.Response | undefined;
+      const submitted = send(
+        PROMPT_ID,
+        ending === 'deadline' ? 1000 : undefined,
+      ).then((value) => {
+        response = value;
+      });
+      try {
+        await vi.waitFor(() => expect(configurationId).toBeDefined());
+        if (ending === 'cancel')
+          expect(
+            (
+              await authorize(
+                supertest(server).post(`/session/${SESSION_ID}/cancel`),
+              )
+            ).status,
+          ).toBe(204);
+        await vi.waitFor(() => expect(response).toBeDefined(), {
+          timeout: 3000,
+        });
+        expect(response!.status).toBe(503);
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+        expect(admit).not.toHaveBeenCalled();
+        expect(state.model).not.toHaveBeenCalled();
+        expect((await send(randomUUID())).body.error).toBe(
+          'hosted_mcp_recovery_required',
+        );
+        expect(
+          (
+            await authorize(
+              supertest(server).post(`/session/${SESSION_ID}/detach`),
+            )
+          ).status,
+        ).toBe(503);
+        finish();
+        await vi.waitFor(() => expect(returned).toBe(true));
+        expect(
+          requests
+            .filter((request) => request.kind === 'mcp-configure')
+            .map((request) => request.serverId),
+        ).toEqual(['demo']);
+        expect(admit).not.toHaveBeenCalled();
+        expect((await send(randomUUID())).status).toBe(202);
+        await vi.waitFor(async () =>
+          expect(
+            (
+              await authorize(
+                supertest(server).get(`/session/${SESSION_ID}/status`),
+              )
+            ).body.hasActivePrompt,
+          ).toBe(false),
+        );
+        expect(
+          requests
+            .filter((request) => request.kind === 'mcp-configure')
+            .map((request) => request.serverId),
+        ).toEqual(['demo', 'second']);
+        expect(state.model).toHaveBeenCalledOnce();
+        expect(
+          (
+            await authorize(
+              supertest(server).post(`/session/${SESSION_ID}/detach`),
+            )
+          ).status,
+        ).toBe(204);
+      } finally {
+        finish();
+        await submitted;
+        await vi.waitFor(async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.status === 404 || !status.body.hasActivePrompt).toBe(
+            true,
+          );
+        });
+        await authorize(supertest(server).delete(`/session/${SESSION_ID}`));
+      }
+    },
+  );
+
+  it('does not admit input when cancellation arrives during publication after MCP initialization', async () => {
+    const { server, authorize } = await mcpApp();
+    const original = LocalManagedSessionResourceStore.prototype.publish;
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let publishing = false;
+    vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    ).mockImplementation(async function (
+      this: LocalManagedSessionResourceStore,
+      ...args
+    ) {
+      const result = await original.apply(this, args);
+      if (args[0] === 'managed-input') {
+        publishing = true;
+        await pending;
+      }
+      return result;
+    });
+    const admit = vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'submitInput',
+    );
+    const prompt = [{ type: 'text', text: 'cancel before input admission' }];
+    const submitted = authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .then((response) => response);
+    try {
+      await vi.waitFor(() => expect(publishing).toBe(true));
+      expect(
+        (
+          await authorize(
+            supertest(server).post(`/session/${SESSION_ID}/cancel`),
+          )
+        ).status,
+      ).toBe(204);
+      finish();
+      expect((await submitted).status).toBe(503);
+      expect(admit).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      expect(
+        (
+          await authorize(
+            supertest(server).post(`/session/${SESSION_ID}/detach`),
+          )
+        ).status,
+      ).toBe(204);
+    } finally {
+      finish();
+      await submitted;
+    }
+  });
 
   it.each(['status', 'cancel'] as const)(
     'serves MCP %s during dispatch and keeps admissions fenced until both finish',

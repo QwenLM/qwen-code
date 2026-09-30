@@ -27,6 +27,7 @@ import {
   HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
+import { waitForTurn } from './hosted-turn-wait.js';
 
 export const HOSTED_MCP_PROFILE = 'hosted-workspace-mcp/1';
 
@@ -95,6 +96,7 @@ type ResourceRequest = Exclude<
 export class HostedMcpSession {
   readonly broker: HostedWorkspaceBroker;
   private ready?: Promise<void>;
+  private initializing = false;
   private acquired = false;
   private ownerReady = false;
   private grantsRenewed = false;
@@ -133,17 +135,18 @@ export class HostedMcpSession {
     );
   }
 
-  ensureReady(): Promise<void> {
-    this.ready ??= this.initialize().catch((cause: unknown) => {
+  async ensureReady(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    this.ready ??= this.initialize(signal).catch((cause: unknown) => {
       this.ready = undefined;
       throw cause;
     });
-    return this.ready;
+    await waitForTurn(this.ready, signal);
   }
 
   async refresh(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    await this.ensureReady();
+    await this.ensureReady(signal);
     signal?.throwIfAborted();
     await this.acquireOwner();
     for (const { configuration, catalog } of this.catalogs.values()) {
@@ -188,30 +191,38 @@ export class HostedMcpSession {
     }
   }
 
-  private async initialize(): Promise<void> {
-    for (const pin of this.servers) {
-      const history = this.session.authority
-        .extensionRecordsInDomain('mcp_configuration')
-        .map((entry) => parseMcpConfiguration(entry.record))
-        .filter((entry) => entry.serverId === pin.serverId)
-        .sort((a, b) => a.configRevision - b.configRevision);
-      const latest = history
-        .filter((entry) => !['failed', 'cancelled'].includes(entry.run.state))
-        .at(-1);
-      const previous = latest?.releaseState === 'released' ? undefined : latest;
-      const effective = latest?.run.definition;
-      await this.install(
-        effective
-          ? {
-              serverId: pin.serverId,
-              serverRevision: effective.definitionRevision,
-              definitionDigest: effective.definitionDigest,
-            }
-          : pin,
-        previous,
-        randomUUID(),
-        (history.at(-1)?.configRevision ?? 0) + 1,
-      );
+  private async initialize(signal?: AbortSignal): Promise<void> {
+    this.initializing = true;
+    try {
+      for (const pin of this.servers) {
+        signal?.throwIfAborted();
+        const history = this.session.authority
+          .extensionRecordsInDomain('mcp_configuration')
+          .map((entry) => parseMcpConfiguration(entry.record))
+          .filter((entry) => entry.serverId === pin.serverId)
+          .sort((a, b) => a.configRevision - b.configRevision);
+        const latest = history
+          .filter((entry) => !['failed', 'cancelled'].includes(entry.run.state))
+          .at(-1);
+        const previous =
+          latest?.releaseState === 'released' ? undefined : latest;
+        const effective = latest?.run.definition;
+        await this.install(
+          effective
+            ? {
+                serverId: pin.serverId,
+                serverRevision: effective.definitionRevision,
+                definitionDigest: effective.definitionDigest,
+              }
+            : pin,
+          previous,
+          randomUUID(),
+          (history.at(-1)?.configRevision ?? 0) + 1,
+          signal,
+        );
+      }
+    } finally {
+      this.initializing = false;
     }
   }
 
@@ -269,7 +280,9 @@ export class HostedMcpSession {
     previous?: McpConfiguration,
     operationId: string = randomUUID(),
     configRevision = 1,
+    signal?: AbortSignal,
   ): Promise<void> {
+    signal?.throwIfAborted();
     let configuration: McpConfiguration;
     let operation: ManagedMcpOperationView;
     if (previous) {
@@ -293,7 +306,9 @@ export class HostedMcpSession {
       await this.commitConfiguration(configuration);
     }
     if (configuration.run.execution === 'intent') {
+      signal?.throwIfAborted();
       await this.acquireOwner();
+      signal?.throwIfAborted();
       const runtime = this.broker.runtime!;
       configuration = {
         ...configuration,
@@ -308,18 +323,26 @@ export class HostedMcpSession {
         },
       };
       await this.commitConfiguration(configuration);
-      operation = await this.dispatch({
-        kind: 'mcp-configure',
-        sessionKey: this.key,
-        operationId: configuration.configurationId,
-        serverId: pin.serverId,
-        serverRevision: pin.serverRevision,
-        definitionDigest: pin.definitionDigest,
-        configRevision: configuration.configRevision,
-        grant: this.grant('mcp_configuration', configuration.configurationId),
-      });
+      // A committed dispatch must reach its original Runtime even if cancellation
+      // raced the journal write; cancellation stops waiting, not that dispatch.
+      operation = await this.dispatch(
+        {
+          kind: 'mcp-configure',
+          sessionKey: this.key,
+          operationId: configuration.configurationId,
+          serverId: pin.serverId,
+          serverRevision: pin.serverRevision,
+          definitionDigest: pin.definitionDigest,
+          configRevision: configuration.configRevision,
+          grant: this.grant('mcp_configuration', configuration.configurationId),
+        },
+        signal,
+      );
     } else {
-      operation = await this.lookup(configuration.configurationId);
+      operation = await waitForTurn(
+        this.lookup(configuration.configurationId),
+        signal,
+      );
     }
     const concluded = ['settled', 'failed', 'cancelled'].includes(
       configuration.run.state,
@@ -665,6 +688,7 @@ export class HostedMcpSession {
   }
 
   async close(): Promise<void> {
+    if (this.initializing) throw new HostedMcpRecoveryRequiredError();
     for (const entry of this.session.authority.extensionRecordsInDomain(
       'mcp_operation',
     )) {
@@ -951,13 +975,12 @@ export class HostedMcpSession {
     operation: ManagedMcpControl,
     signal?: AbortSignal,
   ): Promise<ManagedMcpOperationView> {
-    signal?.throwIfAborted();
     let response: ManagedMcpOperationView;
     try {
-      response = await this.broker.control(operation);
+      response = await waitForTurn(this.broker.control(operation), signal);
     } catch {
       signal?.throwIfAborted();
-      response = await this.lookup(operation.operationId);
+      response = await waitForTurn(this.lookup(operation.operationId), signal);
     }
     signal?.throwIfAborted();
     const deadline = Date.now() + 630_000;
@@ -965,7 +988,7 @@ export class HostedMcpSession {
     while (response.state === 'running' && Date.now() < deadline) {
       await delay(interval, undefined, { signal });
       interval = Math.min(interval * 2, 1_000);
-      response = await this.lookup(operation.operationId);
+      response = await waitForTurn(this.lookup(operation.operationId), signal);
       signal?.throwIfAborted();
     }
     return response;
