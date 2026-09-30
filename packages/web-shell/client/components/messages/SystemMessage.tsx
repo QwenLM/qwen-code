@@ -294,7 +294,7 @@ export const SystemMessage = memo(function SystemMessage({
     );
   }
   const contextUsage =
-    variant === 'info' ? parseContextUsageMessage(content) : null;
+    variant === 'info' ? parseContextUsageMessage(content, data) : null;
   if (contextUsage) {
     return (
       <div className={styles.flushMessage}>
