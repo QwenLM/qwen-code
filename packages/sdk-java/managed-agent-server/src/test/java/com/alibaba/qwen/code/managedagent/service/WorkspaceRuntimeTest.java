@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -17,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -280,6 +282,20 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void authorizationRefusesAnUnverifiedPhysicalMount() {
+        SessionRecord session = createSession("storage", ".");
+        WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
+        var checked = new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                new DataSourceTransactionManager(dataSource), guard);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        assertUnavailable(() -> checked.authorize(session));
+        checked.authorizePassiveAttachment(session);
+        verify(guard).verify(session.workspace());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> checked.authorizePassiveAttachment(session));
+    }
+
+    @Test
     void rejectsMissingReplacedSymlinkAndOverlappingMounts() throws Exception {
         SessionRecord session = createSession("storage", ".");
         Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
@@ -521,6 +537,35 @@ class WorkspaceRuntimeTest {
             verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
         }
         authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    @Test
+    void mcpRecoveryKeepsExactOwnershipWhenTheVerifiedMountIsUnavailable() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
+        var checked = new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                new DataSourceTransactionManager(dataSource), guard);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        var transport = new WorkspaceRuntimeTransport(fixture.http(), resolver(session, temp.toRealPath()),
+                checked, fixture.bindings(), new JdbcRuntimeSessionRepository(dataSource));
+        assertUnavailable(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
+        verify(fixture.http(), never()).control(any(), any(), any());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        String storageKey = digest(session.tenantId() + "\0" + session.workspace().getStorageId())
+                .substring("sha256:".length());
+        var originalHolder = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
+        for (String kind : List.of("mcp-status", "mcp-cancel", "mcp-release")) {
+            Map<String, Object> operation = mcpControl(session, kind);
+            transport.control(fixture.lease(), runtimeSession, operation).toCompletableFuture().join();
+            verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
+        }
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey)).isEqualTo(originalHolder);
+        jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = 'another-owner' WHERE storage_key = ?", storageKey);
+        assertBusy(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-status")));
     }
 
     @Test

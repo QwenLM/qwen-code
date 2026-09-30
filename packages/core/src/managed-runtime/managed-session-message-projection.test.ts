@@ -217,6 +217,36 @@ const branchRecord: ChatRecord = {
 };
 
 describe('managed session message projection', () => {
+  it('projects a fixed committed cut without reading later missing messages', async () => {
+    const harness = await createHarness();
+    try {
+      const sink = new ManagedSessionRecordSink(
+        harness.authority,
+        harness.store,
+        () => HOLDS,
+      );
+      await sink.write(records[0]);
+      const cut = harness.authority.committedSequence;
+      await sink.write(records[1]);
+      const latest = harness.authority
+        .eventsInSequenceRange(cut + 1, harness.authority.committedSequence)
+        .find((event) => event.kind === 'message.committed')!;
+      const missing = latest.payload[
+        'contentRef'
+      ] as unknown as ManagedSessionDurableRef;
+      const read = harness.store.read.bind(harness.store);
+      vi.spyOn(harness.store, 'read').mockImplementation((reference) =>
+        reference.resourceId === missing.resourceId
+          ? Promise.reject(new Error('later message unavailable'))
+          : read(reference),
+      );
+      await expect(sink.project(cut)).resolves.toEqual([records[0]]);
+      await expect(sink.project()).rejects.toThrow('later message unavailable');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('assigns the message sequence after earlier queued commits', async () => {
     const harness = await createHarness();
     const publish = harness.store.publish.bind(harness.store);
