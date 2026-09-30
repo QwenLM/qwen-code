@@ -34389,6 +34389,7 @@ describe('App session callbacks', () => {
       const layout = container.querySelector(
         '[data-sidebar-shell]',
       )!.parentElement!;
+      const shellRoot = container.querySelector('[data-web-shell-root]')!;
       const resize = observers.get(layout)!;
       Object.defineProperty(layout, 'clientWidth', {
         configurable: true,
@@ -34397,7 +34398,7 @@ describe('App session callbacks', () => {
       await act(async () => {
         resize([], {} as ResizeObserver);
       });
-      expect(layout.hasAttribute('data-compact-sidebar')).toBe(true);
+      expect(shellRoot.hasAttribute('data-compact-sidebar')).toBe(true);
       await act(async () => {
         shellRef.current?.openSessionDrawer();
       });
@@ -34409,7 +34410,7 @@ describe('App session callbacks', () => {
       await act(async () => {
         resize([], {} as ResizeObserver);
       });
-      expect(layout.hasAttribute('data-compact-sidebar')).toBe(false);
+      expect(shellRoot.hasAttribute('data-compact-sidebar')).toBe(false);
       expect(
         container.querySelector('[data-sidebar-shell]')?.className,
       ).not.toContain('mobileDrawerForced');
@@ -36831,6 +36832,71 @@ describe('App session callbacks', () => {
     expect(sidebarPage()).toBe('home');
   });
 
+  it('keeps the Channels column when a channel session opens from its panel', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_source_metadata'],
+    };
+    const { container } = renderApp({
+      sidebar: { primaryNav: { items: ['channels'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('channels');
+
+    // Opening a conversation closes the panel; the Channels column and its
+    // rail selection must survive instead of snapping back to Home.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(sidebarPage()).toBe('channels');
+  });
+
+  it('restores Home with one rail click from the Live panel in a Live session', async () => {
+    mockConnection.sessionContext = { kind: 'live' };
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+    expect(sidebarPage()).toBe('live');
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('live');
+
+    // The explicit Home choice must stick: the panel close must not revert
+    // the section to the Live session default.
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-home"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('home');
+  });
+
   it('keeps the sidebar on the Home page in split view', async () => {
     const { container } = renderApp({
       sidebar: { showLive: true, primaryNav: { items: ['live'] } },
@@ -36879,6 +36945,7 @@ describe('App session callbacks', () => {
       const layout = container.querySelector(
         '[data-sidebar-shell]',
       )!.parentElement!;
+      const shellRoot = container.querySelector('[data-web-shell-root]')!;
       const resize = observers.get(layout)!;
       Object.defineProperty(layout, 'clientWidth', {
         configurable: true,
@@ -36887,7 +36954,7 @@ describe('App session callbacks', () => {
       await act(async () => {
         resize([], {} as ResizeObserver);
       });
-      expect(layout.hasAttribute('data-compact-sidebar')).toBe(true);
+      expect(shellRoot.hasAttribute('data-compact-sidebar')).toBe(true);
       await act(async () => {
         shellRef.current?.openSessionDrawer();
       });

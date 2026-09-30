@@ -9430,6 +9430,11 @@ export function App({
     sidebarOptions.enabled &&
     sidebarRailEnabled &&
     (sidebarLayoutWidth ?? window.innerWidth) > 760;
+  // One compact-chrome signal for the whole shell: the sidebar drawer chrome
+  // and the empty-chat welcome layout both key off it, so they cannot split
+  // when an embedded container disagrees with the viewport.
+  const compactShell =
+    sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760;
   const channelSidebarEnabled =
     sidebarOptions.enabled &&
     projectFeaturesAvailable &&
@@ -9463,16 +9468,29 @@ export function App({
       setSidebarSection(activePanel);
       return;
     }
-    // Closing a panel returns to the chat, so the section follows the session
-    // context again instead of pinning the closed panel's column.
+    // Closing a panel returns to the chat. Keep a still-valid current
+    // section — an explicit Home choice or the Channels column the opened
+    // conversation came from — and only drop sections whose feature is gone.
     if (activePanel === null) {
-      setSidebarSection(
-        liveSidebarEnabled && connection.sessionContext?.kind === 'live'
-          ? 'live'
-          : 'home',
-      );
+      setSidebarSection((current) => {
+        if (current === 'channels') {
+          return channelSidebarEnabled ? 'channels' : 'home';
+        }
+        if (current === 'live') {
+          return liveSidebarEnabled &&
+            connection.sessionContext?.kind === 'live'
+            ? 'live'
+            : 'home';
+        }
+        return current;
+      });
     }
-  }, [activePanel, connection.sessionContext?.kind, liveSidebarEnabled]);
+  }, [
+    activePanel,
+    channelSidebarEnabled,
+    connection.sessionContext?.kind,
+    liveSidebarEnabled,
+  ]);
   const appliedHistoryRevision = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (navigation?.historyRevision === appliedHistoryRevision.current) return;
@@ -19568,6 +19586,7 @@ export function App({
           style={appStyle}
           data-web-shell-root
           data-web-shell-shadcn
+          data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
@@ -20014,11 +20033,6 @@ export function App({
           <div
             className={styles.appShell}
             ref={sidebarLayoutRef}
-            data-compact-sidebar={
-              sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760
-                ? ''
-                : undefined
-            }
           >
             {sidebarOptions.enabled && (
               <div

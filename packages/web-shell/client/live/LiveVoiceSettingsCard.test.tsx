@@ -503,6 +503,46 @@ describe('LiveVoiceSettingsCard', () => {
     expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Carol' });
   });
 
+  it('settles a padded draft when the refresh converges on its trimmed form', async () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+    act(() => setInputValue(voice(), ' Ethan '));
+
+    // Submit paths trim, so a refresh converging on the trimmed form of a
+    // padded draft has still converged: the draft and its conflict baseline
+    // must be forgotten.
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard
+            setup={{ ...setup, status: { ...setup.status!, voice: 'Ethan' } }}
+          />,
+        ),
+    );
+    expect(voice().value).toBe('Ethan');
+    expect(save().disabled).toBe(true);
+
+    act(() => setInputValue(voice(), 'Carol'));
+    expect(container.textContent).not.toContain('settings.liveSetup.conflict');
+    expect(save().disabled).toBe(false);
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Carol' });
+  });
+
+  it('keeps the shortcut capture disabled until the status loads', () => {
+    const setup = { ...setupResult({}), status: undefined };
+    const container = mount(setup);
+    const capture = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="settings.liveShortcut.capture"]',
+    )!;
+    expect(capture.disabled).toBe(true);
+  });
+
   it('does not block a dirty voice when an unrelated field refreshes', async () => {
     const setup = setupResult({
       voice: 'Tina',

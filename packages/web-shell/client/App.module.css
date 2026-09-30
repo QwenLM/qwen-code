@@ -374,7 +374,7 @@
   }
 }
 
-.appShell[data-compact-sidebar] .mobileDrawer {
+.app[data-compact-sidebar] .mobileDrawer {
   display: block;
   position: absolute;
   top: 0;
@@ -389,14 +389,14 @@
   transition: visibility 0s linear 200ms;
 }
 
-.appShell[data-compact-sidebar] .mobileDrawerOpen {
+.app[data-compact-sidebar] .mobileDrawerOpen {
   visibility: visible;
   pointer-events: auto;
   /* Show immediately on open; only the close path needs the delay above. */
   transition-delay: 0s;
 }
 
-.appShell[data-compact-sidebar] .mobileBackdrop {
+.app[data-compact-sidebar] .mobileBackdrop {
   display: block;
   position: absolute;
   inset: 0;
@@ -407,16 +407,16 @@
   transition: opacity 200ms ease;
 }
 
-.appShell[data-compact-sidebar] .mobileDrawerOpen .mobileBackdrop {
+.app[data-compact-sidebar] .mobileDrawerOpen .mobileBackdrop {
   opacity: 1;
   pointer-events: auto;
 }
 
-.appShell[data-compact-sidebar] .hamburgerButton {
+.app[data-compact-sidebar] .hamburgerButton {
   display: flex;
 }
 
-.appShell[data-compact-sidebar] .hamburgerButtonFloating {
+.app[data-compact-sidebar] .hamburgerButtonFloating {
   position: absolute;
   top: 12px;
   left: 12px;
@@ -956,74 +956,83 @@
   display: contents;
 }
 
-@media (max-width: 760px) {
-  .appChatEmpty .chatPaneWithMobileComposerBottom {
-    position: relative;
-    overflow: hidden;
-  }
+/* The empty-chat welcome chrome follows the shell container (the same
+   data-compact-sidebar signal as the drawer chrome), not the viewport, so an
+   embedded host narrower than its window cannot mix desktop welcome layout
+   with the compact drawer. */
+.appChatEmpty[data-compact-sidebar] .chatPaneWithMobileComposerBottom {
+  position: relative;
+  overflow: hidden;
+}
 
-  /* The custom-footer variant renders the composer footer `display: contents`,
-     so this wrap stays the containing block for the absolutely-positioned
-     bottom panels (status panel) anchored above it. */
-  .appChatEmpty
-    .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
-    position: relative;
-  }
+/* The custom-footer variant renders the composer footer `display: contents`,
+   so this wrap stays the containing block for the absolutely-positioned
+   bottom panels (status panel) anchored above it. */
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
+  position: relative;
+}
 
-  .appChatEmpty .chatViewWithMobileComposerBottom .footer {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    margin-top: 0;
-  }
+.appChatEmpty[data-compact-sidebar] .chatViewWithMobileComposerBottom .footer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  margin-top: 0;
+}
 
-  .appChatEmpty .mobileWelcomeGroup {
-    display: flex;
-    flex-direction: column;
-  }
+.appChatEmpty[data-compact-sidebar] .mobileWelcomeGroup {
+  display: flex;
+  flex-direction: column;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter {
-    display: contents;
-  }
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithWelcomeMiddle
+  .footerWithCustomFooter {
+  display: contents;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .footerWithCustomFooter .composer {
-    order: 2;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
-  }
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithWelcomeMiddle
+  .footerWithCustomFooter
+  .composer {
+  order: 2;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .mobileWelcomeFooterMiddle {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: flex-start;
-    justify-content: center;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
-  }
+.appChatEmpty[data-compact-sidebar]
+  .chatViewWithWelcomeMiddle
+  .mobileWelcomeFooterMiddle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: center;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+}
 
-  .appChatEmpty .chatViewWithWelcomeMiddle .customFooter {
-    order: 1;
-    display: flex;
-    flex: 0 0 auto;
-    align-items: flex-start;
-    justify-content: center;
-    width: min(100%, var(--chat-shell-width));
-    margin: 0 auto;
-    padding-right: 20px;
-    padding-left: 20px;
-  }
-  .desktopWelcomeFooter {
-    display: none;
-  }
+.appChatEmpty[data-compact-sidebar] .chatViewWithWelcomeMiddle .customFooter {
+  order: 1;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: center;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+}
+.appChatEmpty[data-compact-sidebar] .desktopWelcomeFooter {
+  display: none;
+}
 
-  .emptyWelcomeFooter {
-    text-align: center;
-  }
+.appChatEmpty[data-compact-sidebar] .emptyWelcomeFooter {
+  text-align: center;
 }
 
 .queuedPrompts {

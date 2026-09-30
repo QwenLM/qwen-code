@@ -163,12 +163,19 @@ export function LiveVoiceSettingsCard({
     if (!status) return;
     const settled = (
       ['enabled', 'model', 'voice', 'endpoint', 'shortcut'] as const
-    ).filter(
-      (key) =>
-        draft[key] !== undefined &&
-        !(key === 'endpoint' && status.keySource === 'route') &&
-        draft[key] === status[key],
-    );
+    ).filter((key) => {
+      const draftValue = draft[key];
+      if (draftValue === undefined) return false;
+      if (key === 'endpoint' && status.keySource === 'route') return false;
+      // Submit paths trim text fields, so a refresh that converges on the
+      // trimmed form of a padded draft has still converged on the saved value.
+      if (key === 'model' || key === 'voice' || key === 'endpoint') {
+        return (
+          typeof draftValue === 'string' && draftValue.trim() === status[key]
+        );
+      }
+      return draftValue === status[key];
+    });
     if (settled.length === 0) return;
     for (const key of settled) draftBaseline.current.delete(key);
     setDraft((current) => {
@@ -538,7 +545,7 @@ export function LiveVoiceSettingsCard({
           </div>
           <HotkeySetter
             accelerator={shortcut}
-            disabled={busy}
+            disabled={busy || !status}
             captureLabel={t('settings.liveShortcut.capture')}
             clearLabel={t('settings.liveShortcut.clear')}
             offLabel={t('settings.liveShortcut.off')}

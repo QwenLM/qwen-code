@@ -534,6 +534,135 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).not.toBeNull();
   });
 
+  it('includes secondary workspace attention on the rail Home button while a full page is open', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    useSessionCatalogQueries.mockImplementation((_client, queries) => {
+      const activeQueries = queries.filter(
+        (query: { options: { group?: string } }) =>
+          query.options.group === 'all',
+      );
+      if (activeQueries.length === 0) return [];
+      return [
+        {
+          page: {
+            sessions: [
+              makeSession('secondary-approval', {
+                workspaceCwd: '/tmp/other',
+                isWaitingForPermission: true,
+              }),
+            ],
+          },
+        },
+      ];
+    });
+
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+
+    // The Home column is hidden behind the Plugins page, so the rail Home
+    // button carries the attention dot and the secondary queries must load
+    // even though the sidebar is not collapsed.
+    const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
+      (call) =>
+        call[1].some(
+          (query: { options: { group?: string; archiveState?: string } }) =>
+            query.options.group === 'all' &&
+            query.options.archiveState === 'active',
+        ),
+    );
+    expect(activeQueryCalls.length).toBeGreaterThan(0);
+    for (const call of activeQueryCalls) {
+      expect(call[2]).toMatchObject({ autoLoad: true });
+    }
+    // Nothing is running, so polling must idle instead of pinning every
+    // secondary workspace to the active cadence.
+    expect(activeQueryCalls[activeQueryCalls.length - 1]![2]).toMatchObject({
+      pollIntervalMs: 30_000,
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('shows completion from a secondary workspace on the rail Home button while a full page is open', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    let running = true;
+    useSessionCatalogQueries.mockImplementation(() => [
+      {
+        page: {
+          sessions: [
+            makeSession('secondary-session', {
+              workspaceCwd: '/tmp/other',
+              hasActivePrompt: running,
+            }),
+          ],
+        },
+        loading: false,
+      },
+    ]);
+
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+    const lastActiveCall = () =>
+      useSessionCatalogQueries.mock.calls
+        .filter((call) =>
+          call[1].some(
+            (query: { options: { group?: string; archiveState?: string } }) =>
+              query.options.group === 'all' &&
+              query.options.archiveState === 'active',
+          ),
+        )
+        .at(-1);
+    expect(lastActiveCall()?.[2]).toMatchObject({ pollIntervalMs: 2_000 });
+    running = false;
+    renderSidebar(false, { layout: 'rail', activePage: 'plugins' });
+    await flushSidebar();
+
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it('shows the highest-priority session status on the collapsed project icon', async () => {
     active.sessions = [
       makeSession('session-status', {
@@ -1873,5 +2002,41 @@ describe('WebShellSidebar rail navigation', () => {
     expect(
       window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
     ).toBe('276');
+  });
+
+  it('keeps the stored width when the resize handle is only clicked', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '420');
+    renderSidebar(false, { layout: 'rail', containerWidth: 600 });
+    await flushSidebar();
+    const sidebar = container.querySelector<HTMLElement>('aside')!;
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
+    // The CSS caps the rendered width at half the container, so the measured
+    // rect is narrower than the stored preference.
+    vi.spyOn(sidebar, 'getBoundingClientRect').mockReturnValue({
+      width: 300,
+    } as DOMRect);
+    const handle = container.querySelector<HTMLElement>('[role="separator"]')!;
+    act(() => {
+      handle.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 300, pointerId: 1 }),
+      );
+    });
+
+    // A zero-displacement press is a click, not a drag: nothing persists.
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBe('420');
+    expect(sidebar.style.getPropertyValue('--web-shell-sidebar-width')).toBe(
+      '420px',
+    );
   });
 });

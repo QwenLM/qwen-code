@@ -1163,6 +1163,11 @@ export function WebShellSidebar({
     railLayout &&
     (collapsed || (activePage !== 'home' && !sectionView)) &&
     !mobileOpen;
+  // Whenever the Home column is not the visible status surface — the collapsed
+  // strip, or the rail with a full page or section column open — the rail/collapsed
+  // icon carries the attention dot, so secondary-workspace status queries must
+  // run in both cases, not only when collapsed.
+  const statusSurfaceHidden = collapsed || (railLayout && homeHidden);
   const navigationExpanded = !collapsed;
   const [storedSessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
@@ -1753,20 +1758,23 @@ export function WebShellSidebar({
       })),
     [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
   );
+  const secondaryStatusQueriesActive =
+    sessionCatalogRequestsEnabled &&
+    statusSurfaceHidden &&
+    !secondaryWorkspaceSessionLiveStateEnabled;
+  // Poll cadence follows the previous render's catalog, mirroring the primary
+  // catalog: fast while something runs, idle otherwise.
+  const [secondaryActiveRunning, setSecondaryActiveRunning] = useState(false);
   const secondaryActiveSnapshots = useSessionCatalogQueries(
     workspace.client,
     secondaryActiveQueries,
     {
-      autoLoad:
-        sessionCatalogRequestsEnabled &&
-        collapsed &&
-        !secondaryWorkspaceSessionLiveStateEnabled,
-      pollIntervalMs:
-        sessionCatalogRequestsEnabled &&
-        collapsed &&
-        !secondaryWorkspaceSessionLiveStateEnabled
+      autoLoad: secondaryStatusQueriesActive,
+      pollIntervalMs: secondaryStatusQueriesActive
+        ? secondaryActiveRunning
           ? ACTIVE_SESSION_POLL_INTERVAL_MS
-          : undefined,
+          : IDLE_SESSION_POLL_INTERVAL_MS
+        : undefined,
     },
   );
   const secondaryActiveSessions = useMemo(
@@ -1776,6 +1784,13 @@ export function WebShellSidebar({
       ),
     [secondaryActiveSnapshots],
   );
+  const secondaryActiveRunningNow = secondaryActiveSessions.some(
+    (session) =>
+      session.hasActivePrompt || session.activeWorkState === 'active',
+  );
+  if (secondaryActiveRunningNow !== secondaryActiveRunning) {
+    setSecondaryActiveRunning(secondaryActiveRunningNow);
+  }
   const secondaryPinnedQueries = useMemo<SessionCatalogQuery[]>(
     () =>
       secondaryWorkspaceCwds.map((workspaceCwd) => ({
@@ -2675,7 +2690,7 @@ export function WebShellSidebar({
 
   useEffect(() => {
     if (
-      !collapsed ||
+      !statusSurfaceHidden ||
       secondaryActiveSnapshots.length !== secondaryActiveQueries.length ||
       secondaryActiveSnapshots.some(
         (snapshot) => snapshot.loading || snapshot.error,
@@ -2725,7 +2740,7 @@ export function WebShellSidebar({
       return changed ? next : current;
     });
   }, [
-    collapsed,
+    statusSurfaceHidden,
     currentSessionIdentity,
     getIdentityForSession,
     secondaryActiveQueries.length,
@@ -4353,6 +4368,13 @@ export function WebShellSidebar({
         }
       };
       function handlePointerUp(upEvent: PointerEvent) {
+        // A press-release without movement is a click, not a drag. Persisting
+        // here would store the container-capped rendered width over the user's
+        // wider preference.
+        if (upEvent.clientX === startX) {
+          teardown(true);
+          return;
+        }
         const rawWidth = getRawWidth(upEvent.clientX);
         if (rawWidth <= SIDEBAR_COLLAPSE_DRAG_WIDTH) {
           collapseFromDrag();

@@ -328,7 +328,7 @@ These `WebShellProps` affect sidebar behavior indirectly:
 Collapse state is persisted in `localStorage` under the key
 `qwen-code-web-shell-sidebar-collapsed`.
 
-Responsive behavior follows the shell container width. Split availability uses 1024px and split-sidebar room uses 1200px. Keyboard collapse moves focus out of the hidden secondary column to the rail control.
+The sidebar, its compact drawer, and the empty-chat welcome chrome follow the shell container width (compact at 760px); chat message content keeps viewport-based breakpoints. Split availability uses 1024px and split-sidebar room uses 1200px. Keyboard collapse moves focus out of the hidden secondary column to the rail control.
 
 The resized desktop width is restored only in expanded layouts. Opening or
 closing the mobile drawer does not overwrite that width or the persisted
