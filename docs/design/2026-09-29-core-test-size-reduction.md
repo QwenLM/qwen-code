@@ -51,24 +51,25 @@ A reduction is kept only if all of these hold:
 
 ## Result
 
-All measurements run on Linux arm64 against main at `e767e223c5`.
+Full Core suite with coverage on both sides, Linux arm64, against main at
+`3a8fd11711`:
 
 | Core                       |    Main | This change |            Change |
 | -------------------------- | ------: | ----------: | ----------------: |
-| Test and support lines     | 714,123 |     535,949 | −178,174 (−25.0%) |
-| Test and support bytes     | 24.9 MB |     19.3 MB |            −22.6% |
-| Test files                 |     861 |         861 |                 0 |
-| Test cases                 |  33,691 |      33,608 |               −83 |
-| Production line coverage   |  91.00% |      90.98% |                   |
-| Production branch coverage |  88.65% |      88.65% |                   |
+| Test and support lines     | 716,440 |     538,171 | −178,269 (−24.9%) |
+| Test and support bytes     | 25.0 MB |     19.4 MB |            −22.5% |
+| Test files                 |     868 |         868 |                 0 |
+| Test cases                 |  33,854 |      33,771 |               −83 |
+| Production line coverage   |  91.02% |      91.02% |                   |
+| Production branch coverage |  88.65% |      88.66% |                   |
 
-- **Coverage:** 41 previously covered lines lose coverage (0.015 points). 30
-  are in tool-result cleanup, which the client starts without awaiting and
-  which scans the machine's real temp directory; 10 are an Arena fallback that
-  only other tests' timing reaches. Each module's own tests cover the same
-  lines on both sides.
-- **Historical faults:** of 106 past bugs, 91 still re-apply to this main; both
-  sides catch the same 80.
+- **Coverage:** one previously covered line loses coverage. An earlier run
+  against `e767e223c5` lost 41 lines in two timing-dependent paths that no test
+  asserts on; they did not recur.
+- Fault and mutation replays ran against main at `e767e223c5`, eleven commits
+  earlier.
+- **Historical faults:** of 106 past bugs, 91 still re-apply to that main;
+  both sides catch the same 80.
 - **Mutation:** thirteen whole modules, every operator. Of 4,583 mutants,
   main's tests kill 3,286; this change loses none of those kills and adds 20.
   The modules are Anthropic usage accounting, workflow budget, XML tool-call
