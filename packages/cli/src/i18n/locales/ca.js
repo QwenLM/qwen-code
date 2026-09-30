@@ -2273,6 +2273,8 @@ export default {
   'Project level': 'Nivell de projecte',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     "L'enganxament d'imatges del porta-retalls no està disponible perquè no s'ha pogut carregar el mòdul natiu del porta-retalls. Reinstal·leu Qwen Code o useu el mètode d'instal·lació per npm.",
+  'Clipboard image paste is unavailable on Linux because no clipboard tool (wl-clipboard or xclip) was found. Install one (e.g. `sudo apt install wl-clipboard`) or export DISPLAY/WAYLAND_DISPLAY.':
+    "L'enganxament d'imatges del porta-retalls no està disponible al Linux perquè no s'ha trobat cap eina de porta-retalls (wl-clipboard o xclip). Instal·leu-ne una (p. ex., `sudo apt install wl-clipboard`) o exporteu DISPLAY/WAYLAND_DISPLAY.",
   ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab per netejar)',
   '"{{name}}" {{state}}.': '«{{name}}» {{state}}.',
   '(Tab / ←→ to switch)': '(Tab / ←→ per canviar)',
