@@ -87,6 +87,7 @@ class HostedWorkspaceStorageGuardMySqlIT {
             Files.createDirectory(root.resolve("child"));
             Files.copy(temporary.resolve("previous/.qwen-managed-storage.json"),
                     root.resolve(".qwen-managed-storage.json"));
+            Files.setLastModifiedTime(root, FileTime.fromMillis(2));
             var restarted = new WorkspaceStorageGuard(jdbc, new DataSourceTransactionManager(dataSource), properties);
             assertUnavailable(() -> restarted.verify(binding));
             assertUnavailable(() -> restarted.restoreOriginal(tenant, storage, 1, operation));
