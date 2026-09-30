@@ -615,6 +615,31 @@ describe('downgradeRejectedReasoningItems', () => {
     ]);
   });
 
+  it('keeps the adjacent episode whose signature-only sibling owned no call group', () => {
+    // The sibling is dropped for carrying no summary, but it owned no call
+    // group, so its removal leaves no pairing debt; the kept episode's
+    // encrypted_content, which the endpoint accepted and never named,
+    // survives the retry.
+    const keep = userItem('hi');
+    const sibling = reasoningItem('rs_short', ['second thought']);
+    const after = userItem('continue');
+    const items = Object.freeze([
+      keep,
+      reasoningItem(LONG, ['first thought']),
+      sibling,
+      reasoningItem(`rs_${'b'.repeat(80)}`, []),
+      after,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 1, maxLength: 64 }),
+    ).toEqual([
+      keep,
+      { type: 'message', role: 'assistant', content: 'first thought' },
+      sibling,
+      after,
+    ]);
+  });
+
   it('scopes the unit drop to the rejected reasoning group only', () => {
     // A second call group later in the turn must survive the first group's
     // drop intact.
