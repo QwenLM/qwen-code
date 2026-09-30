@@ -2784,6 +2784,62 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     });
   });
 
+  // The round-19 narrowing: bodies a provably inert receiver reads as data
+  // (or as its program through the bare `-` idiom) are as opaque to shell
+  // rules as any script file, so these entrances must stop denying.
+  it.runIf(bashSemanticsLane).each([
+    // The issue #9381 repro: python reads its program from stdin.
+    `python - <<'PY'\nimport os\nprint(os.getcwd())\nPY`,
+    // An output redirect on the opener never moves stdin.
+    `cat > README.md <<'EOF'\nhello\nEOF`,
+    // git commit -F - reads the message from stdin; the body is data.
+    `git commit -F - <<'MSG'\nsubject\nMSG`,
+    // << inside arithmetic, inside a comment, and inside a parameter
+    // subscript arms no heredoc at all.
+    `echo $((1 << 20)) && git add .`,
+    `echo $HOME # a << b`,
+    `echo \${arr[1 << 2]}`,
+    `printf $'it\\'s\n'\ngit log <<< 'x'`,
+    // A function body replays whole: braces keep the heredoc unprojected, so
+    // the recorded body keeps its terminator and replays as inert cat input.
+    `banner() {\ncat <<'EOF'\nhello\nEOF\n}\nbanner`,
+    // An apostrophe inside a comment opens no quote and cannot swallow the
+    // heredoc lines that follow.
+    `echo "x" # don't forget\ncat <<EOF\nbody\nEOF`,
+  ])('allows the provably-inert heredoc entrance %#', async (command) => {
+    const guard = createDaemonToolGuard();
+
+    await expect(guard(request(command))).resolves.toEqual({
+      allowed: true,
+    });
+  });
+
+  it.runIf(bashSemanticsLane)(
+    'still denies the inert-looking shapes that execute the body',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      // A group piped onward hands the receiver's stdout to a shell.
+      await expect(
+        guard(request(`{\ncat <<EOF\nx\nEOF\n} | sh`)),
+      ).resolves.toMatchObject({ allowed: false });
+      // A function whose replay runs a relocated mutation stays denied.
+      await expect(
+        guard(
+          request(`f() {\ngit -C ${cmdPath(outsideRepo)} reset --hard\n}\nf`),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+      // A # behind a NBSP is mid-word in bash, not a comment: the pipe that
+      // follows is real and must deny, while a blank before # comments it out.
+      await expect(
+        guard(request('cat <<EOF # - | sh\ngit reset --hard\nEOF')),
+      ).resolves.toMatchObject({ allowed: false });
+      await expect(
+        guard(request('cat <<EOF # - | sh\ngit reset --hard\nEOF')),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
   it.runIf(bashSemanticsLane)(
     'does not let an LF-only line terminate a CRLF heredoc early',
     async () => {

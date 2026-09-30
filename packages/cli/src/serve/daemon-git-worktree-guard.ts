@@ -326,6 +326,11 @@ interface GuardToken {
   // relocation markers — a here-string carries a whole command — but it is
   // never argv, so payload joins (`eval …`, `env -S …`) must skip it.
   readonly redirect?: boolean;
+  // Carries a `$(…)`/backtick substitution. The substitution loop already
+  // evaluated that body as a command on its own, so the free-text relocation
+  // scans must not pattern-match the token's raw text — a heredoc body inside
+  // `"$(cat <<'EOF' …)"` is data, not argv.
+  readonly substitution?: boolean;
   // A bare digit before a redirection: a file descriptor or an argv word,
   // indistinguishable here.
   readonly ambiguousFd?: boolean;
@@ -675,17 +680,90 @@ export function containsUnmodelledWindowsSyntax(
   return false;
 }
 
+// shell-quote throws on a parameter expansion whose interior holds shell
+// punctuation (`${arr[1 << 2]}`), which would deny a legitimate word. Mask
+// each balanced `${…}` span with an inert placeholder word for the parse and
+// restore it in the token texts afterwards; the word stays dynamic either way.
+function maskParameterExpansions(segment: string): {
+  text: string;
+  spans: string[];
+  prefix: string;
+} {
+  let prefix = '__QWEN_PARAM_';
+  while (segment.includes(prefix)) prefix += '_';
+  const spans: string[] = [];
+  let out = '';
+  let single = false;
+  let double = false;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!;
+    if (!single && ch === '\\' && i + 1 < segment.length) {
+      out += ch + segment[i + 1];
+      i++;
+      continue;
+    }
+    if (ch === "'" && !double) {
+      single = !single;
+      out += ch;
+      continue;
+    }
+    if (ch === '"' && !single) {
+      double = !double;
+      out += ch;
+      continue;
+    }
+    if (!single && ch === '$' && segment[i + 1] === '{') {
+      let depth = 1;
+      let end = i + 2;
+      for (; end < segment.length && depth > 0; end++) {
+        if (segment[end] === '{') depth++;
+        else if (segment[end] === '}') depth--;
+      }
+      if (depth === 0) {
+        spans.push(segment.slice(i, end));
+        out += `${prefix}${spans.length - 1}`;
+        i = end - 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return { text: out, spans, prefix };
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
 ): TokenizedSegment | null {
+  const masked = maskParameterExpansions(segment);
   let parsed: ReturnType<typeof parse>;
   try {
     // The caller already normalized the whole command text once; re-running
     // the Windows pre-pass per segment is what let the stages disagree.
-    parsed = parse(segment, (key) => `$${key}`);
+    parsed = parse(masked.text, (key) => `$${key}`);
   } catch {
     return null;
+  }
+  if (masked.spans.length > 0) {
+    const restore = (text: string): string => {
+      let restored = text;
+      for (const [index, span] of masked.spans.entries()) {
+        restored = restored.replaceAll(`${masked.prefix}${index}`, span);
+      }
+      return restored;
+    };
+    parsed = parsed.map((token) => {
+      if (typeof token === 'string') return restore(token);
+      if (
+        token !== null &&
+        typeof token === 'object' &&
+        'pattern' in token &&
+        typeof token.pattern === 'string'
+      ) {
+        return { ...token, pattern: restore(token.pattern) };
+      }
+      return token;
+    });
   }
   let depth = startDepth;
   const runs: GuardRun[] = [{ tokens: [], depth }];
@@ -722,6 +800,7 @@ function tokenizeSegment(
           runs.at(-1)!.tokens.push({
             text: token,
             dynamic: true,
+            substitution: true,
             ...(isRedirectOperand ? { redirect: true } : {}),
           });
           continue;
@@ -730,6 +809,9 @@ function tokenizeSegment(
       runs.at(-1)!.tokens.push({
         text: token,
         dynamic: token.includes('$') || token.includes('`'),
+        ...(token.includes('$(') || token.includes('`')
+          ? { substitution: true }
+          : {}),
         ...(isRedirectOperand ? { redirect: true } : {}),
       });
       continue;
@@ -802,7 +884,11 @@ function expandShellLocals(
     },
   );
   if (text === token.text) return token;
-  return { text, dynamic: !resolved };
+  return {
+    text,
+    dynamic: !resolved,
+    ...(token.substitution ? { substitution: true } : {}),
+  };
 }
 
 // Rebuilding a payload from tokens loses the quoting that made a value one
@@ -2179,7 +2265,13 @@ async function evaluateUnrecognizedRun(
   context: GuardEvaluationContext,
   relink?: RelinkState,
 ): Promise<GuardDenial | undefined> {
-  if (!run.some((token) => GIT_WORD_PATTERN.test(token.text))) return undefined;
+  // A substitution token's text is source the substitution loop already
+  // evaluated as a command on its own; scanning it again pattern-matches
+  // inert payload data (a heredoc body inside `"$(cat <<'EOF' …)"`) as argv.
+  const scannable = run.filter((token) => !token.substitution);
+  if (!scannable.some((token) => GIT_WORD_PATTERN.test(token.text))) {
+    return undefined;
+  }
   // A relinked `.git` redirects discovery for whatever git this run executes,
   // exactly as it would for a recognized one.
   if (relink?.gitDir) {
@@ -2199,7 +2291,7 @@ async function evaluateUnrecognizedRun(
     run.length > 0 && PROGRAMS_WITH_OWN_C_FLAG.has(executableBaseName(run[0]!));
   if (
     (!ownsCFlag && hasGitRelocationMarker(run)) ||
-    run.some((token) =>
+    scannable.some((token) =>
       (ownsCFlag
         ? TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN
         : TEXT_RELOCATION_MARKER_PATTERN
@@ -2972,8 +3064,10 @@ async function evaluateCommandWithCwd(
             inherited.ambientUnresolved ||
             inherited.ambientRelocations.length > 0 ||
             hasGitRelocationMarker(expanded) ||
-            expanded.some((token) =>
-              TEXT_RELOCATION_MARKER_PATTERN.test(token.text),
+            expanded.some(
+              (token) =>
+                !token.substitution &&
+                TEXT_RELOCATION_MARKER_PATTERN.test(token.text),
             )
           ) {
             return { denial: denyDynamicRelocation(), cwdAfter: trackedCwd };
