@@ -2691,6 +2691,7 @@ export class LlmClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      toolRegistry.syncReviewedDeclarations?.(extraHistory ?? []);
       const codeModeOnly =
         this.config.getToolMode?.() === ToolMode.CodeModeOnly;
       const deferredSummary = toolRegistry.getDeferredToolSummary();
@@ -5741,8 +5742,6 @@ export class LlmClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
-      // The summary does not carry tool_search schemas either (#12569).
-      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,

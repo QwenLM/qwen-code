@@ -214,8 +214,8 @@ export async function resolveDeferredToolCall(
   }
 
   // The arguments must be written against a schema the model currently has.
-  // A review is recorded when tool_search returns the schema and cleared
-  // whenever history is replaced (see `clearReviewedDeclarations`), so a tool
+  // A review is recorded when tool_search returns the schema and rebuilt
+  // from surviving results after history replacement, so a tool
   // never reviewed here, or whose review left context with a compaction,
   // clear or rewind, is refused rather than run by name (#12569). A registry
   // that does not define the lookup at all is deliberately not gated: both
@@ -229,7 +229,7 @@ export async function resolveDeferredToolCall(
   ) {
     return {
       error: bridgeRefusal(
-        `Deferred tool "${target.name}" has no schema in the current context. Run tool_search with select:${target.name} and call it with the returned schema.`,
+        `Deferred tool "${target.name}" has no verified schema review in the current context. Run tool_search with select:${target.name} and call it with the returned schema.`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
       targetName: target.name,

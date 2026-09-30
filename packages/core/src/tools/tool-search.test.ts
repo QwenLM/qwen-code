@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { CallableTool } from '@google/genai';
+import type { CallableTool, Content } from '@google/genai';
 import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
 import {
@@ -26,6 +26,8 @@ import { ToolNames } from './tool-names.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { runWithToolCallRuntime } from '../code-mode/tool-call-runtime.js';
+import { LlmChat } from '../core/llm-chat.js';
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -398,6 +400,200 @@ describe('ToolSearchTool', () => {
     expect(content).toContain('"name":"cron_create"');
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
   });
+
+  async function searchHistory(name: string): Promise<Content[]> {
+    const result = await new ToolSearchTool(config)
+      .build({ query: `select:${name}` })
+      .execute(new AbortController().signal);
+    return [
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: ToolNames.TOOL_SEARCH, args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: ToolNames.TOOL_SEARCH,
+              response: { output: result.llmContent },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Schema reviewed.' }] },
+    ];
+  }
+
+  it('keeps a resident schema callable after microcompaction and forgets an evicted one', async () => {
+    const hidden = new MockTool({ name: 'cron_list', shouldDefer: true });
+    registry.registerTool(hidden);
+    const history = await searchHistory(hidden.name);
+    for (const id of ['old', 'recent']) {
+      history.push(
+        {
+          role: 'model',
+          parts: [{ functionCall: { id, name: 'read_file', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id,
+                name: 'read_file',
+                response: { output: 'file bytes '.repeat(1000) },
+              },
+            },
+          ],
+        },
+      );
+    }
+    history.push({ role: 'model', parts: [{ text: 'Done.' }] });
+    const compacted = microcompactHistory(
+      history,
+      null,
+      {
+        toolResultsNumToKeep: 1,
+      },
+      { force: true },
+    );
+    expect(compacted.meta?.toolsCleared).toBeGreaterThan(0);
+    const chat = new LlmChat(config);
+    chat.setHistory(compacted.history);
+
+    expect(registry.getReviewedDeclaration(hidden.name)).toBe(
+      deferredDeclarationFingerprint(hidden),
+    );
+    expect(
+      await resolveDeferredToolCall(registry, {
+        name: hidden.name,
+        arguments: {},
+      }),
+    ).toMatchObject({ tool: hidden });
+    expect(registry.isDeferredToolRevealed(hidden.name)).toBe(false);
+
+    chat.setHistory([
+      { role: 'user', parts: [{ text: 'Summary without schemas.' }] },
+    ]);
+    expect(registry.getReviewedDeclaration(hidden.name)).toBeUndefined();
+    expect(
+      await resolveDeferredToolCall(registry, {
+        name: hidden.name,
+        arguments: {},
+      }),
+    ).toMatchObject({ errorType: ToolErrorType.INVALID_TOOL_PARAMS });
+  });
+
+  it.each(['restore', 'truncate', 'orphan', 'fork'])(
+    'preserves resident schema evidence through %s',
+    async (route) => {
+      const hidden = new MockTool({ name: 'cron_list', shouldDefer: true });
+      registry.registerTool(hidden);
+      const history = await searchHistory(hidden.name);
+      const chat = new LlmChat(config, {}, [...history]);
+      if (route === 'restore') {
+        registry.clearReviewedDeclarations();
+        chat.setHistory([...history]);
+      } else if (route === 'truncate') {
+        chat.addHistory({ role: 'user', parts: [{ text: 'Discard this.' }] });
+        chat.truncateHistory(history.length);
+      } else if (route === 'orphan') {
+        chat.addHistory({ role: 'user', parts: [{ text: 'Interrupted.' }] });
+        chat.stripOrphanedUserEntriesFromHistory();
+      } else {
+        chat.isForkedChat = true;
+        chat.setHistory([]);
+      }
+      expect(registry.getReviewedDeclaration(hidden.name)).toBe(
+        deferredDeclarationFingerprint(hidden),
+      );
+    },
+  );
+
+  it.each(['truncate', 'orphan', 'clear'])(
+    'forgets a schema actually removed by %s',
+    async (route) => {
+      const hidden = new MockTool({ name: 'cron_list', shouldDefer: true });
+      registry.registerTool(hidden);
+      const history = await searchHistory(hidden.name);
+      const chat = new LlmChat(config, {}, history);
+      if (route === 'truncate') chat.truncateHistory(1);
+      else if (route === 'clear') chat.clearHistory();
+      else {
+        chat.truncateHistory(2);
+        expect(registry.getReviewedDeclaration(hidden.name)).toBeDefined();
+        chat.stripOrphanedUserEntriesFromHistory();
+      }
+      expect(registry.getReviewedDeclaration(hidden.name)).toBeUndefined();
+    },
+  );
+
+  it('rearms a pending search result when it lands after history replacement', async () => {
+    const hidden = new MockTool({ name: 'cron_list', shouldDefer: true });
+    registry.registerTool(hidden);
+    const searched = await searchHistory(hidden.name);
+    const chat = new LlmChat(config);
+    chat.setHistory([searched[0]!]);
+    expect(registry.getReviewedDeclaration(hidden.name)).toBeUndefined();
+
+    chat.addHistory(searched[1]!);
+
+    expect(
+      await resolveDeferredToolCall(registry, {
+        name: hidden.name,
+        arguments: {},
+      }),
+    ).toMatchObject({ tool: hidden });
+  });
+
+  it.each(['parameters', 'server'])(
+    'does not refresh a historical MCP fingerprint after a %s change',
+    async (change) => {
+      const oldTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'old-server',
+        'lookup',
+        'Lookup',
+        { type: 'object', properties: { text: { type: 'string' } } },
+        undefined,
+        'same_registered_name',
+      );
+      registry.registerTool(oldTool);
+      const history = await searchHistory(oldTool.name);
+      registry.removeMcpToolsByServer(oldTool.serverName);
+      registry.registerTool(
+        new DiscoveredMCPTool(
+          {} as CallableTool,
+          change === 'server' ? 'new-server' : oldTool.serverName,
+          'lookup',
+          'Lookup',
+          change === 'parameters'
+            ? { type: 'object', properties: { id: { type: 'number' } } }
+            : oldTool.parameterSchema,
+          undefined,
+          oldTool.name,
+        ),
+      );
+      registry.clearReviewedDeclarations();
+      registry.syncReviewedDeclarations(history);
+
+      expect(registry.getReviewedDeclaration(oldTool.name)).toBe(
+        deferredDeclarationFingerprint(oldTool),
+      );
+      expect(
+        await resolveDeferredToolCall(registry, {
+          name: oldTool.name,
+          arguments: {},
+        }),
+      ).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        error: expect.objectContaining({
+          message: expect.stringContaining('changed since tool_search'),
+        }),
+      });
+    },
+  );
 
   it.each([
     ['select', 'select:cron_create'],

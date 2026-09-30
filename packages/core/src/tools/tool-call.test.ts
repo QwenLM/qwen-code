@@ -337,7 +337,7 @@ describe('ToolCallTool', () => {
         targetName: 'cron_list',
         error: expect.objectContaining({
           message: expect.stringContaining(
-            'has no schema in the current context. Run tool_search with select:cron_list',
+            'has no verified schema review in the current context. Run tool_search with select:cron_list',
           ),
         }),
       });

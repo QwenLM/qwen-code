@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
 import type {
   AnyDeclarativeTool,
   ToolResult,
@@ -244,9 +244,8 @@ export class ToolRegistry {
   private pinnedDeferredReveals: Set<string> = new Set();
   // Fingerprint of each tool as tool_search last returned it into the current
   // history. tool_call refuses a hidden tool with no entry, so an entry is the
-  // claim "the model has this schema in context": it is cleared wherever the
-  // FileReadCache is cleared for replaced history (see
-  // `clearReviewedDeclarations`, #12569). It deliberately survives tool
+  // claim "the model has this schema in context": history replacement rebuilds
+  // it from surviving tool_search results (#12569). It survives tool
   // removal: a disconnect does not take the schema out of history, and a
   // reconnect is compared by fingerprint, so an identical republish still
   // matches while a changed one asks for a fresh review.
@@ -1031,18 +1030,43 @@ export class ToolRegistry {
     );
   }
 
-  /**
-   * Forgets every recorded review. Call it wherever history is replaced
-   * wholesale (`LlmChat.setHistory` / `truncateHistory` /
-   * `stripOrphanedUserEntries`, `/clear`, `/compress`, a session transition):
-   * the tool_search results those reviews stand for may no longer be in
-   * context, and a new replacement site must call it too. The FileReadCache
-   * is also cleared in places that never drop a tool_search result —
-   * microcompaction's COMPACTABLE_TOOLS does not include tool_search, and a
-   * workspace relocation keeps the chat — and those need no call here.
-   */
+  /** Forgets every review when starting a different session. */
   clearReviewedDeclarations(): void {
     this.reviewedDeferredDeclarations.clear();
+  }
+
+  /** Rebuilds reviews from schemas actually retained in the primary history. */
+  syncReviewedDeclarations(history: readonly Content[]): void {
+    const reviewed = new Map<string, string>();
+    for (const entry of history) {
+      for (const part of entry.parts ?? []) {
+        const response = part.functionResponse;
+        if (response?.name !== ToolNames.TOOL_SEARCH) continue;
+        const output = response.response?.['output'];
+        if (typeof output !== 'string') continue;
+        for (const match of output.matchAll(/<function>(.*?)<\/function>/gs)) {
+          try {
+            const schema = JSON.parse(match[1]!) as Record<string, unknown>;
+            if (!schema || typeof schema.name !== 'string') continue;
+            const suffix = `\u0000${schema.name}\u0000${JSON.stringify(schema.parametersJsonSchema)}`;
+            const previous = this.reviewedDeferredDeclarations.get(schema.name);
+            if (typeof schema.serverName === 'string') {
+              reviewed.set(schema.name, `${schema.serverName}${suffix}`);
+            } else if (previous?.endsWith(suffix)) {
+              // Old transcripts did not serialize the MCP server identity.
+              reviewed.set(schema.name, previous);
+            } else if (
+              !(this.getTool(schema.name) instanceof DiscoveredMCPTool)
+            ) {
+              reviewed.set(schema.name, suffix);
+            }
+          } catch {
+            // Truncated or malformed results do not establish a reviewed schema.
+          }
+        }
+      }
+    }
+    this.reviewedDeferredDeclarations = reviewed;
   }
 
   /**

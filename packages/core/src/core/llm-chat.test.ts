@@ -416,6 +416,49 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('resyncs a tool_search response committed through the streaming send path', async () => {
+    const syncReviewedDeclarations = vi.fn();
+    vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+      getTool: vi.fn(),
+      syncReviewedDeclarations,
+    } as unknown as ReturnType<Config['getToolRegistry']>);
+    const searchResponse: Part = {
+      functionResponse: {
+        id: 'search',
+        name: 'tool_search',
+        response: { output: '<functions></functions>' },
+      },
+    };
+    chat.setHistory([
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'search', name: 'tool_search', args: {} } },
+        ],
+      },
+    ]);
+    syncReviewedDeclarations.mockClear();
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+      streamResponse(stopResponse([{ text: 'Done.' }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: [searchResponse] },
+      'search-result',
+    );
+    for await (const _ of stream) {
+      /* consume */
+    }
+
+    expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
+    expect(syncReviewedDeclarations).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
+      ]),
+    );
+  });
+
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
       const isolatedChat = new LlmChat(

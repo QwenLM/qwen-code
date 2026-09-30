@@ -477,13 +477,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // no longer tag delimiters.
     const schemaBlocks = reviewed.map((tool) => {
       const binding = bindings?.get(tool.name);
-      const declaration = binding
-        ? {
-            ...tool.schema,
-            jsName: binding.jsName,
-            signature: describeCodeModeBinding(binding),
-          }
-        : tool.schema;
+      const declaration = {
+        ...tool.schema,
+        ...(tool instanceof DiscoveredMCPTool
+          ? { serverName: tool.serverName }
+          : {}),
+        ...(binding
+          ? {
+              jsName: binding.jsName,
+              signature: describeCodeModeBinding(binding),
+            }
+          : {}),
+      };
       return `<function>${escapeJsonTagCharacters(JSON.stringify(declaration))}</function>`;
     });
     let llmContent = '';
