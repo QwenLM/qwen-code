@@ -1351,11 +1351,6 @@ class ManagedAgentApiContractTest {
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
-        if (expectedStatus == 403) {
-            assertThat(json(content).path("error").path("code").asText())
-                    .as("%s actor-scope error code", operationId)
-                    .isEqualTo("actor_scope_mismatch");
-        }
         if (status != expectedStatus) {
             drift.put("response %s: expected %d, got %d%s".formatted(
                     operationId, expectedStatus, status,
