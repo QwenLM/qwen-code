@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
+  DaemonAttachmentUploadError,
   DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
@@ -4915,6 +4916,38 @@ describe('createDaemonSessionActions', () => {
 
     expect(onAdmissionStarted).not.toHaveBeenCalled();
     expect(session.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not inline or admit an image after a negotiated chunk upload returns 404', async () => {
+    const session = createMockSession('session-a');
+    const failure = new DaemonAttachmentUploadError(
+      new DaemonHttpError(
+        404,
+        { code: 'attachment_upload_not_found' },
+        'Upload expired',
+      ),
+    );
+    session.uploadAttachment.mockRejectedValueOnce(failure);
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments', 'session_attachment_chunk_upload'],
+          modelServices: [],
+        },
+      },
+    });
+    await expect(
+      actions.submitPrompt('look', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+    ).rejects.toBe(failure);
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
   });
 
   it('falls back to inline image data when the attachment route is unavailable', async () => {

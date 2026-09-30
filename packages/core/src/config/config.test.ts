@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
@@ -22,6 +26,7 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   deriveAgentConfig,
+  deriveApprovalModeConfig,
   deriveConfig,
   deriveWorktreeConfig,
   TrustGateError,
@@ -82,6 +87,7 @@ import {
   createDebugLogger,
   resetDebugLoggingState,
   setDebugLogSession,
+  type DebugLogger,
 } from '../utils/debugLogger.js';
 import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
@@ -308,6 +314,7 @@ vi.mock('../memory/team-memory-git-status.js', () => ({
 
 vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
+  HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -3110,20 +3117,24 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const resolvedPolicy = {
+        ...parameters().shellExecutionSandbox,
+        effectiveBackend: 'bwrap' as const,
+        enforcement: 'full' as const,
+      };
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue(resolvedPolicy);
       try {
         const config = new Config(parameters());
+        const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
           'refreshCache',
         );
         await config.initialize();
-        expect(probe).toHaveBeenCalledWith(
-          config.getShellExecutionSandbox(),
-          undefined,
-        );
+        expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
+        expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -3154,7 +3165,11 @@ describe('Server Config (config.ts)', () => {
     it('omits user-interaction tools from the admitted headless registry', async () => {
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue({
+          ...parameters().shellExecutionSandbox,
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        });
       try {
         const config = new Config({
           ...parameters(),
@@ -8813,6 +8828,9 @@ describe('Server Config (config.ts)', () => {
       });
       // Set messageBus using the setter
       config.setMessageBus(mockMessageBus as unknown as MessageBus);
+      vi.spyOn(config, 'getHookSystem').mockReturnValue({
+        runtimeId: 'auth-runtime',
+      } as unknown as NonNullable<ReturnType<Config['getHookSystem']>>);
 
       const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
@@ -8834,6 +8852,12 @@ describe('Server Config (config.ts)', () => {
         `Successfully authenticated with ${authType}`,
         'auth_success',
         'Authentication successful',
+        undefined,
+        {
+          runtimeId: 'auth-runtime',
+          sessionId: config.getSessionId(),
+          agentId: null,
+        },
       );
     });
 
@@ -9084,6 +9108,148 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'drops a stale auxiliary endpoint instead of unconfiguring %s',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        // The pin no longer names a configured endpoint, so the selector falls
+        // back to the bare form and the registry's first same-id match — the
+        // pre-#12760 behaviour — instead of reporting the model as unset.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'warns when a stale auxiliary endpoint pin is dropped (%s)',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          [key]: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [{ id: 'shared', baseUrl: 'https://moved.example/v1' }],
+          },
+        });
+        const warn = vi.spyOn(
+          (config as unknown as { debugLogger: DebugLogger }).debugLogger,
+          'warn',
+        );
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('Aux endpoint pin dropped for "shared"'),
+        );
+        // The escaped form must reach the log, never a raw NUL byte.
+        expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('\0'));
+      },
+    );
+
+    it('keeps the pin when a same-id sibling declares the colliding default URL (#12760)', () => {
+      // The first row declares no baseUrl, so its effective URL is the
+      // provider default — the same URL the second row declares. Matching the
+      // pin on effective baseUrl with first-hit semantics would return the
+      // first row's undefined registryBaseUrl and silently drop the pin,
+      // rebinding every fast-model call to the personal key.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'main',
+        fastModel: 'openai:gpt-4o\0https://api.openai.com/v1',
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4o', envKey: 'OPENAI_API_KEY_PERSONAL' },
+            {
+              id: 'gpt-4o',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY_WORK',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:gpt-4o\0https://api.openai.com/v1',
+      );
+    });
+
+    it.each(['fastModel', 'compactionModel'] as const)(
+      'keeps %s bare when the pinned entry declares no endpoint of its own',
+      (key) => {
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          // What the picker persists for a row whose provider entry has no
+          // `baseUrl`: the registry's effective (default) URL.
+          [key]: 'openai:shared\0https://api.openai.com/v1',
+          modelProvidersConfig: { openai: [{ id: 'shared' }] },
+        });
+        // Such an entry is registered under the plain id, which a bare
+        // selector already resolves to; re-attaching the effective URL would
+        // hand consumers a registry key that does not exist.
+        const read = () =>
+          key === 'fastModel'
+            ? config.getFastModel()
+            : config.getCompactionModel();
+        expect(read()).toBe('openai:shared');
+      },
+    );
+
+    it('keeps the endpoint disambiguator on a persisted fast model selector (#12760)', () => {
+      // Two providers expose the same model id over the openai protocol; the
+      // picker pins the second one as `authType:id\0baseUrl`. Dropping the
+      // suffix would rebind the fast model to the first registered endpoint
+      // (registry first-match fallback) — e.g. an exhausted token plan.
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'qwen3.7-max',
+        fastModel: 'openai:shared-fast\0https://free-quota.example.com/v1',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'qwen3.7-max',
+              name: 'qwen3.7-max',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (token plan)',
+              baseUrl: 'https://exhausted-plan.example.com/v1',
+              envKey: 'TOKEN_PLAN_API_KEY',
+            },
+            {
+              id: 'shared-fast',
+              name: 'shared-fast (free quota)',
+              baseUrl: 'https://free-quota.example.com/v1',
+              envKey: 'FREE_QUOTA_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe(
+        'openai:shared-fast\0https://free-quota.example.com/v1',
+      );
+    });
+
     it('preserves authType-qualified fast model selectors across auth types', () => {
       const config = new Config({
         ...baseParams,
@@ -9273,6 +9439,48 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('getCompactionModel', () => {
+      it('keeps the endpoint disambiguator on a persisted compaction model selector (#12760)', async () => {
+        // Twin of the getFastModel case: the picker pins the second of two
+        // same-id endpoints and runSideQuery's resolveForModel consumes the
+        // suffix. Dropping it would rebind compaction to the first registered
+        // endpoint (registry first-match fallback).
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3.7-max',
+          compactionModel:
+            'openai:shared-compact\0https://free-quota.example.com/v1',
+          modelProvidersConfig: {
+            [AuthType.USE_OPENAI]: [
+              {
+                id: 'qwen3.7-max',
+                name: 'qwen3.7-max',
+                baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                envKey: 'DASHSCOPE_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (token plan)',
+                baseUrl: 'https://exhausted-plan.example.com/v1',
+                envKey: 'TOKEN_PLAN_API_KEY',
+              },
+              {
+                id: 'shared-compact',
+                name: 'shared-compact (free quota)',
+                baseUrl: 'https://free-quota.example.com/v1',
+                envKey: 'FREE_QUOTA_API_KEY',
+              },
+            ],
+          },
+        });
+
+        await config.refreshAuth(AuthType.USE_OPENAI);
+
+        expect(config.getCompactionModel()).toBe(
+          'openai:shared-compact\0https://free-quota.example.com/v1',
+        );
+      });
+
       it('returns the compaction model when set', async () => {
         const config = new Config({
           ...baseParams,
@@ -10083,34 +10291,42 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(true);
     vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
-    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(false);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+
+    scan.mockResolvedValueOnce({
+      ready: false,
+      revision: 'not-ready-revision',
     });
+    await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+      undefined,
+    );
+    expect(config.getMemoryRecallMode()).toBe('legacy');
 
     const transition = await config.prepareMemoryRecallTransition();
     expect(transition).toMatchObject({
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
-      previousRevision: 'legacy-revision',
+      previousRevision: 'not-ready-revision',
       previousAutoMemoryPrompt: 'legacy prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
+    expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+    expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
     await expect(
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
     config.commitMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('structured');
-    expect(config.getAutoMemoryPrompt()).toBe('structured prompt');
+    expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
@@ -10143,9 +10359,6 @@ describe('Server Config (config.ts)', () => {
       scanMemoryRecallCorpusStatus: vi
         .fn()
         .mockResolvedValue({ ready: true, revision: 'structured-revision' }),
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
     });
     vi.mocked(rebuildUserAutoMemoryIndex).mockRejectedValueOnce(
       new Error('EACCES: cannot read user root'),
@@ -10157,8 +10370,10 @@ describe('Server Config (config.ts)', () => {
       from: 'legacy',
       to: 'structured',
       revision: 'structured-revision',
-      autoMemoryPrompt: 'structured prompt',
     });
+    expect(transition?.autoMemoryPrompt).toContain(
+      'Use the complete tree and focused metadata for routing.',
+    );
   });
 
   it('prepareMemoryRecallTransition stays inert in safe mode', async () => {
@@ -10177,12 +10392,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
@@ -10207,12 +10417,7 @@ describe('Server Config (config.ts)', () => {
     const scan = vi
       .fn()
       .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-    Object.assign(config, {
-      scanMemoryRecallCorpusStatus: scan,
-      buildAutoMemoryPromptForMode: vi
-        .fn()
-        .mockResolvedValue('structured prompt'),
-    });
+    Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
     await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
       undefined,
@@ -11562,6 +11767,7 @@ describe('Server Config (config.ts)', () => {
     const fireInstructionsLoadedEvent = vi.fn().mockResolvedValue(undefined);
     const signal = new AbortController().signal;
     config['hookSystem'] = {
+      runtimeId: 'test-hook-runtime',
       fireInstructionsLoadedEvent,
     } as unknown as HookSystem;
 
@@ -13890,6 +14096,41 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('DAC plan workflow', () => {
+    it('notifies after a Plan execution mode is selected or changed', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      const states: Array<{
+        mode: ApprovalMode;
+        prePlanMode: ApprovalMode;
+        executionMode: ApprovalMode | undefined;
+      }> = [];
+      config.onApprovalModeChange((mode, prePlanMode) => {
+        states.push({
+          mode,
+          prePlanMode: prePlanMode ?? ApprovalMode.DEFAULT,
+          executionMode: config.getPlanExecutionMode(),
+        });
+      });
+
+      config.setPlanMode(true, ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+
+      expect(states).toEqual([
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.YOLO,
+        },
+        {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.YOLO,
+          executionMode: ApprovalMode.AUTO_EDIT,
+        },
+      ]);
+    });
+
     it.each([
       ApprovalMode.DEFAULT,
       ApprovalMode.AUTO_EDIT,
@@ -13963,6 +14204,43 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   describe('prePlanMode tracking', () => {
+    it('notifies canonical listeners after approval state changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const listener = vi.fn();
+      const unsubscribe = config.onApprovalModeChange(listener);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      unsubscribe();
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).toHaveBeenNthCalledWith(1, ApprovalMode.YOLO, undefined);
+      expect(listener).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.PLAN,
+        ApprovalMode.YOLO,
+      );
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not notify when trust rejects a mode or a derived config changes', () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onApprovalModeChange(listener);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+
+      expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+        TrustGateError,
+      );
+      const derived = deriveApprovalModeConfig(config, ApprovalMode.PLAN);
+      derived.config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(listener).not.toHaveBeenCalled();
+      derived.cleanup();
+    });
+
     it('should save pre-plan mode when entering plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -15787,13 +16065,17 @@ describe('Model Switching and Config Updates', () => {
 
       const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireUserPromptSubmitEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireUserPromptSubmitEvent,
+      };
 
       const response = await config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'UserPromptSubmit',
             input: {
               prompt: 'model prompt',
@@ -15809,6 +16091,80 @@ describe('Model Switching and Config Updates', () => {
         expected,
       );
       expect(response.success).toBe(true);
+    });
+  });
+
+  describe('hook execution bridge ownership', () => {
+    it.each(['missing', 'runtime', 'session', 'agent'] as const)(
+      'rejects %s ownership before dispatch',
+      async (invalid) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const fire = vi.fn();
+        // @ts-expect-error - a focused dispatcher test double
+        config['hookSystem'] = {
+          runtimeId: 'runtime-A',
+          firePreToolUseEvent: fire,
+        };
+        const owner = captureHookExecutionOwner(config)!;
+        const invalidOwner =
+          invalid === 'missing'
+            ? undefined
+            : {
+                ...owner,
+                ...(invalid === 'runtime' ? { runtimeId: 'runtime-B' } : {}),
+                ...(invalid === 'session' ? { sessionId: 'old-session' } : {}),
+                ...(invalid === 'agent' ? { agentId: '' } : {}),
+              };
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: invalidOwner,
+              eventName: 'PreToolUse',
+              input: { tool_name: 'read_file' },
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+        expect(response.success).toBe(false);
+        expect(response.error?.message).toContain('owner');
+        expect(fire).not.toHaveBeenCalled();
+      },
+    );
+
+    it('dispatches with the captured owner rather than untrusted input metadata', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+      const observed: unknown[] = [];
+      const fire = vi.fn(async () => {
+        observed.push(getHookExecutionOwner());
+        return undefined;
+      });
+      // @ts-expect-error - a focused dispatcher test double
+      config['hookSystem'] = {
+        runtimeId: 'runtime-A',
+        firePreToolUseEvent: fire,
+      };
+      const owner = captureHookExecutionOwner(config, 'A');
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner,
+            eventName: 'PreToolUse',
+            input: {
+              tool_name: 'read_file',
+              agent_id: 'B',
+              session_id: 'other-session',
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+      expect(response.success).toBe(true);
+      expect(observed).toEqual([owner]);
+      expect(getHookExecutionOwner()).toBeUndefined();
     });
   });
 
@@ -15828,6 +16184,7 @@ describe('Model Switching and Config Updates', () => {
           {},
           {
             get: (_target, prop) => {
+              if (prop === 'runtimeId') return 'test-hook-runtime';
               if (typeof prop !== 'string' || prop === 'then') {
                 return undefined;
               }
@@ -15853,6 +16210,7 @@ describe('Model Switching and Config Updates', () => {
           .request<HookExecutionRequest, HookExecutionResponse>(
             {
               type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              owner: captureHookExecutionOwner(config),
               eventName,
               input: {},
             },
@@ -15879,12 +16237,13 @@ describe('Model Switching and Config Updates', () => {
       const config = new Config({ ...baseParams });
       await config.initialize();
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { [method]: fire };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', [method]: fire };
       return config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName,
             input,
             signal,
@@ -16114,7 +16473,7 @@ describe('Model Switching and Config Updates', () => {
         allOutputs: [blockingOutput, secondOutput],
       });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', fireStopEvent };
 
       const controller = new AbortController();
       const response = await config
@@ -16122,6 +16481,7 @@ describe('Model Switching and Config Updates', () => {
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'Stop',
             input: {
               stop_hook_active: true,
@@ -16169,13 +16529,14 @@ describe('Model Switching and Config Updates', () => {
         allOutputs: [],
       });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireStopEvent };
+      config['hookSystem'] = { runtimeId: 'test-hook-runtime', fireStopEvent };
 
       const response = await config
         .getMessageBus()!
         .request<HookExecutionRequest, HookExecutionResponse>(
           {
             type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            owner: captureHookExecutionOwner(config),
             eventName: 'Stop',
             input: { stop_hook_active: false },
           },
@@ -16207,7 +16568,10 @@ describe('Model Switching and Config Updates', () => {
         .fn()
         .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireMessageDisplayEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireMessageDisplayEvent,
+      };
 
       const messageBus = config.getMessageBus();
       expect(messageBus).toBeDefined();
@@ -16218,6 +16582,7 @@ describe('Model Switching and Config Updates', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: captureHookExecutionOwner(config),
           eventName: 'MessageDisplay',
           input: {
             message_id: 'msg-123',
@@ -16245,7 +16610,10 @@ describe('Model Switching and Config Updates', () => {
         .fn()
         .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
       // @ts-expect-error - accessing private for testing
-      config['hookSystem'] = { fireMessageDisplayEvent };
+      config['hookSystem'] = {
+        runtimeId: 'test-hook-runtime',
+        fireMessageDisplayEvent,
+      };
 
       const messageBus = config.getMessageBus();
       const response = await messageBus!.request<
@@ -16254,6 +16622,7 @@ describe('Model Switching and Config Updates', () => {
       >(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: captureHookExecutionOwner(config),
           eventName: 'MessageDisplay',
           input: {},
         },
@@ -16514,5 +16883,138 @@ describe('Model Switching and Config Updates', () => {
       'prompt-auto',
     );
     expect(config.takeActiveTodoReminder('prompt-user', true)).toBeUndefined();
+  });
+});
+
+describe('applyWorkspaceAgentPersona', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+    chatRecording: false,
+  };
+
+  const agentSession = () => {
+    // The opt-in as well as the source type. Collaboration is off by default,
+    // and `sourceType: 'agent'` alone deliberately does not open the surface —
+    // these cases are about what an opted-in agent session gets, so they have
+    // to say so.
+    const config = new Config({
+      ...baseParams,
+      agentCollaborationEnabled: true,
+    });
+    config.setSessionSource('agent', 'ag_alice');
+    return config;
+  };
+
+  it('puts the persona where the main session prompt is read from', () => {
+    // The whole reason no new machinery was needed: the prompt path already
+    // prefers an override over the core prompt.
+    const config = agentSession();
+
+    config.applyWorkspaceAgentPersona('You are alice.', 'alice');
+
+    expect(config.getSystemPrompt()).toBe('You are alice.');
+    expect(config.getWorkspaceAgentName()).toBe('alice');
+  });
+
+  it('is a workspace-agent session only with the opt-in and the agent source', () => {
+    expect(agentSession().isWorkspaceAgentSession()).toBe(true);
+    const optedOut = new Config(baseParams);
+    optedOut.setSessionSource('agent', 'ag_alice');
+    expect(optedOut.isWorkspaceAgentSession()).toBe(false);
+    expect(new Config(baseParams).isWorkspaceAgentSession()).toBe(false);
+  });
+
+  it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
+    // `registerFactory` is a single mock on the prototype, so every registry
+    // shares one call log. Snapshot and clear between the two, or the ordinary
+    // session inherits the agent's registrations and the negative half of this
+    // test can never fail.
+    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
+    factory.mockClear();
+    await agentSession().createToolRegistry(undefined, { skipDiscovery: true });
+    const agentTools = factory.mock.calls.map(([name]) => name as string);
+
+    factory.mockClear();
+    await new Config(baseParams).createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    const ordinaryTools = factory.mock.calls.map(([name]) => name as string);
+    // Asserted against the recorded registrations, not `getAllToolNames`:
+    // that method is stubbed to `[]` at module scope, so the positive half
+    // could never pass and the negative half could never fail.
+    for (const name of [
+      'thread_post',
+      'thread_read',
+      'thread_create',
+      'thread_wait',
+      'thread_block',
+      'thread_review',
+    ]) {
+      expect(agentTools).toContain(name);
+      expect(ordinaryTools).not.toContain(name);
+    }
+  });
+
+  it('refuses on a session that is not an agent', () => {
+    // Otherwise any session could be handed a persona and post under a name
+    // that is not its own.
+    expect(() =>
+      new Config(baseParams).applyWorkspaceAgentPersona('x', 'alice'),
+    ).toThrow(/only be applied to an agent session/);
+  });
+
+  it('enforces the persona tool subset without widening the read-only ceiling', async () => {
+    const config = agentSession();
+    config.applyWorkspaceAgentPersona('Read only', 'alice', [
+      'read_file',
+      'thread_review',
+      'write_file',
+    ]);
+    const guard = config.getToolInvocationGuard()!;
+    for (const toolName of [
+      'read_file',
+      'thread_review',
+      'write_file',
+      'glob',
+    ]) {
+      const result = await guard({
+        callId: 'guard-check',
+        toolName,
+        args: {},
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(
+        toolName === 'read_file' || toolName === 'thread_review',
+      );
+    }
+  });
+
+  it('refuses on a session belonging to another source', () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent-host', 'ws_1');
+
+    expect(() => config.applyWorkspaceAgentPersona('x', 'alice')).toThrow(
+      /only be applied to an agent session/,
+    );
+  });
+
+  it('refuses a second persona rather than changing one in place', () => {
+    // A session's prompt is part of what its transcript means; swapping it
+    // under a running conversation would make the record a lie.
+    const config = agentSession();
+    config.applyWorkspaceAgentPersona('You are alice.', 'alice');
+
+    expect(() =>
+      config.applyWorkspaceAgentPersona('You are bob.', 'bob'),
+    ).toThrow(/already has a persona/);
+    expect(config.getSystemPrompt()).toBe('You are alice.');
+    expect(config.getWorkspaceAgentName()).toBe('alice');
+  });
+
+  it('names no agent on a session that never had a persona applied', () => {
+    expect(new Config(baseParams).getWorkspaceAgentName()).toBeUndefined();
   });
 });

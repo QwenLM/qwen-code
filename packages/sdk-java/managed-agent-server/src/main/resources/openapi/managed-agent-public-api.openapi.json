@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.19.0",
-    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel."
+    "version": "1.22.0",
+    "description": "Canonical contract for the public Managed Agent resources and the WebShell adapter. partial means that the route exists but generated types and full contract tests are pending; planned means that the route or field is not implemented. Workspace context and cwd operations are v1.9 target contracts, not current server capabilities. v1.10 adds planned command admission, Actions, lifecycle and actor authorization. v1.12 refines planned W0 creation discovery, actor-specific create hints and explicit default selection. Full tool-result descriptors from the v1.11 design are not yet included. Filter planned fields as well as routes from production SDKs. v1.13 moves this contract into the Qwen Code repository as its single source and records the shipped rename, archive, unarchive and delete routes as partial. v1.14 integrates W0d workspace discovery, the WebShell workspace lookup, and empty-session binding as partial; workspace_binding/workspaceBinding advertises this narrow flow without enabling workspace execution or context switching. v1.15 adds the archived, archiving and deleting Session statuses and the cancelling Turn status, requires request_id in error envelopes, declares the error responses that the server returns, and marks Session create, list and get on both surfaces implemented. v1.16 adds the planned Stage H task contract (SessionTaskView as PublicTask, task list, detail, events and cancel) and names the MCP catalog, hook catalog, automation and channel resources as planned; their shapes arrive with Stages H1 to H6. v1.17 implements event replay: events carry their schema and projection versions and a top-level Item and Part identity, JSON event pages return has_more and next_cursor and accept limits up to 1000, and a persisted replay floor answers expired cursors with 409 cursor_expired in JSON and one agent.session.resync_required frame over SSE; it marks the public event query and stream, the WebShell event stream and the WebShell transcript implemented. v1.18 implements the durable Session lifecycle (Stage D4): close, archive and delete answer 202 with a command operation on both surfaces, an archive requires a closed Session, a deleted Session leaves a tombstone whose operations stay readable, and the operation query serves them; unarchive restores a closed Session, and Session capabilities advertise session_lifecycle. v1.19 serves the task list and detail on both surfaces as partial (Stage H0c): the Session store projects them from the Stage H records the Session authority commits, a task.updated Session event announces each change of a task's view, and Session capabilities advertise tasks. Task events and cancel stay planned until a slice's tasks produce output and accept a cancel. v1.20 implements the Turn read model (Stage D5): the public Turn list and detail read a Session's Turns without their input, newest first by creation time in milliseconds and then Turn ID, with an opaque cursor; a deleted Session's Turns are not readable, and the durable admission fields of a Turn stay planned until D7. v1.21 declares on the task list, detail and event routes of both surfaces the 403 actor_scope_mismatch that the tenant filter answers on every /v1/agents/ and WebShell route, as the Session and Turn reads already do, and the shared Forbidden response names it; a caller that cannot read a task still gets 404. v1.22 adds deployment-opted-in creation with an initial Workspace file-tool Turn (G0) on the public and WebShell surfaces; the fixed server-owned profile does not enable later Workspace operations."
   },
   "servers": [
     {
@@ -153,7 +153,7 @@
         "tags": ["Public Sessions"],
         "operationId": "createSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Planned W0 workspace selection is persisted with the original creation receipt. Check actor-scoped replay before resolving defaults. A durable binding is not proof of Runtime readiness; never ignore selection.",
+        "description": "Workspace selection is persisted with the original actor-scoped creation receipt. With the deployment's G0 file admission opt-in, qwen-code Sessions in an authorized, preregistered Workspace may include initial input under the fixed preapproved file-tool profile. Public callers cannot select the profile. Otherwise Workspace creation must have empty input. Later Workspace submit, cancel and lifecycle operations remain gated. Check replay before resolving defaults; a durable binding is not proof of Runtime readiness.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -480,7 +480,8 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "listTurns",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Turns of this Session, newest first: by creation time in milliseconds, which created_at shows in whole seconds, then by id, both descending. next_cursor names the last Turn of the page and is null on the last page; a page never repeats or skips a Turn that existed when the first page was read. 400 invalid_limit for a 32-bit integer limit outside 1 to 100, invalid_request for a limit that is not a 32-bit integer, and invalid_cursor for a cursor that does not decode to the createdAt:turnId form this server issues. 404 session_not_found for an unknown, deleted or unreadable Session.",
         "parameters": [
           {
             "$ref": "#/components/parameters/Cursor"
@@ -500,6 +501,12 @@
               }
             }
           },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -518,7 +525,8 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "getTurn",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
+        "description": "404 session_not_found for an unknown, deleted or unreadable Session, and turn_not_found for a Turn that this Session does not have; an id that differs from a Turn's only by trailing spaces does not find it. 400 invalid_request for a Turn id longer than 64 characters.",
         "responses": {
           "200": {
             "description": "Turn state.",
@@ -529,6 +537,12 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -760,7 +774,7 @@
             "$ref": "#/components/responses/NotFound"
           }
         },
-        "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
+        "description": "Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta and item.tool_call.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events."
       }
     },
     "/api/agent/web-shell/v1/events/stream": {
@@ -808,7 +822,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellCreateSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "W0 maps workspaceId/cwdRelative to the public selection without using environmentId or absolute cwd. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
+        "description": "Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Later Workspace submit, cancel and lifecycle operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1809,6 +1823,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -1850,6 +1867,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -1882,6 +1902,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -1963,6 +1986,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -1998,6 +2024,9 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
@@ -2032,6 +2061,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2377,7 +2409,7 @@
     },
     "responses": {
       "Forbidden": {
-        "description": "Resource is readable but actor lacks this operation or original Action responder permission.",
+        "description": "The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission.",
         "content": {
           "application/json": {
             "schema": {
@@ -4064,7 +4096,7 @@
               },
               "workspace_binding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; later submit, cancel and lifecycle operations remain gated."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -4297,7 +4329,7 @@
               },
               "workspaceBinding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; later submit, cancel and lifecycle operations remain gated."
               }
             },
             "x-qwen-implementation-status": "partial"
