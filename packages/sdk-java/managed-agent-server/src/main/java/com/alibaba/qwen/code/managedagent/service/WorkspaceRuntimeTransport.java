@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -276,7 +277,19 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
-        if (managed(session) && !"history".equals(operation.get("kind"))) {
+        if (ManagedMcpProtocol.isOperation(operation)) {
+            if (!managed(session)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ManagedMcpProtocol.validateSession(session, operation);
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation);
+            Context context = context(lease, session, !recovery);
+            if (context.runtime().getState() != RuntimeBindingRecord.State.READY
+                    && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ownership.assertHeld(context.binding(), context.session());
+        } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             ownership.assertHeld(context.binding(), context.session());
         }
@@ -289,6 +302,11 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
+        // RELEASING fences later claims; an absent holder needs no physical release.
+        if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
+                && !ownership.isHeld(context.binding(), context.session())) {
+            return CompletableFuture.completedFuture(true);
+        }
         return delegate.release(lease, session).thenCompose(released -> {
             if (!Boolean.TRUE.equals(released)) {
                 throw WorkspaceExecutionStore.unavailable();
