@@ -20,7 +20,10 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
-import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import {
+  ManagedSessionStoreHttpError,
+  type HttpToolPublicationOwner,
+} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-projection.js';
 import { readHostedFileHistory } from './hosted-file-history.js';
@@ -2749,3 +2752,104 @@ it('keeps a durable pending history when post-execution settlement fails', async
   );
   expect(broker.release).not.toHaveBeenCalled();
 });
+
+it.each([false, true])(
+  'settles a definite preparation refusal (mixed batch: %s)',
+  async (mixed) => {
+    broker.fileHistory.mockImplementation(async (operation) => {
+      if (operation.action === 'prepare')
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'managed_runtime_provider_operation_failed',
+          undefined,
+          'ordinary files only',
+        );
+      return {
+        ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        snapshots: [],
+        files: {},
+      };
+    });
+    const responses = await turn.execute(
+      mixed ? calls : [calls[1]],
+      mixed ? parts : [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain('ordinary files only');
+    expect(broker.prepare).toHaveBeenCalledTimes(mixed ? 1 : 0);
+    expect(broker.execute).toHaveBeenCalledTimes(mixed ? 1 : 0);
+    expect(await readHostedFileHistory(session)).toBeUndefined();
+    expect(
+      (await session.sink.project())
+        .filter((record) => record.type === 'tool_result')
+        .flatMap((record) => record.message?.parts ?? []),
+    ).toEqual(responses);
+    if (mixed) await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  [409, 'managed_runtime_provider_operation_failed'],
+  [400, 'runtime_control_operation_invalid'],
+] as const)(
+  'releases a definite bind rejection %s %s without blocking',
+  async (status, code) => {
+    broker.fileHistory.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(status, code),
+    );
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toThrow('Runtime Broker returned HTTP');
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+    expect(broker.release).toHaveBeenCalledOnce();
+    expect(await session.sink.project()).toEqual([]);
+  },
+);
+
+it.each(['bind', 'prepare', 'release', 'store'] as const)(
+  'keeps uncertain history %s failures blocked',
+  async (phase) => {
+    if (phase === 'store') {
+      vi.spyOn(session.authority, 'commitDomainRecord').mockRejectedValueOnce(
+        new ManagedSessionStoreHttpError(
+          503,
+          'store_unavailable',
+          'commit outcome unknown',
+        ),
+      );
+    } else {
+      broker.fileHistory.mockImplementation(async (operation) => {
+        if (
+          operation.action === phase ||
+          (phase === 'release' && operation.action === 'bind')
+        )
+          throw new HostedWorkspaceBrokerRejection(
+            phase === 'release' ? 409 : 503,
+            'managed_runtime_provider_operation_failed',
+          );
+        return {
+          ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+          snapshots: [],
+          files: {},
+        };
+      });
+      if (phase === 'release')
+        broker.release.mockRejectedValueOnce(
+          new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+        );
+    }
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.release).toHaveBeenCalledTimes(phase === 'release' ? 1 : 0);
+  },
+);

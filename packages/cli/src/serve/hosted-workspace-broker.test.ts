@@ -540,3 +540,25 @@ it('stops observation immediately when the original execution is terminally unkn
   });
   expect(paths).toHaveLength(1);
 });
+
+it('preserves a worker history refusal reason', async () => {
+  const broker = await fixture(() => ({
+    code: 409,
+    body: {
+      code: 'managed_runtime_provider_operation_failed',
+      error: 'ordinary files only',
+    },
+  }));
+  await expect(
+    broker.fileHistory({
+      kind: 'raw-file-history',
+      action: 'prepare',
+      promptId: 'prompt',
+      paths: ['dir'],
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'managed_runtime_provider_operation_failed',
+    reason: 'ordinary files only',
+  });
+});

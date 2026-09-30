@@ -34,7 +34,11 @@ Bind 从 Session Store 恢复最新完整历史状态，以稳定的 Harness Ses
 `file_history_snapshot` 读取记录，保持 transcript 投影对该 domain 的兼容。
 被拒绝的调用不创建备份；同一 prompt 的多次修改保留首次修改前的内容。
 准备阶段也会拒绝已跟踪路径在上次工具副作用后的变化；后续 Write/Edit 不能静默
-接纳外部或 Shell 修改。
+接纳外部或 Shell 修改。明确的准备拒绝会转为本批 Write/Edit 的持久化工具错误，
+其他获准调用可以继续。新回合的 bind 明确拒绝在确认释放 runtime 后将回合结算为错误。
+这两种情况不阻塞 Session，也不保留空闲 Workspace 租约；补回缺失备份后可重试。
+响应未知或释放失败仍需恢复。恢复已保存的 Shell 续执行则不同：bind 拒绝时保留
+原 runtime 及恢复状态，因为关闭该 runtime 会使未完成回合无法继续。
 
 每批调用完成后，包括工具报错和取消，worker 记录受影响文件的当前字节摘要及权限。
 Harness 在模型继续和释放 runtime 前持久化结果状态。执行未知或历史持久化失败时
@@ -45,8 +49,13 @@ Session Store 保存快照及预期文件状态，备份字节保留在 FileHist
 worker 存储中。备份缺失以及非法、越界、符号链接路径均拒绝继续。在修改、结算和
 撤销前重新检查备份，包括 worker 持续运行期间。最多保留 100 个 prompt 快照，
 达到上限后拒绝新的修改 prompt，避免删除持久历史仍引用的备份。
-每条历史记录也受现有 Store 的 64 KiB 内联限制约束；准备记录超限时在派发前拒绝，
-结算记录无法持久化时保留 pending 恢复标记。
+每条历史记录也受现有 Store 的 64 KiB 内联限制约束。Write/Edit 与撤销前的容量
+预检包含两份快照、已有回执、pending 标记、副作用后最大文件指纹，以及撤销时列出
+全部跟踪文件的回执；另预留 1 KiB 给 authority 信封。容量不足在原生副作用前拒绝，
+Session 保持可用；撤销在获取 runtime 前返回
+`409 hosted_file_history_capacity_exceeded`。Read/Shell 仍可使用，但后续
+Write/Edit 可能需要新 Session。重复撤销也可能耗尽相同预算；已完成回执仍可重放。
+本片不裁剪历史，也不保证无限保留。真正的持久化失败仍保留 pending 恢复标记。
 
 ## 仅文件撤销
 
@@ -54,6 +63,14 @@ worker 存储中。备份缺失以及非法、越界、符号链接路径均拒�
 `POST /session/:id/files/rewind`，后者接收目标 `promptId` 和 UUID `requestId`。
 两者均为 live-session-owner 范围，要求现有客户端身份；撤销还要求文件工具 Session
 空闲、可写且未阻塞。请求获取独立 runtime Session，并恢复已保存状态。
+Workspace 忙或暂不可用时返回可重试的 409。明确的 bind 拒绝在写入 pending 前
+释放已获取的 runtime，并返回 `409 hosted_file_history_refused`。已释放的请求
+ID 不能再次获取：重试原 ID 返回 `409 runtime_session_not_acquirable`，不阻塞
+Session；修复条件后需提交新的请求 ID。busy／容量拒绝可以复用原 ID；已完成的
+回执始终按原 ID 重放。获取、绑定或释放结果未知时仍阻塞。
+
+Rewind 恢复到目标 prompt 开始时的状态，包括撤掉后续 prompt 的修改。快照继续
+保留，因此先回退到较早目标，再选择较晚目标，可能将文件向前恢复。新建目录会保留。
 
 撤销副作用前持久化 pending undo 记录。将每个跟踪文件与最后观察到的摘要及权限
 比较，后续外部或 Shell 修改视为冲突。复用 `rewind(promptId, false)` 恢复已有
@@ -63,6 +80,20 @@ worker 存储中。备份缺失以及非法、越界、符号链接路径均拒�
 已完成的撤销回执会保留在后续历史记录中，因此在另一次撤销、Write/Edit 或 reload
 之后重试旧请求，仍返回原始结果，不重新获取已释放的 runtime。回执与快照共用有
 大小上限的内联记录预算。
+
+## 部署与升级
+
+worker 备份位于 `$QWEN_HOME/file-history/<Harness Session ID>/`
+（默认是 worker 所属 OS 用户的 `~/.qwen/file-history/`）。在 Broker 的 worker
+环境中设置绝对路径 `QWEN_HOME`，挂载 worker 用户可写的持久存储。它需要与
+Workspace 和 SQL Store 一起保留；仅持久化 Workspace 或数据库不会保存备份
+字节。重启时保留仍被引用的备份文件。缺备份会明确拒绝，修复后可重试；未知或部分
+副作用仍需运维恢复。
+
+先升级 Broker 和 worker bundle，再升级 Hosted Harness。旧 Broker 会以
+`400 runtime_control_operation_invalid` 拒绝 raw-history control；Harness
+释放该次 bind 获取的 runtime，并将回合结算为错误，不派发工具，也不降级为无备份
+写入。要恢复 files/Shell 工具回合，服务端与 worker 版本必须匹配。
 
 ## 实现边界
 

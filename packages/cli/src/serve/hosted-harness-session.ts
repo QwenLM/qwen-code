@@ -7,6 +7,8 @@
 import {
   readHostedFileHistory,
   commitHostedFileHistory,
+  assertHostedFileHistoryCapacity,
+  HostedFileHistoryRefusedError,
 } from './hosted-file-history.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -39,6 +41,8 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
+  isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import {
@@ -1481,19 +1485,43 @@ export function registerHostedHarnessSessionRoutes(
           return error(res, 409, 'hosted_file_rewind_conflict');
         return res.status(priorUndo.conflict ? 409 : 200).json(priorUndo);
       }
+      const pending = { ...saved, pendingUndo: { requestId, promptId } };
+      try {
+        await assertHostedFileHistoryCapacity(session.managed, pending);
+      } catch (cause) {
+        if (!(cause instanceof HostedFileHistoryRefusedError)) throw cause;
+        return error(res, 409, 'hosted_file_history_capacity_exceeded');
+      }
       const broker = new HostedWorkspaceBroker(
         brokerOptions,
         session.managed.authority.sessionHeader.sessionKey,
         requestId,
       );
-      await broker.warm();
-      await broker.acquire();
-      await broker.fileHistory({
-        kind: 'raw-file-history',
-        action: 'bind',
-        state: saved.state,
-      });
-      const pending = { ...saved, pendingUndo: { requestId, promptId } };
+      try {
+        await broker.warm();
+        await broker.acquire();
+      } catch (cause) {
+        if (isRetryableWorkspaceAcquisition(cause))
+          return error(res, 409, cause.code);
+        if (
+          cause instanceof HostedWorkspaceBrokerRejection &&
+          cause.status === 409 &&
+          cause.code === 'runtime_session_not_acquirable'
+        )
+          return error(res, 409, 'runtime_session_not_acquirable');
+        throw cause;
+      }
+      try {
+        await broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'bind',
+          state: saved.state,
+        });
+      } catch (cause) {
+        if (!isHostedFileHistoryRefusal(cause)) throw cause;
+        await broker.release();
+        return error(res, 409, 'hosted_file_history_refused');
+      }
       await commitHostedFileHistory(session.managed, pending);
       const result = await broker.fileHistory({
         kind: 'raw-file-history',

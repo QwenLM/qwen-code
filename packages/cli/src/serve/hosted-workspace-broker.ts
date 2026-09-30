@@ -41,9 +41,22 @@ export class HostedWorkspaceBrokerRejection extends Error {
     readonly status: number,
     readonly code: unknown,
     readonly details?: Record<string, unknown>,
+    readonly reason?: string,
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
+}
+
+export function isHostedFileHistoryRefusal(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      cause.code === 'managed_runtime_provider_operation_failed') ||
+      (cause.status === 400 &&
+        cause.code === 'runtime_control_operation_invalid'))
+  );
 }
 
 export class HostedWorkspaceBroker {
@@ -546,6 +559,7 @@ export class HostedWorkspaceBroker {
         details && typeof details === 'object' && !Array.isArray(details)
           ? (details as Record<string, unknown>)
           : undefined,
+        typeof parsed['error'] === 'string' ? parsed['error'] : undefined,
       );
     }
     if (

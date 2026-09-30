@@ -7,6 +7,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   parseHostedFileHistoryState,
   type HostedFileHistoryState,
@@ -23,6 +24,69 @@ export interface HostedFileHistoryRecord {
     filesChanged: string[];
     conflict: boolean;
   }>;
+}
+
+export class HostedFileHistoryRefusedError extends Error {}
+
+export async function assertHostedFileHistoryCapacity(
+  session: ManagedSession,
+  record: HostedFileHistoryRecord,
+): Promise<void> {
+  const files = Object.keys(record.state.files);
+  const receipts =
+    record.undoReceipts ??
+    (await readHostedFileHistory(session))?.undoReceipts ??
+    [];
+  const content = await fileHistoryContent(session, {
+    ...record,
+    state: {
+      ...record.state,
+      files: Object.fromEntries(
+        files.map((file) => [
+          file,
+          { digest: `sha256:${'0'.repeat(64)}`, mode: 0o7777 },
+        ]),
+      ),
+    },
+    undoReceipts: [
+      ...receipts,
+      ...(record.pendingUndo
+        ? [{ ...record.pendingUndo, filesChanged: files, conflict: false }]
+        : []),
+    ],
+  });
+  // Reserve the authority's UUID command, revision and prior resource reference.
+  // Fingerprints and undo receipts above bound the record after file effects.
+  if (
+    Buffer.byteLength(JSON.stringify(content)) >
+    HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes - 1024
+  )
+    throw new HostedFileHistoryRefusedError(
+      'Hosted file history capacity is exhausted; no file mutation was started. Use a new Session for further Write/Edit.',
+    );
+}
+
+async function fileHistoryContent(
+  session: ManagedSession,
+  record: HostedFileHistoryRecord,
+) {
+  const previous = (await session.sink.project()).at(-1);
+  if (!previous)
+    throw new Error('Hosted file history has no owning conversation.');
+  return {
+    ...record,
+    record: {
+      uuid: randomUUID(),
+      parentUuid: previous.uuid,
+      sessionId: record.state.ownerSessionId,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      cwd: previous.cwd,
+      version: previous.version,
+      systemPayload: { snapshots: record.state.snapshots },
+    },
+  };
 }
 
 export async function readHostedFileHistory(
@@ -65,9 +129,7 @@ export async function commitHostedFileHistory(
     undoReceipts: record.undoReceipts ?? saved?.undoReceipts ?? [],
   };
   if (isDeepStrictEqual(saved, record)) return;
-  const previous = (await session.sink.project()).at(-1);
-  if (!previous)
-    throw new Error('Hosted file history has no owning conversation.');
+  const content = await fileHistoryContent(session, record);
   await session.authority.commitDomainRecord(
     {
       operation: 'commitFileHistory',
@@ -79,20 +141,7 @@ export async function commitHostedFileHistory(
     },
     {
       domain: 'file_history',
-      content: {
-        ...record,
-        record: {
-          uuid: randomUUID(),
-          parentUuid: previous.uuid,
-          sessionId: record.state.ownerSessionId,
-          timestamp: new Date().toISOString(),
-          type: 'system',
-          subtype: 'file_history_snapshot',
-          cwd: previous.cwd,
-          version: previous.version,
-          systemPayload: { snapshots: record.state.snapshots },
-        },
-      },
+      content,
     },
     { class: 'trusted_entry' },
   );

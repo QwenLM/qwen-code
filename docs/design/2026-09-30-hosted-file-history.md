@@ -43,7 +43,14 @@ so transcript projection continues to understand the domain.
 Denied calls do not create backups. Repeated edits retain the prompt's original
 preimage.
 Preparation also refuses changes to a tracked path since the last tool effect;
-another Write/Edit cannot silently absorb an external or Shell edit.
+another Write/Edit cannot silently absorb an external or Shell edit. A definite
+preparation refusal becomes a persisted tool error for the batch's Write/Edit
+calls; other admitted calls may continue. A definite bind refusal in a new turn
+ends it with an error after confirmed runtime release. Neither case blocks the Session
+or retains idle Workspace ownership. Missing backups can be restored and retried;
+unknown responses and failed release still require recovery. Binding a saved
+Shell continuation is different: refusal preserves its original runtime and
+recovery state, because closing that runtime would strand the unfinished turn.
 
 After every completed batch, including tool errors and cancellation, the
 worker records current byte digests and modes for affected files. The Harness
@@ -58,9 +65,16 @@ invalid/outside/symlink paths fail closed. Backups are revalidated before
 mutation, settlement and undo, including during a live worker's lifetime.
 Retention is bounded to 100 prompt snapshots; reaching the bound refuses another
 mutating prompt rather than deleting backups still referenced by durable history.
-The existing 64 KiB inline Store limit also applies to each history record;
-an oversized preparation is refused before dispatch, and a settlement that
-cannot be persisted retains its pending recovery marker.
+The existing 64 KiB inline Store limit also applies to each history record.
+Before Write/Edit and undo, preflight includes both snapshot copies, retained
+receipts, the pending marker, maximum post-effect fingerprints and (for undo)
+a receipt listing every tracked file. Reserve 1 KiB for the authority envelope.
+Capacity refusal happens before native effects and leaves the Session usable;
+undo returns `409 hosted_file_history_capacity_exceeded` before acquiring a
+runtime. Read/Shell calls remain available, but further Write/Edit may require
+a new Session. Repeated undo can exhaust the same budget; completed receipt
+replay remains available. There is no pruning or unbounded retention guarantee.
+Actual persistence failures continue to retain pending recovery markers.
 
 ## File-only undo
 
@@ -69,6 +83,17 @@ The private Hosted API adds `GET /session/:id/files/history` and
 Both are live-session-owner scoped and require the existing client identity;
 undo additionally requires an idle, writable, unblocked file-tool Session.
 The request uses its own acquired runtime Session and restores the saved state.
+Workspace busy/unavailable returns a retryable 409. A definite bind refusal
+releases the acquired runtime and returns `409 hosted_file_history_refused`
+before writing pending state. That released request ID cannot be acquired again:
+retrying it returns `409 runtime_session_not_acquirable` without blocking. After
+repair, submit a new request ID. Busy/capacity refusals can reuse the same ID;
+completed receipts are always replayed by the original ID. Unknown
+acquisition/bind/release outcomes block.
+
+Rewind restores the state at the start of the target prompt, including changes
+from later prompts. Snapshots remain available, so choosing a later target after
+an earlier rewind can move files forward again. Newly created directories remain.
 
 Before undo effects, persist a pending undo record. Compare every tracked file
 against its last observed digest and mode; a subsequent external or Shell
@@ -82,6 +107,22 @@ Completed undo receipts remain in subsequent history records, so retrying an
 older request after another undo, Write/Edit or reload returns its original
 result without reacquiring a released runtime. Receipts share the same bounded
 inline record budget as snapshots.
+
+## Deployment and rollout
+
+Worker backups live under `$QWEN_HOME/file-history/<Harness Session ID>/`
+(or the worker OS user's `~/.qwen/file-history/`). Set an absolute `QWEN_HOME`
+on the Broker's worker environment and mount durable storage writable by the
+worker user. Preserve it alongside the Workspace and SQL store; persisting only
+the Workspace or database does not retain backup bytes. Keep referenced backup
+files across restarts. A missing backup is a definite refusal until repaired;
+unknown or partial effects still require operator recovery.
+
+Upgrade the Broker and worker bundle before the Hosted Harness. Older Brokers
+reject raw-history control with `400 runtime_control_operation_invalid`; the
+Harness releases that failed bind and ends the turn without dispatching tools.
+It does not fall back to unbacked writes. Matching server/worker versions are
+required to resume files/Shell tool turns.
 
 ## Implementation boundaries
 

@@ -7,6 +7,8 @@
 import {
   readHostedFileHistory,
   commitHostedFileHistory,
+  assertHostedFileHistoryCapacity,
+  HostedFileHistoryRefusedError,
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -47,6 +49,7 @@ import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
+  isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
@@ -263,11 +266,11 @@ export class HostedWorkspaceToolTurn {
   async resumeCommittedResults(): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
-    await this.acquire();
+    await this.acquire(true);
     this.uncertain = false;
   }
 
-  private async acquire(): Promise<void> {
+  private async acquire(recovering = false): Promise<void> {
     this.uncertain = true;
     try {
       await this.broker.acquire();
@@ -276,14 +279,27 @@ export class HostedWorkspaceToolTurn {
         const saved = await readHostedFileHistory(this.session);
         if (saved?.pendingTurn || saved?.pendingUndo)
           throw new Error('Hosted file history requires recovery.');
-        await this.broker.fileHistory({
-          kind: 'raw-file-history',
-          action: 'bind',
-          state: saved?.state ?? null,
-        });
+        try {
+          await this.broker.fileHistory({
+            kind: 'raw-file-history',
+            action: 'bind',
+            state: saved?.state ?? null,
+          });
+        } catch (cause) {
+          // A saved continuation still needs this original runtime ID.
+          if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
+          await this.broker.release();
+          this.acquired = false;
+          throw new HostedFileHistoryRefusedError(
+            cause.reason ?? cause.message,
+          );
+        }
       }
     } catch (cause) {
-      if (isRetryableWorkspaceAcquisition(cause)) {
+      if (
+        (!this.acquired && isRetryableWorkspaceAcquisition(cause)) ||
+        cause instanceof HostedFileHistoryRefusedError
+      ) {
         this.uncertain = false;
         throw cause;
       }
@@ -481,21 +497,6 @@ export class HostedWorkspaceToolTurn {
             reason,
           );
     };
-    if (refusals.every((reason) => reason !== undefined)) {
-      const responses = requests.flatMap((_, index) => refusal(index)!);
-      try {
-        if (!this.messageFitsInline('tool_result', responses, model))
-          throw new Error(
-            'Hosted tool refusal exceeds the inline Session Store limit.',
-          );
-        await this.commit('tool_result', responses, model);
-      } catch (cause) {
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
-      this.uncertain = false;
-      signal.throwIfAborted();
-      return responses;
-    }
     const paths = requests.flatMap((request, index) =>
       !this.mcp &&
       refusals[index] === undefined &&
@@ -511,15 +512,48 @@ export class HostedWorkspaceToolTurn {
           promptId: this.promptId,
           paths: [...new Set(paths)],
         });
-        await commitHostedFileHistory(this.session, {
-          schemaVersion: 1,
+        const prepared = {
+          schemaVersion: 1 as const,
           state,
           pendingTurn: this.promptId,
           pendingUndo: null,
-        });
+        };
+        await assertHostedFileHistoryCapacity(this.session, prepared);
+        await commitHostedFileHistory(this.session, prepared);
+      } catch (cause) {
+        if (
+          !isHostedFileHistoryRefusal(cause) &&
+          !(cause instanceof HostedFileHistoryRefusedError)
+        )
+          throw new HostedToolRecoveryRequiredError(cause);
+        const reason =
+          cause instanceof HostedWorkspaceBrokerRejection
+            ? (cause.reason ?? cause.message)
+            : cause.message;
+        for (const [index, request] of requests.entries())
+          if (
+            refusals[index] === undefined &&
+            ['write_file', 'edit'].includes(request.call.name)
+          )
+            refusals[index] =
+              `Hosted file history refused this batch's Write/Edit before execution: ${reason.slice(0, 512)}`;
+        paths.length = 0;
+      }
+    }
+    if (refusals.every((reason) => reason !== undefined)) {
+      const responses = requests.flatMap((_, index) => refusal(index)!);
+      try {
+        if (!this.messageFitsInline('tool_result', responses, model))
+          throw new Error(
+            'Hosted tool refusal exceeds the inline Session Store limit.',
+          );
+        await this.commit('tool_result', responses, model);
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
       }
+      this.uncertain = false;
+      signal.throwIfAborted();
+      return responses;
     }
     const reserved = new Map<number, string>();
     try {

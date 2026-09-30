@@ -12,6 +12,7 @@ import path from 'node:path';
 import express from 'express';
 import supertest from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as hostedHistory from './hosted-file-history.js';
 import {
   LocalJsonlManagedSessionJournalHandle,
   LocalJsonlManagedSessionJournalStore,
@@ -1775,7 +1776,12 @@ describe('Hosted Harness no-tool session', () => {
       .expect(204);
   });
 
-  it.each(['workspace_busy', 'workspace_unavailable'])(
+  it.each([
+    'workspace_busy',
+    'workspace_unavailable',
+    'managed_runtime_provider_operation_failed',
+    'runtime_control_operation_invalid',
+  ])(
     'retries load after %s without losing the original committed Shell continuation',
     async (refusalCode) => {
       const log = vi
@@ -1918,9 +1924,16 @@ describe('Hosted Harness no-tool session', () => {
         path.join(state.root, `${SESSION_ID}.jsonl`),
         key,
       );
-      acquire.mockRejectedValueOnce(
-        new HostedWorkspaceBrokerRejection(409, refusalCode),
+      const bindRefused = !refusalCode.startsWith('workspace_');
+      const refusal = new HostedWorkspaceBrokerRejection(
+        refusalCode === 'runtime_control_operation_invalid' ? 400 : 409,
+        refusalCode,
       );
+      if (bindRefused)
+        vi.mocked(
+          HostedWorkspaceBroker.prototype.fileHistory,
+        ).mockRejectedValueOnce(refusal);
+      else acquire.mockRejectedValueOnce(refusal);
       const refused = await headers(
         supertest(second).post('/session/' + SESSION_ID + '/load'),
       ).send({
@@ -1928,8 +1941,11 @@ describe('Hosted Harness no-tool session', () => {
         toolProfile: 'hosted-workspace-shell/1',
         captureBytes: 1024 * 1024,
       });
-      expect(refused.status).toBe(409);
-      expect(refused.body.code).toBe(refusalCode);
+      expect(refused.status).toBe(bindRefused ? 503 : 409);
+      expect(refused.body.code).toBe(
+        bindRefused ? 'managed_session_open_failed' : refusalCode,
+      );
+      expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
       expect(state.model).toHaveBeenCalledOnce();
       expect(acknowledge).toHaveBeenCalledOnce();
       const checkpointAfter = await LocalJsonlManagedSessionJournalStore.read(
@@ -3254,9 +3270,22 @@ describe('Hosted Harness tool approvals', () => {
     await finished();
     expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
   });
-  it.each([false, true])(
-    'persists undo across reload and retains pending state on release failure (%s)',
-    async (releaseFails) => {
+  it.each([
+    'success',
+    'release',
+    'busy',
+    'bind',
+    'unsupported',
+    'unknown-acquire',
+    'unknown-released',
+    'unknown-bind',
+    'refusal-release',
+    'capacity',
+    'partial',
+  ])(
+    'settles undo or preserves its recovery boundary (%s)',
+    async (scenario) => {
+      const releaseFails = scenario === 'release';
       let writePromptId = PROMPT_ID;
       const historyState = {
         ownerSessionId: SESSION_ID,
@@ -3363,6 +3392,126 @@ describe('Hosted Harness tool approvals', () => {
         headers(supertest(server).post(`/session/${SESSION_ID}/files/rewind`))
           .set('X-Qwen-Client-Id', clientId)
           .send(request);
+      if (scenario !== 'success' && scenario !== 'release') {
+        const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+        const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+        const acquiredBefore = acquire.mock.calls.length;
+        const releasedBefore = release.mock.calls.length;
+        const retryable = ['busy', 'bind', 'unsupported', 'capacity'].includes(
+          scenario,
+        );
+        if (['busy', 'unknown-acquire', 'unknown-released'].includes(scenario))
+          acquire.mockRejectedValueOnce(
+            new HostedWorkspaceBrokerRejection(
+              scenario === 'busy' ? 409 : 503,
+              scenario === 'unknown-released'
+                ? 'runtime_session_not_acquirable'
+                : 'workspace_busy',
+            ),
+          );
+        if (
+          ['bind', 'unsupported', 'unknown-bind', 'refusal-release'].includes(
+            scenario,
+          )
+        )
+          control.mockRejectedValueOnce(
+            new HostedWorkspaceBrokerRejection(
+              scenario === 'unsupported'
+                ? 400
+                : scenario === 'unknown-bind'
+                  ? 503
+                  : 409,
+              scenario === 'unsupported'
+                ? 'runtime_control_operation_invalid'
+                : 'managed_runtime_provider_operation_failed',
+            ),
+          );
+        if (scenario === 'refusal-release')
+          release.mockRejectedValueOnce(new Error('release response lost'));
+        if (scenario === 'capacity')
+          vi.spyOn(
+            hostedHistory,
+            'assertHostedFileHistoryCapacity',
+          ).mockRejectedValueOnce(
+            new hostedHistory.HostedFileHistoryRefusedError(
+              'capacity exhausted',
+            ),
+          );
+        if (scenario === 'partial') {
+          const physical = control.getMockImplementation()!;
+          control.mockImplementation(async (operation) =>
+            operation.action === 'rewind'
+              ? {
+                  state: historyState,
+                  filesChanged: [],
+                  filesFailed: ['notes.txt'],
+                  conflict: false,
+                }
+              : physical(operation),
+          );
+        }
+        const response = await undo();
+        expect(response.status).toBe(retryable ? 409 : 503);
+        if (scenario === 'capacity')
+          expect(response.body.code).toBe(
+            'hosted_file_history_capacity_exceeded',
+          );
+        if (scenario === 'busy')
+          expect(response.body.code).toBe('workspace_busy');
+        if (scenario === 'bind' || scenario === 'unsupported')
+          expect(response.body.code).toBe('hosted_file_history_refused');
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: !retryable,
+        });
+        const after = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/files/history`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(after.body.history.pendingUndo).toEqual(
+          scenario === 'partial' ? request : null,
+        );
+        expect(after.body.history.state).toEqual(historyState);
+        expect(
+          control.mock.calls.filter(([op]) => op.action === 'rewind'),
+        ).toHaveLength(scenario === 'partial' ? 1 : 0);
+        expect(acquire).toHaveBeenCalledTimes(
+          acquiredBefore + (scenario === 'capacity' ? 0 : 1),
+        );
+        expect(release).toHaveBeenCalledTimes(
+          releasedBefore +
+            (['bind', 'unsupported', 'refusal-release'].includes(scenario)
+              ? 1
+              : 0),
+        );
+        if (retryable) {
+          if (scenario === 'bind' || scenario === 'unsupported') {
+            acquire.mockRejectedValueOnce(
+              new HostedWorkspaceBrokerRejection(
+                409,
+                'runtime_session_not_acquirable',
+              ),
+            );
+            const reused = await undo();
+            expect(reused.status).toBe(409);
+            expect(reused.body.code).toBe('runtime_session_not_acquirable');
+            const stillUsable = await headers(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            ).set('X-Qwen-Client-Id', clientId);
+            expect(stillUsable.body.recoveryBlocked).toBe(false);
+            request.requestId = randomUUID();
+          }
+          expect((await undo()).status).toBe(200);
+          expect((await undo()).status).toBe(200);
+          expect(
+            control.mock.calls.filter(([op]) => op.action === 'rewind'),
+          ).toHaveLength(1);
+        }
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+        return;
+      }
       const response = await undo();
       expect(response.status).toBe(releaseFails ? 503 : 200);
       const after = await headers(
