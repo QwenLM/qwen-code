@@ -179,6 +179,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String runtimeId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
                 "runtimeSessionId");
+        CompletableFuture<SessionContext> current = sessions.get(runtimeId);
+        if (current != null) {
+            return current.thenApply(context -> {
+                synchronized (context) {
+                    requireSameSession(context.session(), new RuntimeSession(harnessId,
+                            runtimeId, turnKind, context.session().getScope()));
+                    return requireReadySessionRecord(context);
+                }
+            });
+        }
         return resolveScope(harnessId).thenCompose(scope -> {
             RuntimeSession session = new RuntimeSession(harnessId,
                     runtimeId, turnKind, scope);
@@ -191,9 +201,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
-        ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
+        if (!ManagedMcpProtocol.isOperation(immutable)) {
+            ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
+        }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
+                    if (ManagedMcpProtocol.isOperation(immutable)) {
+                        ManagedMcpProtocol.validateSession(context.session(), immutable);
+                    }
                     synchronized (context) {
                         requireReadySessionRecord(context);
                         context.beginControl();
@@ -1019,13 +1034,26 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<Boolean> releasedSession(
             String harnessSessionId, String runtimeSessionId) {
         return persistedSession(harnessSessionId, runtimeSessionId)
-                .thenApply(record -> {
+                .thenCompose(record -> {
                     if (record.getState()
                             == RuntimeSessionRecord.State.RELEASED) {
-                        return true;
+                        return CompletableFuture.completedFuture(true);
                     }
                     RuntimeBindingRecord binding = bindingRepository.findById(
                             record.getBindingId());
+                    if ((record.getState() == RuntimeSessionRecord.State.ACQUIRING
+                            || record.getState() == RuntimeSessionRecord.State.RELEASING)
+                            && binding != null && binding.getGeneration() == record.getRuntimeGeneration()
+                            && matchingLiveBinding(binding) != null) {
+                        CompletableFuture<SessionContext> adopted = CompletableFuture.completedFuture(
+                                new SessionContext(record.getSession(), binding, requireLiveBinding(binding).lease()));
+                        boolean inserted = sessions.putIfAbsent(runtimeSessionId, adopted) == null;
+                        return release(harnessSessionId, runtimeSessionId).whenComplete((released, error) -> {
+                            if (inserted && (error != null || !Boolean.TRUE.equals(released))) {
+                                sessions.remove(runtimeSessionId, adopted);
+                            }
+                        });
+                    }
                     // A Broker that died mid-acquire or mid-release leaves the
                     // Session ACQUIRING or RELEASING; both pin a LOST
                     // generation, and neither can ever be confirmed by a
@@ -1051,7 +1079,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         if (releasing != null) {
                             finishSessionRelease(releasing);
-                            return true;
+                            return CompletableFuture.completedFuture(true);
                         }
                     }
                     throw unavailable("runtime_reconciliation_required",
@@ -2885,7 +2913,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     == RuntimeSessionRecord.State.RELEASED) {
                 return current;
             }
-            if (current.getState() != RuntimeSessionRecord.State.READY) {
+            if (current.getState() != RuntimeSessionRecord.State.READY
+                    && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
                 throw conflict("runtime_session_not_ready",
                         "Runtime Session is not ready for release");
             }

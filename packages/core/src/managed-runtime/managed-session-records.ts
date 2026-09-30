@@ -113,7 +113,14 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  * implemented or admitted, so submission is gated separately.
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
-  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+  [
+    'goal_state',
+    'session_metadata',
+    'file_history',
+    'session_source',
+    'mcp_configuration',
+    'mcp_operation',
+  ];
 
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
