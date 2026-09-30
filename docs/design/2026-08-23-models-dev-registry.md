@@ -36,7 +36,7 @@ The draft-only `model.customCatalog` option was removed: it loaded too late for 
 
 ## Storage and refresh
 
-A trimmed JSON snapshot ships with the CLI and has a 200 KiB generation budget. The full upstream download has a separate 16 MiB limit. Refresh starts in the background after proxy initialization, uses a ten-second timeout and a 24-hour cache interval, revalidates with ETag, and atomically writes the cache under `Storage.getGlobalQwenDir()`. Concurrent refreshes share an in-flight request. Failure leaves the previous data usable and is logged only at debug level.
+A trimmed JSON snapshot ships with the CLI and has a 200 KiB generation budget. The full upstream download has a separate 16 MiB limit. Refresh starts in the background after proxy initialization, uses a ten-second timeout and a 24-hour cache interval, revalidates with ETag, and atomically writes the cache under `Storage.getGlobalQwenDir()`. Cache reads and ETag reuse require the current projection version and a reachable model key. Older or unstamped caches require a full download and re-projection; bump `MODEL_CATALOG_PROJECTION_VERSION` when projection rules change. Concurrent refreshes share an in-flight request. Failure leaves the previous data usable and is logged only at debug level.
 
 `QWEN_CODE_MODELS_DEV=off` restores regex-only behavior. `QWEN_CODE_MODELS_DEV_REFRESH=off` disables upstream refresh. `QWEN_CODE_MODELS_DEV_URL` selects a mirror with the same provider filtering. No request-time network lookup, cross-process lock, scheduled regeneration service, or new dependency is introduced.
 

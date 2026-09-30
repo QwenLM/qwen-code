@@ -23,9 +23,13 @@ export interface ModelCatalogEntry {
 export interface ModelCatalog {
   source: string;
   fetchedAt: string;
+  projection: number;
   etag?: string;
   models: Record<string, ModelCatalogEntry>;
 }
+
+// Bump when projection rules change so older caches are fetched and reprojected.
+export const MODEL_CATALOG_PROJECTION_VERSION = 1;
 
 /** `QWEN_CODE_MODELS_DEV=off` restores the regex-only model tables. */
 export const MODEL_CATALOG_ENV = 'QWEN_CODE_MODELS_DEV';
@@ -128,7 +132,8 @@ export function parseModelCatalog(raw: unknown): ModelCatalog | undefined {
   if (!raw || typeof raw !== 'object') {
     return undefined;
   }
-  const { source, fetchedAt, etag, models } = raw as Partial<ModelCatalog>;
+  const { source, fetchedAt, projection, etag, models } =
+    raw as Partial<ModelCatalog>;
   if (typeof fetchedAt !== 'string' || !models || typeof models !== 'object') {
     return undefined;
   }
@@ -148,6 +153,10 @@ export function parseModelCatalog(raw: unknown): ModelCatalog | undefined {
   return {
     source: typeof source === 'string' ? source : '',
     fetchedAt,
+    projection:
+      typeof projection === 'number' && Number.isSafeInteger(projection)
+        ? projection
+        : 0,
     ...(typeof etag === 'string' ? { etag } : {}),
     models: valid,
   };
@@ -178,7 +187,10 @@ export function loadModelCatalog(): ModelCatalog {
       isModelCatalogKey(key),
     );
     const usable =
-      cached && cached.source === source && usableEntries.length > 0
+      cached &&
+      cached.projection === MODEL_CATALOG_PROJECTION_VERSION &&
+      cached.source === source &&
+      usableEntries.length > 0
         ? { ...cached, models: Object.fromEntries(usableEntries) }
         : undefined;
     let base =

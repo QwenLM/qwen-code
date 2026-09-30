@@ -13,7 +13,9 @@ import bundled from './generated/model-registry.json' with { type: 'json' };
 import {
   getModelCatalogCachePath,
   invalidateModelCatalog,
+  loadModelCatalog,
   lookupModelCatalog,
+  MODEL_CATALOG_PROJECTION_VERSION,
 } from './model-catalog.js';
 import {
   MODELS_DEV_PROVIDERS,
@@ -167,6 +169,7 @@ describe('trimModelsDevCatalog', () => {
     expect(trimModelsDevCatalog(api, NOW)).toEqual({
       source: MODELS_DEV_URL,
       fetchedAt: NOW,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: trimmed,
     });
   });
@@ -278,6 +281,7 @@ describe('trimModelsDevCatalog', () => {
     expect(trimModelsDevCatalog({}, NOW, 'https://mirror/api.json')).toEqual({
       source: 'https://mirror/api.json',
       fetchedAt: NOW,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: {},
     });
   });
@@ -341,6 +345,7 @@ describe('refreshModelCatalog', () => {
   function readJson(filePath: string): {
     source: string;
     fetchedAt: string;
+    projection: number;
     etag?: string;
     models: unknown;
   } {
@@ -437,7 +442,8 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: new Date(Date.now() + 60_000).toISOString(),
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
     fetchMock.mockResolvedValue(jsonResponse(api));
 
@@ -471,7 +477,8 @@ describe('refreshModelCatalog', () => {
     const previous = {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 128_000 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 128_000 } },
     };
     writeJson(getModelCatalogCachePath(), previous);
     // Valid JSON that would project fine, but larger than the budget: the
@@ -512,7 +519,8 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: new Date().toISOString(),
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
 
     await refreshModelCatalog();
@@ -524,9 +532,10 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://old-mirror/api.json',
       fetchedAt: new Date().toISOString(),
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       etag: '"old"',
       // Non-empty, so only the source mismatch can force the re-fetch.
-      models: { kept: { context: 7 } },
+      models: { 'kept-model': { context: 7 } },
     });
     fetchMock.mockResolvedValue(jsonResponse(api));
 
@@ -541,8 +550,9 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       etag: '"abc"',
-      models: { kept: { context: 7 } },
+      models: { 'kept-model': { context: 7 } },
     });
     fetchMock.mockResolvedValue(new Response(null, { status: 304 }));
 
@@ -552,16 +562,58 @@ describe('refreshModelCatalog', () => {
       'If-None-Match': '"abc"',
     });
     const cache = readJson(getModelCatalogCachePath());
-    expect(cache.models).toEqual({ kept: { context: 7 } });
+    expect(cache.models).toEqual({ 'kept-model': { context: 7 } });
     expect(cache.etag).toBe('"abc"');
     expect(Date.parse(cache.fetchedAt)).toBeGreaterThan(Date.parse(LONG_AGO));
+  });
+
+  it.each([undefined, 0, 2])(
+    'does not revalidate an older projection on 304 (%s)',
+    async (projection) => {
+      writeJson(getModelCatalogCachePath(), {
+        source: MODELS_DEV_URL,
+        fetchedAt: LONG_AGO,
+        projection,
+        etag: '"old"',
+        models: { 'deepseek-v4-flash': { modalities: { image: true } } },
+      });
+      fetchMock.mockResolvedValue(new Response(null, { status: 304 }));
+
+      await refreshModelCatalog();
+
+      expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({});
+      expect(readJson(getModelCatalogCachePath()).fetchedAt).toBe(LONG_AGO);
+      invalidateModelCatalog();
+      expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+      expect(lookupModelCatalog('deepseek-v4-flash')).toBeUndefined();
+    },
+  );
+
+  it('reprojects an old cache without sending its ETag', async () => {
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: new Date().toISOString(),
+      projection: 0,
+      etag: '"old"',
+      models: { 'deepseek-v4-flash': { modalities: { image: true } } },
+    });
+    fetchMock.mockResolvedValue(jsonResponse(api));
+
+    await refreshModelCatalog();
+
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({});
+    expect(readJson(getModelCatalogCachePath())).toMatchObject({
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: trimmed,
+    });
   });
 
   it('leaves the cache untouched when the fetch fails', async () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
     fetchMock.mockRejectedValue(new Error('offline'));
 
@@ -574,6 +626,7 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: {},
     });
     fetchMock.mockResolvedValue(new Response('nope', { status: 500 }));
@@ -587,7 +640,8 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
     // Valid JSON with no allowlisted provider, e.g. a gateway error envelope.
     fetchMock.mockResolvedValue(jsonResponse({ message: 'rate limited' }));
@@ -596,7 +650,7 @@ describe('refreshModelCatalog', () => {
 
     const cache = readJson(getModelCatalogCachePath());
     expect(cache.fetchedAt).toBe(LONG_AGO);
-    expect(cache.models).toEqual({ kept: { context: 7 } });
+    expect(cache.models).toEqual({ 'kept-model': { context: 7 } });
     // The stale cache stays on disk but is older than the bundle, so the
     // bundled snapshot is what answers.
     expect(lookupModelCatalog('claude-fable-5')).toEqual(
@@ -608,7 +662,8 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
     fetchMock.mockResolvedValue(
       jsonResponse({
@@ -624,7 +679,8 @@ describe('refreshModelCatalog', () => {
 
     expect(readJson(getModelCatalogCachePath())).toMatchObject({
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
   });
 
@@ -632,7 +688,8 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
     fetchMock.mockResolvedValue(jsonResponse(providerStubs));
 
@@ -640,7 +697,8 @@ describe('refreshModelCatalog', () => {
 
     expect(readJson(getModelCatalogCachePath())).toMatchObject({
       fetchedAt: LONG_AGO,
-      models: { kept: { context: 7 } },
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
+      models: { 'kept-model': { context: 7 } },
     });
   });
 
@@ -648,6 +706,7 @@ describe('refreshModelCatalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: LONG_AGO,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       etag: '"poisoned"',
       models: {},
     });

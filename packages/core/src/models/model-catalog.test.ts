@@ -26,6 +26,7 @@ import {
   isModelCatalogKey,
   loadModelCatalog,
   lookupModelCatalog,
+  MODEL_CATALOG_PROJECTION_VERSION,
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
@@ -97,6 +98,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { 'cached-model': { context: 123, output: 45 } },
     });
     expect(lookupModelCatalog('cached-model')).toEqual({
@@ -111,6 +113,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { 'cached-model': { context: 123 } },
     });
     invalidateModelCatalog();
@@ -119,10 +122,27 @@ describe('model catalog', () => {
     expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
   });
 
+  it.each([undefined, 0, 2])(
+    'ignores a newer cache from another projection (%s)',
+    (projection) => {
+      writeJson(getModelCatalogCachePath(), {
+        source: MODELS_DEV_URL,
+        fetchedAt: FAR_FUTURE,
+        projection,
+        models: { 'deepseek-v4-flash': { modalities: { image: true } } },
+      });
+
+      expect(loadModelCatalog().fetchedAt).toBe(bundled.fetchedAt);
+      expect(lookupModelCatalog('deepseek-v4-flash')).toBeUndefined();
+      expect(lookupModelCatalog(bundledId)).toEqual(bundledEntry);
+    },
+  );
+
   it('ignores a cache older than the bundled snapshot', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'test',
       fetchedAt: LONG_AGO,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { 'cached-model': { context: 123 } },
     });
     expect(lookupModelCatalog('cached-model')).toBeUndefined();
@@ -139,6 +159,7 @@ describe('model catalog', () => {
     // side already refuses to write this shape, so a stale one must not win.
     writeJson(getModelCatalogCachePath(), {
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { bad: { context: 'x' } },
     });
     invalidateModelCatalog();
@@ -250,6 +271,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { 'deepseek-v3': { context: 163_840, output: 163_840 } },
     });
     invalidateModelCatalog();
@@ -261,6 +283,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: MODELS_DEV_URL,
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: {
         '32768': { modalities: { pdf: true } },
         'model@default': { context: 123 },
@@ -279,6 +302,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: {
         'glm-4.7': { output: 131_072 },
         'qwen-vl-max': { output: 8_192 },
@@ -347,6 +371,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { 'qwen3.8-max': { modalities: { image: true, pdf: true } } },
     });
     invalidateModelCatalog();
@@ -364,6 +389,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: {
         'claude-sonnet-4-5': { context: 1_000_000, output: 64_000 },
         'claude-sonnet-4-6': { context: 1_000_000 },
@@ -385,6 +411,7 @@ describe('model catalog', () => {
     writeJson(getModelCatalogCachePath(), {
       source: 'https://models.dev/api.json',
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       models: { 'qwen3-coder-plus': { context: 1_048_576, output: 65_536 } },
     });
     invalidateModelCatalog();
@@ -398,6 +425,7 @@ describe('model catalog', () => {
   it('drops malformed entries while parsing', () => {
     const parsed = parseModelCatalog({
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       etag: '"abc"',
       models: {
         good: { context: 1, modalities: { image: true } },
@@ -428,6 +456,7 @@ describe('model catalog', () => {
     expect(parsed).toEqual({
       source: '',
       fetchedAt: FAR_FUTURE,
+      projection: MODEL_CATALOG_PROJECTION_VERSION,
       etag: '"abc"',
       models: {
         good: { context: 1, modalities: { image: true } },

@@ -19,6 +19,7 @@ import {
   getModelCatalogCachePath,
   isModelCatalogDisabled,
   isModelCatalogKey,
+  MODEL_CATALOG_PROJECTION_VERSION,
   MODEL_CATALOG_URL_ENV,
   MODELS_DEV_URL,
   parseModelCatalog,
@@ -243,7 +244,12 @@ export function trimModelsDevCatalog(
       agreed.push([key, entry]);
     }
   }
-  return { source, fetchedAt, models: sortedModels(agreed) };
+  return {
+    source,
+    fetchedAt,
+    projection: MODEL_CATALOG_PROJECTION_VERSION,
+    models: sortedModels(agreed),
+  };
 }
 
 async function readCacheFile(
@@ -300,11 +306,12 @@ async function readBoundedCatalogJson(
 
 async function refreshRemote(url: string, cachePath: string): Promise<void> {
   const cached = await readCacheFile(cachePath);
-  // A cache with no models is a poisoned write from before the empty-
-  // projection guard below; treat it as absent so it heals on this fetch
-  // instead of being re-stamped by a 304.
+  // Old projections and unusable entries must be fetched again, not re-stamped
+  // by a 304 that only validates the unchanged upstream payload.
   const reusable =
-    cached?.source === url && Object.keys(cached.models).length > 0
+    cached?.projection === MODEL_CATALOG_PROJECTION_VERSION &&
+    cached.source === url &&
+    Object.keys(cached.models).some(isModelCatalogKey)
       ? cached
       : undefined;
   if (reusable) {

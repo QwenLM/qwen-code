@@ -36,7 +36,7 @@ preset 或显式配置的上下文窗口仍以该配置为准。自动检测使�
 
 ## 存储与刷新
 
-裁剪后的 JSON 快照随 CLI 发布，生成体积预算为 200 KiB；完整上游响应使用独立的 16 MiB 下载上限。后台刷新在代理初始化之后启动，超时为十秒，缓存间隔为 24 小时，通过 ETag 条件请求重新验证，在 `Storage.getGlobalQwenDir()` 下原子写入缓存。并发刷新共享进行中的请求。失败保留原有可用数据，仅记录 debug 日志。
+裁剪后的 JSON 快照随 CLI 发布，生成体积预算为 200 KiB；完整上游响应使用独立的 16 MiB 下载上限。后台刷新在代理初始化之后启动，超时为十秒，缓存间隔为 24 小时，通过 ETag 条件请求重新验证，在 `Storage.getGlobalQwenDir()` 下原子写入缓存。读取缓存与复用 ETag 均要求投影版本一致且存在可达的模型标识；旧版本或未标版本的缓存须完整下载并重新投影。调整投影规则时递增 `MODEL_CATALOG_PROJECTION_VERSION`。并发刷新共享进行中的请求。失败保留原有可用数据，仅记录 debug 日志。
 
 `QWEN_CODE_MODELS_DEV=off` 恢复仅使用正则表。`QWEN_CODE_MODELS_DEV_REFRESH=off` 禁止刷新上游。`QWEN_CODE_MODELS_DEV_URL` 选择镜像，仍使用相同 provider 过滤。本次不引入请求时联网、跨进程锁、定时生成服务或新依赖。
 
