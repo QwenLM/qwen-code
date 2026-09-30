@@ -17,6 +17,7 @@ import { ExecTool } from '../tools/exec.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
 import { Kind, ToolConfirmationOutcome } from '../tools/tools.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { UpdateGoalTool } from '../goals/goal-tools.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
@@ -560,6 +561,63 @@ describe('CodeModeOnly scheduler dispatch', () => {
         },
         isClientInitiated: false,
         prompt_id: 'prompt-parallel',
+      },
+      new AbortController().signal,
+    );
+    try {
+      await vi.waitFor(() => expect(started).toBe(2), { timeout: 30_000 });
+    } finally {
+      release();
+    }
+    await scheduled;
+  }, 40_000);
+
+  it('runs Code Mode Bash calls in one Promise.allSettled batch', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+
+    let started = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.SHELL,
+        kind: Kind.Execute,
+        params: { type: 'object' },
+        execute: async () => {
+          started++;
+          await gate;
+          return { llmContent: 'ok', returnDisplay: 'ok' };
+        },
+      }),
+    );
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    const scheduled = scheduler.schedule(
+      {
+        callId: 'exec-parallel-shell',
+        name: ToolNames.EXEC,
+        args: {
+          source:
+            "await Promise.allSettled([tools.run_shell_command({ command: 'first' }), tools.run_shell_command({ command: 'second' })]);",
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-parallel-shell',
       },
       new AbortController().signal,
     );

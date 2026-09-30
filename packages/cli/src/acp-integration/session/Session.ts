@@ -15288,7 +15288,12 @@ export class Session implements SessionContext {
                       .getToolRegistry()
                       .getTool(nestedName)?.kind;
                     const safe =
-                      isToolCallConcurrencySafe(nestedName, kind, nestedArgs) &&
+                      isToolCallConcurrencySafe(
+                        nestedName,
+                        kind,
+                        nestedArgs,
+                        'code_mode',
+                      ) &&
                       !(
                         kind === Kind.Execute &&
                         !this.config.getDisableAllHooks?.() &&
