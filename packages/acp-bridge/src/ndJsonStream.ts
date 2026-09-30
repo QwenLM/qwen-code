@@ -237,7 +237,14 @@ function createLegacyReadable(
           const { value, done } = await reader.read();
           if (canceled || done) break;
           if (!value) continue;
-          readLegacyChunk(value, pending, controller, textDecoder, hooks);
+          readLegacyChunk(
+            value,
+            pending,
+            controller,
+            textDecoder,
+            hooks,
+            () => canceled,
+          );
         }
       } finally {
         reader.releaseLock();
@@ -463,11 +470,13 @@ function readLegacyChunk(
   pending: Uint8Array[],
   controller: ReadableStreamDefaultController<AnyMessage>,
   textDecoder: TextDecoderLike,
-  hooks?: NdJsonStreamHooks,
+  hooks: NdJsonStreamHooks | undefined,
+  isCanceled: () => boolean,
 ): void {
   let start = 0;
   let newline = chunk.indexOf(0x0a, start);
   while (newline !== -1) {
+    if (isCanceled()) return;
     const lineBytes = takeLegacyLineBytes(
       pending,
       chunk.subarray(start, newline),

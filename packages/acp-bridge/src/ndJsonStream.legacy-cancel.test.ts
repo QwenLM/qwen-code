@@ -79,6 +79,80 @@ describe('legacy NDJSON cancellation', () => {
     }
   });
 
+  it('stops later frames in the same chunk when a message hook cancels its reader', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cancel = vi.fn();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value;
+      },
+      cancel,
+    });
+    let cancellation: Promise<void> | undefined;
+    const observed = vi.fn(() => {
+      cancellation = reader.cancel('fatal');
+    });
+    const { readable } = ndJsonStream(new WritableStream<Uint8Array>(), input, {
+      onMessageObserved: observed,
+    });
+    const reader = readable.getReader();
+    const messages = [1, 2, 3].map((n) => ({ ...message, params: { n } }));
+    const first = reader.read();
+    controller.enqueue(
+      encoder.encode(
+        messages.map((value) => JSON.stringify(value)).join('\n') + '\n',
+      ),
+    );
+    const enqueue = vi.spyOn(
+      ReadableStreamDefaultController.prototype,
+      'enqueue',
+    );
+    try {
+      expect((await first).value).toEqual(messages[0]);
+      expect(cancellation).toBeDefined();
+      await cancellation;
+      expect.soft(enqueue).toHaveBeenCalledOnce();
+      expect.soft(error).not.toHaveBeenCalled();
+      expect(observed).toHaveBeenCalledOnce();
+      expect(cancel).toHaveBeenCalledExactlyOnceWith('fatal');
+      expect(input.locked).toBe(false);
+      expect(await reader.read()).toEqual({ done: true, value: undefined });
+    } finally {
+      await reader.cancel('cleanup').catch(() => {});
+      reader.releaseLock();
+      enqueue.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    'preserves all frames without cancellation (split across chunks: %s)',
+    async (split) => {
+      const stream = fixture();
+      const messages = [1, 2, 3].map((n) => ({ ...message, params: { n } }));
+      const payload =
+        messages.map((value) => JSON.stringify(value)).join('\n') + '\n';
+      const splitAt = split ? payload.indexOf('"n":2') + 4 : payload.length;
+      stream.controller.enqueue(encoder.encode(payload.slice(0, splitAt)));
+      if (split) {
+        stream.controller.enqueue(encoder.encode(payload.slice(splitAt)));
+      }
+      stream.controller.close();
+      const reader = stream.readable.getReader();
+      try {
+        for (const value of messages) {
+          expect((await reader.read()).value).toEqual(value);
+        }
+        expect(await reader.read()).toEqual({ done: true, value: undefined });
+        expect(stream.cancel).not.toHaveBeenCalled();
+        expect(stream.input.locked).toBe(false);
+      } finally {
+        reader.releaseLock();
+      }
+    },
+  );
+
   it('forwards cancellation before data and releases the upstream lock', async () => {
     const stream = fixture();
     const reason = new Error('consumer stopped');
