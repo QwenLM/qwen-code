@@ -10,6 +10,10 @@ public interface ToolPublicationObjectStore {
     /** The caller closes the stream after verifying its complete contents. */
     InputStream open(String key);
 
+    default void deleteIfPresent(String key) {
+        throw new UnsupportedOperationException("Output deletion is not supported by this adapter");
+    }
+
     /** A versioned or suspended bucket cannot enforce the no-overwrite rule. */
     void requireUnversioned();
 }
