@@ -221,6 +221,8 @@ public class ManagedAgentProperties {
         private Integer entryConcurrency;
         private Duration operationTimeout;
         private Duration claimTimeout;
+        private Long verificationBytesPerSecond;
+        private Duration maxVerificationTimeout;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -246,6 +248,10 @@ public class ManagedAgentProperties {
         public void setOperationTimeout(Duration value) { operationTimeout = value; }
         public Duration getClaimTimeout() { return claimTimeout; }
         public void setClaimTimeout(Duration value) { claimTimeout = value; }
+        public Long getVerificationBytesPerSecond() { return verificationBytesPerSecond; }
+        public void setVerificationBytesPerSecond(Long value) { verificationBytesPerSecond = value; }
+        public Duration getMaxVerificationTimeout() { return maxVerificationTimeout; }
+        public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
     }
 
     public static class Dispatch {
