@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -20,14 +21,35 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class WorkspaceExecutionStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final WorkspaceStorageGuard storageGuard;
+
+    @Autowired
+    public WorkspaceExecutionStore(JdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
+        this.jdbc = jdbc;
+        this.transaction = new TransactionTemplate(transactionManager);
+        this.storageGuard = storageGuard;
+    }
 
     public WorkspaceExecutionStore(JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
+        this.storageGuard = null;
+    }
+
+    public boolean verifiedRecoveryEnabled() {
+        return storageGuard != null && storageGuard.enabled();
     }
 
     public void authorize(SessionRecord session) {
+        authorizePassiveAttachment(session);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
+    public void authorizePassiveAttachment(SessionRecord session) {
         ContextBinding binding = session.workspace();
         if (binding == null || !"ACTIVE".equals(session.status())
                 || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
@@ -125,6 +147,9 @@ public class WorkspaceExecutionStore {
             String current = jdbc.queryForObject("SELECT holder_key FROM"
                     + " managed_workspace_execution_lease WHERE storage_key = ? FOR UPDATE",
                     String.class, key);
+            if (storageGuard != null) {
+                storageGuard.verifyLocked(binding);
+            }
             if (current != null && !holder.equals(current)) {
                 throw busy();
             }
@@ -136,6 +161,9 @@ public class WorkspaceExecutionStore {
     }
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session) {
+        if (storageGuard != null) {
+            storageGuard.verify(binding);
+        }
         List<String> holders = jdbc.queryForList("SELECT holder_key FROM"
                 + " managed_workspace_execution_lease WHERE storage_key = ?",
                 String.class, storageKey(binding));

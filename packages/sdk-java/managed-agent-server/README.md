@@ -430,6 +430,52 @@ the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
+### Verified original-mount recovery (W1a)
+
+W1a is opt-in for process restart in a trusted, single-host Linux `local-process` deployment. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
+V21 adds a persistent storage registration and mount fence. Leave
+`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
+upgrading every Broker and Harness instance. An unregistered mount is refused
+once the option is enabled; it is never registered from the directory found at
+startup.
+
+Stop all processes and external jobs that can write the storage, account for
+old Runtime holders and verify the original root before registration. Apply
+Flyway migrations, then run the private maintenance entry from this module on
+the same Linux host. Give a stable UUID to each operation and reuse it after a
+crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
+`W1_JDBC_PASSWORD` environment variables:
+
+```bash
+mvn -q -DskipTests compile exec:java \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
+```
+
+`inspect <tenant> <storage> <canonical-root>` is read-only. The same entry also
+accepts `fence` or `restore-original` with a mount revision and the exact
+operation UUID; both require `--offline-confirmed`. A fence has no timeout and requires every holder field to be clear after exact-owner cleanup. Stop new admissions, settle or cancel original executions, prove writers stopped, release holders and stop service/external writer processes before fencing.
+`restore-original` only reopens the still-verified original mapping after its
+holder is clear. Both commands accept retries with the same operation UUID;
+restoring increments the mount revision, so a delayed old fence cannot reopen
+maintenance. Completed registration and restore retries revalidate identity and marker; concurrent same-operation retries do not advance the revision twice. Inspect reports state, revision, active/completed operation, holder and independent identity/marker status, including while fenced. The flag records the operator's offline check; the program
+cannot stop arbitrary processes or external writers itself. Do not use it on
+a live shared storage.
+
+After registration, enable
+`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on the
+whole upgraded deployment. On each new attachment, model submission, Runtime
+claim and execute, the server compares the configured canonical root against
+the SQL registration, Linux host/device/inode identity and the root marker.
+A missing or conflicting marker, replacement root, missing saved cwd or fenced
+storage blocks new work; original execution status/cancel and authorized
+history remain on their saved identities. The marker is a continuity check,
+not a backup or protection against a malicious same-UID writer. See the
+[W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
+Hosted cold load reads the saved tool profile when Java omits it. It checks retained history and resources through one committed sequence, verifies complete Shell output including empty-stream seals, and rechecks writer ownership before publishing an attachment. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
+Workspace resume/next-turn admission still requires product-route integration; this
+internal guard is not a public resume capability yet.
+
 Build the container from the repository root:
 
 ```bash

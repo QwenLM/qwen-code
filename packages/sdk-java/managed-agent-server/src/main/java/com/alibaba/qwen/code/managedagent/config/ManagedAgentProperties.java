@@ -311,6 +311,7 @@ public class ManagedAgentProperties {
         private boolean durableLocalProcess;
         private boolean trustedLocalRebootRecovery;
         private boolean operatorRecoveryEnabled;
+        private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -440,6 +441,14 @@ public class ManagedAgentProperties {
 
         public void setOperatorRecoveryEnabled(boolean operatorRecoveryEnabled) {
             this.operatorRecoveryEnabled = operatorRecoveryEnabled;
+        }
+
+        public boolean isVerifiedWorkspaceRecoveryEnabled() {
+            return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
+            this.verifiedWorkspaceRecoveryEnabled = verifiedWorkspaceRecoveryEnabled;
         }
 
         public String getStateDirectory() {

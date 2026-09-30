@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
+import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import {
   ManagedSessionAlreadyExistsError,
@@ -21,6 +22,14 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  MANAGED_TOOL_RESULT_LIMITS,
+  parseToolResultManifestBytes,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import {
+  ResourceToolResultSegmentStore,
+  type DurableToolResultResourceStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionEvent,
@@ -122,19 +131,145 @@ function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
     );
 }
 
-function hasUnsettledInput(session: HostedSession): boolean {
+function hasUnsettledInput(
+  session: HostedSession,
+  throughSequence: number,
+): boolean {
   const accepted = new Set<string>();
   const authority = session.managed.authority;
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
+  for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
     if (event.kind === 'input.accepted')
       accepted.add(event.payload['turnId'] as string);
     if (event.kind === 'turn.settled')
       accepted.delete(event.payload['turnId'] as string);
   }
   return accepted.size > 0;
+}
+
+async function verifyWorkspaceRestore(
+  session: HostedSession,
+  toolResults: DurableToolResultResourceStore,
+  throughSequence: number,
+): Promise<void> {
+  const { authority, resources, sink } = session.managed;
+  const segmentStore = new ResourceToolResultSegmentStore(toolResults);
+  const manifests = new Map<string, ManagedSessionDurableRef>();
+  const verified = new Map<string, ManagedSessionDurableRef>();
+  async function readRef(ref: ManagedSessionDurableRef): Promise<void> {
+    const previous = verified.get(ref.resourceId);
+    if (previous) {
+      if (
+        previous.kind !== ref.kind ||
+        previous.schemaVersion !== ref.schemaVersion ||
+        previous.byteLength !== ref.byteLength ||
+        previous.digest !== ref.digest
+      )
+        throw new Error('Hosted resource references conflict.');
+      return;
+    }
+    const bytes = await resources.read(ref);
+    verified.set(ref.resourceId, ref);
+    if (ref.kind === 'managed-tool-result-manifest')
+      manifests.set(ref.resourceId, ref);
+    if (ref.kind === 'managed-session_metadata') {
+      const metadata = object(JSON.parse(bytes.toString('utf8')));
+      if (!metadata || typeof metadata['title'] !== 'string')
+        throw new Error('Hosted recovery layout is unsupported.');
+      if (metadata['previousRecordRef'])
+        await readRef(
+          metadata['previousRecordRef'] as unknown as ManagedSessionDurableRef,
+        );
+    }
+    if (ref.kind === 'managed-checkpoint') {
+      const checkpoint = parseHarnessCheckpointV1(bytes);
+      if (
+        checkpoint.resume.fileHistoryRef ||
+        checkpoint.output.mediaRefs.length
+      )
+        throw new Error('Hosted recovery layout is unsupported.');
+      const refs = [
+        checkpoint.resume.apiHistoryRef,
+        checkpoint.resume.artifactRef,
+        checkpoint.resume.goalRecordsRef,
+        checkpoint.resume.goalCheckpointWindowRef,
+        checkpoint.resume.tokenCountsRef,
+        checkpoint.resume.uiTelemetryRef,
+        checkpoint.resume.attributionRef,
+        checkpoint.attempt?.routeRef,
+        checkpoint.attempt?.capabilityRef,
+        checkpoint.attempt?.samplingRef,
+        checkpoint.attempt?.usageRef,
+        ...(checkpoint.tools?.items.map((item) => item.outcomeRef) ?? []),
+        checkpoint.approval?.optionsRef,
+        checkpoint.approval?.decisionRef,
+        checkpoint.approval?.invocationRef,
+        checkpoint.output.llmContentRef,
+        checkpoint.output.hookResultRef,
+      ];
+      for (const nested of refs) {
+        if (nested) await readRef(nested);
+      }
+    }
+  }
+  const header = authority.sessionHeader;
+  await readRef(header.definitionRef);
+  await readRef(header.rootSnapshotRef);
+  if (header.baseTranscriptProof) await readRef(header.baseTranscriptProof);
+  for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
+    if (
+      event.kind === 'domain.committed' &&
+      event.payload['domain'] !== 'session_metadata'
+    )
+      throw new Error('Hosted recovery domain is unsupported.');
+    for (const [field, value] of Object.entries(event.payload)) {
+      if (field.endsWith('Ref') && value !== null && value !== undefined) {
+        const ref = value as unknown as ManagedSessionDurableRef;
+        await readRef(ref);
+      } else if (field === 'resources' && Array.isArray(value)) {
+        for (const ref of value) {
+          const resource = ref as unknown as ManagedSessionDurableRef;
+          await readRef(resource);
+        }
+      }
+    }
+  }
+  for (const ref of manifests.values()) {
+    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    if (manifest.captureStatus !== 'complete')
+      throw new Error('Hosted tool result capture is incomplete.');
+    for (const content of manifest.contents) {
+      if ('ref' in content.body) {
+        const bytes = await toolResults.read(content.body.ref);
+        if (createHash('sha256').update(bytes).digest('hex') !== content.digest)
+          throw new Error('Hosted tool result content is incomplete.');
+      } else {
+        const hash = createHash('sha256');
+        for (
+          let offset = 0;
+          offset < content.byteLength ||
+          (content.byteLength === 0 && offset === 0);
+          offset += MANAGED_TOOL_RESULT_LIMITS.maxSegmentBytes
+        ) {
+          const read = await segmentStore.readRange({
+            manifestRef: ref,
+            expectedIdentity: manifest,
+            streamId: content.streamId,
+            offset,
+            length: Math.min(
+              MANAGED_TOOL_RESULT_LIMITS.maxSegmentBytes,
+              content.byteLength - offset,
+            ),
+          });
+          if (read.status !== 'ok')
+            throw new Error('Hosted tool result content is incomplete.');
+          hash.update(read.result);
+        }
+        if (hash.digest('hex') !== content.digest)
+          throw new Error('Hosted tool result content is incomplete.');
+      }
+    }
+  }
+  await sink.project(throughSequence);
 }
 
 async function eventEnvelope(
@@ -250,7 +385,7 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const body = object(req.body);
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
-    const toolProfile = body?.['toolProfile'];
+    let toolProfile = body?.['toolProfile'];
     if (
       toolProfile !== undefined &&
       ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
@@ -343,6 +478,32 @@ export function registerHostedHarnessSessionRoutes(
         resourceStore: stores.resourceStore,
         ...(refs ? { create: refs, requireNew: true } : {}),
       });
+      const definition = object(
+        JSON.parse(
+          (
+            await managed.resources.read(
+              managed.authority.sessionHeader.definitionRef,
+            )
+          ).toString('utf8'),
+        ),
+      );
+      if (!create && toolProfile === undefined)
+        toolProfile = definition?.['toolProfile'];
+      if (
+        toolProfile !== undefined &&
+        ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE) ||
+          !brokerOptions)
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (definition?.['toolProfile'] !== toolProfile) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
       const session: HostedSession = {
         managed,
         clientId: randomUUID(),
@@ -361,32 +522,37 @@ export function registerHostedHarnessSessionRoutes(
             }
           : {}),
       };
-      const definition = object(
-        JSON.parse(
-          (
-            await managed.resources.read(
-              managed.authority.sessionHeader.definitionRef,
-            )
-          ).toString('utf8'),
-        ),
-      );
       const pinned = toolProfile
         ? readHostedApprovalDefinition(definition)
         : undefined;
-      if (
-        definition?.['toolProfile'] !== toolProfile ||
-        (toolProfile && !pinned)
-      ) {
+      if (toolProfile && !pinned) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
       if (pinned) session.approval = pinned;
       const restore = await managed.authority.restoreBundle();
-      if (restore.recoveryStatus !== 'ok' || hasUnsettledInput(session)) {
+      if (
+        restore.recoveryStatus !== 'ok' ||
+        hasUnsettledInput(session, restore.throughSequence)
+      ) {
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
+      }
+      if (!create && toolProfile) {
+        try {
+          await verifyWorkspaceRestore(
+            session,
+            stores.toolResultResources,
+            restore.throughSequence,
+          );
+          await stores.assertWritable();
+        } catch {
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
       }
       sessions.set(sessionId, session);
       res.status(200).json({

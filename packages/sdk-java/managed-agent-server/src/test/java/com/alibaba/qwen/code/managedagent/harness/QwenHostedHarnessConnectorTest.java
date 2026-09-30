@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
@@ -119,6 +120,53 @@ class QwenHostedHarnessConnectorTest {
         assertThat(attachment.bootId()).isEqualTo(BOOT_ID);
         verify(client).loadSession(any(LoadHarnessSession.class));
         verify(client).createSession(any(CreateHarnessSession.class));
+    }
+
+    @Test
+    void rechecksWorkspaceAuthorityOnCachedAttachmentAndKeepsPassiveRecoveryAuthorized() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution);
+        ReflectionTestUtils.setField(connector, "client", client);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        verify(execution).authorize(session);
+
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessageContaining("Workspace execution authority is unavailable");
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
+                "prompt", java.util.List.of(), "digest"))
+                .hasMessageContaining("Workspace execution authority is unavailable");
+        assertThatThrownBy(() -> connector.continueManagedRuntime("tenant-a", SESSION_ID,
+                "prompt", "checkpoint", "activation"))
+                .hasMessageContaining("Workspace execution authority is unavailable");
+        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+        connector.createOrLoad("tenant-a", SESSION_ID, true, true);
+        verify(execution).authorizePassiveAttachment(session);
+        verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
+        doThrow(new IllegalStateException("grant revoked")).when(execution).authorizePassiveAttachment(session);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true, true))
+                .hasMessage("grant revoked");
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
+                "prompt", java.util.List.of(), "digest"))
+                .hasMessage("Hosted Workspace files are disabled");
     }
 
     private static QwenHostedHarnessConnector connector(

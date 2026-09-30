@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -17,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -277,6 +279,20 @@ class WorkspaceRuntimeTest {
         jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE', deleted_at = NULL,"
                 + " workspace_storage_id = 'replacement' WHERE session_id = ?", snapshot.sessionId());
         assertUnavailable(() -> authority.authorize(snapshot));
+    }
+
+    @Test
+    void authorizationRefusesAnUnverifiedPhysicalMount() {
+        SessionRecord session = createSession("storage", ".");
+        WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
+        var checked = new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                new DataSourceTransactionManager(dataSource), guard);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        assertUnavailable(() -> checked.authorize(session));
+        checked.authorizePassiveAttachment(session);
+        verify(guard).verify(session.workspace());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> checked.authorizePassiveAttachment(session));
     }
 
     @Test

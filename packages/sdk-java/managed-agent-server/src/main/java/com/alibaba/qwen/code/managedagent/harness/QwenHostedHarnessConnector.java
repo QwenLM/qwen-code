@@ -93,7 +93,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
             }
-            workspaceExecution.authorize(session);
+            if (passiveManagedRuntimeRecovery) {
+                workspaceExecution.authorizePassiveAttachment(session);
+            } else {
+                workspaceExecution.authorize(session);
+            }
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef attached = passiveManagedRuntimeRecovery
@@ -112,8 +116,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission submit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
+        requireReadyForNewWork(tenantId, sessionId);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
-                .session(attachment(tenantId, sessionId))
+                .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
                 .payloadDigest(payloadDigest);
         input.forEach(builder::addContent);
@@ -126,8 +131,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission continueManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
+        requireReadyForNewWork(tenantId, sessionId);
         PromptReceipt receipt = client().continueManagedRuntime(
-                attachment(tenantId, sessionId), promptId, checkpointId,
+                attachment(tenantId, sessionId, true), promptId, checkpointId,
                 activationId);
         return new Admission(receipt.getLastEventId(),
                 receipt.getEventEpoch());
@@ -137,7 +143,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Admission cancelManagedRuntime(String tenantId, String sessionId,
             String promptId, String checkpointId, String activationId) {
         PromptReceipt receipt = client().cancelManagedRuntime(
-                new CancelManagedRuntime(attachment(tenantId, sessionId),
+                new CancelManagedRuntime(attachment(tenantId, sessionId, false),
                         promptId, checkpointId, activationId));
         return new Admission(receipt.getLastEventId(),
                 receipt.getEventEpoch());
@@ -149,7 +155,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String eventEpoch) {
         HarnessEventStream stream = client().streamEvents(
                 StreamHarnessEvents.builder()
-                        .session(attachment(tenantId, sessionId))
+                        .session(attachment(tenantId, sessionId, false))
                         .lastEventId(lastEventId)
                         .eventEpoch(eventEpoch)
                         .build());
@@ -176,12 +182,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public void cancel(String tenantId, String sessionId) {
-        client().cancelTurn(attachment(tenantId, sessionId));
+        client().cancelTurn(attachment(tenantId, sessionId, false));
     }
 
     @Override
     public void rename(String tenantId, String sessionId, String title) {
-        client().updateSessionTitle(attachment(tenantId, sessionId), title);
+        client().updateSessionTitle(attachment(tenantId, sessionId, false), title);
     }
 
     @Override
@@ -202,14 +208,28 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         attachments.clear();
     }
 
-    private HarnessSessionRef attachment(String tenantId, String sessionId) {
+    private HarnessSessionRef attachment(String tenantId, String sessionId, boolean newWork) {
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef attachment = attachments.get(key);
         if (attachment == null) {
-            createOrLoad(tenantId, sessionId, true);
+            createOrLoad(tenantId, sessionId, true,
+                    !newWork && workspaceExecution.verifiedRecoveryEnabled());
             attachment = attachments.get(key);
         }
         return attachment;
+    }
+
+    private void requireReadyForNewWork(String tenantId, String sessionId) {
+        if (!workspaceExecution.verifiedRecoveryEnabled()) {
+            return;
+        }
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        if (session.workspace() != null) {
+            if (!isWorkspaceFilesAvailable()) {
+                throw new IllegalStateException("Hosted Workspace files are disabled");
+            }
+            workspaceExecution.authorize(session);
+        }
     }
 
     private HarnessSessionRef create(SessionRecord session) {

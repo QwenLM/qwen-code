@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -203,6 +204,8 @@ class HostedWorkspaceToolTurnIT {
             arguments.add(prefix + "root=" + workspaces.get(index));
             Files.createDirectory(workspaces.get(index).resolve("child"));
         }
+        boolean verifiedRecovery = !faults && !latency && "Linux".equals(System.getProperty("os.name"));
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (sseGaps) {
             // Keep SQL polling outside the 10s receive window to require live hub delivery.
@@ -236,6 +239,13 @@ class HostedWorkspaceToolTurnIT {
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
                 if (faults) Files.writeString(workspaces.get(index).resolve("child/proof.txt"), "x");
             }
+            if (verifiedRecovery) {
+                var guard = spring.getBean(WorkspaceStorageGuard.class);
+                for (int index = 0; index < workspaces.size(); index++) {
+                    guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
+                }
+            }
+            System.out.println("W1_PHYSICAL_GUARD=" + verifiedRecovery);
             String secondarySessionId = faults || latency ? "" : store.insertWorkspaceSessionCommand(tenant, "actor", "create-secondary",
                     "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                     new WorkspaceSelection(sessions.getFirst().get("workspaceId").toString(), "child")).sessionId();
@@ -272,9 +282,11 @@ class HostedWorkspaceToolTurnIT {
                     ? new HostedShellOutputProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             HostedProviderControlProbe providerProbe = providerControl
                     ? new HostedProviderControlProbe(jdbc, tenant, sessions, broker, gateServer) : null;
+            HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
+                    "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
             gateServer.start();
             List<String> triggers = new ArrayList<>();
-            try (shellProbe; providerProbe) {
+            try (shellProbe; providerProbe; coldLoadProbe) {
                 if (storeFaults || shellOutput) {
                     for (Map<String, Object> session : sessions) {
                         if (shellOutput ? session.get("fault").equals("receipt-failure")
@@ -296,6 +308,7 @@ class HostedWorkspaceToolTurnIT {
                         "resultFile", resultFile.toString(),
                         "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
                         "brokerUrl", broker.getBaseUri().toString(),
+                        "coldLoadUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/cold-load",
                         "statusGateUrl", "http://127.0.0.1:" + gateServer.getAddress().getPort() + "/release"));
                 Path log = temporary.resolve("driver.log");
                 Process driver = new ProcessBuilder(node, "--import", "tsx",
