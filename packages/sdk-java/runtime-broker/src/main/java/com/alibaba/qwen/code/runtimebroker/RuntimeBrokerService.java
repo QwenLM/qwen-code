@@ -321,87 +321,92 @@ public final class RuntimeBrokerService implements AutoCloseable {
             String publicationId, String publicationToken) {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
-        return requireReadySession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            synchronized (context) {
-                requireReadySessionRecord(context);
-                ToolExecutionRecord record = requireExecution(context, executionId);
-                boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
-                if (!"deferred".equals(record.getReference().get("dispatchMode")) && !v3) {
-                    throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
-                }
-                if (v3 && (publicationVerifier == null || publicationId == null
-                        || publicationToken == null)) {
-                    throw unavailable("runtime_execution_publication_required",
-                            "Tool v3 requires an installed publication before dispatch", null);
-                }
-                if (v3 && !publicationId.equals(record.getReference().get("publicationId"))) {
-                    throw conflict("runtime_execution_conflict", "Original publication ID changed");
-                }
-                if (!v3 && (publicationId != null || publicationToken != null)) {
-                    throw invalid("runtime_reference_invalid", "Tool v2 has no publication grant");
-                }
-                // The UTF-8 encoder would turn an unpaired surrogate into '?'.
-                if (payloadJson == null || !BrokerValues.isWellFormedJson(payloadJson)) {
-                    throw invalid("runtime_payload_invalid", "Tool payload is invalid");
-                }
-                byte[] bytes = payloadJson.getBytes(StandardCharsets.UTF_8);
-                if (bytes.length > 256 * 1024) {
-                    throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
-                }
-                String digest;
-                try {
-                    digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-                } catch (NoSuchAlgorithmException exception) {
-                    throw new IllegalStateException(exception);
-                }
-                if (!digest.equals(record.getRequestDigest())) {
-                    throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
-                }
-                Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
-                // An escaped unpaired surrogate passes the text check above but
-                // would still reach the Worker, and run, as '?'.
-                if (!payload.keySet().equals(Set.of("toolName", "input"))
-                        || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
-                        || !(payload.get("input") instanceof Map)
-                        || !BrokerValues.isWellFormedJson(payload)
-                        || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
-                            && !"run_shell_command".equals(toolName)) {
-                    throw invalid("runtime_payload_invalid", "Tool payload is invalid");
-                }
-                if (v3) {
-                    if (!"run_shell_command".equals(payload.get("toolName"))
-                            || Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
-                        throw invalid("runtime_payload_invalid", "Tool v3 requires foreground Shell");
+        CompletionStage<ToolExecutionRecord> started = requireReadySession(
+                harnessSessionId, runtimeSessionId)
+                .thenCompose(context -> {
+                    synchronized (context) {
+                        requireReadySessionRecord(context);
+                        ToolExecutionRecord record = requireExecution(context, executionId);
+                        boolean v3 = "deferred_v3".equals(record.getReference().get("dispatchMode"));
+                        if (!"deferred".equals(record.getReference().get("dispatchMode")) && !v3) {
+                            throw conflict("runtime_execution_conflict", "Execution was not reserved for deferred dispatch");
+                        }
+                        if (v3 && (publicationVerifier == null || publicationId == null
+                                || publicationToken == null)) {
+                            throw unavailable("runtime_execution_publication_required",
+                                    "Tool v3 requires an installed publication before dispatch", null);
+                        }
+                        if (v3 && !publicationId.equals(record.getReference().get("publicationId"))) {
+                            throw conflict("runtime_execution_conflict", "Original publication ID changed");
+                        }
+                        if (!v3 && (publicationId != null || publicationToken != null)) {
+                            throw invalid("runtime_reference_invalid", "Tool v2 has no publication grant");
+                        }
+                        // The UTF-8 encoder would turn an unpaired surrogate into '?'.
+                        if (payloadJson == null || !BrokerValues.isWellFormedJson(payloadJson)) {
+                            throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        }
+                        byte[] bytes = payloadJson.getBytes(StandardCharsets.UTF_8);
+                        if (bytes.length > 256 * 1024) {
+                            throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
+                        }
+                        String digest;
+                        try {
+                            digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+                        } catch (NoSuchAlgorithmException exception) {
+                            throw new IllegalStateException(exception);
+                        }
+                        if (!digest.equals(record.getRequestDigest())) {
+                            throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
+                        }
+                        Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
+                        // An escaped unpaired surrogate passes the text check above but
+                        // would still reach the Worker, and run, as '?'.
+                        if (!payload.keySet().equals(Set.of("toolName", "input"))
+                                || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
+                                || !(payload.get("input") instanceof Map)
+                                || !BrokerValues.isWellFormedJson(payload)
+                                || Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
+                                    && !"run_shell_command".equals(toolName)) {
+                            throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        }
+                        if (v3) {
+                            if (!"run_shell_command".equals(payload.get("toolName"))
+                                    || Boolean.TRUE.equals(((Map<?, ?>) payload.get("input")).get("is_background"))) {
+                                throw invalid("runtime_payload_invalid", "Tool v3 requires foreground Shell");
+                            }
+                            RuntimePublicationGrant grant = publicationVerifier.verify(record,
+                                    publicationId, publicationToken);
+                            if (!shouldDriveDispatch(record)) {
+                                return CompletableFuture.completedFuture(record);
+                            }
+                            requireUsableLease(context);
+                            return mapFailure(safeStage(() -> transport.installPublication(
+                                    context.lease(), context.session(), grant)),
+                                    "runtime_publication_install_failed", "Publication installation failed")
+                                    .thenApply(ignored -> {
+                                        beginDispatch(context, record, payload, grant);
+                                        ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
+                                        return latest == null ? record : latest;
+                                    });
+                        }
+                        if (shouldDriveDispatch(record)) {
+                            beginDispatch(context, record, payload);
+                        }
+                        ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
+                        return CompletableFuture.completedFuture(latest == null ? record : latest);
                     }
-                    RuntimePublicationGrant grant = publicationVerifier.verify(record,
-                            publicationId, publicationToken);
-                    if (!shouldDriveDispatch(record)) {
-                        return CompletableFuture.completedFuture(record);
-                    }
-                    requireUsableLease(context);
-                    return mapFailure(safeStage(() -> transport.installPublication(
-                            context.lease(), context.session(), grant)),
-                            "runtime_publication_install_failed", "Publication installation failed")
-                            .thenApply(ignored -> {
-                                beginDispatch(context, record, payload, grant);
-                                ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-                                return latest == null ? record : latest;
-                            });
-                }
-                if (shouldDriveDispatch(record)) {
-                    beginDispatch(context, record, payload);
-                }
-                ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
-                return CompletableFuture.completedFuture(latest == null ? record : latest);
-            }
-        });
+                });
+        return unknownWhenAdmissionClosed(started, harnessSessionId,
+                runtimeSessionId, executionId);
     }
 
     public CompletionStage<ToolExecutionRecord> startExecution(
             String harnessSessionId, String runtimeSessionId, String executionCallId) {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId, "executionCallId");
-        return requireReadySession(harnessSessionId, runtimeSessionId)
+        CompletionStage<ToolExecutionRecord> started = requireReadySession(
+                harnessSessionId, runtimeSessionId)
                 .thenApply(context -> {
                     synchronized (context) {
                         requireReadySessionRecord(context);
@@ -416,6 +421,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         return requireExecution(context, executionId);
                     }
                 });
+        return unknownWhenAdmissionClosed(started, harnessSessionId,
+                runtimeSessionId, executionId);
     }
 
     private CompletionStage<ToolExecutionRecord> createExecutionReceipt(
@@ -460,8 +467,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 }
             }
-            return requireReadySession(harnessSessionId, runtimeSessionId)
-                    .thenApply(context -> requireExecution(context, executionId));
+            return unknownWhenAdmissionClosed(
+                    requireReadySession(harnessSessionId, runtimeSessionId)
+                            .thenApply(context -> requireExecution(context,
+                                    executionId)),
+                    harnessSessionId, runtimeSessionId, executionId);
         });
     }
 
@@ -622,7 +632,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     + "acquire the Session again to confirm the cancellation");
                 }
             }
-            return requireReadySession(harnessSessionId, runtimeSessionId)
+            return unknownWhenAdmissionClosed(
+                    requireReadySession(harnessSessionId, runtimeSessionId)
                     .thenCompose(context -> {
                         ToolExecutionRecord requested;
                         boolean publicationV3;
@@ -710,7 +721,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                                             executionId);
                                     return latest == null ? requested : latest;
                                 });
-                    });
+                    }),
+                    harnessSessionId, runtimeSessionId, executionId);
         });
     }
 
@@ -2686,6 +2698,37 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
         }
         return new OwnedExecution(record, binding, session);
+    }
+
+    /**
+     * An execution whose outcome is already UNKNOWN keeps its own answer
+     * when the generation that could tell more is no longer live: nothing
+     * can change the record anymore, so a closed admission reads as the
+     * record's UNKNOWN instead of replacing it. Any other failure, and any
+     * record the caller does not own, keeps the original error.
+     */
+    private CompletionStage<ToolExecutionRecord> unknownWhenAdmissionClosed(
+            CompletionStage<ToolExecutionRecord> stage,
+            String harnessSessionId, String runtimeSessionId,
+            String executionCallId) {
+        return stage.handle((record, error) -> {
+            if (error == null) {
+                return record;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException exception
+                    && "runtime_admission_closed".equals(exception.getCode())) {
+                ToolExecutionRecord stored = executionRepository
+                        .findByExecutionCallId(executionCallId);
+                if (stored != null
+                        && stored.getState() == ToolExecutionRecord.State.UNKNOWN
+                        && stored.getHarnessSessionId().equals(harnessSessionId)
+                        && stored.getRuntimeSessionId().equals(runtimeSessionId)) {
+                    return stored;
+                }
+            }
+            throw new CompletionException(cause);
+        });
     }
 
     /**

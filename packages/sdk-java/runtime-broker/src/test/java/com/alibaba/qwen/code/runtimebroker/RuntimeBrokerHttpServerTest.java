@@ -369,6 +369,44 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void providerStartTheWorkerNeverBeganStaysUnknownForTheCaller() throws Exception {
+        // Provider references carry a UUID Runtime Session id.
+        String runtime = "550e8400-e29b-41d4-a716-446655440303";
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            Map<String, Object> reference = Map.of("sessionId", runtime, "promptId", "turn",
+                    "callId", "worker-call", "capabilityDigest", "a".repeat(64),
+                    "policyRevision", "policy", "invocationId", "invocation", "argsDigest", "b".repeat(64));
+            String id = fixture.service.prepareExecution("harness", runtime, "provider", reference)
+                    .toCompletableFuture().join().getExecutionCallId();
+            Map<String, Object> start = Map.of("protocolVersion", 1, "requestId", "start",
+                    "harnessSessionId", "harness", "runtimeSessionId", runtime);
+            // The worker refused the execute: it still holds the call as prepared.
+            fixture.transport.runtimeStatus = Map.of("state", "prepared");
+            for (int attempt = 0; attempt < 2; attempt++) {
+                HttpResponse<String> started = fixture.post("/executions/" + id + ":start", start);
+                assertEquals(409, started.statusCode(), started.body());
+                assertEquals("runtime_broker_execution_unknown",
+                        JSON.parseObject(started.body()).getString("code"));
+            }
+            // The cancel route shares the envelope: the call never started,
+            // but the physical cancellation still reaches the worker.
+            HttpResponse<String> cancelled = fixture.post("/executions/" + id + ":cancel", Map.of(
+                    "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime));
+            assertEquals(409, cancelled.statusCode(), cancelled.body());
+            assertEquals("runtime_broker_execution_unknown",
+                    JSON.parseObject(cancelled.body()).getString("code"));
+            assertEquals(1, fixture.transport.cancellations.get());
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + id
+                    + "?requestId=read&harnessSessionId=harness&runtimeSessionId=" + runtime))
+                    .header("Authorization", "Bearer secret").GET().build();
+            assertEquals(409, fixture.client.send(read, HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertEquals(1, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void providerObservesTheOriginalExecutionAfterResponseLoss() throws Exception {
         // Provider references carry a UUID Runtime Session id.
         String runtime = "550e8400-e29b-41d4-a716-446655440302";
