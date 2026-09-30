@@ -373,3 +373,46 @@ Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environ
 ```
 
 ---
+
+### SerpApi
+
+The official hosted MCP server by SerpApi, providing real-time structured search results from Google, Baidu, Bing and other search engines through a single tool.
+
+- **Documentation:** https://serpapi.com/integrations/mcp
+- **Cost:** Paid (free plan available)
+- **Get API Key:** https://serpapi.com/manage-api-key
+- **Best for:** Structured web search results
+
+#### Available Tools
+
+- `search` — Web search, optionally returning results as Markdown
+
+#### Setup
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add serpapi \
+  -t http \
+  "https://mcp.serpapi.com/mcp" \
+  -H "Authorization: Bearer ${SERPAPI_API_KEY}"
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "serpapi": {
+      "httpUrl": "https://mcp.serpapi.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SERPAPI_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
+
+---
