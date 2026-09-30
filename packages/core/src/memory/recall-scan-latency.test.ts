@@ -91,7 +91,7 @@ const FAST_RESULT_CEILING_MS = POOL_CI
 // A GitHub-hosted lane is one lane class, not one slow row. Across hosted
 // `Test (ubuntu-latest)` jobs the 1000-topic best-of-5 spans 128-227ms on four
 // runners, and the smaller corpi breached the strict 100ms bound at 110-177ms
-// on six jobs — three of those on all three vitest attempts, which `--retry`
+// on eight jobs — five of those on all three vitest attempts, which `--retry`
 // cannot rescue. So every cold row moves off the strict bound here, sized by
 // this file's own ~20% slack convention rather than the pool's multiple:
 // against the same developer-machine baseline the `~5x` pool figure in
