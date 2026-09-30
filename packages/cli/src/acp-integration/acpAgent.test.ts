@@ -2436,6 +2436,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     authenticate: (args: { methodId: string }) => Promise<void>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
+    loadSession: (args: Record<string, unknown>) => Promise<unknown>;
+    unstable_resumeSession: (args: Record<string, unknown>) => Promise<unknown>;
     setSessionConfigOption: (args: Record<string, unknown>) => Promise<unknown>;
     beginManagedShutdown: () => {
       configs: Config[];
@@ -4582,6 +4584,135 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockConnectionState.resolve();
       await agentPromise;
     }
+  });
+
+  describe('Managed host', () => {
+    async function bootManagedHost() {
+      mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+        {
+          privateParentCapability: 'managed-host-capability',
+          executionEngine: 'managed',
+        },
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.initialize({
+        clientCapabilities: {},
+        _meta: {
+          'qwen-code/private-parent-capability': 'managed-host-capability',
+        },
+      });
+      return { agent, agentPromise };
+    }
+
+    it('creates Managed sessions under the writer lease and returns their receipt', async () => {
+      await setupSessionMocks('managed-host-session');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        const response = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        })) as { _meta?: Record<string, unknown> };
+
+        const [settings, , , , , , , , , hostPolicy] =
+          vi.mocked(loadCliConfig).mock.calls[0]!;
+        expect(hostPolicy?.executionEngine).toBe('managed');
+        expect(settings?.experimental?.sessionWriterLease).toBe(true);
+        expect(response._meta).toEqual({
+          [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed',
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it.each([
+      ['new', undefined],
+      ['new', 'legacy'],
+      ['load', undefined],
+      ['load', 'legacy'],
+      ['resume', undefined],
+      ['resume', 'legacy'],
+    ] as const)(
+      '%s refuses the %s engine before creating a Config',
+      async (action, engine) => {
+        await setupSessionMocks('managed-host-refusal');
+        const { agent, agentPromise } = await bootManagedHost();
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          ...(engine
+            ? { _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } }
+            : {}),
+        };
+        try {
+          await expect(
+            action === 'new'
+              ? agent.newSession(params)
+              : action === 'load'
+                ? agent.loadSession(params)
+                : agent.unstable_resumeSession(params),
+          ).rejects.toMatchObject({
+            code: -32024,
+            message: 'This ACP host only executes managed sessions.',
+            data: { errorKind: 'session_execution_engine_unavailable' },
+          });
+          expect(loadCliConfig).not.toHaveBeenCalled();
+        } finally {
+          mockConnectionState.resolve();
+          await agentPromise;
+        }
+      },
+    );
+
+    it('refuses a Managed session its Config cannot record', async () => {
+      const innerConfig = await setupSessionMocks('managed-host-unrecorded');
+      innerConfig.initialize = vi
+        .fn()
+        .mockRejectedValue(
+          new SessionExecutionEngineError(
+            'managed-host-unrecorded',
+            'managed execution requires chat recording and a writer lease',
+          ),
+        );
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          data: { errorKind: 'session_execution_engine_unavailable' },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('does not start without a private parent', async () => {
+      await expect(
+        runAcpAgent(mockConfig, makeSessionSettings(), mockArgv, {
+          executionEngine: 'managed',
+        }),
+      ).rejects.toThrow(
+        'A Managed ACP host is available only to a private managed ACP parent.',
+      );
+    });
   });
 
   it.each([false, true])(

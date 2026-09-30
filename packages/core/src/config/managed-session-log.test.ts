@@ -20,6 +20,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from './approval-mode.js';
 import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
+import { MCPServerConfig } from './mcp-server-config.js';
+import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
+import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
   ManagedSessionRecordRefusedError,
   type ChatRecord,
@@ -1327,5 +1330,82 @@ describe('Managed Session log recording', () => {
     expect(() => recorder.bindManagedSink(writer)).toThrow(
       SessionWriterUnavailableError,
     );
+  });
+});
+
+describe('Managed host tools', () => {
+  it('builds a registry without tools', async () => {
+    const legacy = await managedConfig({
+      sessionExecutionEngine: 'legacy',
+    }).createToolRegistry(undefined, { skipDiscovery: true });
+    expect(legacy.getAllToolNames()).not.toHaveLength(0);
+
+    const managed = await managedConfig().createToolRegistry();
+    expect(managed.getAllToolNames()).toEqual([]);
+  });
+
+  it.each([
+    [
+      'legacy',
+      ['discovered_tool', 'late_deferred', 'late_factory', 'late_tool'],
+    ],
+    ['managed', []],
+  ] as const)(
+    'a %s registry keeps %j of the tools registered later',
+    async (engine, kept) => {
+      const config = managedConfig({ sessionExecutionEngine: engine });
+      const registry = new ToolRegistry(config);
+      const tool = {
+        name: 'late_tool',
+        shouldDefer: false,
+      } as unknown as AnyDeclarativeTool;
+      const factory = async () => tool;
+      registry.registerTool(tool);
+      registry.registerFactory('late_factory', factory);
+      registry.registerPermissionDeferredFactory('late_deferred', factory);
+      const source = new ToolRegistry(
+        managedConfig({ sessionExecutionEngine: 'legacy' }),
+      );
+      const discovered = Object.create(DiscoveredTool.prototype, {
+        name: { value: 'discovered_tool' },
+      }) as DiscoveredTool;
+      source.registerTool(discovered);
+      registry.copyDiscoveredToolsFrom(source);
+
+      expect(registry.getAllToolNames().sort()).toEqual(kept);
+    },
+  );
+
+  it('has no MCP servers and starts no MCP discovery', async () => {
+    const mcpServers = { configured: new MCPServerConfig('node') };
+    expect(
+      managedConfig({
+        sessionExecutionEngine: 'legacy',
+        mcpServers,
+      }).getMcpServers(),
+    ).toHaveProperty('configured');
+    const config = managedConfig({ mcpServers });
+    expect(config.getMcpServers()).toEqual({});
+
+    const initializeInternal = vi
+      .spyOn(
+        config as unknown as {
+          initializeInternal(options?: unknown): Promise<void>;
+        },
+        'initializeInternal',
+      )
+      .mockResolvedValue(undefined);
+    await config.initialize();
+    expect(initializeInternal).toHaveBeenCalledWith(
+      expect.objectContaining({ skipMcpDiscovery: true }),
+    );
+
+    // A settings reload or a working-directory change reconciles MCP servers
+    // after initialization; a Managed session starts none.
+    (config as unknown as { initialized: boolean }).initialized = true;
+    const getToolRegistry = vi.spyOn(config, 'getToolRegistry');
+    await config.reinitializeMcpServers(mcpServers);
+    expect(getToolRegistry).not.toHaveBeenCalled();
+    await config.closeSessionWriter();
   });
 });

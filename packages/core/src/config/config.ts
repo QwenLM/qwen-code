@@ -3857,6 +3857,10 @@ export class Config {
         skipFileCheckpointing: true,
       };
     }
+    // MCP servers run in the host process; a Managed session has none.
+    if (this.sessionExecutionEngine === 'managed') {
+      options = { ...options, skipMcpDiscovery: true };
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
     }
@@ -5841,6 +5845,10 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  getSessionExecutionEngine(): SessionExecutionEngine | undefined {
+    return this.sessionExecutionEngine;
   }
 
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
@@ -8223,7 +8231,13 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.executionEnvironment || this.shellExecutionSandbox) return {};
+    if (
+      this.executionEnvironment ||
+      this.shellExecutionSandbox ||
+      this.sessionExecutionEngine === 'managed'
+    ) {
+      return {};
+    }
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -8471,7 +8485,12 @@ export class Config {
   }
 
   private async refreshMcpServers(): Promise<void> {
-    if (this.shellExecutionSandbox) return;
+    if (
+      this.shellExecutionSandbox ||
+      this.sessionExecutionEngine === 'managed'
+    ) {
+      return;
+    }
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -12113,6 +12132,8 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
+    // The registry refuses every tool of a Managed session.
+    if (this.sessionExecutionEngine === 'managed') return registry;
 
     const registerLazy = (
       toolName: ToolName,

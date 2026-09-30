@@ -340,10 +340,24 @@ export class ToolRegistry {
   }
 
   /**
+   * A Managed session never runs a tool's side effect in the host process,
+   * so its registry takes no tool from any path, including tools registered
+   * after the session starts (image generation, workflows, advisor).
+   */
+  private refusesHostTool(name: string): boolean {
+    if (this.config.getSessionExecutionEngine?.() !== 'managed') return false;
+    debugLogger.info(
+      `Tool "${name}" skipped: a Managed session has no host tools.`,
+    );
+    return true;
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (this.refusesHostTool(tool.name)) return;
     if (
       this.isToolDisabled(
         tool.name,
@@ -414,6 +428,7 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -437,6 +452,7 @@ export class ToolRegistry {
    * tool while {@link preloadDeferredToolsWithinBudget} skips it.
    */
   registerPermissionDeferredFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -538,6 +554,7 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    if (this.config.getSessionExecutionEngine?.() === 'managed') return;
     for (const [key, tool] of source.mcpAppTools) {
       if (
         !this.mcpAppTools.has(key) &&
