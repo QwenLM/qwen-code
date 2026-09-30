@@ -140,7 +140,17 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> payload, Map<String, Object> capture) {
-        requireOwnedWorkspace(lease, session);
+        try {
+            requireOwnedWorkspace(lease, session);
+        } catch (RuntimeException error) {
+            String code = error instanceof RuntimeBrokerException refusal
+                    ? refusal.getCode() : "workspace_unavailable";
+            Map<String, Object> result = new LinkedHashMap<>(Map.of("executionStatus", "not_started",
+                    "responseParts", List.of(), "error", Map.of("type", code,
+                            "message", "Workspace execution was refused before dispatch.")));
+            result.put("capture", null);
+            return CompletableFuture.completedFuture(Map.of("state", "settled", "result", result));
+        }
         return delegate.executeV3(lease, session, reference, payload, capture);
     }
 

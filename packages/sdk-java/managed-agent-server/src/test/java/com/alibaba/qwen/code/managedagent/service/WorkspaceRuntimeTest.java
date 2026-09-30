@@ -345,8 +345,14 @@ class WorkspaceRuntimeTest {
                 .toCompletableFuture().join()).containsEntry("state", "cancel_requested");
         assertThat(fixture.transport().acknowledgeV3(fixture.lease(), runtimeSession, original, Map.of())
                 .toCompletableFuture().join()).containsEntry("state", "settled");
-        assertUnavailable(() -> fixture.transport().executeV3(fixture.lease(), runtimeSession,
-                original, Map.of(), Map.of()));
+        Map<String, Object> refusal = fixture.transport().executeV3(fixture.lease(), runtimeSession,
+                original, Map.of(), Map.of()).toCompletableFuture().join();
+        assertThat(refusal).containsEntry("state", "settled");
+        Map<?, ?> result = (Map<?, ?>) refusal.get("result");
+        assertThat(result.get("executionStatus")).isEqualTo("not_started");
+        assertThat(result.get("capture")).isNull();
+        assertThat(result.get("error")).isEqualTo(Map.of("type", "workspace_unavailable",
+                "message", "Workspace execution was refused before dispatch."));
         verify(fixture.http(), never()).executeV3(any(), any(), any(), any(), any());
     }
 

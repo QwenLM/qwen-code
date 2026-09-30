@@ -997,6 +997,57 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void deferredV3SettlesOnlyAnExplicitNotStartedAnswer() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            Map<String, Object> notStarted = new java.util.LinkedHashMap<>();
+            notStarted.put("executionStatus", "not_started");
+            notStarted.put("capture", null);
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", notStarted));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+
+            ToolExecutionRecord settled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("not_started", settled.getExecutionStatus());
+            assertTrue(settled.getResult().containsKey("capture"));
+            assertNull(settled.getResult().get("capture"));
+            assertEquals(1, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.statusV3Calls.get());
+
+            fixture.transport.executeV3Result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_unavailable", "remote refusal", false));
+            ToolExecutionRecord next = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "next-key", reference, digest, "pub-2"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    next.getExecutionCallId(), payload, "pub-2", "token"));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, awaitExecution(fixture.executionRepository,
+                    next.getExecutionCallId(), ToolExecutionRecord.State.UNKNOWN).getState());
+            assertEquals(2, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.statusV3Calls.get());
+        }
+    }
+
+    @Test
     void cancelUnknownDeferredV3CallsTheOriginalRuntime() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             RuntimeSessionRecord session = join(fixture.service.acquire(
@@ -3821,6 +3872,8 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger executeCalls = new AtomicInteger();
         final AtomicInteger cancelCalls = new AtomicInteger();
         final AtomicInteger cancelV3Calls = new AtomicInteger();
+        final AtomicInteger executeV3Calls = new AtomicInteger();
+        final AtomicInteger statusV3Calls = new AtomicInteger();
         final AtomicInteger releaseCalls = new AtomicInteger();
         final AtomicInteger statusCalls = new AtomicInteger();
         volatile long lastAfterSequence = -1;
@@ -3845,6 +3898,7 @@ class RuntimeBrokerServiceTest {
         volatile CompletableFuture<Map<String, Object>> executeResult =
                 CompletableFuture.completedFuture(
                         Map.of("executionStatus", "success"));
+        volatile CompletableFuture<Map<String, Object>> executeV3Result;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
@@ -3895,6 +3949,29 @@ class RuntimeBrokerServiceTest {
             lastSession = session;
             lastReference = reference;
             return executeResult;
+        }
+
+        @Override
+        public CompletionStage<Void> installPublication(RuntimeLease lease,
+                RuntimeSession session, RuntimePublicationGrant grant) {
+            return executeV3Result == null ? RuntimeTransport.super.installPublication(lease, session, grant)
+                    : CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> payload, Map<String, Object> capture) {
+            executeV3Calls.incrementAndGet();
+            return executeV3Result == null ? RuntimeTransport.super.executeV3(lease, session,
+                    reference, payload, capture) : executeV3Result;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference, long afterSequence) {
+            statusV3Calls.incrementAndGet();
+            return RuntimeTransport.super.statusV3(lease, session, reference, afterSequence);
         }
 
         @Override

@@ -2353,14 +2353,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         : transport.execute(context.lease(), context.session(), dispatchReference(executing), payload))
                 : safeStage(() -> transport.executeV3(context.lease(), context.session(),
                         executing.getReference(), payload, capture(grant)))
-                        .handle((ignored, error) -> {
+                        .handle((answer, error) -> {
                             if (nonRetryableToolV3(error)) {
                                 throw new CompletionException(unwrap(error));
                             }
+                            if (error == null && answer != null
+                                    && "settled".equals(answer.get("state"))
+                                    && answer.get("result") instanceof Map<?, ?> result
+                                    && "not_started".equals(result.get("executionStatus"))) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> notStarted = (Map<String, Object>) result;
+                                return notStarted;
+                            }
                             return null;
                         })
-                        .thenCompose(ignored -> awaitV3Result(context, executing,
-                                clock.instant().plus(Duration.ofMinutes(30))));
+                        .thenCompose(notStarted -> notStarted != null
+                                ? CompletableFuture.completedFuture(notStarted)
+                                : awaitV3Result(context, executing,
+                                        clock.instant().plus(Duration.ofMinutes(30))));
         return invocation
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
