@@ -29,6 +29,7 @@ import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
+  HOSTED_APPROVAL_TIMEOUT_MS,
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
@@ -1117,6 +1118,11 @@ describe('Hosted Harness no-tool session', () => {
 });
 
 describe('Hosted Harness tool approvals', () => {
+  // Turns commit and sync several records, which can take over a second
+  // on a busy host.
+  const waitFor = <T>(check: () => T | Promise<T>) =>
+    vi.waitFor(check, { timeout: 10_000 });
+
   beforeEach(async () => {
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
@@ -1334,11 +1340,11 @@ describe('Hosted Harness tool approvals', () => {
         })
         .expect(202);
       const count = requestIds.length + 1;
-      await vi.waitFor(() => expect(requestIds).toHaveLength(count));
+      await waitFor(() => expect(requestIds).toHaveLength(count));
       return requestIds.at(-1)!;
     };
     const finished = async (clientId: string) =>
-      vi.waitFor(async () => {
+      waitFor(async () => {
         const status = await headers(
           supertest(server).get(`/session/${SESSION_ID}/status`),
         ).set('X-Qwen-Client-Id', clientId);
@@ -1470,7 +1476,7 @@ describe('Hosted Harness tool approvals', () => {
         })
         .expect(202);
       const count = requestIds.length + 1;
-      await vi.waitFor(() => expect(requestIds).toHaveLength(count));
+      await waitFor(() => expect(requestIds).toHaveLength(count));
     };
     await submit(PROMPT_ID);
     const answer = (optionId: string) =>
@@ -1506,7 +1512,7 @@ describe('Hosted Harness tool approvals', () => {
     const failed = await answer('allow');
     expect(failed.status).toBe(409);
     expect(failed.body.code).toBe('hosted_turn_recovery_required');
-    await vi.waitFor(async () =>
+    await waitFor(async () =>
       expect(await status()).toMatchObject({
         hasActivePrompt: false,
         recoveryBlocked: true,
@@ -1524,7 +1530,7 @@ describe('Hosted Harness tool approvals', () => {
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
-    await vi.waitFor(async () =>
+    await waitFor(async () =>
       expect(await status()).toMatchObject({
         hasActivePrompt: false,
         recoveryBlocked: false,
@@ -1561,7 +1567,7 @@ describe('Hosted Harness tool approvals', () => {
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
-    await vi.waitFor(async () =>
+    await waitFor(async () =>
       expect(await status()).toMatchObject({
         hasActivePrompt: false,
         recoveryBlocked: true,
@@ -1576,12 +1582,21 @@ describe('Hosted Harness tool approvals', () => {
   it('asks again in the Turn after one whose calls were all refused', async () => {
     const { server, clientId, answer, status, submit } = await waitingSession();
     const finished = () =>
-      vi.waitFor(async () =>
+      waitFor(async () =>
         expect(await status()).toMatchObject({
           hasActivePrompt: false,
           recoveryBlocked: false,
         }),
       );
+    expect(await definitions()).toEqual([
+      {
+        engine: 'managed',
+        sessionId: SESSION_ID,
+        toolProfile: files,
+        approvalMode: 'default',
+        approvalTimeoutMs: HOSTED_APPROVAL_TIMEOUT_MS,
+      },
+    ]);
     expect((await answer('deny')).status).toBe(200);
     await finished();
     const second = randomUUID();
@@ -1605,7 +1620,7 @@ describe('Hosted Harness tool approvals', () => {
       .mockImplementation(() => {});
     const { server, clientId, answer, status } = await waitingSession();
     expect((await answer('allow')).status).toBe(200);
-    await vi.waitFor(async () =>
+    await waitFor(async () =>
       expect(await status()).toMatchObject({ hasActivePrompt: false }),
     );
     vi.spyOn(
@@ -1615,6 +1630,11 @@ describe('Hosted Harness tool approvals', () => {
     await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
       .set('X-Qwen-Client-Id', clientId)
       .send({ title: 'renamed' })
+      .expect(503);
+    // Only a Session whose writes stopped refuses the next write as well.
+    await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'renamed again' })
       .expect(503);
     vi.spyOn(
       LocalManagedSessionResourceStore.prototype,
@@ -1630,5 +1650,29 @@ describe('Hosted Harness tool approvals', () => {
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining('store unavailable'),
     );
+  });
+
+  it('asks again in the next Turn after an approval expired unanswered', async () => {
+    const { answer, status, submit } = await waitingSession();
+    const finished = () =>
+      waitFor(async () =>
+        expect(await status()).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        }),
+      );
+    // An answer after the expiry time expires the Action at once.
+    const now = vi
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.now() + HOSTED_APPROVAL_TIMEOUT_MS);
+    const late = await answer('allow');
+    now.mockRestore();
+    expect(late.status).toBe(409);
+    expect(late.body.code).toBe('action_expired');
+    await finished();
+    await submit(randomUUID());
+    expect((await answer('allow')).status).toBe(200);
+    await finished();
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
   });
 });

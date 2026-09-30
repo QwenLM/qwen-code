@@ -730,7 +730,9 @@ export class HostedWorkspaceToolTurn {
     await this.harness.resolveDurableWait();
     const action = authority.action(requestId)!;
     if (action.state === 'decided')
-      return hostedActionAllowed(action) ? undefined : APPROVAL_REFUSALS.denied;
+      return hostedActionAllowed(action, options.policyRevision)
+        ? undefined
+        : APPROVAL_REFUSALS.denied;
     if (action.state !== 'expired') return APPROVAL_REFUSALS.cancelled;
     this.unanswered = true;
     return APPROVAL_REFUSALS.expired;

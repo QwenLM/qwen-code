@@ -128,21 +128,19 @@ function decisionBytes(
 }
 
 /**
- * Whether a decided Action chose `allow`. Decision bytes are deterministic, so
- * their recorded digest says which option was chosen without reading them.
+ * Whether a decided Action chose `allow` under the policy revision its options
+ * recorded. Decision bytes are deterministic, so their recorded digest says
+ * which option was chosen without reading them.
  */
-export function hostedActionAllowed(action: ManagedSessionAction): boolean {
+export function hostedActionAllowed(
+  action: ManagedSessionAction,
+  policyRevision: string,
+): boolean {
   return (
     action.state === 'decided' &&
     action.decisionRef?.digest ===
       createHash('sha256')
-        .update(
-          decisionBytes(
-            'allow',
-            action.inputRevision,
-            HOSTED_TOOL_APPROVAL_POLICY,
-          ),
-        )
+        .update(decisionBytes('allow', action.inputRevision, policyRevision))
         .digest('hex')
   );
 }
@@ -284,33 +282,61 @@ export async function resolveHostedAction(
   )
     return { status: 400, code: 'invalid_action_response' };
   const writable = () => !isBlocked() && !authority.writesStopped;
-  if (
-    authority.action(requestId)!.state === 'requested' &&
-    Date.now() >= options.expiresAt
-  ) {
-    if (!writable()) return RECOVERY_REQUIRED;
-    await endHostedAction(session, requestId, 'expired');
-    waiters.notify(requestId);
-  }
   const bytes = decisionBytes(
     optionId,
     existing.inputRevision,
     options.policyRevision,
   );
   const digest = createHash('sha256').update(bytes).digest('hex');
-  const current = authority.action(requestId)!;
-  if (current.state === 'expired' || current.state === 'cancelled')
-    return { status: 409, code: ENDED_CODES[current.state] };
-  if (current.state === 'decided') {
-    return current.decisionRef?.digest === digest
+  const decided = (action: ManagedSessionAction): HostedActionResolution =>
+    action.decisionRef?.digest === digest
       ? { status: 200, body: { requestId, state: 'decided', optionId } }
       : { status: 409, code: 'action_already_resolved' };
+  // What is already recorded is answered as it stands, blocked or not.
+  const recorded = (): HostedActionResolution | undefined => {
+    const action = authority.action(requestId)!;
+    if (action.state === 'expired' || action.state === 'cancelled')
+      return { status: 409, code: ENDED_CODES[action.state] };
+    return action.state === 'decided' ? decided(action) : undefined;
+  };
+  // A write that failed: answer what won the race, or report a Session that
+  // can no longer write, where no retry can succeed, and wake the waiting
+  // Turn so it stops now rather than at the expiry. Anything else is
+  // retryable.
+  const failed = (cause: unknown): HostedActionResolution => {
+    const raced = recorded();
+    if (raced) {
+      if (authority.action(requestId)!.state === 'decided')
+        waiters.notify(requestId);
+      return raced;
+    }
+    if (writable()) throw cause;
+    waiters.notify(requestId);
+    return RECOVERY_REQUIRED;
+  };
+  if (
+    authority.action(requestId)!.state === 'requested' &&
+    Date.now() >= options.expiresAt
+  ) {
+    if (!writable()) return RECOVERY_REQUIRED;
+    try {
+      await endHostedAction(session, requestId, 'expired');
+    } catch (cause) {
+      return failed(cause);
+    }
+    waiters.notify(requestId);
   }
+  const current = recorded();
+  if (current) return current;
   if (!writable()) return RECOVERY_REQUIRED;
   const decisionRef = await session.resources.publish(
     'managed-action-decision',
     bytes,
   );
+  // Another answer, the expiry or a cancel may have landed meanwhile.
+  const landed = recorded();
+  if (landed) return landed;
+  if (!writable()) return RECOVERY_REQUIRED;
   try {
     await authority.resolveAction(
       {
@@ -320,17 +346,12 @@ export async function resolveHostedAction(
         contentDigest: digest,
       },
       { requestId, state: 'decided', decisionRef },
+      // Asked again inside the authority's queue, since the Turn may block
+      // while this write waits behind others.
+      writable,
     );
   } catch (cause) {
-    const raced = authority.action(requestId)!;
-    if (
-      !(cause instanceof ManagedSessionConflictError) ||
-      raced.state === 'requested'
-    )
-      throw cause;
-    return raced.state === 'decided'
-      ? { status: 409, code: 'action_already_resolved' }
-      : { status: 409, code: ENDED_CODES[raced.state] };
+    return failed(cause);
   }
   waiters.notify(requestId);
   return { status: 200, body: { requestId, state: 'decided', optionId } };

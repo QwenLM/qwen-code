@@ -867,15 +867,41 @@ describe('managed session authority activation fences', () => {
       ),
     ).toEqual(requested);
 
+    const sequence = opened.authority.committedSequence;
+    await expect(
+      opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-refused',
+        }),
+        { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+        () => false,
+      ),
+    ).rejects.toThrow(/was not admitted/);
+    expect(opened.authority.action('req-1')?.state).toBe('requested');
+    expect(opened.authority.committedSequence).toBe(sequence);
+
     const decided = await opened.authority.resolveAction(
       inputCommand(fixture, {
         operation: 'resolveAction',
         commandId: 'cmd-action-decide',
       }),
       { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+      () => true,
     );
     expect(decided.state).toBe('decided');
     expect(decided.decisionRef).toEqual(ref());
+    // A recorded outcome is answered without asking again.
+    expect(
+      await opened.authority.resolveAction(
+        inputCommand(fixture, {
+          operation: 'resolveAction',
+          commandId: 'cmd-action-decide-replay',
+        }),
+        { requestId: 'req-1', state: 'decided', decisionRef: ref() },
+        () => false,
+      ),
+    ).toEqual(decided);
     expect(
       await opened.authority.resolveAction(
         inputCommand(fixture, {

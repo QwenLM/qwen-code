@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   HOSTED_APPROVAL_TIMEOUT_MS,
+  HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
+  hostedActionAllowed,
   hostedApprovalAsks,
   hostedApprovalDefinition,
   parseHostedApprovalSettings,
@@ -70,6 +73,45 @@ describe('Hosted tool approval settings', () => {
   });
 });
 
+describe('Hosted approval decisions', () => {
+  it('recognises allow under the policy revision the Action recorded', () => {
+    const decision = (optionId: string, policyRevision: string) =>
+      createHash('sha256')
+        .update(
+          JSON.stringify({ v: 1, optionId, inputRevision: 1, policyRevision }),
+        )
+        .digest('hex');
+    const action = (digest: string) => ({
+      requestId: 'tool_approval_1',
+      kind: 'permission',
+      source: 'tool_call',
+      inputRevision: 1,
+      optionsRef: null,
+      state: 'decided' as const,
+      decisionRef: {
+        resourceId: 'r',
+        kind: 'managed-action-decision',
+        schemaVersion: 1,
+        byteLength: 1,
+        digest,
+      },
+    });
+    const next = 'hosted-tool-approval/2';
+    expect(hostedActionAllowed(action(decision('allow', next)), next)).toBe(
+      true,
+    );
+    expect(
+      hostedActionAllowed(
+        action(decision('allow', next)),
+        HOSTED_TOOL_APPROVAL_POLICY,
+      ),
+    ).toBe(false);
+    expect(hostedActionAllowed(action(decision('deny', next)), next)).toBe(
+      false,
+    );
+  });
+});
+
 describe('Hosted approval waiters', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -119,6 +161,22 @@ describe('Hosted approval waiters', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await waiting;
     expect(settled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not wait once the signal has aborted', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    controller.abort();
+    let settled = false;
+    const waiting = new HostedApprovalWaiters()
+      .wait('a', Date.now() + 5_000, controller.signal, () => false)
+      .then(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    await waiting;
     expect(vi.getTimerCount()).toBe(0);
   });
 

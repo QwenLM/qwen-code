@@ -801,7 +801,6 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     const requestId = req.params['requestId'];
-    const stopped = session.managed.authority.writesStopped;
     void resolveHostedAction(
       session.managed,
       session.waiters,
@@ -814,17 +813,11 @@ export function registerHostedHarnessSessionRoutes(
           ? res.json(result.body)
           : error(res, result.status, result.code),
       (cause) => {
+        // This answer recorded nothing, so a retry is safe.
         writeStderrLineSafe(
           `qwen serve: Hosted Action ${requestId} could not be resolved: ${String(cause)}`,
         );
-        // Only this answer's own write can have stopped the writes; any
-        // earlier failure wrote nothing and stays retryable.
-        if (stopped || !session.managed.authority.writesStopped)
-          return error(res, 503, 'action_resolution_failed');
-        // A failed append stops every later write, so no retry can succeed.
-        // Wake the waiting Turn so it blocks the Session now, not at expiry.
-        session.waiters.notify(requestId);
-        error(res, 409, 'hosted_turn_recovery_required');
+        error(res, 503, 'action_resolution_failed');
       },
     );
   });

@@ -25,9 +25,11 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
 } from './hosted-workspace-tool-turn.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
+  hostedActionAllowed,
   resolveHostedAction,
   type HostedApprovalMode,
 } from './hosted-tool-approval.js';
@@ -988,6 +990,13 @@ async function toolResults() {
     );
 }
 
+async function toolResultErrors() {
+  return (await session.sink.project())
+    .filter((record) => record.type === 'tool_result')
+    .flatMap((record) => record.message?.parts ?? [])
+    .map((part) => part.functionResponse?.response?.['error']);
+}
+
 it('asks before an edit in default mode and runs the batch once the owner allows', async () => {
   turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
   const started = Date.now();
@@ -1054,7 +1063,10 @@ it('asks before an edit in default mode and runs the batch once the owner allows
   expect((await checkpoint()).continuation.phase).toBe('results_ready');
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
-  ).resolves.toMatchObject({ status: 200 });
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('deny')),
   ).resolves.toEqual({ status: 409, code: 'action_already_resolved' });
@@ -1089,6 +1101,12 @@ it('refuses a denied call in the model order and still runs the rest', async () 
     'success',
   );
   expect(await toolResults()).toEqual([['call-1'], ['call-0']]);
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('deny')),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'deny' },
+  });
   expect(
     (await checkpoint()).tools?.items.map((item) => item.functionCallId),
   ).toEqual(['call-0']);
@@ -1192,6 +1210,15 @@ it('refuses a call whose approval expires unanswered', async () => {
     resolveHostedAction(session, waiters, requestId, answer('allow')),
   ).resolves.toEqual({ status: 409, code: 'action_expired' });
   expect(publish).not.toHaveBeenCalled();
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => true,
+    ),
+  ).resolves.toEqual({ status: 409, code: 'action_expired' });
 });
 
 it('expires an approval that is answered after its expiry', async () => {
@@ -1233,6 +1260,15 @@ it('cancels a waiting approval and refuses every call when the turn aborts', asy
   expect(broker.release).toHaveBeenCalledOnce();
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'action_cancelled' });
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => true,
+    ),
   ).resolves.toEqual({ status: 409, code: 'action_cancelled' });
 });
 
@@ -1307,9 +1343,11 @@ it('stops the Turn when a late answer cannot record the expiry', async () => {
     LocalJsonlManagedSessionJournalHandle.prototype,
     'appendTransaction',
   ).mockRejectedValueOnce(new Error('journal down'));
+  const notify = vi.spyOn(waiters, 'notify');
   await expect(
     resolveHostedAction(session, waiters, requestId, answer('allow')),
-  ).rejects.toThrow('journal down');
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  expect(notify).toHaveBeenCalledWith(requestId);
   expect(session.authority.writesStopped).toBe(true);
   await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
   expect(broker.prepare).not.toHaveBeenCalled();
@@ -1532,6 +1570,10 @@ it('does not ask about later calls once the turn is cancelled', async () => {
   ).toHaveLength(1);
   expect(session.authority.action(first)?.state).toBe('cancelled');
   expect(await toolResults()).toEqual([['call-0', 'call-1']]);
+  expect(await toolResultErrors()).toEqual([
+    'The turn was cancelled before this tool call ran.',
+    'The turn was cancelled before this tool call ran.',
+  ]);
 });
 
 it('opens no Action when the turn is cancelled while one is prepared', async () => {
@@ -1651,4 +1693,210 @@ it('replays a decision recorded while the answer was being read', async () => {
   vi.mocked(Date.now).mockRestore();
   await running;
   expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('answers two identical concurrent decisions alike', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const decided = {
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  };
+  await expect(
+    Promise.all([
+      resolveHostedAction(session, waiters, requestId, answer('allow')),
+      resolveHostedAction(session, waiters, requestId, answer('allow')),
+    ]),
+  ).resolves.toEqual([decided, decided]);
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('answers the same decision that won a race while it was being written', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const original = session.authority.resolveAction.bind(session.authority);
+  vi.spyOn(session.authority, 'resolveAction').mockImplementationOnce(
+    async (command, request) => {
+      // The same decision is recorded first, and this write then conflicts.
+      await original(command, request);
+      throw new ManagedSessionConflictError('action already decided.');
+    },
+  );
+  const notify = vi.spyOn(waiters, 'notify');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
+  expect(notify).toHaveBeenCalledWith(requestId);
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('answers the loser of two different concurrent decisions with a conflict', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const results = await Promise.all([
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+    resolveHostedAction(session, waiters, requestId, answer('deny')),
+  ]);
+  const recorded = hostedActionAllowed(
+    session.authority.action(requestId)!,
+    HOSTED_TOOL_APPROVAL_POLICY,
+  )
+    ? 'allow'
+    : 'deny';
+  expect(results).toContainEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: recorded },
+  });
+  expect(results).toContainEqual({
+    status: 409,
+    code: 'action_already_resolved',
+  });
+  await running;
+  expect(broker.execute).toHaveBeenCalledTimes(recorded === 'allow' ? 1 : 0);
+});
+
+it('writes nothing once the Turn blocks while the decision is published', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  let blocked = false;
+  const publish = session.resources.publish.bind(session.resources);
+  vi.spyOn(session.resources, 'publish').mockImplementationOnce(
+    async (kind, bytes) => {
+      blocked = true;
+      return publish(kind, bytes);
+    },
+  );
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    ),
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  await running;
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('answers what landed while the decision was published, even once blocked', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  let blocked = false;
+  const publish = session.resources.publish.bind(session.resources);
+  vi.spyOn(session.resources, 'publish').mockImplementationOnce(
+    async (kind, bytes) => {
+      // Another answer records allow, then the Session blocks.
+      await resolveHostedAction(session, waiters, requestId, answer('allow'));
+      blocked = true;
+      return publish(kind, bytes);
+    },
+  );
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    ),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('writes nothing when the Session blocks while the decision waits in the queue', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  // Hold another write inside the authority's queue.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const inQueue = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const append =
+    LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+  vi.spyOn(
+    LocalJsonlManagedSessionJournalHandle.prototype,
+    'appendTransaction',
+  ).mockImplementationOnce(async function (
+    this: LocalJsonlManagedSessionJournalHandle,
+    records,
+  ) {
+    entered();
+    await gate;
+    return append.call(this, records);
+  });
+  const held = commit('assistant', [{ text: 'held' }], 'model');
+  await inQueue;
+  const queued = vi.spyOn(session.authority, 'resolveAction');
+  let blocked = false;
+  const answering = resolveHostedAction(
+    session,
+    waiters,
+    requestId,
+    answer('allow'),
+    () => blocked,
+  );
+  await vi.waitFor(() => expect(queued).toHaveBeenCalled());
+  blocked = true;
+  release();
+  await held;
+  await expect(answering).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+  });
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  await running;
+  expect(broker.execute).not.toHaveBeenCalled();
 });
