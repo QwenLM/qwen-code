@@ -38,6 +38,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-admission;MODE=MySQL;"
@@ -66,6 +68,9 @@ class ManagedWorkspaceAdmissionTest {
 
     @Autowired
     private ManagedWorkspaceRegistry registry;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @Test
     void discoveryFiltersBeforePagingAndKeepsDefaultOutsidePage()
@@ -551,15 +556,19 @@ class ManagedWorkspaceAdmissionTest {
         ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
                 Clock.systemUTC(), ignored -> {
                 }, registry, enabled);
+        // An unproxied store has no @Transactional; creation resolves the
+        // Workspace only inside a transaction, as the Spring bean provides.
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
         List<Map<String, Object>> input = List.of(
                 Map.of("type", "text", "text", "go"));
         String digest = "sha256:" + "a".repeat(64);
 
         for (String workspace : List.of("ws-policy", "ws-tenant")) {
-            assertThatThrownBy(() -> gated.insertWorkspaceSessionCommand(
-                    tenant, "actor-a", workspace, digest, "qwen-code", null,
-                    null, input, digest,
-                    new WorkspaceSelection(workspace, ".")))
+            assertThatThrownBy(() -> transaction.execute(status ->
+                    gated.insertWorkspaceSessionCommand(tenant, "actor-a",
+                            workspace, digest, "qwen-code", null, null, input,
+                            digest, new WorkspaceSelection(workspace, "."))))
                     .as(workspace)
                     .isInstanceOfSatisfying(ApiException.class, error -> {
                         assertThat(error.getStatus())
@@ -577,10 +586,11 @@ class ManagedWorkspaceAdmissionTest {
 
         // The same store admits the Workspace that passes every guard, so the
         // refusals above come from the policy and mount-tenant checks alone.
-        assertThat(gated.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "ws-valid", digest, "qwen-code", null, null, input, digest,
-                new WorkspaceSelection("ws-valid", ".")).sessionId())
-                .isNotBlank();
+        assertThat(transaction.execute(status ->
+                gated.insertWorkspaceSessionCommand(tenant, "actor-a",
+                        "ws-valid", digest, "qwen-code", null, null, input,
+                        digest, new WorkspaceSelection("ws-valid", ".")))
+                .sessionId()).isNotBlank();
     }
 
     @Test
