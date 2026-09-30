@@ -401,9 +401,9 @@ import {
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
-import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import {
-  serializeStatsMessage,
+  createStatsMessageData,
   type StatsView,
 } from './components/messages/StatsMessage';
 import {
@@ -12144,8 +12144,15 @@ export function App({
   // block mid-stream, which would split the streaming answer and orphan its
   // usage frames.
   const dispatchReadOnlyStatus = useCallback(
-    (text: string) => {
-      store.dispatch([{ type: 'status', text, clearActiveText: false }]);
+    (text: string, data?: unknown) => {
+      store.dispatch([
+        {
+          type: 'status',
+          text,
+          ...(data !== undefined ? { data } : {}),
+          clearActiveText: false,
+        },
+      ]);
       resumeChatBottomFollow('smooth');
     },
     [store, resumeChatBottomFollow],
@@ -13608,7 +13615,10 @@ export function App({
         .getContextUsage({ detail })
         .then((result) => {
           if (!owner.isCurrent()) return;
-          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
+          dispatchReadOnlyStatus(
+            t('contextUsage.title'),
+            createContextUsageMessageData(result),
+          );
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
@@ -13622,6 +13632,7 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       reportError,
+      t,
     ],
   );
   // Stable identity: ChatEditor is memoized and an inline closure would
@@ -17350,7 +17361,8 @@ export function App({
               .then((result) => {
                 if (!owner.isCurrent()) return;
                 dispatchReadOnlyStatus(
-                  serializeStatsMessage(result, statsView),
+                  t('stats.title'),
+                  createStatsMessageData(result, statsView),
                 );
               })
               .catch((error: unknown) => {
