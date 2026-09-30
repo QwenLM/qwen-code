@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import yargs from 'yargs';
 import type { ArgumentsCamelCase } from 'yargs';
 
 const loadSettings = vi.fn();
@@ -316,5 +317,35 @@ describe('update command', () => {
     );
     expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+});
+
+describe('update command argument parsing', () => {
+  // The parser mirrors production: config.ts builds yargs with .strict(), so
+  // an undeclared --target-version (builder removed or option renamed) throws
+  // instead of silently falling through to registry discovery.
+  function capturingParser(received: { argv?: ArgumentsCamelCase<unknown> }) {
+    return yargs([])
+      .command({
+        ...updateCommand,
+        handler: (argv) => {
+          received.argv = argv;
+        },
+      })
+      .strict()
+      .fail(false)
+      .locale('en');
+  }
+
+  it('maps --target-version to argv.targetVersion through the builder', async () => {
+    const received: { argv?: ArgumentsCamelCase<unknown> } = {};
+    await capturingParser(received).parse('update --target-version 0.23.1');
+    expect(received.argv).toMatchObject({ targetVersion: '0.23.1' });
+  });
+
+  it('leaves targetVersion absent when the flag is not given', async () => {
+    const received: { argv?: ArgumentsCamelCase<unknown> } = {};
+    await capturingParser(received).parse('update');
+    expect(received.argv).not.toHaveProperty('targetVersion');
   });
 });

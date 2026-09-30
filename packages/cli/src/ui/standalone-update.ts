@@ -14,7 +14,6 @@ import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
 import type { Response as UndiciResponse } from 'undici';
 import * as tar from 'tar';
-import semver from 'semver';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -1279,9 +1278,27 @@ async function applyStandaloneUpdate(
     await extractArchive(archivePath, extractDir, target);
 
     const newInstallDir = path.join(extractDir, 'qwen-code');
-    if (!fs.existsSync(path.join(newInstallDir, 'manifest.json'))) {
+    const newManifestPath = path.join(newInstallDir, 'manifest.json');
+    if (!fs.existsSync(newManifestPath)) {
       throw new Error(
         'Extracted archive does not contain expected qwen-code directory',
+      );
+    }
+    // The smoke test pins the version the executable reports; the manifest is
+    // the field the installation reads back (and the prepared-update gate
+    // compares against), so it must agree with the requested version too.
+    const manifestVersion = (
+      JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
+        version?: unknown;
+      }
+    ).version;
+    if (
+      typeof manifestVersion !== 'string' ||
+      !SEMVER_RE.test(manifestVersion) ||
+      normalizeVersion(manifestVersion) !== normalizeVersion(newVersion)
+    ) {
+      throw new Error(
+        `Smoke test failed: manifest version ${String(manifestVersion)} does not match expected version ${newVersion}`,
       );
     }
 

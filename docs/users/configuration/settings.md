@@ -872,7 +872,7 @@ QWEN_UPDATE_BASE_URL="https://downloads.example.com/qwen-code" \
   qwen update --target-version 0.23.1
 ```
 
-`--target-version` accepts a concrete stable or prerelease version, optionally prefixed with `v`. It rejects mutable tags such as `latest` and `nightly`. Explicit targets permit same-version reinstalls and downgrades; the downloaded executable must report the requested version before activation. For non-standalone installations, the command returns an error directing you to install the selected version manually using your installation method. Omitting the option preserves normal version discovery.
+`--target-version` accepts a concrete stable or prerelease version, optionally prefixed with `v`. It rejects mutable tags such as `latest` and `nightly`. Explicit targets permit same-version reinstalls and downgrades; the downloaded executable must report the requested version before activation. The selection applies to that update only and is not persisted: background and on-exit automatic updates move a standalone installation forward again on the next session, so keeping an exact older version requires setting [`general.enableAutoUpdate`](#general) to `false`. For non-standalone installations, the command returns an error directing you to install the selected version manually using your installation method. Omitting the option preserves normal version discovery.
 
 This setting applies to `qwen update`, `/update`, and automatic standalone updates. It does not change npm registry version discovery. It is separate from the installer's `QWEN_INSTALL_BASE_URL`, which points directly to a version-specific directory.
 

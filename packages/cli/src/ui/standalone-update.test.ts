@@ -449,13 +449,17 @@ describe('standalone-update', () => {
         badChecksum?: boolean;
         runnable?: boolean;
         reportedVersion?: string;
+        manifestVersion?: string;
       } = {},
     ) {
       const fixture = path.join(tempDir, 'fixture');
       fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
       fs.writeFileSync(
         path.join(fixture, 'qwen-code', 'manifest.json'),
-        JSON.stringify({ target: 'linux-x64', version: '1.2.3' }),
+        JSON.stringify({
+          target: 'linux-x64',
+          version: options.manifestVersion ?? '1.2.3',
+        }),
       );
       // `runnable` prints the version the archive was built for;
       // `reportedVersion` stages a mismatch against it instead.
@@ -501,6 +505,20 @@ describe('standalone-update', () => {
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
           'Smoke test failed: expected version 1.2.3, got 9.9.9',
+        );
+        expectInstallationPreserved();
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves the installation when the archive manifest version disagrees with the requested version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({ runnable: true, manifestVersion: '9.9.9' });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'Smoke test failed: manifest version 9.9.9 does not match expected version 1.2.3',
         );
         expectInstallationPreserved();
       },
