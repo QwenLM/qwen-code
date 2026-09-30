@@ -227,7 +227,8 @@ H records. It also projects `action.changed` into a new Actions table in the
 same transaction, reading the options from the `optionsRef` resource that the
 Harness publishes before it commits the request, and appends an
 `action.updated` Session event. The table
-uses Flyway migration V23; tool publication uses V20–V22.
+uses Flyway migration V24; tool publication uses V20–V22 and the Session MCP
+catalog uses V23.
 Projection validates the original options resource and immutable revision chain.
 Decision receipt IDs are opaque product handles derived from the recorded
 decision, never raw storage resource IDs. The public Turn ID is resolved from

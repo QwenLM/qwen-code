@@ -105,6 +105,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
             }
+            if (actions == null) {
+                throw new IllegalStateException("Hosted Workspace Sessions"
+                        + " require the Managed Action store");
+            }
             workspaceExecution.authorize(session);
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
@@ -114,7 +118,6 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         ? load(session, false)
                         : create(session));
         if (session.workspace() != null
-                && actions != null
                 && !actions.approvalMode(tenantId, sessionId).equals(attached.getApprovalMode())) {
             attachments.remove(key);
             throw new IllegalStateException(
@@ -251,7 +254,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     CreateHarnessSession.builder()
                             .harnessSessionId(session.sessionId())
                             .approvalMode(
-                                    session.workspace() == null || actions == null
+                                    session.workspace() == null
                                             ? approvalMode
                                             : parseApprovalMode(
                                                     actions.approvalMode(

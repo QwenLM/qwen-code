@@ -118,7 +118,7 @@ Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模�
 
 ### 6.1 投影
 
-Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记录。它还会在同一个事务中把 `action.changed` 投影到一张新的 Action 表，从 Harness 在提交请求之前发布的 `optionsRef` 资源中读取选项，并追加一个 `action.updated` Session 事件。该表使用 Flyway V23；V20–V22 已由工具发布功能使用。投影验证原始选项资源及不可变的版本链。决定回执 ID 是从已记录决定派生的不透明产品句柄，不暴露存储资源 ID。存在对应的 Java Turn 时，从 Hosted prompt ID 解析公共 Turn ID。
+Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记录。它还会在同一个事务中把 `action.changed` 投影到一张新的 Action 表，从 Harness 在提交请求之前发布的 `optionsRef` 资源中读取选项，并追加一个 `action.updated` Session 事件。该表使用 Flyway V24；V20–V22 已由工具发布功能使用，V23 已由 Session MCP 目录使用。投影验证原始选项资源及不可变的版本链。决定回执 ID 是从已记录决定派生的不透明产品句柄，不暴露存储资源 ID。存在对应的 Java Turn 时，从 Hosted prompt ID 解析公共 Turn ID。
 
 ### 6.2 路由
 

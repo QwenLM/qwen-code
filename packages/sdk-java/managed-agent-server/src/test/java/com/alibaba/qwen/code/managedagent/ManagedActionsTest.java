@@ -423,6 +423,43 @@ class ManagedActionsTest {
     }
 
     @Test
+    void cancelledActionsFailTheResponseWithActionCancelled() throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        ActionJournal journal =
+                action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
+        responses.put(
+                journal.id,
+                call -> {
+                    throw new IllegalStateException("turn aborted");
+                });
+        JsonNode admitted =
+                readAccepted(
+                        auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                                .header("Idempotency-Key", "cancelled-answer")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(response("allow")));
+        String op = admitted.path("id").asText();
+        journal.change("cancelled", null);
+        await().atMost(Duration.ofSeconds(5))
+                .untilAsserted(
+                        () ->
+                                assertThat(
+                                                sessions.findOperation(tenant, session, op)
+                                                        .orElseThrow()
+                                                        .state())
+                                        .isEqualTo("FAILED"));
+        JsonNode result =
+                read(
+                        auth(
+                                get("/v1/agents/sessions/{session}/operations/{op}", session, op),
+                                tenant,
+                                "owner"));
+        assertThat(result.path("failure_code").asText()).isEqualTo("action_cancelled");
+        assertThat(result.has("action_resolution")).isFalse();
+    }
+
+    @Test
     void competingResponsesReconcileWithTheSingleRecordedDecision() throws Exception {
         String tenant = tenant();
         String session = session(tenant);
