@@ -77,12 +77,13 @@ class HostedWorkspaceConcurrencyIT {
         var source = new DriverManagerDataSource(url, user, password);
         var jdbc = new JdbcTemplate(source);
         String tenant = "w1-race-" + UUID.randomUUID();
-        Path root = Files.createDirectory(temporary.resolve("workspace"));
-        // Keep initialized-root mtime distinct from birth time without relying on sleeps.
-        Files.setLastModifiedTime(root, FileTime.fromMillis(1));
-        Files.createDirectory(temporary.resolve("initial-state"));
-        var properties = properties(tenant, root, temporary.resolve("initial-state"));
+        Throwable failure = null;
         try {
+            Path root = Files.createDirectory(temporary.resolve("workspace"));
+            // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+            Files.setLastModifiedTime(root, FileTime.fromMillis(1));
+            Files.createDirectory(temporary.resolve("initial-state"));
+            var properties = properties(tenant, root, temporary.resolve("initial-state"));
             Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
             var store = store(source, properties);
             jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
@@ -201,9 +202,40 @@ class HostedWorkspaceConcurrencyIT {
                 }
                 System.out.println("W1_TWO_BROKER_A4_OK physical=" + LINUX + " staleLost=" + LINUX);
             }
+        } catch (Exception | Error error) {
+            failure = error;
+            throw error;
         } finally {
-            jdbc.update("DELETE FROM managed_workspace_execution_lease WHERE tenant_id = ?", tenant);
-            if (h2 != null) h2.stop();
+            try {
+                jdbc.update("DELETE FROM qwen_tool_execution WHERE binding_id IN"
+                        + " (SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?)", tenant);
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE binding_id IN"
+                        + " (SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?)",
+                        Long.class, tenant)).isZero();
+                for (String table : List.of("qwen_runtime_session", "qwen_runtime_binding",
+                        "qwen_runtime_binding_slot", "qwen_runtime_placement_guard",
+                        "managed_workspace_execution_lease", "managed_agent_event",
+                        "managed_agent_consumer_progress", "managed_workspace_create_command",
+                        "managed_session_create_scope", "managed_agent_session",
+                        "managed_workspace_access", "managed_workspace_registry")) {
+                    jdbc.update("DELETE FROM " + table + " WHERE tenant_id = ?", tenant);
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE tenant_id = ?",
+                            Long.class, tenant)).as("%s fixture tenant cleanup", table).isZero();
+                }
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (failure == null) {
+                    failure = cleanupFailure;
+                    throw cleanupFailure;
+                }
+                failure.addSuppressed(cleanupFailure);
+            } finally {
+                try {
+                    if (h2 != null) h2.stop();
+                } catch (RuntimeException | Error stopFailure) {
+                    if (failure == null) throw stopFailure;
+                    failure.addSuppressed(stopFailure);
+                }
+            }
         }
     }
 

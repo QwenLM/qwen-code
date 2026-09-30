@@ -77,11 +77,14 @@ public class WorkspaceStorageGuard {
         if (row == null) {
             return "unverified";
         }
-        String identityStatus = "match";
+        String identityStatus = "unavailable";
         try {
-            requireMatching(row, identity(root), tenantId, storageId);
-        } catch (RuntimeException error) {
+            Identity current = identity(root);
             identityStatus = "mismatch";
+            requireMatching(row, current, tenantId, storageId);
+            identityStatus = "match";
+        } catch (RuntimeException error) {
+            // Keep unreadable identity distinct from a verified mismatch.
         }
         String markerStatus = "match";
         try {
@@ -383,6 +386,9 @@ public class WorkspaceStorageGuard {
 
     private Marker readMarker(Path root) {
         Path file = root.resolve(MARKER);
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ,
                 LinkOption.NOFOLLOW_LINKS)) {
             if (channel.size() > 4096) {

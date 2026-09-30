@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -112,6 +113,43 @@ class WorkspaceStorageGuardTest {
         jdbc.update("UPDATE managed_workspace_execution_lease SET mount_birth_time = NULL");
         assertUnavailable(() -> guard().verify(binding));
         assertThat(guard().inspect("tenant", "storage")).contains("identity=mismatch");
+    }
+
+    @Test
+    void reportsUnreadableIdentityWithoutClaimingMismatch() {
+        guard().register("tenant", "storage", UUID.randomUUID().toString());
+        var unavailable = new WorkspaceStorageGuard(jdbc,
+                new DataSourceTransactionManager(dataSource), properties, path -> {
+                    throw new IOException("identity is unreadable");
+                });
+        assertThat(unavailable.inspect("tenant", "storage"))
+                .contains("identity=unavailable", "marker=match");
+        assertUnavailable(() -> unavailable.verify(binding));
+    }
+
+    @Test
+    void refusesDirectoryAndSymlinkMarkersWithoutChangingRegistration() throws Exception {
+        String operation = UUID.randomUUID().toString();
+        guard().register("tenant", "storage", operation);
+        var registration = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        Path marker = root.resolve(".qwen-managed-storage.json");
+        Path saved = temp.resolve("marker-backup");
+        Files.move(marker, saved);
+        Files.createDirectory(marker);
+        assertUnavailable(() -> guard().verify(binding));
+        assertThat(guard().inspect("tenant", "storage")).contains("marker=unavailable");
+        assertUnavailable(() -> guard().register("tenant", "storage", operation));
+        assertUnavailable(() -> guard().fence("tenant", "storage", 1, UUID.randomUUID().toString()));
+        Files.delete(marker);
+        Files.createSymbolicLink(marker, saved);
+        assertUnavailable(() -> guard().verify(binding));
+        assertThat(guard().inspect("tenant", "storage")).contains("marker=unavailable");
+        assertUnavailable(() -> guard().register("tenant", "storage", operation));
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease"))
+                .isEqualTo(registration);
+        Files.delete(marker);
+        Files.move(saved, marker);
+        guard().verify(binding);
     }
 
     @Test

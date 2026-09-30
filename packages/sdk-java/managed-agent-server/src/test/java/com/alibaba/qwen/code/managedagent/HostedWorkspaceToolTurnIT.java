@@ -355,6 +355,13 @@ class HostedWorkspaceToolTurnIT {
                         else if (cancellations) cancellationProbe.assertReport(sessions.get(index), reports.get(index));
                         else if (faults) assertFaultLedger(jdbc, tenant, sessions.get(index), index, reports.get(index), storeFaults);
                         else if (index < 2) assertThat(Files.readString(workspace.resolve("child/proof.txt"))).isEqualTo("after");
+                        else if (index == 2) {
+                            assertThat(Files.readString(workspace.resolve("child/shell-reloaded.txt"))).isEqualTo("xx");
+                            assertThat(workspace.resolve("shell-reloaded.txt")).doesNotExist();
+                            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
+                                    + " WHERE harness_session_id = ?", Integer.class, sessions.get(index).get("sessionId")))
+                                    .isEqualTo(3);
+                        }
                         assertThat(workspace.resolve("proof.txt")).doesNotExist();
                     }
                 } finally {

@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
     private final ManagedAgentProperties.Harness properties;
@@ -31,16 +33,26 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore workspaceExecution;
     private final DaemonApprovalMode approvalMode;
+    private final ManagedActionStore actions;
     private volatile HostedHarnessClient client;
     private final Map<AttachmentKey, HarnessSessionRef> attachments =
             new ConcurrentHashMap<>();
 
     public QwenHostedHarnessConnector(ManagedAgentProperties properties,
             AgentStateStore sessions, WorkspaceExecutionStore workspaceExecution) {
+        this(properties, sessions, workspaceExecution, null);
+    }
+
+    public QwenHostedHarnessConnector(
+            ManagedAgentProperties properties,
+            AgentStateStore sessions,
+            WorkspaceExecutionStore workspaceExecution,
+            ManagedActionStore actions) {
         this.properties = properties.getHarness();
         this.sessionStore = properties.getSessionStore();
         this.workspaceId = sessionStore.getWorkspaceId();
         this.sessions = sessions;
+        this.actions = actions;
         this.workspaceExecution = workspaceExecution;
         if (this.properties.getToken() == null
                 || this.properties.getToken().isBlank()
@@ -93,6 +105,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
             }
+            if (actions == null) {
+                throw new IllegalStateException("Hosted Workspace Sessions"
+                        + " require the Managed Action store");
+            }
             if (passiveManagedRuntimeRecovery) {
                 workspaceExecution.authorizePassiveAttachment(session);
             } else {
@@ -105,6 +121,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 : attachments.computeIfAbsent(key, ignored -> loadExisting
                         ? load(session, false)
                         : create(session));
+        if (session.workspace() != null
+                && !actions.approvalMode(tenantId, sessionId).equals(attached.getApprovalMode())) {
+            attachments.remove(key);
+            throw new IllegalStateException(
+                    "Hosted Harness did not confirm the Session approval mode");
+        }
         attachments.put(key, attached);
         return new Attachment(attached.getHarnessBootId(),
                 attached.getRuntimeRecovery(),
@@ -181,6 +203,21 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void resolveAction(
+            String tenantId,
+            String sessionId,
+            String actionId,
+            JsonNode response) {
+        requireReadyForNewWork(tenantId, sessionId);
+        client().resolveAction(
+                        attachment(tenantId, sessionId, true),
+                        actionId,
+                        response.path("optionId").asText(),
+                        response.path("inputRevision").asLong(),
+                        response.path("policyRevision").asText());
+    }
+
+    @Override
     public void cancel(String tenantId, String sessionId) {
         client().cancelTurn(attachment(tenantId, sessionId, false));
     }
@@ -234,11 +271,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     private HarnessSessionRef create(SessionRecord session) {
         try {
-            CreateHarnessSession.Builder builder = CreateHarnessSession
-                    .builder()
-                    .harnessSessionId(session.sessionId())
-                    .approvalMode(approvalMode)
-                    .toolProfile(toolProfile(session));
+            CreateHarnessSession.Builder builder =
+                    CreateHarnessSession.builder()
+                            .harnessSessionId(session.sessionId())
+                            .approvalMode(
+                                    session.workspace() == null
+                                            ? approvalMode
+                                            : parseApprovalMode(
+                                                    actions.approvalMode(
+                                                            session.tenantId(),
+                                                            session.sessionId())))
+                            .approvalTimeoutMs(properties.getApprovalTimeout().toMillis())
+                            .toolProfile(toolProfile(session));
             ManagedSessionStoreConnection store = managedSessionStore(
                     session);
             if (store != null) {

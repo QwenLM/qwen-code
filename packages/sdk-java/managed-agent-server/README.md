@@ -51,7 +51,7 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 [简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
-Actions (Java routes planned): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
+Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
 [简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
 ## Prerequisites
@@ -278,12 +278,20 @@ Harness or Runtime Broker credentials.
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
 Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
 adapter uses the same admission. This requires the Hosted Harness and HTTP
-Session Store, `yolo` approval mode, and a `local-process`, `session`-isolated
+Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
 header alone does not authenticate an actor.
+
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
+`auto-edit`, the Session creator can list, inspect and answer pending permission
+Actions through the public API or WebShell. Responses are durable, idempotent
+operations; their final result follows the committed Harness decision.
+`QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
+The approval mode is pinned at Session creation and must be confirmed by the
+Harness on creation and load.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
 through `POST /v1/agents/sessions`. The server chooses the fixed
@@ -433,7 +441,7 @@ for the exact boundary.
 ### Verified original-mount recovery (W1a)
 
 W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
-V24 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
+V25 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
 upgrading every Broker and Harness instance. An unregistered mount is refused
 once the option is enabled; it is never registered from the directory found at
@@ -443,12 +451,12 @@ Marker v2 stores birth time as a canonical `Instant` string preserving nanosecon
 
 Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
 
-Prerelease W1 V21 databases and marker v1 cannot be directly upgraded to V24/v2. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
+Prerelease W1 V21/V24 databases and marker v1 cannot be directly upgraded to V25/v2. Experimental W1 V24 conflicts with main’s Actions V24; renaming the migration does not upgrade an existing database. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Apply
 Flyway migrations, then run the private maintenance entry from this module on
-the same Linux host. Give a stable UUID to each operation and reuse it after a
+the same Linux host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
 crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 `W1_JDBC_PASSWORD` environment variables:
 
@@ -469,7 +477,7 @@ java -cp /path/to/app.jar \
 
 `inspect <tenant> <storage> <canonical-root>` is read-only. The same entry also
 accepts `fence` or `restore-original` with a mount revision and the exact
-operation UUID; both require `--offline-confirmed`. A fence has no timeout and requires every holder field to be clear after exact-owner cleanup. Stop new admissions, settle or cancel original executions, prove writers stopped, release holders and stop service/external writer processes before fencing.
+operation UUID; both require `--offline-confirmed`. A fence has no timeout and requires every holder field to be clear after exact-owner cleanup. Entering a new fence and restoring both require the intact registered root identity and marker. W1 cannot force-fence, re-register or repair a changed identity or missing marker; admission stays closed until the verified original mapping is re-presented, or a separately designed offline repair is performed. Stop new admissions, settle or cancel original executions, prove writers stopped, release holders and stop service/external writer processes before fencing.
 `restore-original` only reopens the still-verified original mapping after its
 holder is clear. Both commands accept retries with the same operation UUID;
 restoring increments the mount revision, so a delayed old fence cannot reopen
@@ -521,11 +529,18 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes copied full-chain scripts for a future integration.
-Their expected `dist/managed-runtime-worker.js` artifact is not built, so the
-commands below describe intended verification, not passing evidence for this
-integration. The G0 integration test instead starts the supported Hosted Harness
-and worker modes through the packaged `dist/cli.js`.
+The full-chain script starts Spring with its embedded Runtime Broker and runs
+both the Hosted Harness and the worker from the packaged `dist/cli.js`: the
+Harness as `node dist/cli.js serve --profile hosted-harness`, and each worker,
+launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
+separate worker bundle exists. The G0 integration test
+(`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
+
+The real-model run below has not been executed as evidence for this
+integration, so treat it as intended verification, not passing evidence. The
+script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
+starts its own temporary MySQL server and exits before starting anything else
+when a command or a required file is missing.
 
 Build the required artifacts first, then run:
 

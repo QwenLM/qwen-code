@@ -249,15 +249,20 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     .slice(lastPrompt + 1)
     .filter((message) => message.role === 'tool');
   if (current.startsWith('SHELL_') && current !== 'SHELL_REFUSAL') {
+    const reloaded =
+      current === 'SHELL_RELOADED' || current === 'SHELL_RESTARTED';
     const callId =
-      current === 'SHELL_RELOADED' ? 'shell-reloaded-proof' : 'shell-proof';
+      current === 'SHELL_RESTARTED'
+        ? 'shell-restarted-proof'
+        : reloaded
+          ? 'shell-reloaded-proof'
+          : 'shell-proof';
     if (!receipts.length) {
-      const producer =
-        current === 'SHELL_RELOADED'
-          ? "require('fs').appendFileSync('shell-reloaded.txt','x'); console.log('RELOADED_OK');"
-          : current === 'SHELL_CANCEL'
-            ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
-            : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
+      const producer = reloaded
+        ? "require('fs').appendFileSync('shell-reloaded.txt','x'); console.log('RELOADED_OK');"
+        : current === 'SHELL_CANCEL'
+          ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
+          : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
       const quote = (text: string) =>
         "'" + text.replaceAll("'", "'\"'\"'") + "'";
       return {
@@ -274,7 +279,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
       };
     }
     assert(
-      current === 'SHELL_LARGE' || current === 'SHELL_RELOADED',
+      current === 'SHELL_LARGE' || reloaded,
       'A failed/cancelled Shell started another inference',
     );
     assert.equal(receipts.length, 1);
@@ -288,7 +293,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
       'Inference preceded durable admission',
     );
     assert.equal(receipts[0].tool_call_id, callId);
-    if (current === 'SHELL_RELOADED') {
+    if (reloaded) {
       assert.match(JSON.stringify(receipts[0].content), /RELOADED_OK/);
       return { content: 'SHELL_DONE' };
     }
@@ -732,6 +737,19 @@ try {
             ),
             'x',
           );
+          await prompt('SHELL_RESTARTED');
+          assert.equal(starts.size, before + 1);
+          assert.equal(modelCalls, beforeModel + 2);
+          assert.equal(
+            await readFile(
+              path.join(session.directory, 'shell-reloaded.txt'),
+              'utf8',
+            ),
+            'xx',
+          );
+          await assert.rejects(
+            access(path.join(cli.root, 'shell-reloaded.txt')),
+          );
         }
         await prompt('TEXT_AFTER_SHELL_RELOAD');
       }
@@ -863,7 +881,7 @@ try {
     } else await json(`/session/${sessionId}/detach`, {}, 204);
   }
   assert(droppedStart);
-  assert.equal(starts.size, 14);
+  assert.equal(starts.size, 15);
   assert.equal(shellExpected.length, 1);
   await writeFile(
     config.resultFile,
