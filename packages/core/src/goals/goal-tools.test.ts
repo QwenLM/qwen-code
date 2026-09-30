@@ -121,6 +121,7 @@ describe('GetGoalTool', () => {
       getDisabledTools: () => new Set<string>(),
       getVisibleTools: () => visibleTools,
       getGoalRuntime: () => undefined as never,
+      isGoalProposalAvailable: () => true,
     } as unknown as Config & GoalToolConfig;
     const registry = new ToolRegistry(config);
     const getGoal = new GetGoalTool(config);
