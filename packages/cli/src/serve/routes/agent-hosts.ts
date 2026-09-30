@@ -8,6 +8,7 @@ import express from 'express';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type { HostRunResult } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   parseHostRunSteps,
   applyHostRunResult,
@@ -23,6 +24,8 @@ import {
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
+
+const debugLogger = createDebugLogger('AGENT_HOSTS');
 
 function body(req: Request): Record<string, unknown> {
   return typeof req.body === 'object' && req.body !== null ? req.body : {};
@@ -460,9 +463,10 @@ export function registerAgentHostTransportRoutes(
           pollIntervalMs = Math.min(pollIntervalMs * 2, 2000);
         }
       } catch (error) {
-        res.status(409).json({
-          error: error instanceof Error ? error.message : String(error),
-        });
+        // The store's message can name coordinator-side paths, so it stays
+        // off the wire, same as the fixed answers enroll and heartbeat give.
+        debugLogger.warn('Agent Host pickup failed:', error);
+        res.status(409).json({ error: 'Agent Host pickup refused.' });
       }
     },
   );
@@ -498,9 +502,10 @@ export function registerAgentHostTransportRoutes(
           alreadyApplied: result.value.alreadyApplied,
         });
       } catch (error) {
-        res.status(409).json({
-          error: error instanceof Error ? error.message : String(error),
-        });
+        // The store's message can name coordinator-side paths, so it stays
+        // off the wire, same as the fixed answers enroll and heartbeat give.
+        debugLogger.warn('Agent Host result failed:', error);
+        res.status(409).json({ error: 'Agent Host result refused.' });
       }
     },
   );

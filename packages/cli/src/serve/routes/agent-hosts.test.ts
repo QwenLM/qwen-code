@@ -13,9 +13,10 @@ import type {
 } from '../workspace-registry.js';
 import { registerAgentHostTransportRoutes } from './agent-hosts.js';
 
-const { pickup, heartbeat } = vi.hoisted(() => ({
+const { pickup, heartbeat, applyResult } = vi.hoisted(() => ({
   pickup: vi.fn<() => Promise<unknown>>(),
   heartbeat: vi.fn<() => Promise<unknown>>(),
+  applyResult: vi.fn<() => Promise<unknown>>(),
 }));
 
 vi.mock(
@@ -25,6 +26,7 @@ vi.mock(
       typeof import('@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js')
     >()),
     pickupRunForHost: pickup,
+    applyHostRunResult: applyResult,
   }),
 );
 vi.mock(
@@ -41,6 +43,7 @@ vi.mock(
 beforeEach(() => {
   pickup.mockReset();
   heartbeat.mockReset();
+  applyResult.mockReset();
 });
 
 function setup(initiallyEnabled = true) {
@@ -73,6 +76,11 @@ function setup(initiallyEnabled = true) {
     beat: (input: Record<string, unknown>) =>
       request(app)
         .post('/agent-hosts/workspace/host/heartbeat')
+        .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
+        .send(input),
+    result: (input: Record<string, unknown>) =>
+      request(app)
+        .post('/agent-hosts/workspace/host/result')
         .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
         .send(input),
   };
@@ -224,4 +232,36 @@ it('does not disclose paths when the host registry fails before authentication',
     .send({ workspaceCwd: '/remote', providers: ['qwen'] });
   expect(response.status).toBe(400);
   expect(response.body).toEqual({ error: 'Agent Host heartbeat refused.' });
+});
+
+it('answers a store failure on the pickup poll with a fixed message', async () => {
+  pickup.mockRejectedValue(
+    new Error(
+      'Cannot pick up Agent work while thread records are unreadable: /private/project/threads',
+    ),
+  );
+
+  const response = await setup().poll();
+
+  expect(response.status).toBe(409);
+  expect(response.body).toEqual({ error: 'Agent Host pickup refused.' });
+  expect(JSON.stringify(response.body)).not.toContain('/private');
+});
+
+it('answers a store failure on result with a fixed message', async () => {
+  applyResult.mockRejectedValue(
+    new Error('Malformed Agent Host registry in /private/project'),
+  );
+
+  const response = await setup().result({
+    threadId: 'thread',
+    runId: 'run',
+    leaseId: 'lease',
+    attempt: 1,
+    status: 'completed',
+  });
+
+  expect(response.status).toBe(409);
+  expect(response.body).toEqual({ error: 'Agent Host result refused.' });
+  expect(JSON.stringify(response.body)).not.toContain('/private');
 });
