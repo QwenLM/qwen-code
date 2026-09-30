@@ -9,6 +9,7 @@ import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
+  isDefinitionPinConsistent,
   parseOperationGrant,
   type ExtensionRun,
   type OperationGrant,
@@ -56,6 +57,10 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 import { readManagedBranchCheckpoint } from './managed-session-resources.js';
+import {
+  parseMcpConfiguration,
+  parseMcpOperation,
+} from './managed-mcp-record.js';
 import {
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
@@ -228,14 +233,14 @@ export interface ManagedSessionExtensionRecord {
   /** The closed record body, parsed and frozen. */
   readonly record: unknown;
   readonly run: ExtensionRun;
-  readonly task: ManagedSessionTaskView;
+  readonly task: ManagedSessionTaskView | null;
 }
 
 export interface ManagedSessionExtensionReceipt {
   readonly receipt: ManagedSessionCommitReceipt;
   readonly domain: ManagedSessionDomain;
   readonly recordId: string;
-  readonly taskId: string;
+  readonly taskId: string | null;
   readonly revision: number;
   readonly recordRef: ManagedSessionDurableRef;
 }
@@ -388,6 +393,14 @@ export class LocalManagedSessionAuthority {
 
   get sessionHeader(): ManagedSessionHeader {
     return this.header;
+  }
+
+  /**
+   * True after an append failed. Its records may already be on disk, so this
+   * authority accepts no further writes and the Session needs recovery.
+   */
+  get writesStopped(): boolean {
+    return this.writeFailure !== undefined;
   }
 
   /**
@@ -788,7 +801,10 @@ export class LocalManagedSessionAuthority {
 
   /**
    * Arbiter-only final decision. A later conflicting outcome is rejected; the
-   * same outcome is idempotent so a duplicate client response is safe.
+   * same outcome is idempotent so a duplicate client response is safe. When
+   * given, `admit` is asked inside the serial section just before a new
+   * outcome is written, so a caller's own precondition cannot change while the
+   * write waits its turn; refusing writes nothing.
    */
   resolveAction(
     command: ManagedSessionCommand,
@@ -797,6 +813,7 @@ export class LocalManagedSessionAuthority {
       readonly state: Exclude<ManagedSessionActionState, 'requested'>;
       readonly decisionRef: ManagedSessionDurableRef | null;
     },
+    admit?: () => boolean,
   ): Promise<ManagedSessionAction> {
     return this.runSerial(async () => {
       const existing = this.actions.get(request.requestId);
@@ -811,6 +828,11 @@ export class LocalManagedSessionAuthority {
         }
         throw new ManagedSessionConflictError(
           `action ${request.requestId} already ${existing.state}.`,
+        );
+      }
+      if (admit && !admit()) {
+        throw new ManagedSessionConflictError(
+          `action ${request.requestId} was not admitted.`,
         );
       }
       await this.commit(
@@ -1308,6 +1330,7 @@ export class LocalManagedSessionAuthority {
       if (replayed !== undefined) return replayed;
       assertManagedSessionDomainEnabled(request.domain);
       const parsed = body.parse(request.record);
+      await this.verifyMcpResources(request.domain, parsed.record);
       this.assertExtensionRevision(
         request.domain,
         body,
@@ -1391,6 +1414,14 @@ export class LocalManagedSessionAuthority {
     );
   }
 
+  extensionRecordsInDomain(
+    domain: ManagedSessionDomain,
+  ): readonly ManagedSessionExtensionRecord[] {
+    return [...this.extensionRecords.values()].filter(
+      (record) => record.domain === domain,
+    );
+  }
+
   /**
    * The Session's task list, rebuilt from the committed records: newest
    * first, then by task ID, both descending.
@@ -1398,6 +1429,7 @@ export class LocalManagedSessionAuthority {
   taskViews(): readonly ManagedSessionTaskView[] {
     return [...this.extensionRecords.values()]
       .map((record) => record.task)
+      .filter((task): task is ManagedSessionTaskView => task !== null)
       .sort((left, right) =>
         left.createdAt !== right.createdAt
           ? right.createdAt - left.createdAt
@@ -1502,6 +1534,45 @@ export class LocalManagedSessionAuthority {
     reject: (message: string) => never,
   ): void {
     const previous = this.extensionRecord(domain, parsed.recordId);
+    if (domain === 'mcp_configuration') {
+      for (const configuration of this.extensionRecordsInDomain(domain)) {
+        if (
+          !isDefinitionPinConsistent(
+            configuration.run.definition,
+            parsed.run.definition,
+          )
+        ) {
+          reject('An MCP server revision cannot name two definition digests.');
+        }
+      }
+    }
+    if (domain === 'mcp_operation' && previous === undefined) {
+      const operation = parseMcpOperation(parsed.record);
+      const configuration = this.extensionRecord(
+        'mcp_configuration',
+        operation.configurationId,
+      );
+      const config =
+        configuration === undefined
+          ? undefined
+          : parseMcpConfiguration(configuration.record);
+      if (
+        config === undefined ||
+        config.releaseState !== 'active' ||
+        config.run.state !== 'settled' ||
+        config.serverId !== operation.serverId ||
+        config.serverRevision !== operation.serverRevision ||
+        config.configRevision !== operation.configRevision ||
+        config.catalogRevision !== operation.catalogRevision ||
+        config.connectionGeneration !== operation.connectionGeneration ||
+        config.run.definition?.definitionDigest !==
+          operation.run.definition?.definitionDigest
+      ) {
+        reject(
+          'MCP operation must bind to its active committed configuration.',
+        );
+      }
+    }
     if (previous === undefined) {
       if (!body.isStart(parsed.record)) {
         reject(
@@ -1535,7 +1606,8 @@ export class LocalManagedSessionAuthority {
     const sessionId = this.sessionKey.sessionId;
     const key = managedExtensionRecordKey(sessionId, domain, parsed.recordId);
     const previous = this.extensionRecords.get(key);
-    const taskId = managedTaskId(key);
+    const taskKind = MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKind;
+    const taskId = taskKind === null ? null : managedTaskId(key);
     const record: ManagedSessionExtensionRecord = Object.freeze({
       domain,
       recordId: parsed.recordId,
@@ -1544,12 +1616,19 @@ export class LocalManagedSessionAuthority {
       recordRef,
       record: parsed.record,
       run: parsed.run,
-      task: Object.freeze({
-        taskId,
-        sessionId,
-        kind: MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKind,
-        ...projectManagedTask(previous?.task ?? null, parsed.run, occurredAt),
-      }),
+      task:
+        taskKind === null
+          ? null
+          : Object.freeze({
+              taskId: taskId!,
+              sessionId,
+              kind: taskKind,
+              ...projectManagedTask(
+                previous?.task ?? null,
+                parsed.run,
+                occurredAt,
+              ),
+            }),
     });
     this.extensionRecords.set(key, record);
     const committed = Object.freeze({
@@ -1589,6 +1668,7 @@ export class LocalManagedSessionAuthority {
           MANAGED_SESSION_LIMITS.maxEventBytes,
         ),
       );
+      await this.verifyMcpResources(domain, parsed.record);
       this.assertExtensionRevision(
         domain,
         body,
@@ -1608,6 +1688,24 @@ export class LocalManagedSessionAuthority {
         parsed,
         recordRef,
       );
+    }
+  }
+
+  private async verifyMcpResources(
+    domain: ManagedSessionDomain,
+    record: unknown,
+  ): Promise<void> {
+    const refs =
+      domain === 'mcp_configuration'
+        ? [parseMcpConfiguration(record).catalogRef]
+        : domain === 'mcp_operation'
+          ? [
+              parseMcpOperation(record).argsRef,
+              parseMcpOperation(record).resultRef,
+            ]
+          : [];
+    for (const ref of refs) {
+      if (ref !== null) await this.resources!.read(ref);
     }
   }
 

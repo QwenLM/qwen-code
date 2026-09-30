@@ -1842,6 +1842,51 @@ describe('WorkflowRunner', () => {
       await expect(fs.readdir(root)).resolves.toEqual([]);
     });
 
+    it('refuses a resume whose script has a dynamic import, leaving its files as they were', async () => {
+      const { config, registry } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+      const runId = 'wf_1234abcd';
+      const files: Record<string, string> = {
+        [path.join(runId, 'journal.jsonl')]: '{"kind":"prior"}\n',
+        [`${runId}.json`]: '{"status":"completed"}',
+        [path.join('generated', 'inline', `${runId}.js`)]:
+          'return await agent("work")',
+      };
+      for (const [name, content] of Object.entries(files)) {
+        await fs.mkdir(path.dirname(path.join(root, name)), {
+          recursive: true,
+        });
+        await fs.writeFile(path.join(root, name), content);
+      }
+      const dispatch = vi.fn(async () => 'live');
+
+      const start = WorkflowRunner.start({
+        ...resumeOptions(config, runId),
+        script: 'await agent("work");\nawait import("node:fs");',
+        dispatch,
+      });
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowScriptNotLaunchedError,
+      );
+      await expect(start).rejects.toThrow(/line 2: dynamic import\(\)/);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.get(runId)).toBeUndefined();
+      expect(registry.isStarting(runId)).toBe(false);
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+      expect(persistInlineWorkflowScriptMock).not.toHaveBeenCalled();
+      for (const [name, content] of Object.entries(files)) {
+        await expect(fs.readFile(path.join(root, name), 'utf8')).resolves.toBe(
+          content,
+        );
+      }
+      await expect(fs.readdir(root)).resolves.toEqual(
+        expect.arrayContaining(['generated', runId, `${runId}.json`]),
+      );
+      await expect(fs.readdir(root)).resolves.toHaveLength(3);
+    });
+
     it('refuses a resume whose journal cannot be read, and says why', async () => {
       const { config, registry } = configWithRegistry();
       const root = await makeStorageRoot();
@@ -2629,6 +2674,41 @@ describe('WorkflowRunner', () => {
       },
     );
 
+    // A dynamic import() fails only when V8 reaches it, after the agents
+    // before it have been spent. Refused here with its own cause instead.
+    it('refuses a dynamic import before any agent runs, without the syntax hint', async () => {
+      const { config, registry } = configWithRegistry();
+      const root = await makeStorageRoot();
+      stubStorage(config, root);
+      logWorkflowRunMock.mockClear();
+      writeWorkflowSnapshotMock.mockClear();
+      writeLineMock.mockClear();
+      const dispatch = vi.fn(async () => 'ok');
+
+      const start = WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        script: "await agent('must-not-run');\nimport('node:fs');\nreturn 1;",
+        args: undefined,
+        dispatch,
+      });
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowScriptNotLaunchedError,
+      );
+      await expect(start).rejects.toThrow(
+        /line 2: dynamic import\(\) is not supported in workflow scripts/,
+      );
+      await expect(start).rejects.toThrow(/inside an agent\(\) call/);
+      await expect(start).rejects.not.toThrow(/TypeScript syntax/);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(registry.list()).toHaveLength(0);
+      expect(writeWorkflowSnapshotMock).not.toHaveBeenCalled();
+      expect(logWorkflowRunMock).not.toHaveBeenCalled();
+      expect(writeLineMock).not.toHaveBeenCalled();
+      await expect(fs.readdir(root)).resolves.toEqual([]);
+    });
+
     // A malformed `export const meta` cannot start a run either, and it
     // reaches the same refusal rather than becoming a registered failure.
     it.each([
@@ -2670,6 +2750,8 @@ describe('WorkflowRunner', () => {
         TS_ANNOTATION,
         'await agent(',
         'export const meta = { name: someIdentifier }',
+        "await agent('a');\nawait import('node:fs');",
+        'const s = "import(\'node:fs\')";\nawait agent(s);',
       ];
 
       for (const source of fixtures) {

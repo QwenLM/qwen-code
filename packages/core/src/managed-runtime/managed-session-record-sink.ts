@@ -486,7 +486,7 @@ export class ManagedSessionRecordSink {
   }
 
   /** Reader-facing records rebuilt from the authoritative log. */
-  project(): Promise<ChatRecord[]> {
-    return this.projection.project();
+  project(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projection.project(throughSequence);
   }
 }

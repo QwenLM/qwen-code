@@ -76,11 +76,26 @@ function authorKindOf(from: string): ThreadMessage['authorKind'] {
   return 'agent';
 }
 
+export class MessageDispatchRejectedError extends Error {
+  constructor(readonly outcomes: TargetOutcome[]) {
+    super('Message did not dispatch to any target.');
+    this.name = 'MessageDispatchRejectedError';
+  }
+}
+
 export interface PostMessageOptions {
   agents?: readonly WorkspaceAgent[];
   now?: number;
   /** Thread state to admit against and persist in the final replacement. */
   threadOverride?: Thread;
+  /**
+   * Books exactly these agents, whatever the text mentions. For a post from
+   * outside the workspace: its caller was granted one agent, and an @name in
+   * the text must not reach another.
+   */
+  targets?: readonly string[];
+  /** Refuse the write unless at least one target accepts the message. */
+  requireDispatch?: boolean;
 }
 
 export function countQueuedElsewhere(
@@ -231,7 +246,18 @@ export async function postMessageInTransaction(
   };
 
   const hasExplicitMention = parsed.ids.length > 0 || parsed.unknown.length > 0;
-  const targetIds = resolveTargets(next, message, hasExplicitMention);
+  // A tree opened from outside the workspace was granted one agent. An @name
+  // in an agent's or the system's post must not wake another one there; a
+  // local person may still bring anyone in.
+  const grantedAgentId = root.externalIntake?.targetAgentId;
+  const targetIds = options.targets
+    ? [...options.targets]
+    : resolveTargets(next, message, hasExplicitMention).filter(
+        (agentId) =>
+          grantedAgentId === undefined ||
+          message.authorKind === 'human' ||
+          agentId === grantedAgentId,
+      );
   if (targetIds.length === 0 && !hasExplicitMention) {
     outcomes.push({ decision: { kind: 'skip', reason: 'no_target' } });
   }
@@ -316,6 +342,14 @@ export async function postMessageInTransaction(
     }
 
     outcomes.push({ agentId, agentName: target?.name, decision });
+  }
+
+  if (
+    options.requireDispatch &&
+    dispatched.length === 0 &&
+    !outcomes.some((outcome) => outcome.decision.kind === 'coalesce')
+  ) {
+    throw new MessageDispatchRejectedError(outcomes);
   }
 
   const storedMessage = { ...message, outcomes: outcomes.map(storeOutcome) };

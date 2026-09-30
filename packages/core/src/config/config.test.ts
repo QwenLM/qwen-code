@@ -961,6 +961,57 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
+    // installProxyDispatcher: false keeps this test from pinning a
+    // process-global undici dispatcher; the wiring under test (the two
+    // constructor options reaching ExtensionManager) is unaffected.
+    const config = new Config({
+      ...baseParams,
+      usageStatisticsEnabled: false,
+      proxy: 'http://127.0.0.1:8080',
+      installProxyDispatcher: false,
+    });
+
+    const manager = config.getExtensionManager() as unknown as {
+      usageStatisticsEnabled?: boolean;
+      proxy?: string;
+    };
+    expect(manager.usageStatisticsEnabled).toBe(false);
+    expect(manager.proxy).toBe('http://127.0.0.1:8080');
+  });
+
+  it('installs the proxy dispatcher by default when a proxy resolves', async () => {
+    // Every pre-existing session Config takes this arm: it passes no
+    // `installProxyDispatcher`, so the default is what honours `settings.proxy`
+    // for LLM and MCP traffic. Both callers that pass the flag pass `false`
+    // (the telemetry-only Config), so without this case inverting the default
+    // to `false` leaves the suite green while session traffic silently goes
+    // direct (#12770 follow-up).
+    const { getGlobalDispatcher, setGlobalDispatcher, EnvHttpProxyAgent } =
+      await import('undici');
+    const { resetDispatcherCache } = await import(
+      '../utils/runtimeFetchOptions.js'
+    );
+    const originalDispatcher = getGlobalDispatcher();
+    try {
+      const config = new Config({
+        ...baseParams,
+        proxy: 'http://127.0.0.1:8080',
+      });
+      // undici loads behind a dynamic import, so the install settles
+      // asynchronously; `initialize()` awaits this same promise.
+      await (config as unknown as { proxyDispatcherReady?: Promise<void> })
+        .proxyDispatcherReady;
+
+      const installed = getGlobalDispatcher();
+      expect(installed).not.toBe(originalDispatcher);
+      expect(installed).toBeInstanceOf(EnvHttpProxyAgent);
+    } finally {
+      setGlobalDispatcher(originalDispatcher);
+      resetDispatcherCache();
+    }
+  });
+
   describe('setHooksFromSettings', () => {
     const systemHooks = {
       SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],

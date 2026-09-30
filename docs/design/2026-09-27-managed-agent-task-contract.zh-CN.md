@@ -3,7 +3,7 @@
 [English](2026-09-27-managed-agent-task-contract.md) | [简体中文](2026-09-27-managed-agent-task-contract.zh-CN.md)
 
 状态：H0a 已实现，仅限契约（它新增的每个路由和 schema，以及它加到现有 schema 的每个属性，当时均为 `planned`）；H0b 已合入；H0c 把四条任务读取路由及其 schema 标记为 `partial`，并去掉 `capabilities.tasks` 上的标记，提供任务列表与详情并宣告任务变化（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）；任务事件、取消和 H1～H6 待实现
-日期：2026-09-27
+日期：2026-09-27；契约后续修订：2026-09-29
 Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
 ## 1. 问题
@@ -38,6 +38,8 @@ Issue：[#12827](https://github.com/QwenLM/qwen-code/issues/12827)，属于 [#12
 
 ## 4. 决定
 
+2026-09-29 的后续修订在契约 v1.23.0 中确定 [#12847](https://github.com/QwenLM/qwen-code/issues/12847) 的 A1–A8。事件和取消仍为 `planned`，不增加运行时行为。A9 与 A10 的任务路由部分已由 #12966 合入。下文原 H0a 的范围与验证仍作为历史记录保留。
+
 ### 4.1 新增内容均为 `planned`
 
 这里新增的每个路由和 schema 都带 `x-qwen-implementation-status: planned`，加到现有 schema
@@ -51,7 +53,9 @@ Java 契约测试就会失败。版本升为 `1.16.0`：新增了路由，而 W0
 作为 `202` 响应，与 planned 类型 `action_response` 和 `close` 相同。只有生成的 WebShell
 类型不受影响，直到任何返回 `WebShellCommandOperation` 的 WebShell 路由变为 `partial`。
 单独建一个 planned 的 operation schema 可以把这个值挡在外面，代价是为一个命令多出第二套
-operation 模型；本变更选择接受它可见。
+operation 模型；本变更选择接受它可见。此后 D4 已把共用命令 operation 暴露在生成类型中，包括 `task_cancel`。本次修订把新增的任务取消专属条件整体标为 `planned`，避免生成器留下对已过滤字段的要求。取消切片提供路由时，必须连同 `task_id`/`taskId`、`failure_code`/`failureCode` 一起去掉这个标记；不收窄任何共用状态枚举。取消切片还必须持久化这两个字段：`managed_agent_operation` 没有 `task_id` 和 `failure_code`
+列，需要一次迁移加入两列，worker 在与 `FAILED` 状态转换的同一事务中写入
+`failure_code`，使失败原因在重新租约和重启后仍然保留（见第 7 节）。
 
 ### 4.2 `PublicTask`
 
@@ -87,8 +91,9 @@ operation 模型；本变更选择接受它可见。
 - **时间戳。** 公共 API 统一用 `int64` epoch 毫秒（`created_at`、`expires_at`），
   服务端由 `clock.millis()` 填写。
 - **`created_at`。** 列表按创建顺序排列，而 `pending` 任务没有 `started_at`，所以视图需要创建时间。
-- **`artifact_refs` 有上限。** 长时间运行的 Monitor 可能轮转出很多 Artifact。视图列出最新的
-  100 个，按从旧到新排列；更早的 Artifact 仍可通过 Session 的 artifact 路由读取。
+- **`artifact_refs` 有上限。** 视图列出最新的 100 个，按从旧到新排列。在能够枚举更早的
+  Artifact 并追溯到任务之前（见第 4.7 节和第 7 节），任务不得轮转出超过该上限的条目：
+  被逐出的 Artifact 仍可按 id 通过 Session 的 artifact 路由读取，但无法再按任务发现。
 
 可选字段缺省时省略，从不为 `null`，与 Action 家族相同；实现该视图的 record 需要
 `@JsonInclude(NON_NULL)`，已有若干 API record 这样做。`additionalProperties: false`
@@ -118,19 +123,19 @@ operation 模型；本变更选择接受它可见。
   则带 `truncated`；
 - `artifact`，收到任务输出的 Artifact 的 `artifact_id`。
 
-条件约束禁止一种类型带另一种类型的字段。类型集合是开放的：后续 minor 版本可以增加类型，
-连同它需要的可选字段一起加入，这是 API 契约第 5 节所允许的。客户端忽略不认识的任务事件类型；任务事件没有终态标志，
-所以该节针对未知终态事件的刷新规则不适用。按 API 契约第 5 节对公共事件的要求，每个事件都带 `schema_version` 和
-`projection_version`。按设计第 11 节和 API 契约第 6 节的要求，高频日志和 Monitor 原始行进入 Artifact 或这个分页流，
-不进入 Session 事件流；事件只保留有限时间，不会永久保存。事件只从最旧的一端过期，因此保留的事件之间没有空洞：
-尚未进入 Artifact 的输出事件也会阻止其后所有事件过期，而错过事件的唯一情形是游标早于最旧的保留事件，
-这时会返回 `cursor_expired`。
+条件约束禁止一种已知类型带另一种类型的字段。类型集合保持开放。同一主版本内，客户端忽略未知可选字段和未知任务事件类型，但仍保存其游标。任务事件没有终态标志。封闭 schema 校验服务端按自身契约版本发出的响应；不支持用旧 minor 版本严格校验新版本响应。允许新增可选字段，但不能在已知类型上复用原本禁止的字段。这遵循 API 契约第 5 节，并保留现有扁平事件结构（A8）。
 
-每个事件都带 `cursor`，即该事件之后的位置，它同时也是事件的标识。消费方为每个已应用的事件保存游标，
-崩溃后恢复时就不会把同一段输出应用两次。一页的 `next_cursor` 是该页最后一个事件的游标，
-因此因 `limit` 而未返回的事件绝不会被越过；空页时它是请求时的位置，不带 `after` 时则是保留事件的起点。与列表页不同，`next_cursor`
-必填且不为 `null`：运行中的任务还会产生事件，读到末尾的调用方仍需要一个继续轮询的位置。
-`after` 接受事件或分页的游标，或任务的 `output_cursor`；不带 `after` 时从最早保留的事件开始。
+每个事件都带 `schema_version` 和 `projection_version`。其身份、位置、载荷和接受时的版本在投影重建、重启和归档后保持不变。即使用 Artifact 偏移实现，游标也绝不重新分配给别的事件；归档必须保留其逻辑位置（A5）。稳定性不排除正常的保留过期。
+
+每个任务的事件以已提交前缀发布：任何事件、分页或 `output_cursor` 位置一旦返回，就不能再有事件出现在它之前或同一位置。提交前分配递增序号并不够；并发写入必须串行发布，或让读取等待未完成的写入。这不要求不同任务之间全局排序，也不要求内部序号连续（A2）。
+
+每个事件都带 `cursor`，即该事件之后的不透明位置，同时作为其身份。消费方原子地应用事件并保存游标，才能在崩溃后避免重复应用同一段输出。一页的 `next_cursor` 是最后一个事件的游标，因此 `limit` 不会越过事件。空页时，它是请求的位置；省略 `after` 时则是保留下限。即使已无保留事件，它仍必填且不为 `null`。
+
+持久化保留下限是最新已过期事件之后的位置；若从未有事件过期，则为流的初始位置。只允许最旧的前缀过期。严格早于下限的游标返回 `409 cursor_expired`，等于下限则合法。保留集为空、重启或投影重建都不能丢掉下限。例如事件 1 到 10 过期后，事件 10 之后的游标合法，事件 9 之后的游标已过期，即使保留集为空也一样。这些是逻辑位置，客户端不能比较游标字符串（A1）。
+
+`after` 接受事件游标、分页游标或任务的 `output_cursor`；省略时从下限开始读取。`output_cursor` 是读取视图时的已提交末尾，刻意跳过更早的输出。恢复必须保留事件分页的检查点，不能用随后任务视图中的末尾替换它。
+
+高频日志和 Monitor 原始行进入 Artifact 或这个单段有上限的分页流，绝不逐行写入 Session 事件。按时间保留是正常归档时的目标，不是无条件删除期限。任何产生输出的任务都要求 `capabilities.artifacts`，包括只向 Artifact 输出的任务。输出事件只有在完整文本已持久归档，并且能按第 4.7 节通过任务 Artifact 发现机制读取后，才允许自身以及后续事件过期（A3–A4）。归档失败不能让下限越过该输出。H3 必须限制持久积压量，并在容量耗尽之前定义生产端背压与准入阻塞；不能在该策略下保全已接受输出的适配器，不得启用产生输出的任务。不能为了达到保留时间目标静默丢弃输出。这些运行时机制属于 H3 的验收门槛，本次契约变更并未实现它们。
 
 这个事件流与 API 契约第 4 节中的 Session 事件历史不同。后者使用公开的整数 `sequence`，
 读取严格大于它的事件，`limit` 最大 1000、默认 100：
@@ -158,15 +163,40 @@ operation 模型；本变更选择接受它可见。
   必须带它，其他类型都不能带。`task_cancel` 绝不带 `action_resolution`。WebShell
   镜像以同样方式增加 `taskId`。
 - 通过已有的 `GET .../operations/{operationId}` 和 WebShell `operations/query` 读回该 operation。
-- 检查按固定顺序进行：访问权限（调用方无法读取任务时返回 `404`，可以读取但无权取消时返回
-  `403 task_forbidden`），然后是幂等重放，最后是任务状态。因此同一 actor 使用同一个
-  `Idempotency-Key` 和相同请求的重试，即使任务已经结算也会重放原 operation，与 cwd 切换以及
-  API 契约第 3 节和第 10 节的要求一致；因此在幂等记录保留期间，丢失的 `202` 不会让发起请求的调用方收到 `409`。
-- `202` 和 `completed` 的 operation 表示 authority 已记录这次取消，不表示任务已停止。
-  任务只有在物理执行结算后才变为 `cancelled`，结果未知时变为 `recovery_blocked`。
-  这遵循设计第 3.2 节：逻辑结算不能覆盖尚未 drain 的进程。
-- 只有 `action_capabilities` 含 `cancel` 时才受理新的键。已结算的任务从不提供它，
-  所以同一条规则覆盖两种情况。
+
+可信 tenant/actor 过滤器与请求解码之后，取消按以下顺序检查（A6）：
+
+1. 校验键：缺失返回 `400 invalid_request`，格式错误返回 `400 invalid_idempotency_key`。
+2. 检查当前访问权：Session 或任务不可读时返回 `404`；可读但无权取消时返回 `403 task_forbidden`。
+3. 在 tenant/Session/operation-kind/actor/key 域内查找保留的幂等记录。请求摘要包含任务 ID，排除仅用于 trace 的请求 ID。摘要不同返回 `409 idempotency_conflict`；相同则返回同一 operation ID、其最新持久状态及 `replayed: true`。
+4. 仅对新请求依次检查任务支持（`400 unsupported_feature`）、Session 是否为 `active`（否则 `409 session_not_active`，包括 `closing`、`closed`、`archived` 和 `deleting`），最后检查 `action_capabilities` 是否含 `cancel`（否则 `409 task_action_unavailable`）。
+5. 原子地复核新请求准入条件并创建 operation，让竞争请求与 Session/任务状态转换串行化。同键并发中已有请求先成功时，按第 3 步处理，不作为新请求。准入还要求该 Session 上没有其他未完成（`pending` 或 `running`）的 operation：取消 operation 与生命周期命令共用同一张持久 operation 表，后者每个 Session 只允许一个未完成的 operation，因此任何未完成的 operation 都会返回 `409 session_operation_active`，而一个未完成的取消同样会阻塞 close、archive 和 delete。
+
+因此，保留的键可以跨越能力和状态变化，但绝不绕过当前访问权检查。资源缺失/已删除或权限撤销仍可返回 `404` 或 `403`；重放承诺以访问权和记录仍保留为前提。合法同键重试不会仅因支持被关闭或任务已结算，就变成新请求的 `400` 或 `409`。
+
+取消 operation 的结果如下（A7）：
+
+| 结果                  | 含义                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| HTTP `202`            | Java 已持久受理命令并承担投递责任，不证明 owner 已接受或物理执行已停止。                          |
+| `pending` / `running` | 投递或确认尚未完成；可重试的传输故障保持在这里。                                                  |
+| `completed`           | 任务 authority 已持久记录取消并返回该 operation 的回执，不证明物理执行已停止。                    |
+| `failed`              | 能确定命令未被接受且不会再投递，`failure_code` 解释原因。                                         |
+| `recovery_blocked`    | 恢复无法确定 authority 是否接受了命令；在对账之前不得报告成功或自动重新执行。                     |
+| `cancelled`           | `task_cancel` 不产生此状态：本契约没有撤回取消命令的机制。共用状态仍可供其他 operation 类型使用。 |
+
+`task_cancel` operation 的其余状态字段随其结果确定。`pending` 和 `running` 携带
+`admission_stage: java_durable`，`delivery_state` 在两次尝试之间为 `pending`、尝试进行中为
+`leased`，不带 `receipt_id`。`completed` 携带 `admission_stage: harness_confirmed`、
+`delivery_state: confirmed` 和任务权威方签发的 `receipt_id`。`failed` 和 `recovery_blocked`
+携带 `admission_stage: java_durable` 和 `delivery_state: blocked` —— 投递已经停止，
+确定未被接受或尚未对账的命令不会再被认领和驱动 —— 且不带 `receipt_id`；`failed` 另带
+`failure_code`。`blocked` 表示在对账之前不再尝试投递；目前没有其他 operation 类型产生该值。
+
+任务只有在取消使物理执行结算后才变为 `cancelled`。自然完成若在竞争中胜出，保留自身的终态；命令受理不能覆盖它。物理结果未知会使任务成为 `recovery_blocked`，这与 operation 的受理结果相互独立。
+
+不同键分别通过准入（包括第 5 步要求的 Session 上无其他未完成
+operation）时，创建不同 operation。它们的物理停止请求可以合并或安全重复，但每个 operation 都必须有自己的记录结果。后到请求若已无 `cancel` 能力，则返回 `409 task_action_unavailable`；两个不同键不保证两次受理。不新增取消 operation 的路由。
 
 ### 4.5 WebShell 适配层
 
@@ -205,31 +235,38 @@ operation 模型；本变更选择接受它可见。
 `CursorExpired` 响应。错误码包括 API 契约已冻结的那些、幂等路由已在返回的 `invalid_idempotency_key`、
 租户过滤器的 `invalid_tenant` 与 `actor_scope_mismatch`，以及三个新增的任务错误码：
 
-| 状态  | 错误码                    | 何时返回                                                                 |
-| ----- | ------------------------- | ------------------------------------------------------------------------ |
-| `400` | `invalid_tenant`          | 缺少 `X-Qwen-Tenant-Id` 或格式错误（租户过滤器）。                       |
-| `400` | `invalid_cursor`          | 任务列表游标格式错误。                                                   |
-| `400` | `invalid_event_cursor`    | `after` 格式错误或属于另一个任务。                                       |
-| `400` | `invalid_limit`           | `limit` 不在 1～100 之间。                                               |
-| `400` | `invalid_request`         | 缺少 `Idempotency-Key`。                                                 |
-| `400` | `invalid_idempotency_key` | `Idempotency-Key` 格式错误，与其他幂等路由相同。                         |
-| `400` | `unsupported_feature`     | 该 Session 不提供任务（`capabilities.tasks` 为 `false`）。               |
-| `403` | `task_forbidden`          | 调用方可以读取该任务，但无权取消它。新增。                               |
-| `403` | `actor_scope_mismatch`    | 已认证的 actor 属于其他租户或其 ID 非法（租户过滤器）。                  |
-| `404` | `session_not_found`       | Session 不存在或不在调用方范围内。                                       |
-| `404` | `task_not_found`          | 任务不存在或不在调用方范围内。新增。                                     |
-| `409` | `cursor_expired`          | `after` 早于保留的事件。                                                 |
-| `409` | `task_action_unavailable` | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。 |
-| `409` | `idempotency_conflict`    | 同一个键用于不同的请求。                                                 |
+| 状态  | 错误码                     | 何时返回                                                                    |
+| ----- | -------------------------- | --------------------------------------------------------------------------- |
+| `400` | `invalid_tenant`           | 缺少 `X-Qwen-Tenant-Id` 或格式错误（租户过滤器）。                          |
+| `400` | `invalid_cursor`           | 任务列表游标格式错误。                                                      |
+| `400` | `invalid_event_cursor`     | `after` 格式错误或属于另一个任务。                                          |
+| `400` | `invalid_limit`            | `limit` 不在 1～100 之间。                                                  |
+| `400` | `invalid_request`          | 缺少 `Idempotency-Key`。                                                    |
+| `400` | `invalid_idempotency_key`  | `Idempotency-Key` 格式错误，与其他幂等路由相同。                            |
+| `400` | `unsupported_feature`      | 该 Session 不提供任务（`capabilities.tasks` 为 `false`）。                  |
+| `403` | `task_forbidden`           | 调用方可以读取该任务，但无权取消它。新增。                                  |
+| `403` | `actor_scope_mismatch`     | 已认证的 actor 属于其他租户或其 ID 非法（租户过滤器）。                     |
+| `404` | `session_not_found`        | Session 不存在或不在调用方范围内。                                          |
+| `404` | `task_not_found`           | 任务不存在或不在调用方范围内。新增。                                        |
+| `409` | `cursor_expired`           | `after` 严格早于持久保留下限，保留集为空也一样。                            |
+| `409` | `task_action_unavailable`  | 使用新键时 `action_capabilities` 不含 `cancel`，包括已结算的任务。新增。    |
+| `409` | `session_not_active`       | 新取消请求指向非 active 的 Session。                                        |
+| `409` | `session_operation_active` | 新取消请求到达时 Session 上有另一个未完成的 operation，与生命周期路由相同。 |
+| `409` | `idempotency_conflict`     | 同一个键用于不同的请求。                                                    |
 
 按 API 契约第 10 节，无权读取任务的调用方收到 `404`，而不是 `403`。只读路由唯一会返回的 `403` 是租户过滤器的
 `actor_scope_mismatch`，针对来自其他租户或 ID 非法的已认证 actor。过滤器覆盖每条 `/v1/agents/` 与 WebShell 路由；任务只读路由从
 `1.21.0` 起声明它，与 Session 和 Turn 的读取路由一致，取消路由另有 `task_forbidden`。`cursor_expired`
 的错误封装中 `replay_floor_sequence` 和 `snapshot_through_sequence` 保持缺省，因为任务游标是不透明的。
-输出事件只有在其文本已进入 Artifact 后才会过期，因此调用方先从头读完保留的事件、再读取任务的 Artifact，
-不会漏掉任何输出：在读取事件开始之前过期的每个事件，都已在那之前进入 Artifact。反过来的顺序可能漏掉在两次读取之间
-被归档并过期的事件。这一保证还要求 `artifact_refs` 列出该任务的全部 Artifact（见第 7 节的 Artifact 归属）。
-两者之间如何无重叠地衔接取决于输出如何分段，由 H3 定义。
+`cursor_expired` 后按以下顺序恢复（A3）：
+
+1. 省略 `after` 从下限读取一页保留事件，保存其 `next_cursor`。不要等待 `has_more` 变成 false：活跃的生产者可能不断增加事件。
+2. 在这些事件读取**之后**读取新的任务视图，再发现并读取其 Artifact。不能复用事件读取之前缓存的 `artifact_refs`。
+3. 从保存的分页游标继续读取事件，包括第一页因上限未返回的事件。若下限追过读者，则重新恢复；不能把再次出现的 `409` 当作空页。H3 定义稳定的输出段身份/范围，用于无重叠地衔接 Artifact 与事件。
+
+输出事件过期之前，其完整文本必须能从持久 Artifact 读取，且恢复读取必须能发现该 Artifact。仅写入 blob，或更新了投影但随后读取仍可能落后，都不够。服务端必须在推进下限之前保证这种可见性。截断事件同样要求完整输出在发布时已经持久可读、可被发现。
+
+在能够枚举更早的 Artifact 并追溯到任务之前，任务不得轮转出超过 `artifact_refs` 的 100 个条目。H3 必须执行这个上限，或者与 O2/O4 一起落地归属机制后才允许超限轮转。该机制存在后，恢复必须同时枚举更早的 Artifact 与最新引用；有上限的视图本身并不完整。这些保证以任务及其 Artifact 按资源保留和授权规则仍可读取为前提，不承诺资源删除后的恢复。并发清理可能需要再次恢复，但绝不能静默越过尚未归档的输出。
 
 ## 5. 契约测试变更
 
@@ -248,6 +285,21 @@ WebShell 的取消请求和事件查询请求也在校验之列。从 `1.21.0` �
 `403`，因为 `ManagedAgentApiContractTest` 无法探测它们。
 
 ## 6. 验证
+
+### 6.1 契约后续修订验收
+
+本次修订增加空事件页、类型集合开放但对象封闭的事件，以及两个接口面和 operation union 中任务取消结果的 schema 实例。重新生成类型不能暴露 planned 路由或字段；共用 operation 的描述可以变化。Schema 测试不能证明上述运行时保证。在 H3 或取消切片把路由标为 `partial` 前，必须证明：
+
+- 游标低于/等于下限时的过期边界，包括保留集为空；
+- 并发延迟提交不能出现在已返回游标之前；
+- 游标与接受时的事件身份在重启、重建和归档后保持不变；
+- Artifact 投影延迟、归档失败和 100 个引用上限不能静默丢输出，恢复衔接输出段时不重复；
+- 声明 `capabilities.tasks` 但未声明 `capabilities.artifacts` 的 Session
+  不能接纳产生输出的任务，包括输出只写入 Artifact 的任务；
+- 能力/Session/任务变化后的重放、撤销访问权、摘要冲突以及同键/不同键并发都遵循第 4.4 节；
+- 丢失的取消回执通过对账处理，不能报告为确定失败或任务物理结算。
+
+### 6.2 H0a 历史验证
 
 - 在 `packages/web-shell` 中运行 `npm run generate:managed-agent-api`，
   `client/components/managed/generated/managed-agent-api.ts` 没有变化，`managed-agent-api.test.ts` 通过。
@@ -278,7 +330,10 @@ WebShell 的取消请求和事件查询请求也在校验之列。从 `1.21.0` �
   Artifact 与保留的事件。
 - **Artifact 归属。** `PublicArtifact` 没有任务引用，artifact 列表也没有按任务过滤，
   所以 `artifact_refs` 中最新 100 个之外的 Artifact 无法追溯到其任务。Artifact 切片（O2、O4）
-  应在任务能轮转出这么多 Artifact 之前加上两者之一。
+  必须在任务能轮转出这么多 Artifact 之前落地两者之一。
+- **取消 operation 存储。** `managed_agent_operation`（V17）没有 `task_id` 和
+  `failure_code` 列。取消切片通过迁移加入两列，并在与 `FAILED` 状态转换的同一事务中写入
+  `failure_code`，使已租约 worker 得知的失败原因在重新租约和重启后仍然保留（见第 4.1 节）。
 - **Legacy 状态。** daemon 的任务状态包括 `paused`，workflow 运行还有 `pausing`；`TaskState`
   两者都没有。已在 #12847（A9）决定：适配切片（H3 或 H4）把两者都映射为 `waiting`，`TaskState`
   不增加状态。H0c 已把 `TaskState` 连同其八个值标为 `partial`，按 API 契约第 5 节，此后再增加

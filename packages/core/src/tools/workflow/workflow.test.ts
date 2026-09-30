@@ -908,8 +908,10 @@ await agent('scan package.json')
     // gained how a run interrupted by its process exiting is listed. Raised
     // again from 28,000, which the fallback had nearly reached, when the
     // `schema` entry gained what is refused before dispatch and what a
-    // failed structured result reports.
-    expect(tool.description.length).toBeLessThanOrEqual(28_500);
+    // failed structured result reports. Raised again from 28,500 when the
+    // reference gained the dynamic import() refusal and the per-call batch
+    // limit with its batching example, which put the fallback at 29,211.
+    expect(tool.description.length).toBeLessThanOrEqual(29_500);
   });
 
   it('rejects build() when script is missing', () => {
