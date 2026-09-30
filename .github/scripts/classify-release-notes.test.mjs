@@ -203,6 +203,12 @@ describe('release note classification', () => {
       join(import.meta.dirname, '../release.yml'),
       'utf8',
     );
+    // release.yml only dispatches now; the labeling body lives in the
+    // extracted step script, so that is where the wiring has to be pinned.
+    const releaseStep = readFileSync(
+      join(import.meta.dirname, 'run-release-step.sh'),
+      'utf8',
+    );
     const workflow = parse(release);
     const publish = workflow.jobs.publish;
     const autoLabel = publish.steps.find(
@@ -215,10 +221,11 @@ describe('release note classification', () => {
     assert.equal(autoLabel.env.GITHUB_TOKEN, '${{ github.token }}');
     assert.equal(publish.permissions.issues, 'write');
     assert.equal(publish.permissions['pull-requests'], 'write');
-    assert.match(autoLabel.run, /classify-release-notes\.mjs/);
-    assert.match(autoLabel.run, /commits="\$\(git rev-list/);
-    assert.match(autoLabel.run, /Cannot enumerate commits/);
-    assert.match(autoLabel.run, /Failed to fetch PRs for commit/);
+    assert.match(autoLabel.run, /run-release-step\.sh label-release-prs/);
+    assert.match(releaseStep, /classify-release-notes\.mjs/);
+    assert.match(releaseStep, /commits="\$\(git rev-list/);
+    assert.match(releaseStep, /Cannot enumerate commits/);
+    assert.match(releaseStep, /Failed to fetch PRs for commit/);
   });
 
   it('updates labels after a lookup failure and exits non-zero', () => {
@@ -240,7 +247,7 @@ describe('release note classification', () => {
           // labels — its projectCards lookup fails on affected gh builds).
           "if (args[0] === 'api' && args[1] === '-X' && (args[2] === 'POST' || args[2] === 'DELETE') && /\\/issues\\/\\d+\\/labels/.test(args[3])) {",
           "  const action = args[2] === 'DELETE' ? 'remove' : 'add';",
-          "  const number = args[3].match(/\\/issues\\/(\\d+)\\/labels/)[1];",
+          '  const number = args[3].match(/\\/issues\\/(\\d+)\\/labels/)[1];',
           `  process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(updates)}, number + ' ' + action + '\\n');`,
           '  process.exit(0);',
           '}',

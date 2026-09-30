@@ -5,6 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
 import { AgentInteractive } from './agent-interactive.js';
 import type { AgentCore } from './agent-core.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
@@ -16,7 +21,8 @@ import type {
 } from './agent-events.js';
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
-import { AgentStatus } from './agent-types.js';
+import { AgentStatus, AgentTerminateMode } from './agent-types.js';
+import { LoopType } from '../../telemetry/types.js';
 import {
   getCurrentAgentDepth,
   getCurrentAgentId,
@@ -33,7 +39,12 @@ function createMockCore(
   overrides: {
     chatValue?: unknown;
     nullChat?: boolean;
-    loopResult?: { text: string; terminateMode: null; turnsUsed: number };
+    loopResult?: {
+      text: string;
+      terminateMode: AgentTerminateMode | null;
+      turnsUsed: number;
+      loopType?: LoopType;
+    };
   } = {},
 ) {
   const emitter = new AgentEventEmitter();
@@ -53,6 +64,15 @@ function createMockCore(
 
   const core = {
     subagentId: 'test-agent-abc123',
+    runInHookFrame: <T>(fn: () => T): T =>
+      runWithHookExecutionOwner(
+        {
+          runtimeId: 'runtime',
+          sessionId: 'session',
+          agentId: 'test-agent-abc123',
+        },
+        fn,
+      ),
     name: 'test-agent',
     eventEmitter: emitter,
     stats: {
@@ -255,6 +275,47 @@ describe('AgentInteractive', () => {
     expect(loopDepth).toBe(0);
   });
 
+  it('restores its hook owner during preparation and later queued rounds', async () => {
+    const { core } = createMockCore();
+    const seen: Array<{
+      stage: string;
+      owner: ReturnType<typeof getHookExecutionOwner>;
+    }> = [];
+    const record = (stage: string) =>
+      seen.push({ stage, owner: getHookExecutionOwner() });
+    vi.mocked(core.createChat).mockImplementation(async () => {
+      record('chat');
+      return createMockChat() as never;
+    });
+    vi.mocked(core.prepareTools).mockImplementation(async () => {
+      record('prepare');
+      return [];
+    });
+    vi.mocked(core.runReasoningLoop).mockImplementation(async () => {
+      record('loop');
+      return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+    });
+    const agent = new AgentInteractive(createConfig(), core);
+    const foreign = { runtimeId: 'other', sessionId: 'other', agentId: 'B' };
+    await runWithHookExecutionOwner(foreign, async () => {
+      await agent.start(context);
+      expect(getHookExecutionOwner()).toEqual(foreign);
+      agent.enqueueMessage('later round');
+      await vi.waitFor(() =>
+        expect(seen.some(({ stage }) => stage === 'loop')).toBe(true),
+      );
+      expect(getHookExecutionOwner()).toEqual(foreign);
+    });
+    expect(seen.map(({ stage }) => stage)).toEqual(['chat', 'prepare', 'loop']);
+    for (const { owner } of seen)
+      expect(owner).toEqual({
+        runtimeId: 'runtime',
+        sessionId: 'session',
+        agentId: 'test-agent-abc123',
+      });
+    await agent.shutdown();
+  });
+
   it('pins the construction-time depth when built inside a sub-agent frame', async () => {
     // A nested in-process interactive agent captures childLaunchDepth() at
     // construction. start() runs OUTSIDE the parent's frame here, so a
@@ -320,6 +381,45 @@ describe('AgentInteractive', () => {
     });
 
     expect(core.runReasoningLoop).toHaveBeenCalledOnce();
+
+    await agent.shutdown();
+  });
+
+  it('surfaces the exact loop detector in the interactive stop message (issue #9450)', async () => {
+    // A loop stop must name its detector (issue #9450 requirement #7): the
+    // visible info message and lastRoundError both carry the LoopType, so a
+    // future regression collapsing stops back into the generic label fails
+    // here instead of shipping unattributable stops.
+    const { core } = createMockCore({
+      loopResult: {
+        text: '',
+        terminateMode: AgentTerminateMode.LOOP_DETECTED,
+        turnsUsed: 3,
+        loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      },
+    });
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+
+    await agent.start(context);
+    // A loop-detected round settles the agent as failed (the round error
+    // path); the stop message must already have been pushed by then.
+    await vi.waitFor(() => {
+      expect(['idle', 'failed']).toContain(agent.getStatus());
+    });
+    await vi.waitFor(() => {
+      expect(agent.getMessages().some((m) => m.role === 'info')).toBe(true);
+    });
+
+    const stopMessages = agent
+      .getMessages()
+      .filter((m) => m.role === 'info')
+      .map((m) => String(m.content));
+    expect(stopMessages).toContain(
+      'Agent stopped: duplicate tool-call loop detected (consecutive_identical_tool_calls).',
+    );
 
     await agent.shutdown();
   });

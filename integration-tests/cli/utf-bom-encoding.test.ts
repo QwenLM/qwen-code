@@ -4,10 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  afterEach,
+  vi,
+} from 'vitest';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TestRig } from '../test-helper.js';
+import { runForcedToolCallScenario, TestRig } from '../test-helper.js';
+import { fakeToolCall } from '../fake-openai-server.js';
 
 // Windows skip (Option A: avoid infra scope)
 const d = process.platform === 'win32' ? describe.skip : describe;
@@ -64,15 +73,25 @@ d('BOM end-to-end integration', () => {
     await rig.cleanup();
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   async function runAndAssert(
     filename: string,
     content: Buffer,
     expectedText: string | null,
   ) {
-    writeFileSync(join(dir, filename), content);
+    const filePath = join(dir, filename);
+    writeFileSync(filePath, content);
     const prompt = `read the file ${filename} and output its exact contents`;
-    const output = await rig.run(prompt);
-    await rig.waitForToolCall('read_file');
+    const requests = await runForcedToolCallScenario({
+      rig,
+      toolCall: fakeToolCall('read_file', { file_path: filePath }),
+      prompt,
+      finalResponse: 'Done.',
+    });
+    const output = JSON.stringify(requests.at(-1)?.['messages'] ?? '');
     const lower = output.toLowerCase();
     if (expectedText === null) {
       expect(

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import {
   rmSync,
   mkdirSync,
@@ -16,6 +16,11 @@ import {
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
+import { serveBridgeBinBuildOptions } from './serve-bridge-bin-build-options.js';
+import {
+  assertPeerBundle,
+  assertPeerDeclarations,
+} from './peer-build-assertions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -34,7 +39,7 @@ const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
 
-execSync('tsc --project tsconfig.build.json', {
+execSync('tsc --build tsconfig.reference.json', {
   stdio: 'inherit',
   cwd: rootDir,
 });
@@ -220,18 +225,45 @@ await esbuild.build({
   treeShaking: true,
 });
 
-// Build serve-bridge CLI bin entry
-await esbuild.build({
-  entryPoints: [join(rootDir, 'src', 'daemon-mcp', 'serve-bridge', 'bin.ts')],
-  bundle: true,
-  format: 'esm',
-  platform: 'node',
-  target: 'node22',
-  outfile: join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
-  external: ['@modelcontextprotocol/sdk'],
-  sourcemap: false,
-  banner: { js: '#!/usr/bin/env node' },
-});
+// Opt-in peer subpath (`@qwen-code/sdk/peer`): the cross-session protocol for
+// a program that is not a Qwen Code session. Node-only, so it never joins a
+// browser bundle, and it must stay free of every runtime dependency.
+for (const [format, outfile] of [
+  ['esm', join(rootDir, 'dist', 'peer', 'index.js')],
+  ['cjs', join(rootDir, 'dist', 'peer', 'index.cjs')],
+]) {
+  await esbuild.build({
+    entryPoints: [join(rootDir, 'src', 'peer', 'index.ts')],
+    bundle: true,
+    format,
+    platform: 'node',
+    target: 'node22',
+    outfile,
+    sourcemap: false,
+    minify: true,
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    legalComments: 'none',
+    keepNames: false,
+    treeShaking: true,
+  });
+  assertPeerBundle(outfile);
+}
+assertPeerDeclarations(join(rootDir, 'dist', 'peer'));
+
+// Build serve-bridge CLI bin entry. The options — including the absence of a
+// hashbang `banner`, see `serveBridgeBinBuildOptions` — are shared with the
+// test that pins the emitted bytes.
+const serveBridgeBinPath = join(
+  rootDir,
+  'dist',
+  'daemon-mcp',
+  'serve-bridge',
+  'bin.js',
+);
+await esbuild.build(serveBridgeBinBuildOptions(rootDir, serveBridgeBinPath));
+assertExecutableBin(serveBridgeBinPath);
 
 // Copy LICENSE from root directory to dist
 const licenseSource = join(rootDir, '..', '..', 'LICENSE');
@@ -241,6 +273,31 @@ if (existsSync(licenseSource)) {
     cpSync(licenseSource, licenseTarget);
   } catch (error) {
     console.warn('Could not copy LICENSE:', error.message);
+  }
+}
+
+/**
+ * A published `bin` must be startable. Assert the built entry begins with a
+ * hashbang and that node can actually parse it: a duplicated hashbang (from a
+ * `banner` stacked on the entry point's own) leaves line 2 as `#!/usr/bin/env
+ * node`, which is a `SyntaxError` through both `node <file>` and the shebang —
+ * a break the type checker, the unit tests and the byte budgets all miss.
+ */
+function assertExecutableBin(filePath) {
+  const firstLine = readFileSync(filePath, 'utf8').split('\n', 1)[0];
+  if (!firstLine.startsWith('#!')) {
+    throw new Error(`Bin ${filePath} must start with a hashbang line`);
+  }
+  try {
+    // argv form, not a command string: `execSync` would run this through
+    // `/bin/sh -c`, where a checkout path containing `$(…)`, a backtick or
+    // `$VAR` still expands — `JSON.stringify` is JSON quoting, not shell
+    // quoting.
+    execFileSync('node', ['--check', filePath], { stdio: 'pipe' });
+  } catch (error) {
+    throw new Error(
+      `Bin ${filePath} does not parse: ${String(error.stderr ?? error.message).trim()}`,
+    );
   }
 }
 

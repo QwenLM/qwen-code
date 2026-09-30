@@ -3,13 +3,110 @@ import type {
   ComputerUse,
   ComputerUseActionResult,
   ComputerUseVerificationResult,
+  ObserveWindowOptions,
 } from "../index.js";
+
+const invalidObservationOptions: ObserveWindowOptions = {
+  pid: 42,
+  windowId: 7,
+  // @ts-expect-error revision cursors are owned by ComputerUse
+  baseRevisionId: "l_manual:r1",
+};
+void invalidObservationOptions;
+
+const invalidRevisionId: ObserveWindowOptions = {
+  pid: 42,
+  windowId: 7,
+  // @ts-expect-error revision cursors are owned by ComputerUse
+  revisionId: "l_manual:r2",
+};
+void invalidRevisionId;
+
+const invalidObservationRevision: ObserveWindowOptions = {
+  pid: 42,
+  windowId: 7,
+  // @ts-expect-error the native revision request is internal to ComputerUse
+  observationRevision: { baseRevisionId: "l_manual:r1" },
+};
+void invalidObservationRevision;
+
+const invalidLineageId: ObserveWindowOptions = {
+  pid: 42,
+  windowId: 7,
+  // @ts-expect-error lineage state is owned by ComputerUse
+  lineageId: "l_manual",
+};
+void invalidLineageId;
 
 export async function exerciseComputerUseTypes(
   computer: ComputerUse,
   signal: AbortSignal,
 ): Promise<ActAndVerifyResult> {
-  await computer.listApps({ signal, callTimeoutMs: 100 });
+  await computer.listApps({ signal });
+  const app = await computer.getApp("org.example.fixture", { signal });
+  const appState = await app.getState({ includeScreenshot: true, maxTextChars: 12_000, signal });
+  appState.screenshot?.images.at(0)?.dataBase64;
+  await app.click(37, { signal });
+  await app.setValue(37, "draft");
+  await app.pressKey("Return", { modifiers: ["shift"] });
+  await app.hotkey(["super", "s"]);
+  await app.scroll(37, { direction: "down" });
+  const platform: "macos" | "windows" | "linux" = await computer.getPlatform({ signal });
+  void platform;
+  await app.paste("plain");
+  await app.paste("**formatted**", { format: "md", signal });
+  await app.paste("<b>formatted</b>", { format: "html" });
+  await app.selectText(37, "draft", { prefix: "Status: ", suffix: ".", signal });
+  await app.selectText(37, "draft", { selection: "cursor_before" });
+  await app.selectText(37, "draft", { selection: "cursor_after" });
+  const textAction: ComputerUseActionResult = await computer.paste({ pid: 42, windowId: 7, text: "new", format: "text", signal });
+  void textAction;
+  await computer.selectText({ pid: 42, windowId: 7, elementToken: "rv1:l_a:1", text: "draft", selection: "text", signal });
+  // @ts-expect-error only the documented clipboard formats are accepted
+  await app.paste("text", { format: "rtf" });
+  // @ts-expect-error app targeting stays internal
+  await app.paste("text", { pid: 42 });
+  // @ts-expect-error app text operations do not expose delivery routing
+  await app.selectText(37, "draft", { deliveryMode: "foreground" });
+  // @ts-expect-error public text selection uses selection, not native naming
+  await app.selectText(37, "draft", { selection_type: "text" });
+  // @ts-expect-error selection requires a current short numeric element ID
+  await app.selectText("rv1:l_a:1", "draft");
+  // @ts-expect-error the exact-window operation requires a window ID
+  await computer.selectText({ pid: 42, elementToken: "rv1:l_a:1", text: "draft" });
+  // @ts-expect-error paste uses a native route without a delivery option
+  await computer.paste({ pid: 42, windowId: 7, text: "new", deliveryMode: "foreground" });
+  // @ts-expect-error app routing is internal
+  await app.click(37, { deliveryMode: "foreground" });
+  // @ts-expect-error app observations do not expose native identities
+  appState.pid;
+  // @ts-expect-error opaque tokens are not app action targets
+  await app.click({ elementToken: "private" });
+  const observation = await computer.observeWindow({
+    pid: 42,
+    windowId: 7,
+    disableDiff: false,
+    includeScreenshot: true,
+    maxTextChars: 12_000,
+    signal,
+  });
+  observation.screenshot?.images.at(0)?.dataBase64;
+  observation.elements.at(0)?.automation_id;
+  observation.diagnostics.selectedBytes;
+  observation.diagnostics.captureComplete;
+  observation.diagnostics.captureReadComplete;
+  observation.diagnostics.captureTruncated;
+  observation.diagnostics.captureIncompleteDetails.at(0);
+  observation.diagnostics.textTruncated;
+  observation.diagnostics.textChars;
+  // @ts-expect-error revision identifiers are not public observation fields
+  observation.revisionId;
+  // @ts-expect-error base revision identifiers are not public observation fields
+  observation.baseRevisionId;
+  // @ts-expect-error lineage identifiers are not public observation fields
+  observation.lineageId;
+  // @ts-expect-error raw native payloads are not public observation fields
+  observation.structured;
   const result = await computer.actAndVerify({
     action: () =>
       computer.click({
@@ -25,7 +122,7 @@ export async function exerciseComputerUseTypes(
         pid: 42,
         windowId: 7,
         expect: [{ element: { token: "rv1:l_a:1", selected: true } }],
-        callTimeoutMs: 100,
+        signal,
       }),
   });
   const verification: ComputerUseVerificationResult = result.verification;

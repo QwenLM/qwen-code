@@ -15,6 +15,10 @@ describe('main CI failure issue workflow', () => {
   );
   const yml = parse(workflow);
   const jobs = yml.jobs;
+  // Collapse line continuations first so pins read like the shell they pin
+  // rather than like this file's indentation.
+  const oneLine = (script) =>
+    script.replace(/\\\n/g, '\n').replace(/\s+/g, ' ');
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
@@ -88,6 +92,89 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
+  });
+
+  it('hands the helper the failed job and step of a run with no test result', () => {
+    // A lane that dies before printing any test result leaves no failing test to
+    // dedupe on, so the issue falls back to one per commit — and without the job
+    // list the fallback body named nothing but the commit, which is what made a
+    // standing red lane undiagnosable from its own issue.
+    //
+    // Each pin below is scoped to the step that owns it and spans a producer
+    // together with its consumer. Isolated substrings cannot express this
+    // contract — one fetch feeding two jq projections feeding two consumers —
+    // and every fragment of it stays green on its own when the wiring between
+    // them is cut. Collapsing the line continuations first keeps the pins
+    // reading like the shell they pin rather than like this file's indentation.
+    const steps = jobs.analyze.steps;
+    const download = oneLine(
+      steps.find((step) => step.name === 'Download failed job logs').run,
+    );
+    const plan = oneLine(steps.find((step) => step.id === 'plan').run);
+
+    // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
+    // fetch has to stay non-fatal AND say so — with the warning inside the
+    // `then` block, since outside it a successful fetch raises an annotation
+    // claiming the opposite. `--paginate` rides the same span because this one
+    // fetch feeds both projections, so dropping it caps a wide run at page 1.
+    expect(download).toContain(
+      'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
+    );
+    // Counted over the whole workflow: both projections read the file this one
+    // fetch wrote, so the payload must be fetched exactly once.
+    expect(
+      (workflow.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
+        .length,
+    ).toBe(1);
+    // The ids projection is bound to the array the download loop iterates and to
+    // the payload the fetch wrote. Swapping it with the TSV projection below
+    // hands `mapfile` whole TSV lines so every log download 404s; renaming the
+    // array on one side only returns every run to the per-commit fallback while
+    // the failed-jobs section still renders.
+    expect(download).toContain(
+      'mapfile -t job_ids < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
+    );
+    expect(download).toContain('for job_id in "${job_ids[@]}"; do');
+    // The same bindings for the projection this PR adds, plus the `|| true` that
+    // keeps an errored jobs response from aborting the step under `bash -e`
+    // before the issue is planned at all, and the `2>/dev/null` that keeps the
+    // resulting jq parse error out of the log.
+    expect(download).toContain(
+      'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
+    );
+    // `--jobs` has to ride the `analyze` invocation: `plan` never reads
+    // `options.jobs`, so moving the flag there drops the section silently. The
+    // span ends at the first `> "${analysis}"`, so no later helper call in the
+    // step can satisfy it.
+    const analyzeInvocation = plan.match(
+      /node "\$\{helper\}" analyze .*?> "\$\{analysis\}"/,
+    )?.[0];
+    expect(analyzeInvocation, 'the analyze invocation').toContain(
+      '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
+    );
+  });
+
+  it('passes --allow-escape-sequences so gh does not refuse the colourised logs', () => {
+    // gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a raw response
+    // carrying terminal escape sequences unless the flag opts out, and the
+    // colourised vitest/pytest logs always carry them: without the flag
+    // every download fails deterministically — a retry would hit the
+    // identical refusal — and the plan falls back to a per-commit issue
+    // naming no failing test. The analyzer strips ANSI before matching, so
+    // the escapes never reach an issue body.
+    const download = oneLine(
+      jobs.analyze.steps.find(
+        (step) => step.name === 'Download failed job logs',
+      ).run,
+    );
+    expect(download).toContain(
+      'if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" --allow-escape-sequences > "${log_dir}/${job_id}.log"; then',
+    );
+    // The warn-and-drop fallback is unchanged: a log that still fails only
+    // costs precision, never the issue.
+    expect(download).toContain(
+      'echo "::warning::Could not download the log of job ${job_id}" rm -f "${log_dir}/${job_id}.log"',
+    );
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {

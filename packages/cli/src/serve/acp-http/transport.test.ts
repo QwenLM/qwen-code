@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
@@ -81,6 +82,10 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import {
+  PersistedSessionListCache,
+  type PersistedSessionListCacheStatus,
+} from '../server/persisted-session-list-cache.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 import { CredentialStore } from '../local-control/credentials.js';
 import { tagListener } from '../local-control/listener-identity.js';
@@ -91,6 +96,7 @@ import {
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connection-registry.js';
 import type { TransportStream } from './transport-stream.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
@@ -434,10 +440,14 @@ class FakeBridge {
     sessionId: string;
     prs: Array<{ number: number; url: string }>;
   }> = [];
+  setSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }> = [];
   /** Shared seed/update call sequence — pins that hydration runs BEFORE the
    * mutation (a seed-after-mutation order would let the bridge publish an
    * event carrying only this-daemon-lifetime bindings). */
-  metadataCallLog: Array<'seed' | 'update'> = [];
+  metadataCallLog: Array<'seed' | 'update' | 'set'> = [];
 
   seedSessionPrs(
     sessionId: string,
@@ -447,6 +457,18 @@ class FakeBridge {
     this.seedSessionPrsCalls.push({ sessionId, prs });
     const existing = this.metadataPrsBySession.get(sessionId) ?? [];
     if (existing.length > 0) return;
+    this.metadataPrsBySession.set(
+      sessionId,
+      prs.map(({ number, url }) => ({ number, url })),
+    );
+  }
+
+  setSessionPrs(
+    sessionId: string,
+    prs: Array<{ number: number; url: string }>,
+  ) {
+    this.metadataCallLog.push('set');
+    this.setSessionPrsCalls.push({ sessionId, prs });
     this.metadataPrsBySession.set(
       sessionId,
       prs.map(({ number, url }) => ({ number, url })),
@@ -560,6 +582,29 @@ class FakeBridge {
     this.lastSessionTasksOptions = opts;
     return { sessionId, tasks: [] };
   }
+  async getSessionAgentsStatus(sessionId: string) {
+    return { sessionId, tasks: [] };
+  }
+  async getSessionAgentTrace(sessionId: string, rootAgentId?: string) {
+    return {
+      v: 1 as const,
+      sessionId,
+      nodes: [],
+      rootAgentIds: rootAgentId ? [rootAgentId] : [],
+      warnings: [],
+    };
+  }
+  async listSessionAttachments() {
+    return [
+      {
+        type: 'resource' as const,
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      },
+    ];
+  }
+
   lastCancelledTask:
     | {
         sessionId: string;
@@ -583,6 +628,7 @@ class FakeBridge {
         taskId: string;
         action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2];
         context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3];
+        input: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[4];
       }
     | undefined;
   async controlSessionWorkflowTask(
@@ -590,9 +636,32 @@ class FakeBridge {
     taskId: string,
     action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2],
     context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3],
+    input: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[4],
   ) {
-    this.lastWorkflowAction = { sessionId, taskId, action, context };
+    this.lastWorkflowAction = { sessionId, taskId, action, context, input };
     return { changed: true, status: 'running' as const };
+  }
+  lastSavedWorkflowRead: { sessionId: string; name: string } | undefined;
+  async getSessionSavedWorkflow(sessionId: string, name: string) {
+    this.lastSavedWorkflowRead = { sessionId, name };
+    return {
+      v: 1 as const,
+      sessionId,
+      name,
+      workflow:
+        name === 'deep-review'
+          ? {
+              v: 1 as const,
+              sessionId,
+              name,
+              source: 'project' as const,
+              scriptPath: `${TEST_WORKSPACE}/.qwen/workflows/deep-review.js`,
+              script:
+                "export const meta = { name: 'deep-review', description: 'd' }",
+              meta: { name: 'deep-review', description: 'd' },
+            }
+          : null,
+    };
   }
   async getSessionLspStatus(sessionId: string) {
     return {
@@ -1722,6 +1791,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it.each(['agent-host', 'agent'])(
+    'session/new rejects the reserved %s source',
+    async (sourceType) => {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'session/new',
+        params: { cwd: '/ws', sourceType, sourceId: 'ag_x' },
+      });
+      expect(ack.status).toBe(202);
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frame).toMatchObject({
+        id: 91,
+        error: {
+          code: -32602,
+          data: { errorKind: 'reserved_session_source' },
+        },
+      });
+    },
+  );
+
   it('maps workspace session admission failures to retryable RPC error data', async () => {
     bridge.spawnOrAttach = async () => {
       throw new SessionLimitExceededError(20);
@@ -1795,6 +1892,82 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       retryable: true,
     });
   });
+
+  it.each(['full', 'summary'] as const)(
+    'accepts the daemon eventDetailMode extension over ACP: %s',
+    async (eventDetailMode) => {
+      const send = vi.spyOn(bridge, 'sendPrompt');
+      const connId = await initialize();
+      await newSession(connId);
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'hello' }],
+          eventDetailMode,
+        },
+      });
+      expect(ack.status).toBe(202);
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith(
+          'sess-1',
+          expect.objectContaining({ eventDetailMode }),
+          expect.any(AbortSignal),
+          expect.anything(),
+        ),
+      );
+    },
+  );
+
+  it.each([
+    { meta: undefined, context: {} },
+    { meta: { 'qwen.daemon.submittedPrompt': 'forged' }, context: {} },
+    {
+      meta: {
+        'qwen.submittedPrompt': 'label',
+        'qwen.daemon.channelPromptAuthorization': 'revoked-worker',
+      },
+      context: {},
+    },
+    {
+      meta: { 'qwen.submittedPrompt': ' original text\n' },
+      context: { submittedPrompt: ' original text\n' },
+    },
+  ])(
+    'admits only public submission declarations over ACP HTTP: $meta',
+    async ({ meta, context }) => {
+      const send = vi.spyOn(bridge, 'sendPrompt');
+      const connId = await initialize();
+      await newSession(connId);
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'wrapper' }],
+          ...(meta ? { _meta: meta } : {}),
+        },
+      });
+      expect(ack.status).toBe(202);
+      await vi.waitFor(() => expect(send).toHaveBeenCalled());
+      expect(send).toHaveBeenCalledWith(
+        'sess-1',
+        expect.anything(),
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          ...context,
+        }),
+      );
+      if (Object.keys(context).length === 0) {
+        expect((send.mock.calls[0] as unknown[])[3]).not.toHaveProperty(
+          'submittedPrompt',
+        );
+      }
+    },
+  );
 
   it('prompt streams session/update then the final result', async () => {
     bridge.promptBehavior = async (_s, q) => {
@@ -3677,6 +3850,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         });
         return scan;
       });
+    // The scan is cancelled the moment its waiter count reaches zero, and a
+    // request only becomes a waiter once it reaches `lookup()`. Posting both
+    // requests and waiting for the loader proves only that the *first* one
+    // attached: on a loaded runner the second can still be resolving params
+    // when the DELETE below tears the first connection down, which drops the
+    // count to zero, aborts the shared scan, and leaves the second request
+    // answering from a rejected promise. Watch `lookup()` for the
+    // single-flight join so the DELETE never lands before the second waiter
+    // is attached.
+    const lookupStatuses: PersistedSessionListCacheStatus[] = [];
+    const originalLookup = PersistedSessionListCache.prototype.lookup;
+    const lookupSpy = vi
+      .spyOn(PersistedSessionListCache.prototype, 'lookup')
+      .mockImplementation(function (
+        this: PersistedSessionListCache,
+        ...args: Parameters<typeof originalLookup>
+      ) {
+        const lookup = originalLookup.apply(this, args);
+        lookupStatuses.push(lookup.status);
+        return lookup;
+      });
 
     try {
       const firstConnId = await initialize();
@@ -3699,6 +3893,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       await waitUntil(() => loadSignal !== undefined);
       expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      await waitUntil(
+        () =>
+          lookupStatuses.filter((status) => status === 'single_flight')
+            .length === 1,
+        10_000,
+      );
 
       const deleted = await fetch(`${base}/acp`, {
         method: 'DELETE',
@@ -3716,6 +3916,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
     } finally {
       resolveScan({ items: [], nextCursor: undefined, hasMore: false });
+      lookupSpy.mockRestore();
       listSessionsSpy.mockRestore();
     }
   });
@@ -5034,15 +5235,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it.each(['session/load', 'session/resume'] as const)(
-    '%s restores reserved-source transcripts on the generic surface',
-    async (method) => {
+  it.each([
+    ['session/load', 'standalone', '550e8400-e29b-41d4-a716-446655440133'],
+    ['session/resume', 'standalone', '550e8400-e29b-41d4-a716-446655440134'],
+    ['session/load', 'agent', '550e8400-e29b-41d4-a716-446655440135'],
+    ['session/resume', 'agent', '550e8400-e29b-41d4-a716-446655440136'],
+  ] as const)(
+    '%s strips %s source metadata on the generic surface',
+    async (method, sourceType, sessionId) => {
       await withRuntimeDir(async () => {
-        const sessionId =
-          method === 'session/load'
-            ? '550e8400-e29b-41d4-a716-446655440133'
-            : '550e8400-e29b-41d4-a716-446655440134';
-        await writeStoredSession(sessionId, 'active', undefined, 'standalone');
+        await writeStoredSession(sessionId, 'active', undefined, sourceType);
         const loadCount = bridge.loadRequests.length;
         const resumeCount = bridge.resumeRequests.length;
 
@@ -5722,12 +5924,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation
       // so the `session_metadata_updated` event payload is complete too.
-      expect(bridge.metadataCallLog).toEqual(['seed', 'update']);
+      expect(bridge.metadataCallLog).toEqual(['seed', 'update', 'set']);
       expect(bridge.seedSessionPrsCalls).toHaveLength(1);
       expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
       expect(
         bridge.seedSessionPrsCalls[0]?.prs.map((entry) => entry.number),
       ).toEqual([9100]);
+      // After the upsert, dispatch reconciles the live entry to the
+      // authoritative persisted list — the bridge merge caps positionally
+      // while the sidecar caps by provenance authority, and the two
+      // diverge past the list limit.
+      expect(bridge.setSessionPrsCalls).toHaveLength(1);
+      expect(bridge.setSessionPrsCalls[0]?.sessionId).toBe(sessionId);
+      expect(
+        bridge.setSessionPrsCalls[0]?.prs.map((entry) => entry.number),
+      ).toEqual([9100, 9101]);
       const persisted = await readSessionPrs(sidecarPath);
       expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
       expect(persisted?.find((entry) => entry.number === 9101)?.state).toBe(
@@ -6489,9 +6700,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sessStream = await openStream(connId, 'sess-1');
     // The guarantee is that the server CLOSES the stream (not a zombie that
     // heartbeats forever). A safety abort at 3s distinguishes "server closed"
-    // (loop ends fast) from "zombie" (only our timeout ends it).
+    // (loop ends fast) from "zombie" (only our timeout ends it); record which
+    // happened — a boolean holds on every lane, while elapsed time on the
+    // shared pool is placement noise.
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
+    let safetyAbortFired = false;
+    const timer = setTimeout(() => {
+      safetyAbortFired = true;
+      ac.abort();
+    }, 3000);
     const start = Date.now();
     try {
       for await (const _f of readSse(sessStream, ac.signal)) {
@@ -6501,8 +6718,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    // Server-initiated close arrives well under the 3s safety timeout.
-    expect(Date.now() - start).toBeLessThan(1500);
+    // A zombie stream ends only via the safety abort; the close must not.
+    expect(safetyAbortFired).toBe(false);
+    // Server-initiated close arrives well under the 3s safety timeout; the
+    // elapsed bound only means something off the shared pool.
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('concurrent session/close calls the bridge exactly once (no TOCTOU double-close)', async () => {
@@ -6534,7 +6754,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Subprocess ends cleanly → bridge event iterator returns done.
     bridge.queues.get('sess-1')?.end();
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
+    let safetyAbortFired = false;
+    const timer = setTimeout(() => {
+      safetyAbortFired = true;
+      ac.abort();
+    }, 3000);
     const start = Date.now();
     try {
       for await (const _f of readSse(sessStream, ac.signal)) {
@@ -6544,7 +6768,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       clearTimeout(timer);
       ac.abort();
     }
-    expect(Date.now() - start).toBeLessThan(1500);
+    // A zombie stream ends only via the safety abort; the close must not.
+    expect(safetyAbortFired).toBe(false);
+    expectWithinLatencyBudget(Date.now() - start, 1500);
   });
 
   it('session-stream reconnect does NOT abort the in-flight prompt', async () => {
@@ -6710,6 +6936,313 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frames).toHaveLength(0);
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
+  });
+
+  it('session/new forwards startup selection and returns its actual confirmation', async () => {
+    const startupConfig = {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+    };
+    const startupConfigApplied = {
+      ...startupConfig,
+      effectiveReasoning: { state: 'enabled', effort: 'high' },
+    };
+    const session = {
+      sessionId: 'startup',
+      workspaceCwd: TEST_WORKSPACE,
+      attached: false,
+      clientId: 'startup-client',
+      modelApplied: true,
+      startupConfigApplied,
+    };
+    const spawn = vi
+      .spyOn(bridge, 'spawnOrAttach')
+      .mockResolvedValueOnce(session);
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 430,
+      method: 'session/new',
+      params: { startupConfig },
+    });
+    const [frame] = (await got) as Array<{ result: Record<string, unknown> }>;
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ startupConfig, sessionScope: 'thread' }),
+    );
+    expect(frame.result).toMatchObject({
+      modelApplied: true,
+      startupConfigApplied,
+    });
+  });
+
+  it.each([
+    { startupConfig: {} },
+    {
+      startupConfig: { modelServiceId: 'x', reasoningEffort: 'high' },
+      sessionScope: 'single',
+    },
+    {
+      startupConfig: { modelServiceId: 'x', reasoningEffort: 'high' },
+      modelServiceId: 'legacy',
+    },
+  ])(
+    'session/new rejects invalid startup request without spawning %j',
+    async (params) => {
+      const spawn = vi.spyOn(bridge, 'spawnOrAttach');
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const got = takeFrames(stream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 431,
+        method: 'session/new',
+        params,
+      });
+      const [frame] = (await got) as Array<{
+        error: { data: Record<string, unknown> };
+      }>;
+      expect(frame.error.data).toMatchObject({
+        errorKind: 'invalid_startup_config',
+        httpStatus: 400,
+      });
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('session/new maps a definite startup rejection to an explicit 422 RPC error', async () => {
+    vi.spyOn(bridge, 'spawnOrAttach').mockRejectedValueOnce(
+      new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      ),
+    );
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const got = takeFrames(stream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 432,
+      method: 'session/new',
+      params: { startupConfig: { modelServiceId: 'm' } },
+    });
+    const [frame] = (await got) as Array<{
+      error: { code: number; data: Record<string, unknown> };
+    }>;
+    expect(frame.error).toMatchObject({
+      // A rejected selection is caller input, not a daemon fault; the
+      // REST-equivalent status travels in data.httpStatus.
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+  });
+
+  it('session/new rolls back the persisted recording after a definite startup rejection so the caller id stays retryable', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440005';
+    // The spawn persists its recording before the selection is rejected
+    // and the bridge closes the live session.
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(sessionId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      );
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 445,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(bridge.killed).toContain(sessionId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 446,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      result: { sessionId: string };
+    };
+    expect(retryFrame.result.sessionId).toBe(sessionId);
+    reader.close();
+  });
+
+  it('session/new rolls back the persisted recording after a definite startup rejection when the daemon generated the id', async () => {
+    // No `_meta['qwen-code/sessionId']`: only the rejection's own
+    // `sessionId` can name the recording the spawn persisted before the
+    // selection was rejected.
+    const spawnedId = '550e8400-e29b-41d4-a716-446655440098';
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(spawnedId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+        spawnedId,
+      );
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 449,
+      method: 'session/new',
+      params: { startupConfig: { modelServiceId: 'm' } },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(bridge.killed).toContain(spawnedId);
+    await expect(
+      new SessionService(TEST_WORKSPACE).findSessionIdIgnoringCase(spawnedId),
+    ).resolves.toBeUndefined();
+    reader.close();
+  });
+
+  it('session/new logs when the definite-rejection recording rollback is refused', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440097';
+    // The session reads as live only after the spawn attempt — reporting it
+    // earlier would trip the admission's live-conflict before the spawn.
+    let spawned = false;
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      spawned = true;
+      await writeStoredSession(sessionId);
+      throw new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+        sessionId,
+      );
+    });
+    // The orphan kill is refused (the session stays live), so the rollback
+    // removes nothing — the refusal must still leave a diagnostic.
+    vi.spyOn(bridge, 'killSession').mockResolvedValue(false);
+    const realGetSummary = bridge.getSessionSummary.bind(bridge);
+    bridge.getSessionSummary = (id: string) => {
+      if (spawned && id === sessionId) {
+        return {
+          sessionId: id,
+          workspaceCwd: TEST_WORKSPACE,
+          createdAt: '2026-06-30T00:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: true,
+        };
+      }
+      return realGetSummary(id);
+    };
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 450,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error).toMatchObject({
+      code: -32602,
+      data: { errorKind: 'startup_config_rejected', httpStatus: 422 },
+    });
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+      ),
+    );
+
+    // The rollback was refused, so the id stays occupied: a retry of the
+    // same id conflicts with the still-live session instead of attaching.
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 451,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(retryFrame.error).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'live',
+      },
+    });
+    reader.close();
+  });
+
+  it('session/new keeps the persisted recording when a startup failure outcome is uncertain', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440006';
+    vi.spyOn(bridge, 'spawnOrAttach').mockImplementationOnce(async () => {
+      await writeStoredSession(sessionId);
+      throw new Error('transport closed');
+    });
+    const connId = await initialize();
+    const stream = await openStream(connId);
+    const reader = frameReader(stream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 447,
+      method: 'session/new',
+      params: {
+        startupConfig: { modelServiceId: 'm' },
+        _meta: { 'qwen-code/sessionId': sessionId },
+      },
+    });
+    const frame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).not.toMatchObject({
+      errorKind: 'startup_config_rejected',
+    });
+    expect(bridge.killed).not.toContain(sessionId);
+
+    // The recording survives, so a corrected retry of the same id still
+    // answers the persisted-admission conflict instead of attaching.
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 448,
+      method: 'session/new',
+      params: { _meta: { 'qwen-code/sessionId': sessionId } },
+    });
+    const retryFrame = (await reader.next()) as {
+      error: { code: number; data: Record<string, unknown> };
+    };
+    expect(retryFrame.error).toMatchObject({
+      code: -32602,
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_id_conflict',
+        conflict: 'persisted',
+      },
+    });
+    reader.close();
   });
 
   it('session/new always uses thread scope (ACP standard compliance)', async () => {
@@ -8675,6 +9208,48 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         taskId: 'workflow-1',
         action: 'retry',
         context: { clientId: 'client-1', fromLoopback: true },
+        // A control action carries no start input, whatever the caller sends.
+        input: undefined,
+      });
+    });
+
+    it('_qwen/session/tasks/workflow_action forwards the start input of a run-script call', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'definition-7',
+          action: 'run-script',
+          script: 'return 1',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { changed: true, status: 'running' },
+      });
+      expect(bridge.lastWorkflowAction).toMatchObject({
+        sessionId: 'sess-1',
+        taskId: 'definition-7',
+        action: 'run-script',
+        input: {
+          script: 'return 1',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
       });
     });
 
@@ -8795,6 +9370,81 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastWorkflowAction).toBeUndefined();
     });
 
+    it('_qwen/session/agents returns agents', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/agents',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('_qwen/session/agent_trace returns persisted lineage', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/agent_trace',
+        params: { sessionId: 'sess-1', rootAgentId: 'root-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          sessionId: 'sess-1',
+          rootAgentIds: ['root-1'],
+          nodes: [],
+        },
+      });
+    });
+
+    it('_qwen/session/attachments returns attachments', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/attachments',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          attachments: [{ attachmentId: 'notes.txt', size: 5 }],
+        },
+      });
+    });
+
     it('_qwen/session/lsp returns status', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -8822,6 +9472,67 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           servers: [{ name: 'typescript', status: 'READY' }],
         },
       });
+    });
+
+    it('_qwen/session/saved_workflow returns the definition envelope', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 63,
+        method: '_qwen/session/saved_workflow',
+        params: { sessionId: 'sess-1', name: 'deep-review' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        id: 63,
+        result: {
+          sessionId: 'sess-1',
+          name: 'deep-review',
+          workflow: {
+            source: 'project',
+            meta: { name: 'deep-review', description: 'd' },
+          },
+        },
+      });
+      expect(bridge.lastSavedWorkflowRead).toEqual({
+        sessionId: 'sess-1',
+        name: 'deep-review',
+      });
+    });
+
+    it('_qwen/session/saved_workflow fails closed for an untrusted workspace', async () => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 64,
+        method: '_qwen/session/saved_workflow',
+        params: { sessionId: 'sess-1', name: 'deep-review' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        id: 64,
+        result: { sessionId: 'sess-1', name: 'deep-review', workflow: null },
+      });
+      expect(bridge.lastSavedWorkflowRead).toBeUndefined();
     });
 
     it('_qwen/session/artifacts returns the session artifact snapshot', async () => {
@@ -11174,6 +11885,8 @@ describe('ACP WebSocket transport security', () => {
   let lanPort: number;
   let bridge: FakeBridge;
   let previousCdpMcpCommand: string | undefined;
+  let credentialStore: CredentialStore | undefined;
+  let desktopRelayCredential: string | undefined;
 
   beforeEach(() => {
     previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
@@ -11191,8 +11904,10 @@ describe('ACP WebSocket transport security', () => {
       cdpTunnelOverWs?: boolean;
       daemonEnv?: Readonly<NodeJS.ProcessEnv>;
       localControlToken?: string;
+      webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      desktopRelaySessionId?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -11200,9 +11915,20 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
-      const credentials = opts.localControlToken
-        ? new CredentialStore(opts.token)
+      const credentials =
+        opts.localControlToken ||
+        opts.webShellToken ||
+        opts.desktopRelaySessionId
+          ? new CredentialStore(opts.token)
+          : undefined;
+      credentialStore = credentials;
+      desktopRelayCredential = opts.desktopRelaySessionId
+        ? credentials!.createDesktopRelayCredential({
+            acpPath: '/acp',
+            sessionId: opts.desktopRelaySessionId,
+          })
         : undefined;
+      if (opts.webShellToken) credentials!.addWebShellToken(opts.webShellToken);
       if (opts.localControlToken) {
         credentials!.addPairingToken('test-pairing', opts.localControlToken);
       }
@@ -11231,6 +11957,7 @@ describe('ACP WebSocket transport security', () => {
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        clientMcpOverWs: opts.desktopRelaySessionId !== undefined,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -11367,6 +12094,112 @@ describe('ACP WebSocket transport security', () => {
   }
 
   // ── Host allowlist ──────────────────────────────────────────────────
+  it('rejects a primary desktop relay credential on the local-control listener', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const result = await wsConnectLocalControl(desktopRelayCredential!);
+    result.socket?.close();
+    expect(result.code).toBe(401);
+    const primary = await wsConnect({
+      headers: { Authorization: `Bearer ${desktopRelayCredential!}` },
+    });
+    primary.close();
+  });
+
+  it('limits a desktop relay credential to one ACP connection, client, server, and session', async () => {
+    await startServer({
+      token: 'runtime-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const credential = desktopRelayCredential!;
+    const ws = await wsConnect({
+      headers: { Authorization: `Bearer ${credential}` },
+    });
+
+    await expect(
+      sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+        },
+      }),
+    ).resolves.toMatchObject({ result: expect.any(Object) });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'other-session',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'other-server',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'not_wired' });
+
+    const replay = await wsConnectRaw('127.0.0.1', undefined, {
+      Authorization: `Bearer ${credential}`,
+    });
+    expect(replay.code).toBe(401);
+
+    const wrongClientCredential = credentialStore!.createDesktopRelayCredential(
+      {
+        acpPath: '/acp',
+        sessionId: 'session-1',
+      },
+    )!;
+    const wrongClient = await wsConnect({
+      headers: { Authorization: `Bearer ${wrongClientCredential}` },
+    });
+    await expect(
+      sendRpc(wrongClient, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'initialize',
+        params: { clientInfo: { name: 'other-client', version: '1.0.0' } },
+      }),
+    ).resolves.toMatchObject({ error: { code: -32600 } });
+
+    const frameOnlyCredential = credentialStore!.createDesktopRelayCredential({
+      acpPath: '/acp',
+      sessionId: 'session-1',
+    })!;
+    const frameOnly = await wsConnect({
+      headers: { Authorization: `Bearer ${frameOnlyCredential}` },
+    });
+    await sendRpc(frameOnly, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+      },
+    });
+    const closed = new Promise<number>((resolve) =>
+      frameOnly.once('close', (code) => resolve(code)),
+    );
+    frameOnly.send(
+      JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'session/new' }),
+    );
+    await expect(closed).resolves.toBe(1008);
+    ws.close();
+    wrongClient.close();
+  });
+
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', undefined);
@@ -11428,6 +12261,96 @@ describe('ACP WebSocket transport security', () => {
   );
 
   // ── CSWSH origin check ─────────────────────────────────────────────
+  it.each([
+    ['http://qwen.test:4170', 'device-token', 101],
+    ['http://qwen.test:4170', 'wrong', 401],
+    ['http://evil.test', 'device-token', 403],
+    ['https://qwen.test:4170', 'device-token', 403],
+  ])(
+    'checks non-loopback primary device access from %s with %s',
+    async (origin, token, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: 'qwen.test:4170',
+        Authorization: `Bearer ${token}`,
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
+  it.each([
+    ['[fd00::1]:4170', 'http://[fd00::1]:4170', 101],
+    ['[fd00::1]:4170', 'http://fd00::1:4170', 403],
+    ['[fd00::1]:4170', 'http://[fd00::2]:4170', 403],
+    // RFC 7230 §5.4: a browser omits the scheme-default port from Origin;
+    // only the URL-parse normalization matches `Host: qwen.test:80` to it.
+    ['qwen.test:80', 'http://qwen.test', 101],
+    ['qwen.test:4170', 'http://qwen.test', 403],
+  ])(
+    'checks non-loopback primary device access with Host %s and origin %s',
+    async (host, origin, code) => {
+      await startServer({
+        hostname: '0.0.0.0',
+        token: 'runtime-token',
+        webShellToken: 'device-token',
+      });
+      const result = await wsConnectRaw('127.0.0.1', origin, {
+        Host: host,
+        Authorization: 'Bearer device-token',
+      });
+      expect(result.code).toBe(code);
+    },
+  );
+
+  it('applies the loopback Host allowlist on a short-spelled loopback bind', async () => {
+    // `127.1` is the inet_aton short form Node binds as 127.0.0.1: the
+    // listener is loopback, so a rebound Host/Origin pair must fail the
+    // loopback allowlist even with a valid device credential — the bind must
+    // not classify as an authenticated remote one.
+    await startServer({
+      hostname: '127.1',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+    });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+      Authorization: 'Bearer device-token',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`, {
+      Authorization: 'Bearer device-token',
+    });
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less non-loopback bind', async () => {
+    // A token-less daemon never classifies as an authenticated remote bind:
+    // the upgrade carries no credential at all, so the rebound Host/Origin
+    // pair must fail the loopback Host allowlist rather than pass an
+    // "Origin agrees with Host" check.
+    await startServer({ hostname: '0.0.0.0' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
+  it('applies the loopback Host allowlist on a token-less specific non-loopback bind', async () => {
+    await startServer({ hostname: '192.168.1.100' });
+    const rebound = await wsConnectRaw('127.0.0.1', 'http://evil.test:4170', {
+      Host: 'evil.test:4170',
+    });
+    expect(rebound.code).toBe(403);
+    const legit = await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`);
+    expect(legit.code).toBe(101);
+  });
+
   it('rejects WS upgrade with cross-origin Origin header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', 'https://evil.com');
@@ -12085,6 +13008,38 @@ describe('ACP WebSocket transport security', () => {
 
     expect(res).toMatchObject({ id: 2, result: { v: 1 } });
     expect(tiers).toEqual(['read']);
+    ws.close();
+  });
+
+  it('classifies session definition reads as WS read methods', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/session/attachments',
+      params: { sessionId: 'session-1' },
+    });
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: '_qwen/session/saved_workflow',
+      params: { sessionId: 'missing-session', name: 'deep-review' },
+    });
+
+    expect(tiers).toEqual(['read', 'read']);
     ws.close();
   });
 

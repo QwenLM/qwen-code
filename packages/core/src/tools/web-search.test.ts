@@ -6,8 +6,32 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 import { ToolErrorType } from './tool-error.js';
-import { WebSearchTool, evaluateWebSearchGate } from './web-search.js';
+import {
+  CITATION_RULES,
+  DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  WebSearchTool,
+  evaluateWebSearchGate,
+  resolveWebSearchMaxPerSession,
+  resolveWebSearchTimeoutMs,
+} from './web-search.js';
+import { generateCustomEnvKey } from '../providers/presets/custom-provider.js';
+import { findProviderByCredentials } from '../providers/all-providers.js';
+import { alibabaStandardProvider } from '../providers/presets/alibaba-standard.js';
+import {
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
+} from '../providers/presets/alibaba-token-plan.js';
+import {
+  CODING_PLAN_CHINA_BASE_URL,
+  CODING_PLAN_ENV_KEY,
+} from '../providers/presets/alibaba-coding-plan.js';
+import {
+  OPENROUTER_BASE_URL,
+  OPENROUTER_ENV_KEY,
+} from '../providers/presets/openrouter.js';
 
 const mockCreate = vi.hoisted(() => vi.fn());
 const mockCtorOpts = vi.hoisted(() => ({ current: undefined as unknown }));
@@ -25,13 +49,18 @@ const TEST_ENV_KEY = 'WEB_SEARCH_TEST_DS_KEY';
 const DASHSCOPE_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 interface ConfigOverrides {
+  allowDynamicHeaderValues?: boolean;
   settings?: {
     enabled?: boolean;
     model?: string;
     webExtractor?: boolean;
     baseUrl?: string;
     apiKeyEnv?: string;
+    timeoutMs?: number;
+    maxPerSession?: number;
   };
+  /** Session web_search counter; one shared object per config, as on Config. */
+  sessionUsage?: { calls: number };
   models?: Array<{
     id: string;
     authType: string;
@@ -39,9 +68,27 @@ interface ConfigOverrides {
     baseUrl?: string;
     generationConfig?: { customHeaders?: Record<string, string> };
   }>;
+  /** Model id the registry currently has selected (drives the auto path). */
+  primaryModel?: string;
+  primaryAuthType?: string;
+  primaryRegistryBaseUrl?: string;
+  /**
+   * Resolved generation config, the only source for env-only setups. Mirrors
+   * the real shape: a pure env configuration carries no `apiKeyEnvKey`.
+   */
+  generationConfig?: {
+    model?: string;
+    authType?: string;
+    baseUrl?: string;
+    apiKeyEnvKey?: string;
+    apiKey?: string;
+    customHeaders?: Record<string, string>;
+  };
+  generationConfigSources?: Record<string, { kind: string; envKey?: string }>;
 }
 
 function makeConfig(overrides: ConfigOverrides = {}): Config {
+  const sessionUsage = overrides.sessionUsage ?? { calls: 0 };
   const models = overrides.models ?? [
     {
       id: 'qwen3.6-plus',
@@ -51,13 +98,19 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
     },
   ];
   return {
+    // `settings: undefined` must mean "nothing configured" (the auto path),
+    // which `??` cannot express — check for the key instead.
     getWebSearchSettings: () =>
-      overrides.settings ?? { enabled: true, model: 'qwen3.6-plus' },
+      'settings' in overrides
+        ? overrides.settings
+        : { enabled: true, model: 'qwen3.6-plus' },
     // The real Config disambiguates same-id entries by registry baseUrl;
     // mirror that so multi-entry tests resolve the gate-selected entry, not
     // the first (authType, id) match.
-    getAllConfiguredModels: () =>
-      models.map((m) => ({ ...m, registryBaseUrl: m.baseUrl })),
+    getAllConfiguredModels: (authTypes?: string[]) =>
+      models
+        .filter((m) => !authTypes || authTypes.includes(m.authType))
+        .map((m) => ({ ...m, registryBaseUrl: m.baseUrl })),
     getResolvedModelConfig: (
       authType: string,
       id: string,
@@ -74,10 +127,22 @@ function makeConfig(overrides: ConfigOverrides = {}): Config {
         : undefined;
     },
     getSessionId: () => 'session-1',
+    getWebSearchSessionUsage: () => sessionUsage,
+    getOutboundAllowDynamicHeaderValues: () =>
+      overrides.allowDynamicHeaderValues ?? false,
     getCliVersion: () => '0.0.0-test',
     getProxy: () => undefined,
-    getModel: () => 'main-model',
+    getModel: () => overrides.primaryModel ?? 'main-model',
     getContentGeneratorConfig: () => ({ authType: 'openai' }),
+    // The auto path reads the ModelsConfig view, which is populated before
+    // `refreshAuth` fills in the content generator config.
+    getCurrentAuthType: () =>
+      'primaryAuthType' in overrides ? overrides.primaryAuthType : 'openai',
+    getCurrentModelRegistryBaseUrl: () => overrides.primaryRegistryBaseUrl,
+    getModelsConfig: () => ({
+      getGenerationConfig: () => overrides.generationConfig ?? {},
+      getGenerationConfigSources: () => overrides.generationConfigSources ?? {},
+    }),
     getFastModel: () => undefined,
   } as unknown as Config;
 }
@@ -161,6 +226,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env[TEST_ENV_KEY];
+  vi.unstubAllEnvs();
   vi.useRealTimers();
 });
 
@@ -170,10 +236,12 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
         webExtractor: true,
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
       });
     }
   });
@@ -401,10 +469,12 @@ describe('evaluateWebSearchGate', () => {
     expect(gate.ok).toBe(true);
     if (gate.ok) {
       expect(gate.backend).toEqual({
+        kind: 'dashscope',
         modelId: 'qwen3.6-plus',
         apiKeyEnvKey: TEST_ENV_KEY,
         baseUrl: DASHSCOPE_BASE_URL,
         webExtractor: true,
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
       });
     }
   });
@@ -548,6 +618,745 @@ describe('evaluateWebSearchGate', () => {
   });
 });
 
+describe('evaluateWebSearchGate auto derivation', () => {
+  const standardBaseUrls = alibabaStandardProvider.baseUrl;
+  if (!Array.isArray(standardBaseUrls)) {
+    throw new Error('Standard provider must declare regional base URLs');
+  }
+  if (typeof alibabaStandardProvider.envKey !== 'string') {
+    throw new Error('Standard provider must declare a fixed env key');
+  }
+  const STANDARD = {
+    id: 'qwen3.6-plus',
+    authType: AuthType.USE_OPENAI,
+    envKey: alibabaStandardProvider.envKey,
+    baseUrl: standardBaseUrls[0].url,
+  };
+  const TOKEN_PLAN = {
+    id: 'qwen3.7-plus',
+    authType: AuthType.USE_OPENAI,
+    envKey: TOKEN_PLAN_ENV_KEY,
+    baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+  };
+  const CODING_PLAN = {
+    id: 'qwen3-coder-plus',
+    authType: AuthType.USE_OPENAI,
+    envKey: CODING_PLAN_ENV_KEY,
+    baseUrl: CODING_PLAN_CHINA_BASE_URL,
+  };
+  const OPENROUTER = {
+    id: 'z-ai/glm-4.5-air:free',
+    authType: AuthType.USE_OPENAI,
+    envKey: OPENROUTER_ENV_KEY,
+    baseUrl: OPENROUTER_BASE_URL,
+  };
+
+  /** Config with nothing under tools.webSearch: the auto path. */
+  const autoConfig = (
+    models: ConfigOverrides['models'],
+    primaryModel: string,
+    extra: Partial<ConfigOverrides> = {},
+  ) => makeConfig({ settings: undefined, models, primaryModel, ...extra });
+
+  it('carries a configured budget on the automatic path', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    // A budget-only setting must not turn the automatic path into an
+    // explicit one.
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 90_000 } }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.timeoutMs).toBe(90_000);
+    }
+  });
+
+  it('normalizes an out-of-range budget on the automatic path', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, { settings: { timeoutMs: 0 } }),
+    );
+    expect(gate.ok && gate.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+  });
+
+  it('derives the backend from a Standard API Key entry', () => {
+    expect(
+      findProviderByCredentials(STANDARD.baseUrl, STANDARD.envKey)?.id,
+    ).toBe('alibabaStandard');
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(autoConfig([STANDARD], STANDARD.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend).toEqual({
+        kind: 'dashscope',
+        // Not the primary model id: the search runs on the documented
+        // search model at the same endpoint.
+        modelId: 'qwen3.8-flash',
+        apiKeyEnvKey: STANDARD.envKey,
+        baseUrl: STANDARD.baseUrl,
+        webExtractor: true,
+        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+      });
+    }
+  });
+
+  it('derives the backend from a Token Plan entry', () => {
+    expect(
+      findProviderByCredentials(TOKEN_PLAN.baseUrl, TOKEN_PLAN.envKey)?.id,
+    ).toBe('token-plan');
+    vi.stubEnv(TOKEN_PLAN.envKey, 'sk-token-plan');
+    const gate = evaluateWebSearchGate(autoConfig([TOKEN_PLAN], TOKEN_PLAN.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(TOKEN_PLAN.baseUrl);
+      expect(gate.backend.modelId).toBe('qwen3.8-flash');
+    }
+  });
+
+  it('derives the backend for a workspace-specific Token Plan host', () => {
+    // Preset matching compares base URLs exactly, so a workspace endpoint
+    // matches no preset and must be adopted by the host check instead.
+    const workspace = {
+      id: 'qwen3.7-plus',
+      authType: 'openai',
+      envKey: 'WS_WORKSPACE_KEY',
+      baseUrl:
+        'https://llm-1yxl3y53fm8pcr4z.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(workspace.envKey, 'sk-workspace');
+    const gate = evaluateWebSearchGate(autoConfig([workspace], workspace.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(workspace.baseUrl);
+      expect(gate.backend.apiKeyEnvKey).toBe(workspace.envKey);
+    }
+  });
+
+  it('derives the backend for a hand-written DashScope entry', () => {
+    const handWritten = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: 'MY_DASHSCOPE_KEY',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(handWritten.envKey, 'sk-hand-written');
+    const gate = evaluateWebSearchGate(
+      autoConfig([handWritten], handWritten.id),
+    );
+    expect(gate.ok).toBe(true);
+  });
+
+  it('derives the backend for a custom-provider entry on a DashScope host', () => {
+    // The custom provider matches any endpoint the user typed in, so it must
+    // not veto an endpoint the host check would otherwise accept.
+    const custom = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: generateCustomEnvKey(AuthType.USE_OPENAI, DASHSCOPE_BASE_URL),
+      baseUrl: DASHSCOPE_BASE_URL,
+    };
+    vi.stubEnv(custom.envKey, 'sk-custom');
+    const gate = evaluateWebSearchGate(autoConfig([custom], custom.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.apiKeyEnvKey).toBe(custom.envKey);
+    }
+  });
+
+  it('derives the backend from an env-only generation config', () => {
+    // The resolver carries the env value plus its source metadata, but no
+    // apiKeyEnvKey. The source keeps searches following key rotation.
+    vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: 'openai',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKey: 'sk-env-only',
+        },
+        generationConfigSources: {
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+        },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(DASHSCOPE_BASE_URL);
+      expect(gate.backend.apiKeyEnvKey).toBe('OPENAI_API_KEY');
+      expect(gate.backend.apiKey).toBeUndefined();
+    }
+  });
+
+  it('carries a literal primary-model credential into the derived backend', () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKey: 'sk-cli-literal',
+        },
+        generationConfigSources: { apiKey: { kind: 'cli' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.apiKey).toBe('sk-cli-literal');
+      expect(gate.backend.apiKeyEnvKey).toBeUndefined();
+    }
+  });
+
+  it('uses the generation config env key when deriving a backend', () => {
+    vi.stubEnv('PLAN_KEY', 'sk-plan');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnvKey: 'PLAN_KEY',
+        },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.apiKeyEnvKey).toBe('PLAN_KEY');
+  });
+
+  it('uses a literal credential when a declared env key is unset', () => {
+    vi.stubEnv(STANDARD.envKey, '');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, {
+        primaryRegistryBaseUrl: STANDARD.baseUrl,
+        generationConfig: {
+          model: STANDARD.id,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: STANDARD.baseUrl,
+          apiKeyEnvKey: STANDARD.envKey,
+          apiKey: 'sk-settings-literal',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.apiKey).toBe('sk-settings-literal');
+      expect(gate.backend.apiKeyEnvKey).toBeUndefined();
+    }
+  });
+
+  it('forwards custom headers from an env-only generation config', () => {
+    const customHeaders = { 'X-DashScope-WorkSpace': 'llm-xyz' };
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: AuthType.USE_OPENAI,
+          baseUrl:
+            'https://llm-xyz.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          apiKey: 'sk-workspace',
+          customHeaders,
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.customHeaders).toEqual(customHeaders);
+  });
+
+  it('keeps auto-derived web extraction disabled when requested', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { webExtractor: false },
+        models: [STANDARD],
+        primaryModel: STANDARD.id,
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.webExtractor).toBe(false);
+  });
+
+  it('forwards custom headers from the selected provider entry', () => {
+    const model = {
+      ...STANDARD,
+      generationConfig: { customHeaders: { 'X-Gateway-Route': 'ds' } },
+    };
+    vi.stubEnv(model.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(autoConfig([model], model.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.customHeaders).toEqual({ 'X-Gateway-Route': 'ds' });
+    }
+  });
+
+  it('uses the registry-selected entry when model ids are duplicated', () => {
+    const intl = {
+      ...STANDARD,
+      envKey: 'DASHSCOPE_INTL_KEY',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    vi.stubEnv(intl.envKey, 'sk-intl');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD, intl], STANDARD.id, {
+        primaryRegistryBaseUrl: intl.baseUrl,
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.baseUrl).toBe(intl.baseUrl);
+  });
+
+  it('falls back to the selected generation config instead of a keyed sibling', () => {
+    const selected = { ...STANDARD, envKey: undefined };
+    const sibling = {
+      ...STANDARD,
+      envKey: 'DASHSCOPE_INTL_KEY',
+      baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(sibling.envKey, 'sk-intl');
+    const gate = evaluateWebSearchGate(
+      autoConfig([selected, sibling], selected.id, {
+        primaryRegistryBaseUrl: selected.baseUrl,
+        generationConfig: {
+          model: selected.id,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: selected.baseUrl,
+          apiKey: 'sk-selected',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(selected.baseUrl);
+      expect(gate.backend.apiKey).toBe('sk-selected');
+    }
+  });
+
+  it('does not scan other auth types before authentication is selected', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, {
+        primaryAuthType: undefined,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it('still uses the selected generation config before authentication is resolved', () => {
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD], STANDARD.id, {
+        primaryAuthType: undefined,
+        generationConfig: {
+          model: STANDARD.id,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: STANDARD.baseUrl,
+          apiKey: 'sk-selected',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.baseUrl).toBe(STANDARD.baseUrl);
+      expect(gate.backend.apiKey).toBe('sk-selected');
+    }
+  });
+
+  it('accepts a non-preset internal Alibaba host on the automatic path', () => {
+    const internal = {
+      id: 'internal-model',
+      authType: AuthType.USE_OPENAI,
+      envKey: 'INTERNAL_MODEL_KEY',
+      baseUrl: 'https://gw.some-team.alibaba-inc.com/v1',
+    };
+    vi.stubEnv(internal.envKey, 'sk-internal');
+    const gate = evaluateWebSearchGate(autoConfig([internal], internal.id));
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.baseUrl).toBe(internal.baseUrl);
+  });
+
+  it('rejects a non-OpenAI primary provider on an accepted host', () => {
+    const anthropic = {
+      id: 'shared-model',
+      authType: AuthType.USE_ANTHROPIC,
+      envKey: 'IDEALAB_OPUS_API_KEY',
+      baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+    };
+    vi.stubEnv(anthropic.envKey, 'sk-anthropic');
+    const gate = evaluateWebSearchGate(
+      autoConfig([anthropic], anthropic.id, {
+        primaryAuthType: AuthType.USE_ANTHROPIC,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it('uses the primary auth type to disambiguate duplicate model ids', () => {
+    const anthropic = {
+      id: STANDARD.id,
+      authType: AuthType.USE_ANTHROPIC,
+      envKey: 'ANTHROPIC_GATEWAY_KEY',
+      baseUrl: 'https://gateway.aliyun-inc.com/anthropic',
+    };
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    vi.stubEnv(anthropic.envKey, 'sk-anthropic');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD, anthropic], STANDARD.id, {
+        primaryAuthType: AuthType.USE_ANTHROPIC,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it('never derives a side request from Qwen OAuth credentials', () => {
+    const oauth = {
+      id: 'qwen3.6-plus',
+      authType: AuthType.QWEN_OAUTH,
+      envKey: 'API_KEY',
+      baseUrl: DASHSCOPE_BASE_URL,
+    };
+    vi.stubEnv(oauth.envKey, 'oauth-token');
+    const gate = evaluateWebSearchGate(
+      autoConfig([oauth], oauth.id, {
+        primaryAuthType: AuthType.QWEN_OAUTH,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it('stays silently off when the env-only key variable is unset', () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: 'openai',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKey: 'stale-env-value',
+        },
+        generationConfigSources: {
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+        },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off for an env-only config on a non-DashScope host', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-env-only');
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'env-model', {
+        generationConfig: {
+          model: 'env-model',
+          authType: 'openai',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a Coding Plan entry', () => {
+    // The preset matches but declares no backend: the endpoint has not been
+    // verified to serve the Responses API search tools.
+    vi.stubEnv(CODING_PLAN.envKey, 'sk-sp-coding');
+    expect(
+      findProviderByCredentials(CODING_PLAN.baseUrl, CODING_PLAN.envKey)?.id,
+    ).toBe('coding-plan');
+    const gate = evaluateWebSearchGate(
+      autoConfig([CODING_PLAN], CODING_PLAN.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a hand-written Coding Plan host', () => {
+    const handWritten = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: 'MY_CODING_KEY',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+    };
+    vi.stubEnv(handWritten.envKey, 'sk-sp-hand-written');
+    const gate = evaluateWebSearchGate(
+      autoConfig([handWritten], handWritten.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a hand-written China Coding Plan host', () => {
+    const handWritten = {
+      id: 'my-model',
+      authType: AuthType.USE_OPENAI,
+      envKey: 'MY_CODING_KEY',
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+    };
+    vi.stubEnv(handWritten.envKey, 'sk-sp-hand-written');
+    const gate = evaluateWebSearchGate(
+      autoConfig([handWritten], handWritten.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it('honors a preset veto even when its host would otherwise be accepted', () => {
+    const idealab = {
+      id: 'qwen3.6-plus',
+      authType: AuthType.USE_OPENAI,
+      envKey: 'IDEALAB_API_KEY',
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+    };
+    vi.stubEnv(idealab.envKey, 'sk-idealab');
+    const gate = evaluateWebSearchGate(autoConfig([idealab], idealab.id));
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.notice).toContain(
+        'provider "idealab" declares no built-in web search backend',
+      );
+    }
+  });
+
+  it.each([
+    [CODING_PLAN.baseUrl + '/', 'ALT_CODING_KEY'],
+    ['https://idealab.alibaba-inc.com/api/openai/v1/', 'ALT_IDEALAB_KEY'],
+  ])(
+    'honors an endpoint preset veto despite credential formatting: %s',
+    (baseUrl, envKey) => {
+      const entry = {
+        id: 'qwen3.6-plus',
+        authType: AuthType.USE_OPENAI,
+        envKey,
+        baseUrl,
+      };
+      vi.stubEnv(envKey, 'sk-test');
+      const gate = evaluateWebSearchGate(autoConfig([entry], entry.id));
+      expect(gate.ok).toBe(false);
+      if (!gate.ok) expect(gate.silent).toBe(true);
+    },
+  );
+
+  it('honors an endpoint preset veto for a literal credential', () => {
+    const gate = evaluateWebSearchGate(
+      autoConfig([], 'qwen3.6-plus', {
+        generationConfig: {
+          model: 'qwen3.6-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+          apiKey: 'sk-literal',
+        },
+        generationConfigSources: { apiKey: { kind: 'settings' } },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.silent).toBe(true);
+  });
+
+  it.each([
+    'https://qwen-gw.alicloudapi.com/v1',
+    'https://dashscope-proxy.example.com/v1',
+  ])(
+    'does not assume an unverified proxy host serves search: %s',
+    (baseUrl) => {
+      const proxy = {
+        id: 'qwen3.6-plus',
+        authType: AuthType.USE_OPENAI,
+        envKey: 'PROXY_KEY',
+        baseUrl,
+      };
+      vi.stubEnv(proxy.envKey, 'sk-proxy');
+      const gate = evaluateWebSearchGate(autoConfig([proxy], proxy.id));
+      expect(gate.ok).toBe(false);
+      if (!gate.ok) expect(gate.silent).toBe(true);
+    },
+  );
+
+  it('does not expose credentials embedded in an unsupported base URL', () => {
+    const unsafe = {
+      id: 'qwen3.6-plus',
+      authType: AuthType.USE_OPENAI,
+      envKey: 'UNSAFE_URL_KEY',
+      baseUrl: 'https://user:sk-secret@api.openai.com/v1',
+    };
+    vi.stubEnv(unsafe.envKey, 'sk-env');
+    const gate = evaluateWebSearchGate(autoConfig([unsafe], unsafe.id));
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.notice).not.toContain('sk-secret');
+  });
+
+  it('stays silently off on a third-party provider, without falling back to another DashScope entry', () => {
+    vi.stubEnv(OPENROUTER.envKey, 'sk-or');
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    expect(
+      findProviderByCredentials(OPENROUTER.baseUrl, OPENROUTER.envKey)?.id,
+    ).toBe('openrouter');
+    const gate = evaluateWebSearchGate(
+      autoConfig([STANDARD, OPENROUTER], OPENROUTER.id),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off when the entry key variable is unset', () => {
+    vi.stubEnv(STANDARD.envKey, '');
+    const gate = evaluateWebSearchGate(autoConfig([STANDARD], STANDARD.id));
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off on a plaintext-HTTP DashScope host', () => {
+    const insecure = {
+      id: 'my-model',
+      authType: 'openai',
+      envKey: 'MY_INSECURE_KEY',
+      baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+    };
+    vi.stubEnv(insecure.envKey, 'sk-insecure');
+    const gate = evaluateWebSearchGate(autoConfig([insecure], insecure.id));
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('stays silently off when disabled explicitly', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: false },
+        models: [STANDARD],
+        primaryModel: STANDARD.id,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('still reports the no-model notice when explicitly enabled', () => {
+    vi.stubEnv(OPENROUTER.envKey, 'sk-or');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true },
+        models: [OPENROUTER],
+        primaryModel: OPENROUTER.id,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBeFalsy();
+      expect(gate.notice).toContain('no search model');
+    }
+  });
+
+  it('derives the backend when explicitly enabled without a model', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true },
+        models: [STANDARD],
+        primaryModel: STANDARD.id,
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.modelId).toBe('qwen3.8-flash');
+  });
+
+  it('stays silently off instead of throwing when the config surface is incomplete', () => {
+    // The gate runs while the tool registry is being built, for whatever
+    // Config shape the caller has. A missing accessor must cost web search,
+    // not every other tool in the registry.
+    const broken = {
+      getWebSearchSettings: () => undefined,
+      getModel: () => 'some-model',
+      getCurrentAuthType: () => 'openai',
+      getCurrentModelRegistryBaseUrl: () => undefined,
+      getAllConfiguredModels: () => [],
+      getModelsConfig: () => ({}),
+    } as unknown as Config;
+    const gate = evaluateWebSearchGate(broken);
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBe(true);
+    }
+  });
+
+  it('reports explicit opt-in when automatic derivation throws', () => {
+    const broken = {
+      getWebSearchSettings: () => ({ enabled: true }),
+      getModel: () => 'some-model',
+      getCurrentAuthType: () => 'openai',
+      getCurrentModelRegistryBaseUrl: () => undefined,
+      getAllConfiguredModels: () => [],
+      getModelsConfig: () => ({}),
+    } as unknown as Config;
+    const gate = evaluateWebSearchGate(broken);
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBeFalsy();
+      expect(gate.notice).toContain('no search model');
+    }
+  });
+
+  it('does not override a declared env backend when its model is missing', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+        },
+        models: [STANDARD],
+        primaryModel: STANDARD.id,
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.silent).toBeFalsy();
+      expect(gate.notice).toContain('no search model');
+    }
+  });
+
+  it('prefers an explicitly configured search model over derivation', () => {
+    vi.stubEnv(STANDARD.envKey, 'sk-standard');
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: { model: 'qwen3.7-plus' },
+        models: [{ ...STANDARD, id: 'qwen3.7-plus' }],
+        primaryModel: 'qwen3.7-plus',
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) {
+      expect(gate.backend.modelId).toBe('qwen3.7-plus');
+    }
+  });
+});
+
 describe('WebSearchTool confirmation', () => {
   it('asks by default, shows the query, and offers the standard always-allow rule', async () => {
     const tool = new WebSearchTool(makeConfig());
@@ -582,6 +1391,29 @@ describe('WebSearchTool validation', () => {
 });
 
 describe('WebSearchTool execute', () => {
+  it('uses a literal credential derived from the primary model', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
+    );
+    await runSearch(
+      makeConfig({
+        settings: undefined,
+        models: [],
+        primaryModel: 'env-model',
+        generationConfig: {
+          model: 'env-model',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKey: 'sk-cli-literal',
+        },
+        generationConfigSources: { apiKey: { kind: 'cli' } },
+      }),
+    );
+    const opts = mockCtorOpts.current as { apiKey: string };
+    expect(opts.apiKey).toBe('sk-cli-literal');
+  });
+
   it('returns a structured result with answer, opened pages, candidates, queries, citation policy, and safety footer', async () => {
     mockCreate.mockResolvedValueOnce(
       makeStream(
@@ -661,6 +1493,36 @@ describe('WebSearchTool execute', () => {
     };
     expect(opts.defaultHeaders['X-Gateway-Route']).toBe('ds');
     expect(opts.defaultHeaders['User-Agent']).toContain('QwenCode/');
+  });
+
+  it('installs dynamic header expansion on the search client fetch', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
+    );
+    const config = makeConfig({
+      allowDynamicHeaderValues: true,
+      models: [
+        {
+          id: 'qwen3.6-plus',
+          authType: 'openai',
+          envKey: TEST_ENV_KEY,
+          baseUrl: DASHSCOPE_BASE_URL,
+          generationConfig: {
+            customHeaders: { 'X-Session': '${session_id}' },
+          },
+        },
+      ],
+    });
+    const getSessionId = vi.spyOn(config, 'getSessionId');
+    await runSearch(config);
+    const opts = mockCtorOpts.current as {
+      defaultHeaders: Record<string, string>;
+      fetch: typeof globalThis.fetch;
+    };
+
+    await opts.fetch('data:text/plain,ok', { headers: opts.defaultHeaders });
+
+    expect(getSessionId).toHaveBeenCalledOnce();
   });
 
   it('truncates an oversized answer while preserving source URLs and the safety footer', async () => {
@@ -1181,5 +2043,413 @@ describe('WebSearchTool execute', () => {
     const schema = tool.schema;
     expect(schema.description).toContain('July 2026');
     vi.useRealTimers();
+  });
+});
+
+describe('WebSearchTool citations', () => {
+  it('asks the model to cite bare URLs without titles', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('as bare URLs, one per line');
+    expect(content).toContain('cannot be verified');
+    expect(content).not.toContain('as markdown links');
+  });
+
+  it('shows a bare URL citation example in the tool description', () => {
+    const description = new WebSearchTool(makeConfig()).schema.description;
+    expect(description).toContain(
+      '- https://www.cms.gov/files/document/r12951cp.pdf',
+    );
+    expect(description).toContain('do not wrap them in markdown links');
+    expect(description).not.toContain('](https://');
+  });
+});
+
+describe('WebSearchTool budget', () => {
+  it('uses a configured budget and falls back to the default for unusable values', () => {
+    expect(resolveWebSearchTimeoutMs(undefined)).toBe(120_000);
+    expect(resolveWebSearchTimeoutMs(30_000)).toBe(30_000);
+    expect(resolveWebSearchTimeoutMs(600_000)).toBe(600_000);
+    // Rejected rather than clamped: a typo must not become a long wait.
+    for (const unusable of [0, -1, 1.5, Number.NaN, 600_001, 1.5e9]) {
+      expect(resolveWebSearchTimeoutMs(unusable)).toBe(
+        DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+      );
+    }
+  });
+
+  it('carries a configured budget on the explicit and env-declared paths', () => {
+    const explicit = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 90_000 },
+      }),
+    );
+    const envDeclared = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+          timeoutMs: 45_000,
+        },
+        models: [],
+      }),
+    );
+    expect(explicit.ok && explicit.backend.timeoutMs).toBe(90_000);
+    expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(45_000);
+  });
+
+  it('normalizes an out-of-range budget on the explicit and env-declared paths', () => {
+    // settings.json is not re-validated at load, so the gate read sites are
+    // the only guard keeping a hand-edited value from reaching the backend.
+    const explicit = evaluateWebSearchGate(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 0 },
+      }),
+    );
+    const envDeclared = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+          timeoutMs: 0,
+        },
+        models: [],
+      }),
+    );
+    expect(explicit.ok && explicit.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+    expect(envDeclared.ok && envDeclared.backend.timeoutMs).toBe(
+      DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    );
+  });
+
+  it('times out on the configured budget rather than a fixed one', async () => {
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            // A stream that never finishes on its own, like a slow search.
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
+      }),
+    );
+    expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(result.error?.message).toBe('Web search timed out after 0.2s.');
+    // The SDK's own request timeout follows the same budget.
+    expect((mockCtorOpts.current as { timeout: number }).timeout).toBe(200);
+  });
+
+  it('reports a sub-second budget to the millisecond instead of rounding it to zero', async () => {
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 40 },
+      }),
+    );
+    expect(result.error?.message).toBe('Web search timed out after 0.04s.');
+  });
+
+  it('salvages the partial result when the budget expires after a search ran', async () => {
+    // terminalFailure tries partial salvage before the timeout arm: a search
+    // that spent its budget after collecting evidence must return it.
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+            yield {
+              type: 'response.output_item.done',
+              item: { ...EXTRACTOR_ITEM, output: 'x'.repeat(20_000) },
+            };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            });
+          },
+        }),
+    );
+    const result = await runSearch(
+      makeConfig({
+        settings: { enabled: true, model: 'qwen3.6-plus', timeoutMs: 200 },
+      }),
+    );
+    expect(result.error).toBeUndefined();
+    const content = result.llmContent as string;
+    expect(content).toContain('[Partial result:');
+    expect(content).toContain('[Raw page content salvaged');
+    expect(content).toContain('Truncated to 6000 characters.');
+  });
+
+  it('reports cancellation instead of salvaging when the caller aborts', async () => {
+    // terminalFailure checks the caller's signal before the salvage arm: an
+    // aborted search must not hand the model salvaged partial evidence.
+    const controller = new AbortController();
+    mockCreate.mockImplementation(
+      (_params: unknown, { signal }: { signal: AbortSignal }) =>
+        Promise.resolve({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'response.created' };
+            yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+            await new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+              controller.abort();
+            });
+          },
+        }),
+    );
+    const tool = new WebSearchTool(makeConfig());
+    const result = await tool
+      .build({ query: 'test query' })
+      .execute(controller.signal);
+    expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(result.error?.message).toBe('Web search cancelled.');
+    expect(result.llmContent).not.toContain('[Partial result:');
+  });
+});
+
+describe('WebSearchTool extractor fallback', () => {
+  const streamDyingAfterPageRead = (pageText: string) => ({
+    async *[Symbol.asyncIterator]() {
+      yield { type: 'response.created' };
+      yield { type: 'response.output_item.done', item: SEARCH_ITEM };
+      yield {
+        type: 'response.output_item.done',
+        item: { ...EXTRACTOR_ITEM, output: pageText },
+      };
+      throw new Error('stream reset');
+    },
+  });
+
+  it('labels salvaged page text as raw page content', async () => {
+    mockCreate.mockResolvedValueOnce(streamDyingAfterPageRead('page content'));
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain(
+      "[Raw page content salvaged from the search agent's page reads — its narrated answer did not arrive.]",
+    );
+    expect(content).toContain('page content');
+    expect(content).not.toContain('Truncated to');
+  });
+
+  it('does not split a surrogate pair when salvaged page text is truncated', async () => {
+    // The fixture length leans on the 41-unit '[Extracted content — goal:
+    // verify facts]\n' prefix collectFromItems prepends: 41 + 5958 'a's
+    // places the emoji's high surrogate exactly at the 6000-unit cut.
+    mockCreate.mockResolvedValueOnce(
+      streamDyingAfterPageRead('a'.repeat(5_958) + '\u{1F600}'),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    // The cut backs off one unit to keep the pair whole, and the label
+    // reports the 5999 units actually delivered, not the 6000 bound.
+    expect(content).toContain('Truncated to 5999 characters.]');
+    // No high surrogate without its low surrogate anywhere in the payload.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(content)).toBe(false);
+  });
+
+  it('bounds salvaged page text when the narration never arrived', async () => {
+    mockCreate.mockResolvedValueOnce(
+      streamDyingAfterPageRead('x'.repeat(20_000)),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('Truncated to 6000 characters.]');
+    expect(content).toContain('x'.repeat(5_000));
+    expect(content).not.toContain('x'.repeat(6_000));
+  });
+
+  it('never uses page text when the narration arrived', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          { ...EXTRACTOR_ITEM, output: 'unrelated page body' },
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    expect(content).toContain('The answer is 42.');
+    expect(content).not.toContain('unrelated page body');
+    expect(content).not.toContain('[Raw page content');
+  });
+});
+
+describe('WebSearchTool citation invariants', () => {
+  it('renders every evidence bullet as a bare URL and nothing else', async () => {
+    // The citation policy tells the model the page lists give URLs only; a
+    // bullet carrying anything else would contradict it silently.
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, EXTRACTOR_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const evidence = content.slice(
+      content.indexOf('Opened evidence pages'),
+      content.indexOf('Queries executed'),
+    );
+    const bullets = evidence
+      .split('\n')
+      .filter((line) => line.startsWith('- '));
+    expect(bullets.length).toBeGreaterThanOrEqual(2);
+    for (const bullet of bullets) {
+      expect(bullet).toMatch(/^- https?:\/\/\S+$/);
+    }
+  });
+
+  it('states the citation rules once for the description and the result footer', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM])),
+    );
+    const content = (await runSearch(makeConfig())).llmContent as string;
+    const description =
+      new WebSearchTool(makeConfig()).schema.description ?? '';
+    const critical = description.slice(
+      description.indexOf('CRITICAL REQUIREMENT'),
+      description.indexOf('  - Example format:'),
+    );
+    expect(
+      critical.split('\n').filter((line) => line.startsWith('  - ')),
+    ).toEqual(CITATION_RULES.map((rule) => `  - ${rule}`));
+    // Exactly the rules, then the safety footer: an exception added to the
+    // footer alone would leave two contradictory policies in one context.
+    expect(content).toContain(
+      `\n\nCitation policy: ${CITATION_RULES.map((rule) => `${rule}.`).join(' ')}\n\n[Safety:`,
+    );
+  });
+});
+
+describe('WebSearchTool session budget', () => {
+  const answeredStream = () =>
+    makeStream(completedEvents([SEARCH_ITEM, MESSAGE_ITEM]));
+  const cappedConfig = (
+    maxPerSession: number,
+    sessionUsage?: { calls: number },
+  ) =>
+    makeConfig({
+      settings: { enabled: true, model: 'qwen3.6-plus', maxPerSession },
+      sessionUsage,
+    });
+
+  it('resolves the configured cap and falls back to the default otherwise', () => {
+    expect(resolveWebSearchMaxPerSession(undefined)).toBe(
+      DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+    );
+    expect(resolveWebSearchMaxPerSession(5)).toBe(5);
+    for (const value of [0, -1, 1.5, Number.NaN, 10_001]) {
+      expect(resolveWebSearchMaxPerSession(value)).toBe(
+        DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
+      );
+    }
+  });
+
+  it('skips a call past the cap with a non-error result and sends nothing', async () => {
+    mockCreate.mockImplementation(() => Promise.resolve(answeredStream()));
+    const config = cappedConfig(2);
+
+    const first = await runSearch(config);
+    const second = await runSearch(config);
+    const third = await runSearch(config);
+
+    expect(first.error).toBeUndefined();
+    expect(second.error).toBeUndefined();
+    expect(third.error).toBeUndefined();
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(third.returnDisplay).toBe(
+      'Skipped: session web search budget used (2/2)',
+    );
+    const content = third.llmContent as string;
+    expect(content.startsWith('Web search was not performed:')).toBe(true);
+    expect(content).toContain('(2 of 2 web_search calls)');
+    expect(content).toContain('tools.webSearch.maxPerSession');
+    expect(content).toContain('WEB_SEARCH_MAX_PER_SESSION');
+    // Nothing external reached the model, so no untrusted-content footer.
+    expect(content).not.toContain('[Safety:');
+  });
+
+  it('counts a search that fails, because the request was sent', async () => {
+    mockCreate
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Internal error'), { status: 500 }),
+      )
+      .mockImplementation(() => Promise.resolve(answeredStream()));
+    const config = cappedConfig(2);
+
+    const failed = await runSearch(config);
+    const succeeded = await runSearch(config);
+    const skipped = await runSearch(config);
+
+    expect(failed.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(succeeded.error).toBeUndefined();
+    expect(skipped.returnDisplay).toBe(
+      'Skipped: session web search budget used (2/2)',
+    );
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not count a call the gate turns away before any request', async () => {
+    const usage = { calls: 0 };
+    delete process.env[TEST_ENV_KEY];
+
+    const blocked = await runSearch(cappedConfig(1, usage));
+
+    expect(blocked.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(usage.calls).toBe(0);
+
+    process.env[TEST_ENV_KEY] = 'sk-test';
+    mockCreate.mockImplementation(() => Promise.resolve(answeredStream()));
+    const allowed = await runSearch(cappedConfig(1, usage));
+
+    expect(allowed.error).toBeUndefined();
+    expect(usage.calls).toBe(1);
+  });
+
+  it('lets calls batched in one turn through only up to the cap', async () => {
+    // The check and the increment sit after the last await before the
+    // request; a check before an await would let all three pass.
+    mockCreate.mockImplementation(() => Promise.resolve(answeredStream()));
+    const config = cappedConfig(2);
+
+    const results = await Promise.all([
+      runSearch(config),
+      runSearch(config),
+      runSearch(config),
+    ]);
+
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(
+      results.filter((result) =>
+        String(result.returnDisplay).startsWith('Skipped:'),
+      ),
+    ).toHaveLength(1);
   });
 });

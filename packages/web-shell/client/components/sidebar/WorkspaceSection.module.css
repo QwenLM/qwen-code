@@ -4,6 +4,7 @@
 }
 
 .headerRow {
+  position: relative;
   display: flex;
   align-items: center;
   width: 100%;
@@ -17,12 +18,13 @@
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 5px;
+  padding: 5px 4px 5px 8px;
   border: none;
   background: transparent;
   color: var(--sidebar-foreground);
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
 }
@@ -58,6 +60,27 @@
   display: block;
 }
 
+.folderIconWrap {
+  position: relative;
+  display: inline-flex;
+  width: 16px;
+  height: 15px;
+  align-items: center;
+}
+
+.folderRemoteBadge {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 8px;
+  height: 8px;
+  padding: 1px;
+  border-radius: 50%;
+  background: var(--sidebar-background);
+  color: var(--agent-blue-500);
+  stroke-width: 2;
+}
+
 .chevronOpen {
   color: var(--sidebar-foreground);
 }
@@ -78,44 +101,26 @@
   border-radius: 4px;
 }
 
-/* Live git chip in the folder header. */
-.gitPill {
-  --git-branch-icon-size: 12px;
-  --git-branch-badge-size: 5px;
-  --git-branch-badge-offset: -1px;
-
-  display: inline-flex;
-  flex: 0 0 24px;
-  width: 24px;
-  padding: 0;
-  border: none;
-  background: none;
-  font: inherit;
-  color: inherit;
-  text-align: inherit;
-  cursor: pointer;
-}
-
-.gitPill [data-web-shell-git-branch] {
-  width: 24px;
-  max-width: 24px;
-  flex-basis: 24px;
-  padding: 0 5px;
-}
-
-/* Keep the icon directly after the folder name — unless the header carries
-   session counts, which sit at its right edge and push the icon after them. */
-.headerRow:has(.gitPill) .header:not(:has(.headerCounts)) {
-  flex-grow: 0;
-}
-
 /* Trusted sessions use the sidebar's shared row with its own left indent;
    read-only rows apply the same indent below. */
 .sessions {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   margin-bottom: 12px;
+}
+
+/* Tree guide under the folder icon, in the spirit of file-explorer indent
+   guides; hovered/selected rows paint over it with their own background. */
+.sessions::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 10px;
+  left: 15px;
+  width: 1px;
+  background: color-mix(in srgb, var(--sidebar-foreground) 14%, transparent);
 }
 
 .empty {
@@ -178,59 +183,4 @@
   .sessionItemReadOnly:hover .sessionNameInner {
     animation: none;
   }
-}
-
-/* Session counts at the right edge of the folder header. */
-.headerCounts {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  padding-left: 6px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted-foreground);
-}
-
-.headerCount {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.headerCount::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.headerCountRunning {
-  color: var(--success-color, #3fb950);
-}
-
-.headerCountAttention {
-  color: var(--warning-color, #d29922);
-}
-
-.headerCountTotal::before {
-  display: none;
-}
-
-/* Full path under an expanded folder header. */
-.path {
-  padding: 0 8px 2px 30px;
-  overflow: hidden;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 10.5px;
-  line-height: 14px;
-  color: var(--muted-foreground);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.pathCompact {
-  padding-left: 26px;
 }

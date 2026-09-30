@@ -61,6 +61,7 @@ describe('HookSystem', () => {
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
       getAllowedHttpHookUrls: vi.fn().mockReturnValue([]),
       getAllowPrivateNetworkHooks: vi.fn().mockReturnValue(false),
@@ -132,6 +133,8 @@ describe('HookSystem', () => {
         mockHookRunner,
         mockHookAggregator,
         expect.any(SessionHooksManager),
+        undefined,
+        hookSystem.runtimeId,
       );
     });
   });
@@ -1086,6 +1089,7 @@ describe('HookSystem', () => {
         PermissionMode.AutoEdit,
         undefined,
         undefined,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -1118,6 +1122,7 @@ describe('HookSystem', () => {
         { content: 'file content' },
         'toolu_test456',
         PermissionMode.Plan,
+        undefined,
         undefined,
         undefined,
       );
@@ -1155,6 +1160,7 @@ describe('HookSystem', () => {
         PermissionMode.Plan,
         undefined,
         'call_def456',
+        undefined,
       );
     });
 
@@ -1298,6 +1304,7 @@ describe('HookSystem', () => {
         PermissionMode.AutoEdit,
         undefined,
         undefined,
+        undefined,
       );
       expect(result).toBeDefined();
     });
@@ -1334,6 +1341,7 @@ describe('HookSystem', () => {
         'Permission denied',
         true,
         PermissionMode.Yolo,
+        undefined,
         undefined,
         undefined,
       );
@@ -1375,6 +1383,7 @@ describe('HookSystem', () => {
         PermissionMode.AutoEdit,
         undefined,
         'call_ghi789',
+        undefined,
       );
     });
 
@@ -1404,6 +1413,7 @@ describe('HookSystem', () => {
         'bash',
         { command: 'ls' },
         'Error occurred',
+        undefined,
         undefined,
         undefined,
         undefined,

@@ -29,6 +29,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventType } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
+import type { SubagentExecutor } from './subagent-executor.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -135,10 +136,12 @@ export function templateString(
  * Each execute() call runs one task through AgentCore's reasoning loop. Calls
  * must be sequential; later calls reuse the same chat and prepared tools.
  */
-export class AgentHeadless {
+export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
+  // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
+  private loopType: string | null = null;
   private chat?: LlmChat;
   private toolsList?: FunctionDeclaration[];
   private executing = false;
@@ -182,6 +185,14 @@ export class AgentHeadless {
     taskName?: string,
     subagentId?: string,
   ): Promise<AgentHeadless> {
+    if (
+      runtimeContext.getAgentExecutionBackend?.() === 'container' &&
+      !runtimeContext.getExecutionEnvironment?.()
+    ) {
+      throw new Error(
+        'Container execution is required, but this agent has no execution environment. Start a supported regular subagent.',
+      );
+    }
     const core = new AgentCore(
       name,
       runtimeContext,
@@ -225,13 +236,19 @@ export class AgentHeadless {
     this.executing = true;
     this.finalText = '';
     this.terminateMode = AgentTerminateMode.ERROR;
+    // A re-executed instance (stop-hook continuation, resident turns) must
+    // not carry the previous run's loop attribution into an ERROR/FINISH
+    // spread; the field is only meaningful for a LOOP_DETECTED stop.
+    this.loopType = null;
     const resetStats = options.resetStats !== false;
     if (resetStats) {
       this.core.resetExecutionStats();
     }
 
     try {
-      await this.executeTurn(context, externalSignal, !resetStats);
+      await this.core.runInHookFrame(() =>
+        this.executeTurn(context, externalSignal, !resetStats),
+      );
     } finally {
       this.executing = false;
     }
@@ -257,11 +274,9 @@ export class AgentHeadless {
       | Content[]
       | undefined;
     const isContinuation = this.hasStartedReasoning;
-    const externalInputsOverride = isContinuation
-      ? (context.get('external_inputs_override') as
-          | AgentExternalInput[]
-          | undefined)
-      : undefined;
+    const externalInputsOverride = context.get('external_inputs_override') as
+      | AgentExternalInput[]
+      | undefined;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
     // get a transcript showing the task that was asked, which is what
@@ -270,8 +285,8 @@ export class AgentHeadless {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    if (isContinuation) {
-      const transcriptInputs = externalInputsOverride ?? [initialTaskText];
+    if (externalInputsOverride) {
+      const transcriptInputs = externalInputsOverride;
       for (const input of transcriptInputs) {
         this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
           subagentId: this.core.subagentId,
@@ -280,6 +295,13 @@ export class AgentHeadless {
           timestamp: Date.now(),
         });
       }
+    } else if (isContinuation) {
+      this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: this.core.subagentId,
+        kind: 'message',
+        text: initialTaskText,
+        timestamp: Date.now(),
+      });
     } else if (
       !initialMessagesOverride ||
       initialMessagesOverride.length === 0
@@ -385,6 +407,7 @@ export class AgentHeadless {
 
         this.finalText = result.text;
         this.terminateMode = result.terminateMode ?? AgentTerminateMode.GOAL;
+        this.loopType = result.loopType ?? null;
       } catch (error) {
         debugLogger.error('Error during subagent execution:', error);
         this.terminateMode = AgentTerminateMode.ERROR;
@@ -402,6 +425,7 @@ export class AgentHeadless {
         this.core.eventEmitter?.emit(AgentEventType.FINISH, {
           subagentId: this.core.subagentId,
           terminateReason: this.terminateMode,
+          ...(this.loopType ? { loopType: this.loopType } : {}),
           timestamp: Date.now(),
           rounds: summary.rounds,
           totalDurationMs: summary.totalDurationMs,
@@ -420,6 +444,7 @@ export class AgentHeadless {
             : 'failed',
           {
             terminate_reason: this.terminateMode,
+            ...(this.loopType ? { loop_type: this.loopType } : {}),
             result: this.finalText,
             execution_summary: this.core.stats.formatCompact(
               'Subagent execution completed',

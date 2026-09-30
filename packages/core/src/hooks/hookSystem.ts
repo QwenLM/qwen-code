@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
@@ -54,6 +55,7 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
  */
 
 export class HookSystem {
+  readonly runtimeId: string = randomUUID();
   private readonly hookRegistry: HookRegistry;
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
@@ -79,6 +81,8 @@ export class HookSystem {
       this.hookRunner,
       this.hookAggregator,
       this.sessionHooksManager,
+      undefined,
+      this.runtimeId,
     );
   }
 
@@ -319,6 +323,7 @@ export class HookSystem {
     permissionMode: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseEvent(
       toolName,
@@ -328,6 +333,7 @@ export class HookSystem {
       permissionMode,
       signal,
       tool_call_id,
+      durationMs,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUse', result.finalOutput)
@@ -346,6 +352,7 @@ export class HookSystem {
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
     tool_call_id?: string,
+    durationMs?: number,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePostToolUseFailureEvent(
       toolUseId,
@@ -356,6 +363,7 @@ export class HookSystem {
       permissionMode,
       signal,
       tool_call_id,
+      durationMs,
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
@@ -641,7 +649,11 @@ export class HookSystem {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean },
+    options?: {
+      sequential?: boolean;
+      skillRoot?: string;
+      trustGated?: boolean;
+    },
   ): string {
     return this.sessionHooksManager.addSessionHook(
       sessionId,

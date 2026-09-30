@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Regression tests for #9833: a /resume or /branch that fails AFTER the
@@ -58,6 +59,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   class SessionService {
     constructor(_cwd: string) {}
+    assertLegacySessionExecution = vi.fn();
     async loadSession(sessionId: string) {
       return sessionServiceMocks.sessions.get(sessionId);
     }
@@ -169,6 +171,7 @@ function makeFakeEnv() {
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   };
 
   // One shared session-service object: every getSessionService() call sees
@@ -325,6 +328,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           addItem,
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -397,6 +401,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -440,6 +445,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           addItem: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -480,6 +486,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           addItem,
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -530,6 +537,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -594,6 +602,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             loadHistory: vi.fn(),
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -693,6 +702,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             loadHistory: vi.fn(),
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -711,6 +721,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             addItem: addItemMock,
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -799,6 +810,7 @@ describe('session swap telemetry accounting (#9833)', () => {
             loadHistory: vi.fn(),
           },
           startNewSession: vi.fn(),
+          seedPromptCount: vi.fn(),
           clearPendingState: vi.fn(),
           setSessionName: vi.fn(),
           remount: vi.fn(),
@@ -861,6 +873,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),
@@ -907,6 +920,7 @@ describe('session swap telemetry accounting (#9833)', () => {
           loadHistory: vi.fn(),
         },
         startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
         clearPendingState: vi.fn(),
         setSessionName: vi.fn(),
         remount: vi.fn(),

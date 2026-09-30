@@ -8,6 +8,15 @@ import { existsSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestRig } from './test-helper.js';
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('TestRig', () => {
   const originalKeepOutput = process.env['KEEP_OUTPUT'];
 
@@ -54,6 +63,32 @@ describe('TestRig', () => {
     expect(existsSync(testDir)).toBe(true);
   });
 
+  it('kills an interactive session a test never closed during cleanup', async () => {
+    // KEEP_OUTPUT is what CI sets, and it makes cleanup() keep the test
+    // directory — the spawned child must not survive that path either.
+    process.env['KEEP_OUTPUT'] = 'true';
+    const rig = new TestRig();
+    await rig.setup('cleanup kills interactive session');
+    // Stands in for the CLI bundle: what is under test is that cleanup ends
+    // whatever runInteractive spawned, not what the CLI itself does.
+    rig.bundlePath = rig.createFile(
+      'idle-cli.js',
+      'setInterval(() => {}, 1000);\n',
+    );
+
+    const { ptyProcess } = rig.runInteractive();
+    expect(isProcessAlive(ptyProcess.pid)).toBe(true);
+
+    await rig.cleanup();
+
+    await expect
+      .poll(() => isProcessAlive(ptyProcess.pid), {
+        message: 'the interactive CLI child outlived cleanup()',
+        timeout: 10_000,
+      })
+      .toBe(false);
+  });
+
   it.each([
     [
       'telemetry events',
@@ -75,4 +110,52 @@ describe('TestRig', () => {
       expect(poll).toHaveBeenCalled();
     },
   );
+
+  describe('readTelemetryEvent', () => {
+    it('returns the latest matching event with its attributes', async () => {
+      const rig = new TestRig();
+      await rig.setup('read telemetry event latest');
+      rig.createFile(
+        'telemetry.log',
+        [
+          JSON.stringify({
+            attributes: {
+              'event.name': 'qwen-code.chat_compression',
+              tokens_before: 1000,
+              tokens_after: 900,
+            },
+          }),
+          JSON.stringify({
+            attributes: { 'event.name': 'qwen-code.api_request' },
+          }),
+          JSON.stringify({
+            attributes: {
+              'event.name': 'qwen-code.chat_compression',
+              tokens_before: 28891,
+              tokens_after: 27128,
+            },
+          }),
+          JSON.stringify({
+            attributes: { 'event.name': 'qwen-code.api_request' },
+          }),
+        ].join('\n'),
+      );
+
+      const event = rig.readTelemetryEvent('chat_compression');
+
+      expect(event?.attributes?.['tokens_before']).toBe(28891);
+      expect(event?.attributes?.['tokens_after']).toBe(27128);
+
+      await rig.cleanup();
+    });
+
+    it('returns null when the event never landed', async () => {
+      const rig = new TestRig();
+      await rig.setup('read telemetry event absent');
+
+      expect(rig.readTelemetryEvent('chat_compression')).toBeNull();
+
+      await rig.cleanup();
+    });
+  });
 });

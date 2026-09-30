@@ -33,6 +33,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
+import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -467,6 +468,40 @@ async function waitForClose(child: ChildProcess): Promise<void> {
   // almost always means a reused PID, not a leaked child; do not turn that
   // teardown observation into a test failure.
   console.warn(`Process ${pid} remained live after close`);
+}
+
+/**
+ * Acquires a lease in a helper process, kills it with SIGKILL, and rewrites
+ * the orphaned record through `mutate`, so Linux identity-domain cases can
+ * craft missing or foreign boot/namespace identities from a real record.
+ */
+async function deadOwnerRecord(
+  mutate?: (record: Record<string, unknown>) => void,
+): Promise<{
+  options: AcquireSessionWriterLeaseOptions;
+  lockPath: string;
+}> {
+  const fixture = await createFixture();
+  const deadOwner = startLeaseProcess();
+  expect(
+    await requestChild(deadOwner, {
+      type: 'acquire',
+      options: fixture.options,
+    }),
+  ).toMatchObject({ ok: true });
+  deadOwner.kill('SIGKILL');
+  await waitForClose(deadOwner);
+  const lockPath = getSessionWriterLockPath(
+    fixture.runtimeBaseDir,
+    fixture.options.sessionId,
+  );
+  const record = JSON.parse(await fs.readFile(lockPath, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  mutate?.(record);
+  await fs.writeFile(lockPath, JSON.stringify(record));
+  return { options: fixture.options, lockPath };
 }
 
 function record(
@@ -989,6 +1024,97 @@ describe('SessionWriterLease', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    'records the PID namespace identity on Linux',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const lockRecord = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+        pid_namespace_id?: number;
+      };
+      expect(lockRecord.pid_namespace_id).toBe(
+        processLiveness.readPidNamespaceId(),
+      );
+      await lease.release();
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'reclaims a dead writer only inside the same Linux identity domain',
+    async () => {
+      const reclaimable = await deadOwnerRecord();
+      const reclaimed = await SessionWriterLease.acquire(reclaimable.options);
+      await reclaimed.release();
+
+      const missingNamespace = await deadOwnerRecord((record) => {
+        delete record['pid_namespace_id'];
+      });
+      await expect(
+        SessionWriterLease.acquire(missingNamespace.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+      const foreignNamespace = await deadOwnerRecord((record) => {
+        record['pid_namespace_id'] = (record['pid_namespace_id'] as number) + 1;
+      });
+      await expect(
+        SessionWriterLease.acquire(foreignNamespace.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+      const foreignBoot = await deadOwnerRecord((record) => {
+        record['process_start_identity'] =
+          'linux:00000000-0000-0000-0000-000000000000:1';
+      });
+      await expect(
+        SessionWriterLease.acquire(foreignBoot.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+    },
+  );
+
+  it.runIf(process.platform === 'linux').each([
+    ['an unparseable identity', () => 'linux:zz'],
+    [
+      'an identity truncated before the start ticks',
+      () => `linux:${processLiveness.readLocalBootId()}`,
+    ],
+    [
+      'a darwin identity read by a Linux reader',
+      () => 'darwin:Tue Sep 1 00:00:00 2026',
+    ],
+    [
+      'a win32 identity read by a Linux reader',
+      () => 'win32:638000000000000000',
+    ],
+  ])('fences a dead writer carrying %s', async (_label, identity) => {
+    const fenced = await deadOwnerRecord((record) => {
+      record['process_start_identity'] = identity();
+    });
+    await expect(
+      SessionWriterLease.acquire(fenced.options),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'fences a dead writer when the local identity domain is indeterminate',
+    async () => {
+      const bootFenced = await deadOwnerRecord();
+      vi.spyOn(processLiveness, 'readLocalBootId').mockReturnValue(null);
+      await expect(
+        SessionWriterLease.acquire(bootFenced.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+      vi.restoreAllMocks();
+
+      const namespaceFenced = await deadOwnerRecord();
+      vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValue(null);
+      await expect(
+        SessionWriterLease.acquire(namespaceFenced.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+    },
+  );
+
   it.runIf(process.platform === 'darwin')(
     'does not reclaim a live Darwin owner across different time zones',
     async () => {
@@ -1291,6 +1417,8 @@ describe('SessionWriterLease', () => {
           'stage=acquire errorKind=session_writer_unavailable',
         );
         expect(log).toContain(`lockPath=${JSON.stringify(lockPath)}`);
+        expect(log).toContain('it does not prove that a writer is still alive');
+        expect(log).toContain('docs/users/conversations-recovery.md');
         expect(log).toContain(
           'cause=Error: Existing session writer lock is malformed',
         );
@@ -2761,6 +2889,186 @@ describe('SessionWriterLease', () => {
     });
     await replacement.assertOwnedAndUnchanged();
     await replacement.release();
+  });
+
+  describe('managed lock schema 3', () => {
+    const managedSchema = { schemaVersion: 3 as const, formatVersion: 1 };
+    const commitProof = {
+      last_commit_sequence: 7,
+      committed_prefix_hash: 'a'.repeat(64),
+    };
+
+    it('pins the format version into active and sealed records', async () => {
+      const fixture = await createFixture('managed-schema-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        format_version: 1,
+      });
+
+      await lease.appendJsonLine({ record: 'managed' });
+      await lease.sealForHandoff(commitProof);
+
+      const sealed = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+      expect(sealed).toMatchObject({
+        schema_version: 3,
+        state: 'sealed',
+        format_version: 1,
+        last_commit_sequence: 7,
+        committed_prefix_hash: 'a'.repeat(64),
+      });
+      expect(sealed.transcript.sha256).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('refuses to seal a managed lease without the commit proof', async () => {
+      const fixture = await createFixture('managed-seal-proof-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      await lease.appendJsonLine({ record: 'managed' });
+      const activeRaw = await fs.readFile(lockPath, 'utf8');
+      let transcriptOpens = 0;
+      fsOpenTestHook.beforeOpen = (filePath) => {
+        if (filePath === fixture.options.transcriptPath) transcriptOpens++;
+      };
+
+      await expect(lease.sealForHandoff()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe(activeRaw);
+      expect(transcriptOpens).toBe(0);
+      // A failed seal is terminal for the lease; the active lock is left for
+      // the owning process, which this test then abandons.
+      await lease.release().catch(() => undefined);
+    });
+
+    it('blocks a baseline writer from a sealed managed lock', async () => {
+      const fixture = await createFixture('managed-takeover-guard-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+      await expect(
+        SessionWriterLease.acquire({
+          ...fixture.options,
+          takeoverPolicy: 'certified',
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    });
+
+    it('hands the sealed commit proof to a certified managed takeover', async () => {
+      const fixture = await createFixture('managed-takeover-session');
+      const first = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await first.appendJsonLine({ record: 'sealed' });
+      await first.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: managedSchema,
+      });
+      expect(replacement.ownerId).not.toBe(first.ownerId);
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      expect(JSON.parse(await fs.readFile(lockPath, 'utf8'))).toMatchObject({
+        schema_version: 3,
+        state: 'active',
+        owner_id: replacement.ownerId,
+      });
+      await replacement.release();
+    });
+
+    it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
+      const fixture = await createFixture('managed-truncate-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'committed' });
+      const prefix = await fs.readFile(fixture.options.transcriptPath);
+      await lease.appendJsonLine({ record: 'uncommitted' });
+      await lease.truncateTo(prefix.byteLength);
+      await lease.appendJsonLine({ record: 'replacement' });
+      await lease.sealForHandoff(commitProof);
+
+      const replacement = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+        takeoverPolicy: 'certified',
+      });
+      expect(await fs.readFile(fixture.options.transcriptPath, 'utf8')).toBe(
+        `${prefix.toString('utf8')}{"record":"replacement"}\n`,
+      );
+      expect(replacement.takeoverCommitProof).toEqual(commitProof);
+      await replacement.release();
+    });
+
+    it('rejects truncation after the transcript changes outside the writer', async () => {
+      const fixture = await createFixture('managed-truncate-changed-session');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'committed' });
+      await fs.appendFile(fixture.options.transcriptPath, '{"foreign":true}\n');
+      const changed = await fs.readFile(fixture.options.transcriptPath);
+
+      await expect(lease.truncateTo(0)).rejects.toBeInstanceOf(
+        SessionTranscriptChangedError,
+      );
+      expect(await fs.readFile(fixture.options.transcriptPath)).toEqual(
+        changed,
+      );
+      await lease.release();
+    });
+
+    it('does not reclaim a stale managed lock for a baseline writer', async () => {
+      const fixture = await createFixture('managed-stale-session');
+      const owner = startLeaseProcess();
+      expect(
+        await requestChild(owner, {
+          type: 'acquire',
+          options: { ...fixture.options, lockSchema: managedSchema },
+        }),
+      ).toMatchObject({ ok: true });
+      owner.kill('SIGKILL');
+      await waitForClose(owner);
+
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+
+      const managed = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await managed.release();
+    });
   });
 
   it('waits for an accepted append before sealing the transcript', async () => {

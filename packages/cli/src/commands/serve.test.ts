@@ -411,7 +411,28 @@ describe('serve rate limit env parsing', () => {
         rateLimitRead: 121,
         rateLimitWindowMs: 60000,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
+  });
+
+  it.each([
+    ['--experimental-paired-engines --no-web', true],
+    ['--no-web', undefined],
+  ])('maps "%s" to experimentalPairedEngines', async (args, expected) => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(args);
+
+    expect(
+      (
+        mockRunQwenServe.mock.calls[0]?.[0] as {
+          experimentalPairedEngines?: boolean;
+        }
+      ).experimentalPairedEngines,
+    ).toBe(expected);
   });
 
   it('applies authenticated open before the yargs path starts the daemon', async () => {
@@ -429,6 +450,9 @@ describe('serve rate limit env parsing', () => {
     );
 
     await startServeHandlerWithArgs('--open-with-auth');
+    // Wait out the fire-and-forget handler's browser-open phase so its
+    // openBrowserSecurely call cannot land in the next test.
+    await vi.waitFor(() => expect(mockOpenBrowserSecurely).toHaveBeenCalled());
 
     expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
     expect(tokenAtBoot).toBe('generated-token');
@@ -485,6 +509,7 @@ describe('serve rate limit env parsing', () => {
         maxJournalEvents: 5000,
         maxJournalBytes: 1048576,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -500,6 +525,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxJournalEvents: 5000 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
       'maxJournalBytes',
@@ -516,6 +542,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxJournalBytes: 1048576 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
       'maxJournalEvents',
@@ -594,6 +621,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ token: 'generated-token' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockQr.generate).toHaveBeenCalledWith(
       'http://192.168.1.20:4170/#token=pairing-token',
@@ -627,6 +655,9 @@ describe('serve rate limit env parsing', () => {
     await startServeHandlerWithArgs(
       '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
     );
+    // Wait out the fire-and-forget handler's pairing phase so it cannot
+    // consume the one-shot QR mock the next test installs.
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
 
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).toEqual(
@@ -713,6 +744,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -730,6 +762,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         compactedReplayMaxBytes: 1024 * 1024,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -743,6 +776,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxTotalSessions: 42 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -756,6 +790,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryProjectScope: 'git-root' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -781,6 +816,7 @@ describe('serve rate limit env parsing', () => {
           timeoutMs: 2500,
         },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
   });
@@ -815,23 +851,28 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryPressureMode: 'off' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
-  it('passes --child-heap-mode to runQwenServe', async () => {
-    mockRunQwenServe.mockResolvedValueOnce({
-      url: 'http://127.0.0.1:4170/',
-      webShellMounted: false,
-    });
+  it.each(['off', 'admit', 'enforce'])(
+    'passes --child-heap-mode %s to runQwenServe',
+    async (mode) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
 
-    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+      await startServeHandlerWithArgs(`--no-web --child-heap-mode ${mode}`);
 
-    expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ childHeapMode: 'off' }),
-    );
-  });
+      expect(mockRunQwenServe).toHaveBeenCalledWith(
+        expect.objectContaining({ childHeapMode: mode }),
+        expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+      );
+    },
+  );
 
-  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+  it('defaults the child heap mode to observe, and rejects an unknown mode', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
       webShellMounted: false,
@@ -841,10 +882,9 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ childHeapMode: 'observe' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
-    // `enforce` is not a value yet, and boot must say so rather than accept
-    // it: applying the partition needs an observation this daemon cannot make.
-    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+    expect(() => buildParser().parseSync('--child-heap-mode unknown')).toThrow(
       /Invalid values/,
     );
   });
@@ -859,6 +899,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryPressureMode: 'observe' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -880,6 +921,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'all' },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -1042,9 +1084,12 @@ describe('maybeOpenWebShellBrowser', () => {
 });
 
 describe('serve startup import boundary', () => {
-  const ecs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-');
-  const startupMs = ecs ? 60_000 : 30_000;
-  const testMs = ecs ? 70_000 : 40_000;
+  // The dev entrypoint pays a cold tsx transform before the daemon can listen,
+  // so this wait is CPU-bound, not a fixed cost: measured 12s on an idle host
+  // and 88s on a shared one running several jobs at once. RUNNER_NAME is unset
+  // on some shared pools, so the budget cannot be keyed to it.
+  const startupMs = 180_000;
+  const testMs = 200_000;
 
   it(
     'reaches listening through the dev entrypoint without loading interactive Ink internals first',
@@ -1226,4 +1271,56 @@ describe('serve startup import boundary', () => {
     },
     testMs,
   );
+});
+
+describe('serve tokenQr resolution', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
+    };
+    mockRunQwenServe.mockResolvedValue({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  async function startWith(args: string) {
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(args);
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => {
+      expect(mockRunQwenServe).toHaveBeenCalled();
+    });
+  }
+
+  it('sets tokenQr from the --token-qr flag', async () => {
+    await startWith('--token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: true }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('passes an explicit --no-token-qr through as false', async () => {
+    await startWith('--no-token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: false }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('leaves tokenQr unset by default', async () => {
+    await startWith('--no-web');
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty('tokenQr');
+  });
 });

@@ -8,6 +8,7 @@ import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
 ): GoalSnapshotV2 {
   return {
     v: 2,
@@ -22,6 +23,7 @@ function snapshot(
       activeTimeMs: 4000,
       createdAt: 1000,
       updatedAt: 5000,
+      ...overrides,
     },
   };
 }
@@ -41,7 +43,10 @@ describe('GoalStatusStrip', () => {
     container.remove();
   });
 
-  function render(status: NonNullable<GoalSnapshotV2['goal']>['status']) {
+  function render(
+    status: NonNullable<GoalSnapshotV2['goal']>['status'],
+    overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+  ) {
     const handlers = {
       onEdit: vi.fn(),
       onPause: vi.fn(),
@@ -51,7 +56,10 @@ describe('GoalStatusStrip', () => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <GoalStatusStrip snapshot={snapshot(status)} {...handlers} />
+          <GoalStatusStrip
+            snapshot={snapshot(status, overrides)}
+            {...handlers}
+          />
         </I18nProvider>,
       );
     });
@@ -191,5 +199,98 @@ describe('GoalStatusStrip', () => {
   it('adds current active time only while active', () => {
     expect(getGoalActiveTimeMs(snapshot('active'), 8000)).toBe(7000);
     expect(getGoalActiveTimeMs(snapshot('paused'), 8000)).toBe(4000);
+  });
+
+  it('shows spend against the budget once a turn has billed', () => {
+    render('active', { tokensUsed: 1_234, tokenBudget: 30_000_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
+    ).toBe('1.2k / 30.0M tokens');
+  });
+
+  it('shows spend alone when the Goal has no budget', () => {
+    render('active', { tokensUsed: 1_234 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
+    ).toBe('1.2k tokens');
+  });
+
+  it('shows nothing for a Goal that has not billed a turn', () => {
+    render('active', { tokensUsed: 0, tokenBudget: 30_000_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]'),
+    ).toBeNull();
+  });
+
+  it('shows nothing for a daemon that does not report spend', () => {
+    // An older daemon's snapshot carries neither field.
+    render('active');
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]'),
+    ).toBeNull();
+  });
+
+  it('keeps showing what a stopped Goal spent', () => {
+    render('paused', { tokensUsed: 2_500_000, tokenBudget: 30_000_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-tokens"]')
+        ?.textContent,
+    ).toBe('2.5M / 30.0M tokens');
+  });
+
+  it('shows active time against its ceiling when the Goal has one', () => {
+    render('paused', { activeTimeMs: 723_000, activeTimeBudgetMs: 1_800_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s / 30m 0s');
+  });
+
+  it('shows active time alone when the Goal has no time ceiling', () => {
+    render('paused', { activeTimeMs: 723_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s');
+  });
+
+  it('shows finished turns against the turn ceiling', () => {
+    render('active', { turnCount: 3, turnBudget: 20 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]')?.textContent,
+    ).toBe('3 / 20 turns');
+  });
+
+  it('shows no turn figure without a turn ceiling, or before a turn finishes', () => {
+    render('active', { turnCount: 3 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+
+    render('active', { turnCount: 0, turnBudget: 20 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+  });
+
+  it('shows no checkpoint streak, even for a snapshot an older daemon filled in', () => {
+    render('active', {
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    expect(
+      container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
+    ).toBeNull();
   });
 });

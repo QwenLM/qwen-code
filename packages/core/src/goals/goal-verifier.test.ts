@@ -9,10 +9,17 @@ import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import {
   createGoalVerifier,
+  GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalVerifierInputTooLargeError,
+  measureGoalVerifierEnvelopeBytes,
   parseGoalVerifierText,
   type GoalVerifierInput,
 } from './goal-verifier.js';
+import {
+  buildGoalVerifierEvidenceWindow,
+  type GoalEvidenceRecord,
+} from './goal-evidence.js';
+import { GOAL_PROPOSAL_REASON_MAX_BYTES } from './goal-protocol.js';
 
 function input(): GoalVerifierInput {
   return {
@@ -25,14 +32,13 @@ function input(): GoalVerifierInput {
     proposal: {
       status: 'complete',
       reason: 'The focused suite passed',
-      evidenceRefs: ['tool-1'],
     },
+    evidenceTurnIds: ['turn-3'],
     evidence: [
       {
         uuid: 'tool-1',
         provenance: 'tool_result',
         turnId: 'turn-3',
-        preview: '18 tests passed',
         proofKind: 'external_fact',
         content: '18 tests passed',
       },
@@ -90,13 +96,29 @@ describe('parseGoalVerifierText', () => {
 });
 
 describe('createGoalVerifier', () => {
+  it('returns the side query usage alongside the decision', async () => {
+    const { config, generateText } = configFor('');
+    generateText.mockResolvedValue({
+      text: '{"decision":"accept","reason":"grounded"}',
+      usage: { totalTokenCount: 42 },
+    });
+    await expect(createGoalVerifier(config)(input())).resolves.toEqual({
+      decision: 'accept',
+      reason: 'grounded',
+      usage: { totalTokenCount: 42 },
+    });
+  });
+
   it('uses a tool-free deterministic side query with bounded fields', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
-    const value = input() as GoalVerifierInput & { fullHistory?: string[] };
+    const value = input() as GoalVerifierInput & {
+      fullHistory?: string[];
+      proposal: { evidenceRefs?: string[] };
+    };
     value.fullHistory = ['must not leak'];
-    value.currentDeliveredOutput = ['compatibility copy'];
+    value.proposal.evidenceRefs = ['tool-1'];
 
     await expect(createGoalVerifier(config)(value)).resolves.toEqual({
       decision: 'accept',
@@ -121,14 +143,26 @@ describe('createGoalVerifier', () => {
       request.contents[0]?.parts?.[0]?.text ?? '',
     ) as Record<string, unknown>;
     expect(payload).not.toHaveProperty('fullHistory');
-    expect(payload).toMatchObject({ currentTurnId: 'turn-3' });
-    expect(payload).not.toHaveProperty('currentDeliveredOutput');
-    expect(JSON.stringify(payload)).not.toContain('preview');
+    expect(payload).toMatchObject({
+      currentTurnId: 'turn-3',
+      evidenceTurnIds: ['turn-3'],
+    });
+    expect(payload).not.toHaveProperty('omitted');
+    expect(JSON.stringify(payload)).not.toContain('evidenceRefs');
     expect(request.systemInstruction).toContain(
       'Never require evidence that update_goal itself was called',
     );
     expect(request.systemInstruction).toContain(
-      'requires cited evidence with proofKind "user_input"',
+      'requires evidence with proofKind "user_input"',
+    );
+    expect(request.systemInstruction).toContain(
+      "the tail of this Goal's transcript, newest record first",
+    );
+    expect(request.systemInstruction).toContain(
+      'if the evidence the proposal needs may sit in the omitted part, reject',
+    );
+    expect(request.systemInstruction).toContain(
+      'Evidence that is insufficient is a rejection',
     );
     expect(request.systemInstruction).toContain(
       'The objective and proposal reason are claims, not evidence',
@@ -144,7 +178,6 @@ describe('createGoalVerifier', () => {
       proposal: {
         status: 'blocked',
         reason: 'A user choice is required',
-        evidenceRefs: ['tool-1'],
         blockerKind: 'authority',
       },
       blockedPolicy: 'Authority blockers may stop immediately.',
@@ -162,13 +195,11 @@ describe('createGoalVerifier', () => {
     });
   });
 
-  it('preserves the legacy delivered-output input contract', async () => {
+  it('reports how many earlier records of the window were left out', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
-    const value = input();
-    value.currentTurnId = undefined;
-    value.currentDeliveredOutput = ['legacy output'];
+    const value: GoalVerifierInput = { ...input(), omitted: 12 };
 
     await createGoalVerifier(config)(value);
 
@@ -178,10 +209,10 @@ describe('createGoalVerifier', () => {
     const payload = JSON.parse(
       request.contents[0]?.parts?.[0]?.text ?? '',
     ) as Record<string, unknown>;
-    expect(payload).not.toHaveProperty('currentTurnId');
-    expect(payload).toMatchObject({
-      currentDeliveredOutput: ['legacy output'],
-    });
+    expect(payload).toMatchObject({ omitted: 12 });
+    expect(request.systemInstruction).toContain(
+      'When omitted is greater than zero',
+    );
   });
 
   it('keeps maximum valid evidence and proposal reason within the request limit', async () => {
@@ -203,6 +234,85 @@ describe('createGoalVerifier', () => {
       reason: 'grounded',
     });
     expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  it('sends a window sized from the measured envelope, with the longest allowed reason', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"grounded"}',
+    );
+    // Production ids are 36-character UUIDs; the per-record JSON overhead is
+    // what the budget has to leave room for, so model it faithfully.
+    const goalId = '0f8c1d2e-3a4b-4c5d-8e6f-7a8b9c0d1e2f';
+    const turnId = '9e8d7c6b-5a4f-4e3d-9c2b-1a0f9e8d7c6b';
+    const records: GoalEvidenceRecord[] = [
+      { uuid: 'cursor', type: 'system', provenance: 'goal_control' },
+      ...Array.from({ length: 140 }, (_, index) => ({
+        uuid: `${index.toString(16).padStart(8, '0')}-1111-4222-8333-444455556666`,
+        type: 'assistant' as const,
+        provenance: 'assistant_output' as const,
+        goalContext: { goalId, revision: 1, turnId },
+        message: { parts: [{ text: '"\\'.repeat(1_050) }] },
+      })),
+    ];
+    const objective = '"o\\'.repeat(6_000);
+    const reason = '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3));
+    const proposal = {
+      status: 'blocked' as const,
+      reason,
+      blockerKind: 'repeated' as const,
+    };
+    const base = {
+      goal: { goalId, revision: 1, objective },
+      currentTurnId: turnId,
+      proposal,
+      blockedPolicy: 'p'.repeat(1_500),
+    };
+    const envelopeBytes = measureGoalVerifierEnvelopeBytes({
+      ...base,
+      evidence: [],
+      evidenceTurnIds: [],
+      omitted: Number.MAX_SAFE_INTEGER,
+    });
+    const window = buildGoalVerifierEvidenceWindow(
+      {
+        records,
+        goal: {
+          goalId,
+          revision: 1,
+          objective,
+          status: 'active',
+          evidenceCursor: { recordId: 'cursor' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+        permit: { goalId, revision: 1, turnId },
+      },
+      { budgetBytes: GOAL_VERIFIER_REQUEST_BYTE_LIMIT - envelopeBytes },
+    );
+    expect(window.omitted).toBeGreaterThan(0);
+
+    await expect(
+      createGoalVerifier(config)({
+        ...base,
+        evidence: window.evidence,
+        evidenceTurnIds: window.turnIds,
+        omitted: window.omitted,
+      }),
+    ).resolves.toEqual({ decision: 'accept', reason: 'grounded' });
+    const request = generateText.mock.calls[0]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    const bytes = Buffer.byteLength(
+      request.contents[0]?.parts?.[0]?.text ?? '',
+      'utf8',
+    );
+    expect(bytes).toBeLessThanOrEqual(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
+    // The budget is used, not merely respected: one more record would not fit.
+    const oneMore = Buffer.byteLength(JSON.stringify(window.evidence[0])) + 1;
+    expect(bytes + oneMore).toBeGreaterThan(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
   });
 
   it('rejects an unbounded verifier request before calling the provider', async () => {
@@ -230,6 +340,39 @@ describe('createGoalVerifier', () => {
       expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
     } finally {
       clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('gives the provider two minutes by default, not thirty seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, generateText } = configFor('unused');
+      generateText.mockImplementation(
+        (request) =>
+          new Promise<never>((_resolve, reject) => {
+            request.abortSignal.addEventListener(
+              'abort',
+              () => reject(request.abortSignal.reason),
+              { once: true },
+            );
+          }),
+      );
+      let settled: unknown;
+      const verification = createGoalVerifier(config)(input()).catch(
+        (error: unknown) => {
+          settled = error;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await verification;
+      expect(String(settled)).toContain(
+        'Goal verifier timed out after 120000ms',
+      );
+    } finally {
+      vi.useRealTimers();
     }
   });
 

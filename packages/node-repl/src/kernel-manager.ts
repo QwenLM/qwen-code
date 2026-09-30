@@ -30,6 +30,7 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 
 const READY_TIMEOUT_MS = 15_000;
 const ADD_ROOT_TIMEOUT_MS = 10_000;
+const CANCEL_GRACE_MS = 5_000;
 const TERMINATE_GRACE_MS = 500;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
@@ -53,6 +54,7 @@ export interface NodeReplImageEvent {
   type: 'image';
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export type NodeReplOutputEvent = NodeReplTextEvent | NodeReplImageEvent;
@@ -69,7 +71,13 @@ export interface NodeReplExecOutcome {
   events: NodeReplOutputEvent[];
   rawTextTruncated: boolean;
   imagesDropped: number;
-  error?: { name: string; message: string; stack?: string };
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+    code?: string;
+    details?: string;
+  };
   stats: {
     durationMs: number;
     generation: number;
@@ -324,13 +332,10 @@ export class NodeReplKernelManager {
       );
     }
     if (request.signal?.aborted) {
-      await this.invalidateKernel('cancelled');
       return this.hostOutcome(
         'cancelled',
-        'Execution was cancelled before it started; the node_repl process was replaced and all bindings were lost.',
+        'Execution was cancelled before it started; the persistent kernel was retained.',
         startedAt,
-        undefined,
-        true,
       );
     }
 
@@ -356,11 +361,13 @@ export class NodeReplKernelManager {
       settled: false,
       settle: () => undefined,
     };
+    const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
     let execFrame: string;
     try {
       execFrame = encodeFrame({
         type: 'exec',
         execId,
+        timeoutMs: effectiveTimeout,
         source: prepared.source,
         previousBindings: [...this.bindingKinds]
           .map(([name, kind]) => ({ name, kind }))
@@ -391,55 +398,78 @@ export class NodeReplKernelManager {
     });
 
     let stopStarted = false;
+    let requestedStopStatus: 'timeout' | 'cancelled' | null = null;
+    let cancelTimeout: NodeJS.Timeout | undefined;
     const stop = (status: 'timeout' | 'cancelled', message: string) => {
       if (stopStarted || inflight.settled) return;
       stopStarted = true;
-      // `catch` before `finally`: the exec must always settle, and a rejected
-      // teardown must not surface as an unhandled rejection.
-      void this.invalidateKernel(status)
-        .catch(() => undefined)
-        .finally(() => {
-          inflight.settle({ hostStatus: status, message });
-        });
+      requestedStopStatus = status;
+      // Native cancellation barriers and a blocked kernel event loop cannot
+      // enforce their own deadline. Only the host can bound this wait.
+      cancelTimeout = setTimeout(() => {
+        if (inflight.settled || this.kernel !== handle) return;
+        void this.invalidateKernel(status)
+          .catch(() => undefined)
+          .finally(() => {
+            inflight.settle({
+              hostStatus: status,
+              message:
+                `${message} The kernel did not stop within ${CANCEL_GRACE_MS}ms after cancellation and was terminated; all bindings were lost. ` +
+                'External actions may have completed; verify external state before retrying.',
+            });
+          });
+      }, CANCEL_GRACE_MS);
+      try {
+        handle.toKernel.write(encodeFrame({ type: 'cancel', execId }));
+      } catch (error) {
+        void this.invalidateKernel('crashed')
+          .catch(() => undefined)
+          .finally(() => {
+            inflight.settle({
+              hostStatus: 'crashed',
+              message: `${message} The cancellation request could not reach the kernel: ${safeErrorMessage(error)}`,
+            });
+          });
+      }
     };
-    const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
     const timeout = setTimeout(
       () =>
         stop(
           'timeout',
-          `Execution exceeded the ${effectiveTimeout}ms timeout; the node_repl process was replaced and all bindings were lost.`,
+          `Execution exceeded the ${effectiveTimeout}ms timeout.`,
         ),
       effectiveTimeout,
     );
     const onAbort = () =>
-      stop(
-        'cancelled',
-        'Execution was cancelled by the user; the node_repl process was replaced and all bindings were lost.',
-      );
+      stop('cancelled', 'Execution was cancelled by the user.');
     request.signal?.addEventListener('abort', onAbort, { once: true });
 
     if (request.signal?.aborted) {
       onAbort();
-    } else {
-      try {
-        handle.toKernel.write(execFrame);
-      } catch (error) {
-        clearTimeout(timeout);
-        request.signal?.removeEventListener('abort', onAbort);
-        await this.invalidateKernel('crashed');
-        if (this.inflight === inflight) this.inflight = null;
-        return this.hostOutcome(
-          'crashed',
-          `Cell could not be sent to the kernel; the process was replaced and all bindings were lost: ${safeErrorMessage(error)}`,
-          startedAt,
-          inflight,
-          true,
-        );
-      }
+    }
+    try {
+      // Even when cancellation wins this narrow race, send the cell after its
+      // cancel frame so the kernel can settle the pending ID without executing
+      // the source. Otherwise the host would wait forever for a terminal frame.
+      handle.toKernel.write(execFrame);
+    } catch (error) {
+      clearTimeout(timeout);
+      clearTimeout(cancelTimeout);
+      request.signal?.removeEventListener('abort', onAbort);
+      await this.invalidateKernel('crashed');
+      if (this.inflight === inflight) this.inflight = null;
+      return this.hostOutcome(
+        'crashed',
+        `Cell could not be sent to the kernel; the process was replaced and all bindings were lost: ${safeErrorMessage(error)}`,
+        startedAt,
+        inflight,
+        true,
+      );
     }
 
     const terminal = await settled;
     clearTimeout(timeout);
+    clearTimeout(cancelTimeout);
     request.signal?.removeEventListener('abort', onAbort);
     if (this.inflight === inflight) this.inflight = null;
     // Flush any partial multi-byte sequence still held by the raw stream
@@ -473,17 +503,38 @@ export class NodeReplKernelManager {
       );
     }
 
-    this.bindingKinds.clear();
-    for (const name of terminal.bindingNames) {
-      this.bindingKinds.set(name, inflight.allowedBindingKinds.get(name)!);
+    if (terminal.status === 'ok' || terminal.status === 'error') {
+      this.bindingKinds.clear();
+      for (const name of terminal.bindingNames) {
+        this.bindingKinds.set(name, inflight.allowedBindingKinds.get(name)!);
+      }
     }
-    const status = terminal.status === 'ok' ? 'ok' : 'error';
+    const status =
+      requestedStopStatus === 'timeout' && terminal.status === 'cancelled'
+        ? 'timeout'
+        : terminal.status;
     const error =
-      terminal.status === 'error'
+      status !== 'ok'
         ? {
-            name: terminal.errorName ?? 'Error',
-            message: terminal.errorMessage ?? 'JavaScript execution failed.',
+            name:
+              terminal.errorName ??
+              (status === 'cancelled'
+                ? 'AbortError'
+                : status === 'timeout'
+                  ? 'TimeoutError'
+                  : 'Error'),
+            message:
+              terminal.errorMessage ??
+              (status === 'cancelled'
+                ? 'Execution was cancelled.'
+                : status === 'timeout'
+                  ? `Execution exceeded the ${effectiveTimeout}ms timeout.`
+                  : 'JavaScript execution failed.'),
             ...(terminal.errorStack ? { stack: terminal.errorStack } : {}),
+            ...(terminal.errorCode ? { code: terminal.errorCode } : {}),
+            ...(terminal.errorDetails
+              ? { details: terminal.errorDetails }
+              : {}),
           }
         : undefined;
     return this.outcomeFromInflight(inflight, status, startedAt, error, false);
@@ -655,12 +706,21 @@ export class NodeReplKernelManager {
           typeof message.execId !== 'string' ||
           typeof message.data !== 'string' ||
           typeof message.mimeType !== 'string' ||
-          message.mimeType.length > MAX_IMAGE_MIME_CHARS
+          message.mimeType.length > MAX_IMAGE_MIME_CHARS ||
+          !(
+            message.metadata === undefined ||
+            typeof message.metadata === 'string'
+          )
         ) {
           this.handleProtocolError(handle, new Error('invalid image frame'));
           return;
         }
-        this.collectImage(message.execId, message.data, message.mimeType);
+        this.collectImage(
+          message.execId,
+          message.data,
+          message.mimeType,
+          message.metadata,
+        );
         return;
       case 'execResult':
         this.handleExecResult(handle, message as ExecResultMessage);
@@ -710,7 +770,7 @@ export class NodeReplKernelManager {
     }
     if (
       handle.generation !== inflight.generation ||
-      !['ok', 'error'].includes(message.status) ||
+      !['ok', 'error', 'cancelled', 'timeout'].includes(message.status) ||
       !Array.isArray(message.bindingNames) ||
       message.bindingNames.some(
         (name) =>
@@ -738,6 +798,13 @@ export class NodeReplKernelManager {
       !(
         message.errorStack === undefined ||
         typeof message.errorStack === 'string'
+      ) ||
+      !(
+        message.errorCode === undefined || typeof message.errorCode === 'string'
+      ) ||
+      !(
+        message.errorDetails === undefined ||
+        typeof message.errorDetails === 'string'
       )
     ) {
       this.handleProtocolError(handle, new Error('invalid exec result'));
@@ -786,7 +853,12 @@ export class NodeReplKernelManager {
     });
   }
 
-  private collectImage(execId: string, data: string, mimeType: string): void {
+  private collectImage(
+    execId: string,
+    data: string,
+    mimeType: string,
+    metadata?: string,
+  ): void {
     const inflight = this.inflight;
     if (!inflight || inflight.execId !== execId) {
       if (inflight) inflight.droppedStaleFrames++;
@@ -801,7 +873,12 @@ export class NodeReplKernelManager {
     }
     inflight.imageCount++;
     inflight.imageChars += data.length;
-    inflight.events.push({ type: 'image', data, mimeType });
+    inflight.events.push({
+      type: 'image',
+      data,
+      mimeType,
+      ...(metadata === undefined ? {} : { metadata }),
+    });
   }
 
   /**
@@ -1047,7 +1124,7 @@ export class NodeReplKernelManager {
     inflight: InflightExec | undefined,
     status: NodeReplExecStatus,
     startedAt: number,
-    error?: { name: string; message: string; stack?: string },
+    error?: NodeReplExecOutcome['error'],
     kernelReplaced = false,
   ): NodeReplExecOutcome {
     const outcome: NodeReplExecOutcome = {

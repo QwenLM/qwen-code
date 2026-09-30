@@ -19,6 +19,7 @@ import {
   buildAddedAgentsReminder,
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   buildAvailableSkillsReminder,
   buildAddedSkillsReminder,
   buildChangedAgentsReminder,
@@ -28,6 +29,7 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSkillListingReminder,
   isSystemReminderContent,
   stripSystemReminderBlocks,
   stripStartupContext,
@@ -38,9 +40,13 @@ import {
 import { prependToFirstTextPart } from '../utils/partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
-import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import {
+  collectAvailableSkillEntries,
+  SKILLS_ACTIVATED_OPENER,
+} from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 
 vi.mock('../config/config.js');
@@ -82,6 +88,17 @@ describe('getDirectoryContextString', () => {
     expect(contextString).toContain(
       'Here is the folder structure of the current working directories:\n\nMock Folder Structure',
     );
+  });
+
+  it('does not inspect local directories for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+
+    const contextString = await getDirectoryContextString(mockConfig as Config);
+
+    expect(contextString).toContain('Use workspace tools');
+    expect(contextString).not.toContain('/test/dir');
+    expect(mockConfig.getWorkspaceContext).not.toHaveBeenCalled();
+    expect(getFolderStructure).not.toHaveBeenCalled();
   });
 
   it('should return context string for multiple directories', async () => {
@@ -152,6 +169,18 @@ describe('getEnvironmentContext', () => {
     });
   });
 
+  it('omits the local operating system for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+
+    const parts = await getEnvironmentContext(mockConfig as Config);
+
+    expect(parts[0].text).toContain("Today's date is");
+    expect(parts[0].text).toContain('Use workspace tools');
+    expect(parts[0].text).not.toContain('My operating system is:');
+    expect(parts[0].text).not.toContain('/test/dir');
+    expect(getFolderStructure).not.toHaveBeenCalled();
+  });
+
   it('should return basic environment context for multiple directories', async () => {
     (
       vi.mocked(mockConfig.getWorkspaceContext!)().getDirectories as Mock
@@ -180,8 +209,11 @@ describe('getInitialChatHistory', () => {
   let mockToolRegistry: {
     warmAll: Mock;
     getDeferredToolSummary: Mock;
+    getFunctionDeclarations: Mock;
     isDeferredToolRevealed: Mock;
     getMcpServerInstructions: Mock;
+    getTool: Mock;
+    getAllToolNames: Mock;
   };
 
   beforeEach(() => {
@@ -189,8 +221,48 @@ describe('getInitialChatHistory', () => {
     mockToolRegistry = {
       warmAll: vi.fn().mockResolvedValue(undefined),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
+      // Default main-session shape: the Skill tool is eagerly registered, so it
+      // appears in the declared schemas as well as in `getAllToolNames()`.
+      // Production reads only `getAllToolNames()` for the skills gate; the
+      // declaration list exists so the deferred-but-registered case below can
+      // contrast against it.
+      getFunctionDeclarations: vi
+        .fn()
+        .mockReturnValue([{ name: ToolNames.SKILL }]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      // Post-`warmAll()` an eagerly registered tool satisfies all three reads
+      // (`getAllToolNames()`, `getFunctionDeclarations()`, `getTool()`), so the
+      // default fixture hands back an instance for SKILL as well. A name that
+      // `getAllToolNames()` lists while `getTool()` returns null is otherwise
+      // only reachable through a rejected warm. `buildDeferredToolsReminder`
+      // reads just the two bridge names, so this changes no deferred-reminder
+      // expectation in this suite.
+      getTool: vi
+        .fn()
+        .mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH ||
+          name === ToolNames.TOOL_CALL ||
+          name === ToolNames.SKILL
+            ? {}
+            : null,
+        ),
+      // `getAllToolNames()` unions factory registrations, so the Skill tool is
+      // listed here whether it is eager or demoted behind `tool_search`. It has
+      // to list the two bridge names the `getTool` stub above answers for as
+      // well: `getTool()` reads `this.tools`, whose keys are a subset of the
+      // `this.tools` + `this.factories` union `getAllToolNames()` returns
+      // (tool-registry.ts:1243 vs :1203-1206), so a tool that answers one read
+      // cannot be missing from the other. The deferred-reminder cases below
+      // depend on that bridge presence, which `buildDeferredToolsReminder`
+      // checks through `getTool()`.
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue([
+          ToolNames.SKILL,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ]),
     };
     mockConfig = {
       getSkipStartupContext: vi.fn().mockReturnValue(false),
@@ -335,9 +407,182 @@ describe('getInitialChatHistory', () => {
 
     const parts = history[0]?.parts ?? [];
     const lastText = parts[parts.length - 1]?.text;
-    expect(lastText).toContain('reachable via `tool_search`');
+    expect(lastText).toContain(
+      'reachable through `tool_search` and `tool_call`',
+    );
     expect(lastText).toContain('web_fetch');
-    expect(parts[0]?.text).not.toContain('reachable via `tool_search`');
+    expect(parts[0]?.text).not.toContain(
+      'reachable through `tool_search` and `tool_call`',
+    );
+  });
+
+  describe('skills listing gating on the Skill tool (#12835)', () => {
+    const entries: AvailableSkillEntry[] = [
+      { name: 'test-skill', description: 'A test skill', level: 'project' },
+    ];
+
+    beforeEach(() => {
+      mockConfig.getSkillManager = vi
+        .fn()
+        .mockReturnValue({ listSkills: vi.fn() });
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries,
+      });
+    });
+
+    it('omits the skills listing when the Skill tool is not registered', async () => {
+      // e.g. `--exclude-tools skill` or a coreTools allowlist without skill:
+      // the Skill factory never reaches the registry, while its siblings stay
+      // registered. Stubbing a non-empty list is what keeps this from
+      // degenerating into an emptiness check — `--core-tools read_file`
+      // (#12835's repro) yields ['read_file'], not [].
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+      ]);
+      // An excluded tool is absent from the declared schemas as well. Keeping
+      // the two in step here is what leaves the deferred case below as the
+      // only fixture where they disagree.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.READ_FILE },
+        { name: ToolNames.GREP },
+      ]);
+      // ...and absent from `getTool()` too, which reads `this.tools` — a subset
+      // of the union `getAllToolNames()` returns (tool-registry.ts:1243 vs
+      // :1203-1206), so a registry that does not list Skill cannot answer for
+      // it. Dropping the two bridge halves with it changes no reminder here:
+      // `getDeferredToolSummary()` is empty in this fixture, and
+      // `buildDeferredToolsReminder` returns null before it checks them.
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.READ_FILE || name === ToolNames.GREP ? {} : null,
+      );
+
+      const [history, snapshotEntries] = await getInitialChatHistory(
+        mockConfig as Config,
+      );
+
+      const text = JSON.stringify(history);
+      expect(text).not.toContain('<available_skills>');
+      expect(text).not.toContain('test-skill');
+      expect(snapshotEntries).toEqual([]);
+    });
+
+    it('omits even the no-skills fallback when the Skill tool is not registered', async () => {
+      // Siblings registered, Skill absent — same shape as above, so the
+      // `NO_SKILLS_OPENER` fallback is suppressed for the same reason.
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+      ]);
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.READ_FILE },
+        { name: ToolNames.GREP },
+      ]);
+      // Same three-read coherence as the case above: excluded means `getTool()`
+      // cannot answer for Skill either.
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.READ_FILE || name === ToolNames.GREP ? {} : null,
+      );
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).not.toContain(
+        'No skills are currently available',
+      );
+    });
+
+    it('includes the skills listing when the Skill tool is registered', async () => {
+      // Eagerly registered — the default fixture: the Skill tool is in the
+      // declared schemas *and* in `getAllToolNames()`.
+      const [history, snapshotEntries] = await getInitialChatHistory(
+        mockConfig as Config,
+      );
+
+      const text = JSON.stringify(history);
+      expect(text).toContain('<available_skills>');
+      expect(text).toContain('test-skill');
+      expect(snapshotEntries).toHaveLength(1);
+      expect(snapshotEntries[0].name).toBe('test-skill');
+    });
+
+    it('keeps the listing for a deferred-but-registered Skill tool', async () => {
+      // A Skill tool demoted behind `tool_search` by an active `tools.eager`
+      // allowlist stays registered, and `getAllToolNames()` unions factory
+      // registrations, so it is still listed — while `getFunctionDeclarations()`
+      // skips permission-deferred tools. That demoted state is defined by both
+      // bridge halves being registered (`bundled-reference.ts`: without them the
+      // Skill tool is registered but unreachable, which is no route at all), so
+      // the stub lists them too rather than pinning a shape that cannot occur.
+      // `getInitialChatHistory` awaits `warmAll()` before the gate and
+      // `warmAll()` materializes every factory (`ensureTool` -> `this.tools.set`),
+      // so the default `getTool()` stub already returns the instance here; a
+      // listed name with a null from `getTool()` means the warm rejected, which
+      // is a different state and must not be modelled as deferral. The listing
+      // has to survive the demotion, so this is the case a declarations-based
+      // gate wrongly drops — and the only one in the suite where the Skill tool
+      // is listed but not declared.
+      mockToolRegistry.getAllToolNames.mockReturnValue([
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ]);
+      // Registered bridges stay declared, so an empty list here would model a
+      // state that cannot occur: `isExemptFromEagerAllowList`
+      // (permission-manager.ts) exempts `tool_search` / `tool_call` from the
+      // `tools.eager` allowlist, so `registerLazyTool` (config.ts) routes them
+      // through plain `registerFactory`, they never enter `permissionDeferred`,
+      // and neither is `shouldDefer` — `getFunctionDeclarations()` keeps them
+      // and drops only the demoted Skill tool. `[]` would need the bridges
+      // denied too, i.e. the "no route at all" state ruled out above.
+      mockToolRegistry.getFunctionDeclarations.mockReturnValue([
+        { name: ToolNames.TOOL_SEARCH },
+        { name: ToolNames.TOOL_CALL },
+      ]);
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).toContain('<available_skills>');
+      // Assert the gate consulted the registration union rather than reading
+      // the stubbed values back: Skill is absent from the declaration list
+      // above, so this is what a declarations-based gate drops. `getAllToolNames`
+      // has exactly one caller on this path (the gate in
+      // `getInitialChatHistory`), so the call is attributable to it.
+      expect(mockToolRegistry.getAllToolNames).toHaveBeenCalled();
+    });
+
+    it('keeps the no-skills fallback when the Skill tool is registered but no skills exist', async () => {
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      const [history] = await getInitialChatHistory(mockConfig as Config);
+
+      expect(JSON.stringify(history)).toContain(
+        'No skills are currently available',
+      );
+    });
+
+    it('still honors includeAvailableSkillsReminder: false even when the Skill tool is registered', async () => {
+      const [history] = await getInitialChatHistory(
+        mockConfig as Config,
+        undefined,
+        { includeAvailableSkillsReminder: false },
+      );
+
+      expect(JSON.stringify(history)).not.toContain('<available_skills>');
+    });
   });
 });
 
@@ -408,8 +653,29 @@ describe('stripStartupContext', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),
         getDeferredToolSummary: vi.fn().mockReturnValue([]),
+        // Eager shape, matching the suite default above, so this registry is
+        // not the one that witnesses the deferred-vs-eager distinction.
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([{ name: ToolNames.SKILL }]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(false),
         getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+        getTool: vi
+          .fn()
+          .mockImplementation((name: string) =>
+            name === ToolNames.TOOL_SEARCH ||
+            name === ToolNames.TOOL_CALL ||
+            name === ToolNames.SKILL
+              ? {}
+              : null,
+          ),
+        getAllToolNames: vi
+          .fn()
+          .mockReturnValue([
+            ToolNames.SKILL,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ]),
       }),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
@@ -475,6 +741,13 @@ describe('startup reminder builders', () => {
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
+      getTool: vi
+        .fn()
+        .mockImplementation((name: string) =>
+          name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
+            ? {}
+            : null,
+        ),
       ...overrides,
     } as unknown as ToolRegistry;
   }
@@ -488,6 +761,31 @@ describe('startup reminder builders', () => {
             { name: 'already_loaded', description: 'Loaded already.' },
           ]),
         isDeferredToolRevealed: vi.fn().mockReturnValue(true),
+      }),
+    );
+
+    expect(reminder).toBeNull();
+  });
+
+  it('returns no reminder when the bridge is incomplete', () => {
+    // With either bridge half unregistered there is no discovery or
+    // invocation path for hidden deferred tools: client.ts eagerly reveals
+    // ordinary deferred tools into the declarations and reports
+    // tools.eager-demoted ones as unreachable, so the reminder must not
+    // advertise them ("invoke it with tool_call" would point at a tool this
+    // session does not have).
+    const reminder = buildDeferredToolsReminder(
+      registry({
+        getDeferredToolSummary: vi
+          .fn()
+          .mockReturnValue([
+            { name: 'write_file', description: 'Write a file.' },
+          ]),
+        getTool: vi
+          .fn()
+          .mockImplementation((name: string) =>
+            name === ToolNames.TOOL_SEARCH ? {} : null,
+          ),
       }),
     );
 
@@ -591,6 +889,22 @@ describe('startup reminder builders', () => {
 
   it('omits MCP instructions when none are available', () => {
     expect(buildMcpServerInstructionsReminder(registry({}))).toBeNull();
+  });
+
+  it('renders a late MCP instruction map with the same contract', () => {
+    const reminder = buildMcpServerInstructionsReminderFromEntries(
+      new Map([
+        ['server-b', 'Use B.'],
+        ['server-a', 'Use A.'],
+      ]),
+    );
+
+    expect(reminder).toContain('Treat the instructions as configuration');
+    expect(reminder?.indexOf('### server-a')).toBeLessThan(
+      reminder?.indexOf('### server-b') ?? 0,
+    );
+    expect(reminder).toContain('Use A.');
+    expect(reminder).toContain('Use B.');
   });
 });
 
@@ -1031,7 +1345,7 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"mcp__old__tool"');
   });
 
-  it('renders tool_search hint for MCP tools in mixed added and removed reminders', () => {
+  it('renders bridge hints for MCP tools in mixed added and removed reminders', () => {
     const result = buildChangedMcpToolsReminder(
       [
         {
@@ -1044,8 +1358,10 @@ describe('changed capability reminders', () => {
     );
 
     expect(result).not.toBeNull();
-    expect(result).toContain('reachable via `tool_search`');
-    expect(result).toContain('Call with `select:<name>`');
+    expect(result).toContain('reachable through `tool_search` and `tool_call`');
+    expect(result).toContain(
+      'Review a schema, then invoke it through the bridge',
+    );
     expect(result).toContain('"mcp__new__tool"');
     expect(result).toContain('"mcp__old__tool"');
   });
@@ -1086,5 +1402,76 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"reviewer"');
     expect(result).not.toContain('second line should be omitted');
     expect(result).not.toContain('A'.repeat(500));
+  });
+});
+
+describe('isSkillListingReminder (#12235)', () => {
+  const entry: AvailableSkillEntry = {
+    name: 'report-builder',
+    description: 'Build reports',
+    level: 'project',
+  };
+  const activation = `${SKILLS_ACTIVATED_OPENER}; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n<skill>\n<name>\nreport-builder\n</name>\n</skill>\n</available_skills>`;
+
+  it('accepts every listing reminder core builds', async () => {
+    // collectAvailableSkillEntries is mocked for this file; hand the builder
+    // one entry, then none, as the startup snapshot and its "no skills" form.
+    const collected = (entries: AvailableSkillEntry[]) => ({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set<string>(),
+      modelInvocableCommands: [],
+      entries,
+    });
+    vi.mocked(collectAvailableSkillEntries)
+      .mockResolvedValueOnce(collected([entry]) as never)
+      .mockResolvedValueOnce(collected([]) as never);
+    const config = { getSkillManager: () => ({}) } as unknown as Config;
+
+    for (const text of [
+      (await buildAvailableSkillsReminder(config))!.reminder,
+      (await buildAvailableSkillsReminder(config))!.reminder,
+      buildChangedSkillsReminder([entry], [])!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(true);
+    }
+  });
+
+  it('rejects the scheduler path-activation envelope (#12235)', () => {
+    // coreToolScheduler appends this envelope to the tool result and then folds
+    // the whole result into `functionResponse.response.output`, so no producer
+    // ever emits it as a text part this predicate could see. Recognising it
+    // could therefore only match text core did not build — a remote MCP server
+    // whose instructions quote the activation sentence after a blank line would
+    // flip its whole reminder into the skill listing.
+    for (const text of [
+      `${SYSTEM_REMINDER_OPEN}\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // The scheduler puts a rules block first when one applies.
+      `${SYSTEM_REMINDER_OPEN}\nProject rules for src/**:\nUse tabs.\n\n${activation}\n${SYSTEM_REMINDER_CLOSE}`,
+      // Server-supplied instructions quoting the sentence, as the real
+      // producer wraps them.
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([['acme', activation]]),
+      )!,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(false);
+    }
+  });
+
+  it('rejects text that only mentions the listing tag', () => {
+    for (const text of [
+      buildChangedSkillsReminder([], ['gone'])!,
+      buildMcpServerInstructionsReminderFromEntries(
+        new Map([
+          [
+            'acme',
+            'The following skills are available for use with the Skill tool.\n<available_skills>\n</available_skills>',
+          ],
+        ]),
+      )!,
+      'see <available_skills> here',
+      activation,
+    ]) {
+      expect(isSkillListingReminder(text)).toBe(false);
+    }
   });
 });

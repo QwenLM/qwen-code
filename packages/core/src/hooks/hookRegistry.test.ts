@@ -10,12 +10,17 @@ import { HookRegistry } from './hookRegistry.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookConfig } from './types.js';
 
-// Mock TrustedHooksManager
-vi.mock('./trustedHooks.js', () => ({
-  TrustedHooksManager: vi.fn().mockImplementation(() => ({
-    getUntrustedHooks: vi.fn().mockReturnValue([]),
-    trustHooks: vi.fn(),
-  })),
+const { debugWarn } = vi.hoisted(() => ({
+  debugWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    warn: debugWarn,
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
 }));
 
 describe('HookRegistry', () => {
@@ -26,6 +31,7 @@ describe('HookRegistry', () => {
     mockConfig = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue(undefined),
       getProjectHooks: vi.fn().mockReturnValue(undefined),
       getExtensions: vi.fn().mockReturnValue([]),
@@ -92,6 +98,113 @@ describe('HookRegistry', () => {
       const allHooks = registry.getAllHooks();
       expect(allHooks).toHaveLength(1);
       expect(allHooks[0].source).toBe(HooksConfigSource.User);
+    });
+
+    describe('system scope', () => {
+      const commandHooks = (command: string, name: string) => ({
+        [HookEventName.PreToolUse]: [
+          { hooks: [{ type: HookType.Command, command, name }] },
+        ],
+      });
+
+      it('registers system hooks under the system source, before user and project hooks', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+        mockConfig.getUserHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo user', 'user-hook'));
+        mockConfig.getProjectHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo project', 'project-hook'));
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(
+          registry.getAllHooks().map(({ source, config }) => ({
+            source,
+            name: config.name,
+          })),
+        ).toEqual([
+          { source: HooksConfigSource.System, name: 'system-hook' },
+          { source: HooksConfigSource.User, name: 'user-hook' },
+          { source: HooksConfigSource.Project, name: 'project-hook' },
+        ]);
+      });
+
+      it('orders the hooks planned for an event by source priority: project, user, system, extensions', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+        mockConfig.getUserHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo user', 'user-hook'));
+        mockConfig.getProjectHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo project', 'project-hook'));
+        mockConfig.getExtensions = vi.fn().mockReturnValue([
+          {
+            isActive: true,
+            hooks: commandHooks('echo extension', 'extension-hook'),
+          },
+        ]);
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(
+          registry
+            .getHooksForEvent(HookEventName.PreToolUse)
+            .map(({ source }) => source),
+        ).toEqual([
+          HooksConfigSource.Project,
+          HooksConfigSource.User,
+          HooksConfigSource.System,
+          HooksConfigSource.Extensions,
+        ]);
+      });
+
+      it('registers system-only hooks as system hooks, not user hooks', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        const allHooks = registry.getAllHooks();
+        expect(allHooks).toHaveLength(1);
+        expect(allHooks[0].source).toBe(HooksConfigSource.System);
+        expect(
+          allHooks.some(({ source }) => source === HooksConfigSource.User),
+        ).toBe(false);
+      });
+
+      it('registers nothing and does not throw when there are no system hooks', async () => {
+        mockConfig.getSystemHooks = vi.fn().mockReturnValue(undefined);
+
+        const registry = new HookRegistry(mockConfig);
+        await expect(registry.initialize()).resolves.toBeUndefined();
+
+        expect(registry.getAllHooks()).toHaveLength(0);
+      });
+
+      it('keeps the same hook from system and user settings as two entries', async () => {
+        // The duplicate key includes the source; this pins that established
+        // behaviour so a change to the key is a deliberate one.
+        const same = commandHooks('echo same', 'same-hook');
+        mockConfig.getSystemHooks = vi.fn().mockReturnValue(same);
+        mockConfig.getUserHooks = vi.fn().mockReturnValue(same);
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
+          HooksConfigSource.System,
+          HooksConfigSource.User,
+        ]);
+      });
     });
 
     it('should load hooks from getUserHooks regardless of trust', async () => {
@@ -875,6 +988,37 @@ describe('HookRegistry', () => {
   });
 
   describe('addAgentHooks — per-agent frontmatter ephemeral entries', () => {
+    it('rolls back partially registered entries when registration throws', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      const valid = {
+        hooks: [{ type: HookType.Command as const, command: 'echo valid' }],
+      };
+      registry.addAgentHooks(
+        { [HookEventName.PreToolUse]: [valid] },
+        'existing',
+        {
+          owner: { sessionId: 's', agentId: 'existing' },
+        },
+      );
+      const broken = {
+        get hooks(): HookConfig[] {
+          throw new Error('broken definition');
+        },
+      };
+      expect(() =>
+        registry.addAgentHooks(
+          { [HookEventName.PreToolUse]: [valid, broken] },
+          'new',
+          {
+            owner: { sessionId: 's', agentId: 'new' },
+          },
+        ),
+      ).toThrow('broken definition');
+      expect(registry.getAllHooks()).toHaveLength(1);
+      expect(registry.getAllHooks()[0].agentScope).toBe('existing');
+    });
+
     it('appends entries tagged with agentScope and returns an unregister callback', async () => {
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -896,6 +1040,7 @@ describe('HookRegistry', () => {
           ],
         },
         'agent:test:abc',
+        { owner: { sessionId: 'session-1', agentId: 'agent-1' } },
       );
 
       const after = registry.getAllHooks();
@@ -926,7 +1071,9 @@ describe('HookRegistry', () => {
 
       // Same identity, different source path (Session + agentScope) — must
       // NOT be deduped against the user-source entry.
-      registry.addAgentHooks(userHooks, 'agent:test:def');
+      registry.addAgentHooks(userHooks, 'agent:test:def', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
       const after = registry.getAllHooks();
       expect(after).toHaveLength(2);
       // Assert the scope tag itself participates in the dedup key, not just
@@ -962,8 +1109,12 @@ describe('HookRegistry', () => {
         ],
       };
 
-      const u1 = registry.addAgentHooks(sameHooks, 'agent:a:1');
-      const u2 = registry.addAgentHooks(sameHooks, 'agent:b:2');
+      const u1 = registry.addAgentHooks(sameHooks, 'agent:a:1', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
+      const u2 = registry.addAgentHooks(sameHooks, 'agent:b:2', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
 
       expect(registry.getAllHooks()).toHaveLength(2);
       u1();
@@ -1009,6 +1160,7 @@ describe('HookRegistry', () => {
           ],
         },
         'agent:test:reload',
+        { owner: { sessionId: 'session-1', agentId: 'agent-1' } },
       );
 
       mockConfig.getUserHooks = vi.fn().mockReturnValue(undefined);
@@ -1090,6 +1242,7 @@ describe('HookRegistry', () => {
           ],
         },
         'agent:test:reload-failure',
+        { owner: { sessionId: 'session-1', agentId: 'agent-1' } },
       );
 
       const before = registry.getAllHooks();
@@ -1107,11 +1260,251 @@ describe('HookRegistry', () => {
     it('silently keeps entries when the hooks payload is empty', async () => {
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
-      const unregister = registry.addAgentHooks({}, 'agent:empty:0');
+      const unregister = registry.addAgentHooks({}, 'agent:empty:0', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
       expect(registry.getAllHooks()).toHaveLength(0);
       // No-op unregister should not throw
       unregister();
       expect(registry.getAllHooks()).toHaveLength(0);
+    });
+  });
+
+  describe('reloadConfiguredHooks — stable enabled-state keying', () => {
+    beforeEach(() => {
+      debugWarn.mockClear();
+    });
+    it('preserves disabled state of a named command hook when its command is edited on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo old-command',
+                name: 'my-named-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('my-named-hook', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+      const editedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo new-command',
+                name: 'my-named-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(editedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect((after[0].config as { command: string }).command).toBe(
+        'echo new-command',
+      );
+      expect(after[0].enabled).toBe(false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+      expect(debugWarn).not.toHaveBeenCalled();
+    });
+
+    it('preserves disabled state of a named HTTP hook when its URL is edited on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://old.example.com/hook',
+                name: 'my-http-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('my-http-hook', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      const editedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://new.example.com/hook',
+                name: 'my-http-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(editedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect((after[0].config as { url: string }).url).toBe(
+        'http://new.example.com/hook',
+      );
+      expect(after[0].enabled).toBe(false);
+      expect(debugWarn).not.toHaveBeenCalled();
+    });
+
+    it('preserves disabled state of a named prompt hook when its prompt text is edited on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt: 'Evaluate this tool call for safety (old)',
+                name: 'my-prompt-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('my-prompt-hook', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      const editedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Prompt,
+                prompt: 'Evaluate this tool call for safety (new)',
+                name: 'my-prompt-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(editedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect((after[0].config as { prompt: string }).prompt).toBe(
+        'Evaluate this tool call for safety (new)',
+      );
+      expect(after[0].enabled).toBe(false);
+      expect(debugWarn).not.toHaveBeenCalled();
+    });
+
+    it('refuses to disable an unnamed command hook individually', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo unnamed',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      registry.setHookEnabled('echo unnamed', false);
+
+      const hooks = registry.getAllHooks();
+      expect(hooks).toHaveLength(1);
+      expect(hooks[0].enabled).toBe(true);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        1,
+      );
+    });
+
+    it('resets disabled state when a hook is renamed on disk', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'old-name',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      registry.setHookEnabled('old-name', false);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        0,
+      );
+
+      const renamedHooks = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'new-name',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(renamedHooks);
+
+      await registry.reloadConfiguredHooks();
+
+      const after = registry.getAllHooks();
+      expect(after).toHaveLength(1);
+      expect(after[0].config.name).toBe('new-name');
+      expect(after[0].enabled).toBe(true);
+      expect(registry.getHooksForEvent(HookEventName.PreToolUse)).toHaveLength(
+        1,
+      );
+      // The reload warning should fire exactly once for the orphaned key
+      expect(debugWarn).toHaveBeenCalledTimes(1);
+      expect(debugWarn.mock.calls[0][0]).toContain(
+        'did not match any entry after reload',
+      );
     });
   });
 

@@ -37,6 +37,7 @@ describe('ZoomImageTool', () => {
       storage: {
         getProjectTempDir: () => path.join(root, '.temp'),
         getProjectDir: () => path.join(root, '.project'),
+        getWorkflowRunsDir: () => path.join(root, '.workflow-runs'),
         getUserSkillsDirs: () => [path.join(root, '.skills')],
       },
     } as unknown as Config;

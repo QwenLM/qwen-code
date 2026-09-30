@@ -5,6 +5,10 @@
  */
 
 import {
+  parseSessionStartupConfig,
+  isSessionStartupConfigError,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
+import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
@@ -23,6 +27,7 @@ import {
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
   readSessionPrs,
+  toSessionPrInfo,
   upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
@@ -45,6 +50,8 @@ import type {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
+import { workflowRequestErrorStatus } from '../workflow-errors.js';
+import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
@@ -52,11 +59,21 @@ import {
 } from '../auth/device-flow.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
+  SUBMITTED_PROMPT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   type BridgeBranchedSession,
   type BridgeRestoredSession,
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
+
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
@@ -70,11 +87,16 @@ import {
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  AcpChildCapacityExceededError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
@@ -130,6 +152,7 @@ import {
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
   createDaemonSubagentManager,
   toSummary as agentToSummary,
@@ -186,8 +209,20 @@ import {
   type JsonRpcResponse,
 } from './json-rpc.js';
 
+/** Sources only the daemon's own dispatcher may create a session under. */
+function isAgentSessionSourceType(sourceType: unknown): boolean {
+  return (
+    sourceType === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    sourceType === AGENT_SESSION_SOURCE_TYPE
+  );
+}
+
 function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  if (err instanceof Error) return err.message;
+  // The ACP SDK rejects with the child's JSON-RPC error object, not an Error.
+  if (isObject(err) && typeof err['message'] === 'string')
+    return err['message'];
+  return String(err);
 }
 
 const SESSION_WRITER_RPC_ERRORS = {
@@ -247,6 +282,61 @@ type AddSessionArtifactInput = Parameters<
 >[1];
 
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
+const SSH_METHODS = new Set([
+  'authenticate',
+  'session/new',
+  'session/load',
+  'session/resume',
+  'session/list',
+  'session/close',
+  'session/cancel',
+  'session/prompt',
+  'session/permission',
+  'session/set_config_option',
+  'session/set_mode',
+  'session/set_model',
+  ...[
+    'session/heartbeat',
+    'session/context',
+    'session/supported_commands',
+    'session/update_metadata',
+    'session/update_organization',
+    'session/recap',
+    'session/detach',
+    'session/context_usage',
+    'session/tasks',
+    'session/agents',
+    'session/agent_trace',
+    'session/attachments',
+    'session/artifacts',
+    'workspace/session_groups/list',
+    'workspace/session_groups/create',
+    'workspace/session_groups/update',
+    'workspace/session_groups/delete',
+    'workspace/trust',
+    'workspace/trust/request',
+    'workspace/providers',
+    'workspace/tools',
+    'workspace/voice',
+    'workspace/voice/set',
+    'workspace/permissions',
+    'workspace/permissions/set',
+    'workspace/auth/status',
+    'workspace/auth/device_flow/start',
+    'workspace/auth/device_flow/get',
+    'workspace/auth/device_flow/cancel',
+    'file/read',
+    'file/read_bytes',
+    'file/stat',
+    'file/list',
+    'file/glob',
+    'file/write',
+    'file/edit',
+    'sessions/delete',
+    'sessions/archive',
+    'sessions/unarchive',
+  ].map((method) => `${QWEN_METHOD_NS}${method}`),
+]);
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
@@ -282,9 +372,13 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/agents`,
+  `${QWEN_METHOD_NS}session/agent_trace`,
+  `${QWEN_METHOD_NS}session/attachments`,
   `${QWEN_METHOD_NS}session/tasks/cancel`,
   `${QWEN_METHOD_NS}session/tasks/workflow_action`,
   `${QWEN_METHOD_NS}session/lsp`,
+  `${QWEN_METHOD_NS}session/saved_workflow`,
   `${QWEN_METHOD_NS}session/artifacts`,
   `${QWEN_METHOD_NS}session/artifacts/add`,
   `${QWEN_METHOD_NS}session/artifacts/remove`,
@@ -645,6 +739,34 @@ export function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: capacityError.message,
+      data: {
+        errorKind: capacityError.code,
+        httpStatus: 503,
+        maxConcurrentChildren: capacityError.maxConcurrentChildren,
+        committedAcpChildren: capacityError.committedAcpChildren,
+      },
+    };
+  }
+  if (isSessionStartupConfigError(err)) {
+    // Both kinds are caller-input rejections — a malformed config and a
+    // selection the provider refused alike — so both map to the JSON-RPC
+    // client-fault code. `data.httpStatus` keeps the REST-equivalent
+    // status, and SDK transports key on it rather than on this code.
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        errorKind: err.code,
+        httpStatus: err.code === 'invalid_startup_config' ? 400 : 422,
+      },
+    };
+  }
   if (err instanceof InvalidRequestedSessionIdError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -663,6 +785,61 @@ export function toRpcError(err: unknown): {
         sessionId: err.sessionId,
         ...err.details,
       },
+    };
+  }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data:
+        err.errorKind === 'invalid_session_id'
+          ? { httpStatus: 400, errorKind: err.errorKind }
+          : {
+              httpStatus: 409,
+              errorKind: err.errorKind,
+              sessionId: err.sessionId,
+              conflict: 'live',
+            },
+    };
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        httpStatus: 409,
+        errorKind: 'managed_session_branch_unsupported',
+        sessionId: err.sessionId,
+      },
+    };
+  }
+  // Raised by a paired host's owner selection or by the ACP child's check.
+  if (
+    err instanceof SessionExecutionEngineError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'session_execution_engine_unavailable')
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message:
+        'This session cannot be resumed with the current execution engine.',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_execution_engine_unavailable',
+      },
+    };
+  }
+  if (
+    err instanceof SessionTranscriptSnapshotUnavailableError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'transcript_snapshot_unavailable')
+  ) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: errMsg(err),
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
     };
   }
   if (err instanceof RequestedSessionIdNotHonoredError) {
@@ -685,8 +862,9 @@ export function toRpcError(err: unknown): {
     };
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const httpStatus =
-      err.code === 'invalid_request'
+    const httpStatus = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -705,12 +883,29 @@ export function toRpcError(err: unknown): {
         errorKind: err.code,
         httpStatus,
         retryable: err.retryable,
+        ...(err.capacity ? { capacity: err.capacity } : {}),
         ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
       },
     };
   }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  const workflowStatus =
+    isObject(err) && isObject(err['data'])
+      ? workflowRequestErrorStatus(err['data']['errorKind'])
+      : undefined;
+  if (
+    workflowStatus !== undefined &&
+    isObject(err) &&
+    isObject(err['data']) &&
+    typeof err['message'] === 'string'
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err['message'],
+      data: { errorKind: err['data']['errorKind'], httpStatus: workflowStatus },
+    };
+  }
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -1517,6 +1712,9 @@ export class AcpDispatcher {
             workspaceCwd: this.boundWorkspace,
             methods: advertisedQwenVendorMethods(
               this.sessionShellCommandEnabled,
+            ).filter(
+              (method) =>
+                !this.fsFactory?.sshWorkspace || SSH_METHODS.has(method),
             ),
           },
           imageCapability: IMAGE_CAPABILITY,
@@ -1662,6 +1860,23 @@ export class AcpDispatcher {
       : undefined;
     const id = isRequest(msg) ? msg.id : undefined;
 
+    if (this.fsFactory?.sshWorkspace && !SSH_METHODS.has(method)) {
+      if (id !== undefined) {
+        conn.sendConn(
+          error(
+            id,
+            RPC.METHOD_NOT_FOUND,
+            'This operation is not supported for SSH workspaces.',
+            {
+              errorKind: 'ssh_workspace_operation_unsupported',
+              httpStatus: 501,
+            },
+          ),
+        );
+      }
+      return;
+    }
+
     const generationScoped =
       TRUSTED_WORKSPACE_METHODS.has(method) ||
       WORKSPACE_GENERATION_MUTATION_METHODS.has(method);
@@ -1723,6 +1938,10 @@ export class AcpDispatcher {
             );
             return;
           }
+          const startupConfig = parseSessionStartupConfig(
+            params['startupConfig'],
+            params,
+          );
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const parsedSessionId = parseCallerSuppliedSessionId(
             meta?.[REQUESTED_SESSION_ID_META_KEY],
@@ -1751,6 +1970,19 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
+          // Same reservation as the REST route: only the daemon's dispatcher
+          // creates agent-host and agent sessions.
+          if (isAgentSessionSourceType(params['sourceType'])) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                'The requested session source is reserved for daemon-owned agent sessions.',
+                { errorKind: 'reserved_session_source' },
+              ),
+            );
+            return;
+          }
           if (
             isReservedStandaloneSessionSource({
               sourceType:
@@ -1809,13 +2041,52 @@ export class AcpDispatcher {
             // Always use sessionScope 'thread' regardless of client params.
             // The REST surface (POST /session) supports 'single' for
             // backward compat, but the ACP endpoint follows the standard.
-            const session = await sessionRuntime.bridge.spawnOrAttach({
-              workspaceCwd: cwd,
-              clientId: conn.clientId,
-              sessionScope: 'thread',
-              ...source,
-              ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
-            });
+            const session = await sessionRuntime.bridge
+              .spawnOrAttach({
+                workspaceCwd: cwd,
+                clientId: conn.clientId,
+                sessionScope: 'thread',
+                ...(startupConfig ? { startupConfig } : {}),
+                ...source,
+                ...(requestedSessionId
+                  ? { sessionId: requestedSessionId }
+                  : {}),
+              })
+              .catch(async (error: unknown) => {
+                // Mirror the REST route: a definite startup rejection
+                // already closed the live session, but the recording the
+                // spawn persisted survives — roll it back so the id stays
+                // retryable, naming the session the rejection was actually
+                // applied to (a daemon-generated id otherwise leaves a
+                // listed, resumable phantom). Uncertain outcomes keep it:
+                // the close result is unknown.
+                const rejectedSessionId =
+                  (isSessionStartupConfigError(error)
+                    ? error.sessionId
+                    : undefined) ?? requestedSessionId;
+                if (
+                  rejectedSessionId !== undefined &&
+                  isSessionStartupConfigError(error) &&
+                  error.code === 'startup_config_rejected'
+                ) {
+                  const removed = await this.removeOrphanSession(
+                    rejectedSessionId,
+                    true,
+                    sessionRuntime,
+                  );
+                  if (!removed) {
+                    // Matches the REST route: the definite rejection still
+                    // owes the caller its error, so a refused rollback (the
+                    // session stayed live) is a log line, not a throw —
+                    // otherwise a permanently occupied id has no
+                    // diagnostic at all.
+                    writeStderrLine(
+                      `qwen serve: startup rejection recording rollback was inconclusive; the session id may stay occupied (${logSafe(rejectedSessionId)})`,
+                    );
+                  }
+                }
+                throw error;
+              });
             const ownership = this.ownershipReceipt(
               conn,
               session.sessionId,
@@ -1858,6 +2129,12 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...(session.startupConfigApplied
+                    ? {
+                        modelApplied: true,
+                        startupConfigApplied: session.startupConfigApplied,
+                      }
+                    : {}),
                   ...(session.sourceType
                     ? { sourceType: session.sourceType }
                     : {}),
@@ -1991,9 +2268,8 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            restored ??= await this.archiveCoordinator.runSharedMany(
-              [sessionId],
-              async () => {
+            const restoreInRuntime = () =>
+              this.archiveCoordinator.runSharedMany([sessionId], async () => {
                 assertGenerationOpen?.();
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
@@ -2039,9 +2315,13 @@ export class AcpDispatcher {
                   sourceId: _reservedSourceId,
                   ...metadataWithoutSource
                 } = metadata;
+                // Agent-source sessions strip their source as the REST restore
+                // does: a restore is a person reading history, and keeping the
+                // source would let the load stand in for a dispatched run.
                 const restoreMetadata =
-                  this.liveSessionIsolation === undefined &&
-                  isReservedStandaloneSessionSource(metadata)
+                  (this.liveSessionIsolation === undefined &&
+                    isReservedStandaloneSessionSource(metadata)) ||
+                  metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                     ? metadataWithoutSource
                     : metadata;
                 // The private directory belongs to the live entry, which the
@@ -2129,7 +2409,10 @@ export class AcpDispatcher {
                   throw error;
                 }
                 return session;
-              },
+              });
+            restored ??= await runWithWorkspaceRuntimeStorage(
+              sessionRuntime,
+              restoreInRuntime,
             );
             const initialReplayOnDelivery =
               method === 'session/load' && !conn.ownsSession(sessionId);
@@ -2338,6 +2621,11 @@ export class AcpDispatcher {
               ...(s.sourceId !== undefined ? { sourceId: s.sourceId } : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
+              ...(s.activeWorkState !== undefined
+                ? { activeWorkState: s.activeWorkState }
+                : {}),
+              hasRunningBackgroundTasks: s.hasRunningBackgroundTasks,
+              ...(s.backgroundTurn ? { backgroundTurn: s.backgroundTurn } : {}),
               isArchived: s.isArchived === true,
               ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
@@ -3094,6 +3382,7 @@ export class AcpDispatcher {
                     {
                       number: boundPr['number'],
                       url: boundPr['url'],
+                      source: 'create',
                       ...(boundState === 'open' ||
                       boundState === 'merged' ||
                       boundState === 'closed'
@@ -3101,11 +3390,13 @@ export class AcpDispatcher {
                         : {}),
                     },
                   )
-                ).map(({ number, url, state }) => ({
-                  number,
-                  url,
-                  ...(state ? { state } : {}),
-                }));
+                ).map(toSessionPrInfo);
+                // Reconcile the live entry to the authoritative persisted
+                // list: the bridge merge capped positionally while the
+                // sidecar caps by provenance authority — past the cap the
+                // two stores evict different entries, and every later
+                // event would serve the diverged list.
+                this.bridge.setSessionPrs?.(sessionId, persistedPrs);
                 // Reply with the authoritative persisted list, mirroring the
                 // REST metadata routes.
                 result = { ...result, prs: persistedPrs };
@@ -3765,6 +4056,50 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}session/agents`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionAgentsStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/agent_trace`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const rootAgentId = params['rootAgentId'];
+          if (
+            rootAgentId !== undefined &&
+            (typeof rootAgentId !== 'string' ||
+              rootAgentId.length === 0 ||
+              rootAgentId.length > 500)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, 'Invalid rootAgentId'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionAgentTrace(
+            sessionId,
+            rootAgentId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/attachments`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const attachments = await this.bridge.listSessionAttachments(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, { attachments });
+          return;
+        }
+
         case `${QWEN_METHOD_NS}session/tasks/cancel`: {
           const sessionId = String(params['sessionId'] ?? '');
           await this.withMutableOwned(conn, sessionId, id, async () => {
@@ -3832,14 +4167,15 @@ export class AcpDispatcher {
               action !== 'retry' &&
               action !== 'rerun' &&
               action !== 'delete-history' &&
-              action !== 'run-saved'
+              action !== 'run-saved' &&
+              action !== 'run-script'
             ) {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
                   ),
                 );
               }
@@ -3854,6 +4190,7 @@ export class AcpDispatcher {
               taskId,
               action,
               this.sessionCtx(conn, sessionId, loopback),
+              readServeWorkflowActionInput(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
@@ -3864,6 +4201,27 @@ export class AcpDispatcher {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionLspStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/saved_workflow`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const name = String(params['name'] ?? '');
+          if (!name) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`name` is required'),
+              );
+            }
+            return;
+          }
+          // Same fail-closed shape as the redacted supported-commands list:
+          // an untrusted workspace never reads workflow scripts.
+          const result = this.isWorkspaceTrusted()
+            ? await this.bridge.getSessionSavedWorkflow(sessionId, name)
+            : { v: 1, sessionId, name, workflow: null };
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -4585,7 +4943,8 @@ export class AcpDispatcher {
           const matches = await fs.glob(pattern, {
             maxResults: maxResults + 1,
           });
-          const truncated = matches.length > maxResults;
+          const truncated =
+            matches.truncated === true || matches.length > maxResults;
           this.replyConn(conn, id, {
             pattern,
             matches: truncated ? matches.slice(0, maxResults) : matches,
@@ -4929,6 +5288,7 @@ export class AcpDispatcher {
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
                 assertCanMutate: assertGenerationOpen,
+                runtimeWorkspaceCwd: this.boundWorkspace,
                 onError: ({ phase, sessionId, error }) => {
                   const safeSessionId = logSafe(sessionId.slice(0, 8));
                   const safeMessage = logSafe(error);
@@ -5035,6 +5395,11 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/agents/create`: {
+          if ('executionBackend' in params) {
+            throw new AcpParamError(
+              'Daemon agents do not support executionBackend.',
+            );
+          }
           const scope = params['scope'];
           if (scope !== 'workspace' && scope !== 'global') {
             if (id !== undefined)
@@ -5117,6 +5482,11 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/agents/update`: {
+          if ('executionBackend' in params) {
+            throw new AcpParamError(
+              'Daemon agents do not support executionBackend.',
+            );
+          }
           const agentType = String(params['agentType'] ?? '');
           if (!agentType) {
             if (id !== undefined)
@@ -5774,18 +6144,30 @@ export class AcpDispatcher {
     binding.promptAbort?.abort();
     const abort = new AbortController();
     binding.promptAbort = abort;
+    const metadata = params['_meta'] as Record<string, unknown> | undefined;
+    const submittedPrompt = metadata?.[SUBMITTED_PROMPT_META_KEY];
     try {
       const result = await this.bridge.sendPrompt(
         sessionId,
         // SECURITY NOTE: `params.sessionId` already equals the routing
         // `sessionId` (both from the same params), so there's no routing
-        // divergence today. If the bridge ever trusts an additional
+        // divergence today. eventDetailMode is an intentional daemon extension:
+        // like REST prompt, it controls this turn's shared retention/delivery.
+        // If the bridge ever trusts an additional privileged
         // `sendPrompt` field by name (e.g. a priority/temperature override),
         // force-stamp it here like the REST surface does (`{ ...body,
         // sessionId, prompt }`) so it can't become client-controlled.
         params as unknown as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
-        this.sessionCtx(conn, sessionId, fromLoopback),
+        {
+          ...this.sessionCtx(conn, sessionId, fromLoopback),
+          ...(typeof submittedPrompt === 'string' &&
+          metadata?.[CHANNEL_PROMPT_META_KEY] === undefined &&
+          metadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] === undefined &&
+          metadata?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY] === undefined
+            ? { submittedPrompt }
+            : {}),
+        },
       );
       if (id !== undefined) this.replySession(conn, sessionId, id, result);
     } catch (err) {

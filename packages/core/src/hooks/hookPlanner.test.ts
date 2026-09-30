@@ -428,6 +428,65 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it.each([
+      ['Bash', 'run_shell_command'],
+      ['Read', 'read_file'],
+      ['Write', 'write_file'],
+      ['Write|Edit', 'write_file'],
+    ])(
+      'matches the Claude Code tool name %s against %s',
+      (matcher, toolName) => {
+        const entry: HookRegistryEntry = {
+          config: { type: HookType.Command, command: 'echo test' },
+          source: HooksConfigSource.Project,
+          eventName: HookEventName.PreToolUse,
+          matcher,
+          enabled: true,
+        };
+        vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+        const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+          toolName,
+        });
+
+        expect(result).not.toBeNull();
+      },
+    );
+
+    it.each([
+      ['Read', 'grep_search'],
+      ['Read', 'list_directory'],
+      ['Edit', 'write_file'],
+      ['Bash', 'monitor'],
+    ])(
+      'does not expand the Claude Code tool name %s to %s',
+      (matcher, toolName) => {
+        const entry: HookRegistryEntry = {
+          config: { type: HookType.Command, command: 'echo test' },
+          source: HooksConfigSource.Project,
+          eventName: HookEventName.PreToolUse,
+          matcher,
+          enabled: true,
+        };
+        vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+        const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+          toolName,
+        });
+
+        expect(result).toBeNull();
+      },
+    );
+
+    it('lists each tool matcher target once', () => {
+      const targets = getToolMatcherTargets('run_shell_command');
+
+      expect(targets).toEqual(
+        expect.arrayContaining(['run_shell_command', 'Shell', 'Bash']),
+      );
+      expect(new Set(targets).size).toBe(targets.length);
+    });
+
     it('does not match regex against tool aliases', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },
@@ -1100,6 +1159,89 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it('matches a pipe-separated list of notification types', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.Notification,
+        matcher: 'permission_prompt|idle_prompt',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'idle_prompt',
+        }),
+      ).not.toBeNull();
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'auth_success',
+        }),
+      ).toBeNull();
+    });
+
+    it('matches notification types with a regex', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.Notification,
+        matcher: '^elicitation_',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'elicitation_dialog',
+        }),
+      ).not.toBeNull();
+      expect(
+        planner.createExecutionPlan(HookEventName.Notification, {
+          notificationType: 'idle_prompt',
+        }),
+      ).toBeNull();
+    });
+
+    it('matches a pipe-separated list of compact triggers', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.PreCompact,
+        matcher: 'manual|auto',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.PreCompact, {
+          trigger: 'auto',
+        }),
+      ).not.toBeNull();
+    });
+
+    it('matches a pipe-separated list of stop failure error types', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.StopFailure,
+        matcher: 'rate_limit|server_error',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      expect(
+        planner.createExecutionPlan(HookEventName.StopFailure, {
+          error: 'server_error',
+        }),
+      ).not.toBeNull();
+      expect(
+        planner.createExecutionPlan(HookEventName.StopFailure, {
+          error: 'unknown',
+        }),
+      ).toBeNull();
+    });
+
     // PostCompact matcher tests
     it('should match trigger with exact string for PostCompact', () => {
       const entry: HookRegistryEntry = {
@@ -1184,5 +1326,82 @@ describe('HookPlanner', () => {
 
       expect(result).not.toBeNull();
     });
+  });
+});
+
+describe('agent hook ownership with a real registry', () => {
+  it('filters before dedup and preserves exact session/agent identity through reload and dispose', async () => {
+    const { HookRegistry } = await import('./hookRegistry.js');
+    const registry = new HookRegistry({
+      getProjectRoot: () => '/source',
+      isTrustedFolder: () => true,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({
+        [HookEventName.PreToolUse]: [
+          { hooks: [{ type: HookType.Command, command: 'global' }] },
+        ],
+      }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+    });
+    await registry.initialize();
+    const planner = new HookPlanner(registry);
+    let trusted = true;
+    const local = (description: string) => ({
+      [HookEventName.PreToolUse]: [
+        {
+          matcher: 'Read',
+          hooks: [
+            {
+              type: HookType.Command as const,
+              command: 'same',
+              name: 'same',
+              description,
+            },
+          ],
+        },
+      ],
+    });
+    const disposeA = registry.addAgentHooks(local('A'), 'registration-A', {
+      owner: { sessionId: 's1', agentId: 'A' },
+      isSourceTrusted: () => trusted,
+    });
+    registry.addAgentHooks(local('B'), 'registration-B', {
+      owner: { sessionId: 's1', agentId: 'B' },
+    });
+    const plan = (agentId: string | null, sessionId = 's1') =>
+      planner
+        .createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+          { runtimeId: 'runtime', sessionId, agentId },
+        )
+        ?.hookConfigs.map(
+          (hook) =>
+            hook.description ??
+            (hook.type === HookType.Command ? hook.command : hook.type),
+        );
+    expect(plan(null)).toEqual(['global']);
+    expect(plan('A')).toEqual(['global', 'A']);
+    expect(plan('B')).toEqual(['global', 'B']);
+    expect(plan('C')).toEqual(['global']);
+    expect(plan('A', 's2')).toEqual(['global']);
+    expect(
+      planner.createExecutionPlan(HookEventName.PreToolUse)?.hookConfigs,
+    ).toHaveLength(1);
+    trusted = false;
+    expect(plan('A')).toEqual(['global']);
+    expect(plan('B')).toEqual(['global', 'B']);
+    await registry.reloadConfiguredHooks();
+    expect(plan('A')).toEqual(['global']);
+    trusted = true;
+    expect(plan('A')).toEqual(['global', 'A']);
+    registry.addAgentHooks(local('resumed A'), 'registration-A-new', {
+      owner: { sessionId: 's1', agentId: 'A' },
+    });
+    disposeA();
+    disposeA();
+    expect(plan('A')).toEqual(['global', 'resumed A']);
+    expect(plan('B')).toEqual(['global', 'B']);
   });
 });

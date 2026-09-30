@@ -173,6 +173,7 @@ describe('LogToSpanProcessor', () => {
         error_message: 'secret upstream error',
         prompt: 'secret prompt',
         function_args: '{"token":"secret"}',
+        request_text: 'secret request',
         response_text: 'secret response',
         error_type: 'RateLimitError',
         safe: 'visible',
@@ -188,6 +189,7 @@ describe('LogToSpanProcessor', () => {
     expect(attrs).not.toHaveProperty('error_message');
     expect(attrs).not.toHaveProperty('prompt');
     expect(attrs).not.toHaveProperty('function_args');
+    expect(attrs).not.toHaveProperty('request_text');
     expect(attrs).not.toHaveProperty('response_text');
     expect(attrs['error_type']).toBe('RateLimitError');
     expect(attrs['safe']).toBe('visible');
@@ -210,6 +212,7 @@ describe('LogToSpanProcessor', () => {
         error_message: 'secret upstream error',
         prompt: 'secret prompt',
         function_args: '{"token":"secret"}',
+        request_text: 'secret request',
         response_text: 'secret response',
         safe: 'visible',
       },
@@ -224,6 +227,7 @@ describe('LogToSpanProcessor', () => {
     expect(attrs['error_message']).toBe('secret upstream error');
     expect(attrs['prompt']).toBe('secret prompt');
     expect(attrs['function_args']).toBe('{"token":"secret"}');
+    expect(attrs['request_text']).toBe('secret request');
     expect(attrs['response_text']).toBe('secret response');
     expect(attrs['safe']).toBe('visible');
     expect(attrs['log.bridge']).toBe(true);

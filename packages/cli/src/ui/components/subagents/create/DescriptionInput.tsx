@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import type { WizardStepProps, WizardAction } from '../types.js';
@@ -26,6 +26,13 @@ export function DescriptionInput({
   config,
 }: WizardStepProps) {
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      abortControllerRef.current?.abort();
+    },
+    [],
+  );
 
   const handleTextChange = useCallback(
     (text: string) => {

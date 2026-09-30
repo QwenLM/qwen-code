@@ -94,7 +94,7 @@ export class MyChannel extends ChannelBase {
 
 Most adapters should pass `options` through unchanged. If an adapter creates its own `SessionRouter` and passes that router to `super()`, set `registerBridgeEvents: true` in `ChannelBaseOptions` so `ChannelBase` still receives `toolCall` and `sessionDied` events directly. Leave it unset for routers supplied by the channel gateway.
 
-If your adapter exposes shell-command behavior, check that `bridge.shellCommand` exists before enabling it. Daemon-managed workers omit that optional method unless the daemon advertises the `session_shell_command` capability.
+If your adapter exposes shell-command or BTW side-question behavior, check that the corresponding `bridge.shellCommand` / `bridge.btw` method exists before enabling it. Daemon-managed workers omit those optional methods unless the daemon advertises the matching `session_shell_command` / `session_btw` capability.
 
 ## The Envelope
 
@@ -200,8 +200,6 @@ protected override onPromptEnd(chatId: string, sessionId: string, messageId?: st
 **Tool call hooks** — override `onToolCall()` to display agent activity (e.g., "Running shell command...").
 
 **Streaming hooks** — override `onResponseChunk(chatId, chunk, sessionId, segment)` for per-chunk progressive display (e.g., editing a message in-place). Override `onResponseComplete(chatId, fullText, sessionId, segment)` to customize final delivery. In daemon-managed named-task mode, `segment.sourceLabel` is immutable delivery metadata for that segment. Render it once on each independently visible message or card, including a separately visible final response, but do not add it to raw buffers or model text. Clear adapter-owned segment state from `onOutputSegmentEnd()`.
-
-**Block streaming** — set `blockStreaming: "on"` in the channel config. The base class automatically splits responses into multiple messages at paragraph boundaries. No plugin code needed — it works alongside `onResponseChunk`.
 
 **Named-task attribution** — `sendThreadMessage(chatId, threadId, text, sourceLabel)` receives the same optional plain-text label for one-shot and proactive delivery boundaries. The default implementation handles plain messages. Adapters that override delivery, split messages, emit cards, or provide fallback sends must repeat the label at every independently visible boundary, escape only the label for the target markup dialect, and include its rendered size in platform limits. Run no-reply checks, media-marker projection, audit hashing, transcript persistence, and retry-body capture against the raw response before presentation; if delivery is persisted for restart-safe retry, persist the captured label separately.
 

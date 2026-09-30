@@ -42,6 +42,75 @@ const createMockMessageBus = () =>
   }) as unknown as MessageBus;
 
 describe('toolHookTriggers', () => {
+  it('transports the owner on all six helpers without adding it to stdin', async () => {
+    const bus = createMockMessageBus();
+    const owner = { runtimeId: 'runtime', sessionId: 'session', agentId: 'A' };
+    vi.mocked(bus.request).mockResolvedValue({
+      type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+      correlationId: 'hook-response',
+      success: true,
+      output: {},
+    });
+    await firePreToolUseHook(
+      bus,
+      'read',
+      {},
+      'tool',
+      'default',
+      undefined,
+      'call',
+      owner,
+    );
+    await firePostToolUseHook(
+      bus,
+      'read',
+      {},
+      {},
+      'tool',
+      'default',
+      undefined,
+      'call',
+      undefined,
+      owner,
+    );
+    await firePostToolUseFailureHook(
+      bus,
+      'tool',
+      'read',
+      {},
+      'error',
+      false,
+      'default',
+      undefined,
+      'call',
+      undefined,
+      owner,
+    );
+    await firePostToolBatchHook(bus, [], 'default', undefined, owner);
+    await fireNotificationHook(
+      bus,
+      'message',
+      NotificationType.PermissionPrompt,
+      undefined,
+      undefined,
+      owner,
+    );
+    await firePermissionRequestHook(
+      bus,
+      'read',
+      {},
+      'default',
+      undefined,
+      undefined,
+      owner,
+    );
+    expect(bus.request).toHaveBeenCalledTimes(6);
+    for (const [request] of vi.mocked(bus.request).mock.calls) {
+      expect(request).toHaveProperty('owner', owner);
+      expect(request).not.toHaveProperty('input.owner');
+    }
+  });
+
   describe('generateToolUseId', () => {
     it('should generate unique IDs with the correct prefix', () => {
       const id1 = generateToolUseId();
@@ -248,6 +317,59 @@ describe('toolHookTriggers', () => {
         additionalContext: 'Additional context here',
       });
     });
+
+    it.each([
+      [
+        'denied',
+        {
+          hookSpecificOutput: {
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Tool not allowed',
+            additionalContext: 'deny <note>',
+          },
+        },
+      ],
+      [
+        'ask',
+        {
+          hookSpecificOutput: {
+            permissionDecision: 'ask',
+            additionalContext: 'ask <note>',
+          },
+        },
+      ],
+      [
+        'stop',
+        {
+          continue: false,
+          reason: 'halt',
+          hookSpecificOutput: { additionalContext: 'stop <note>' },
+        },
+      ],
+    ] as const)(
+      'keeps sanitized additional context on the %s branch',
+      async (blockType, output) => {
+        const mockMessageBus = createMockMessageBus();
+        (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+          success: true,
+          output,
+        });
+
+        const result = await firePreToolUseHook(
+          mockMessageBus,
+          'test-tool',
+          {},
+          'test-id',
+          'auto',
+        );
+
+        expect(result.shouldProceed).toBe(false);
+        expect(result.blockType).toBe(blockType);
+        expect(result.additionalContext).toBe(
+          `${blockType === 'denied' ? 'deny' : blockType} &lt;note&gt;`,
+        );
+      },
+    );
 
     it('should handle hook execution errors gracefully', async () => {
       const mockMessageBus = createMockMessageBus();
@@ -831,6 +953,36 @@ describe('toolHookTriggers', () => {
   });
 
   describe('appendAdditionalContext', () => {
+    it('preserves structured media and its ordering when adding hook context', () => {
+      const parts = [
+        { text: 'resource media-1' },
+        { fileData: { mimeType: 'image/png', fileUri: 'oss://image' } },
+      ];
+      const original = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'exec',
+            response: { output: 'read completed' },
+            parts,
+          },
+        },
+      ];
+      expect(appendAdditionalContext(original, 'hook context')).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'exec',
+            response: { output: 'read completed\n\nhook context' },
+            parts,
+          },
+        },
+      ]);
+      expect(original[0].functionResponse.response.output).toBe(
+        'read completed',
+      );
+    });
+
     it('should return original content when no additional context is provided', () => {
       const result = appendAdditionalContext('original content', undefined);
       expect(result).toBe('original content');

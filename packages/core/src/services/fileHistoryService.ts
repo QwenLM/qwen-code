@@ -831,6 +831,17 @@ export class FileHistoryService {
   ): Promise<RewindResult> {
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
 
+    // Refuse a shared key before truncation can prune the wrong backups.
+    let matches = 0;
+    for (const snapshot of this.state.snapshots) {
+      if (snapshot.promptId === promptId) matches++;
+    }
+    if (matches > 1) {
+      throw new Error(
+        'The selected snapshot shares its checkpoint identity with another turn',
+      );
+    }
+
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) {
       throw new Error('The selected snapshot was not found');

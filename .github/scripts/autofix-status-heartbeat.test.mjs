@@ -833,6 +833,40 @@ describe('autofix-status-heartbeat loop', () => {
     }
   });
 
+  // Gate on the skip line's SECOND occurrence, not a fixed sleep: the
+  // loop sleeps a full interval BEFORE its first tick, so on a loaded
+  // runner a fixed budget races startup — a red lane with no product
+  // defect. Content, not existence: `exec >> heartbeat.log` creates the
+  // file before any line is written. Nor the FIRST occurrence: a
+  // fail-open mutant (skip logged, `continue` dropped) writes its fake
+  // gh record two fork+exec chains AFTER the echo, so a gate resolving
+  // on the first line lets the zero-gh-calls assertion land in that
+  // fork-latency window and pass. The second line arrives a full
+  // interval later, restoring the cross-tick observation window.
+  // A timeout failure carries the observed log state: its two shapes are
+  // "nothing skipped" and "pulse died after one skip", and a bare "must
+  // log a skipped tick" sentence asserts the opposite of the second —
+  // the skip WAS logged; what broke is the loop.
+  async function awaitTwoSkipLines(workdir, timeoutMs) {
+    const log = join(workdir, 'heartbeat.log');
+    const readLog = () => (existsSync(log) ? readFileSync(log, 'utf8') : '');
+    const ok = await waitFor(
+      () =>
+        (readLog().match(/gh config mint failed; skipping this tick/g) ?? [])
+          .length >= 2,
+      timeoutMs,
+    );
+    const logText = readLog();
+    const skips = (
+      logText.match(/gh config mint failed; skipping this tick/g) ?? []
+    ).length;
+    const lastLine = logText.trim().split('\n').at(-1);
+    assert.ok(
+      ok,
+      `expected >= 2 'gh config mint failed; skipping this tick' log lines within ${timeoutMs}ms, saw ${skips}; last log line: ${JSON.stringify(lastLine)}`,
+    );
+  }
+
   it('skips the tick on a failed config mint — never gh against a shared config', async () => {
     // Fail CLOSED, the af-112 doctrine: a failing mktemp must skip the
     // tick's gh call, never run gh with the PAT against an unpinned config
@@ -848,19 +882,38 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const child = startLoop(env);
     try {
-      // Several tick intervals at the 1s test interval.
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await awaitTwoSkipLines(workdir, 8000);
       assert.equal(
         readCalls(gh.records).length,
         0,
         'a failed mint must skip the gh call entirely',
       );
       assert.ok(child.exitCode === null, 'a failed mint must not end the loop');
-      const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
-      assert.match(logText, /gh config mint failed; skipping this tick/);
     } finally {
       killGroup(child);
     }
+  });
+
+  it('the failed-mint gate failure carries the observed log state', async () => {
+    // Pulse-death shape (the gate's witness): the loop logs ONE skip
+    // line, then dies. A bare "a failed mint must log a skipped tick"
+    // asserts the opposite of that shape — the skip WAS logged — so the
+    // timeout failure must carry the observed count and last line that
+    // make the two gate-timeout shapes distinguishable.
+    const workdir = freshTmp();
+    writeFileSync(
+      join(workdir, 'heartbeat.log'),
+      '2026-09-02T00:00:00Z heartbeat started: comment 777 interval 1s max_age 20400s\n' +
+        '2026-09-02T00:00:01Z gh config mint failed; skipping this tick\n',
+    );
+    await assert.rejects(
+      () => awaitTwoSkipLines(workdir, 300),
+      (err) => {
+        assert.match(err.message, /saw 1;/);
+        assert.match(err.message, /last log line: ".*skipping this tick/);
+        return true;
+      },
+    );
   });
 
   it('stamps each tick in flight around the gh call and clears it after', async () => {

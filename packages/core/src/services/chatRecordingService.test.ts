@@ -6,10 +6,16 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   ChatRecordingService,
   isTurnResultRecordPayload,
@@ -23,8 +29,9 @@ import {
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { Part } from '@google/genai';
-import type { FileDiff } from '../tools/tools.js';
+import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import type { Content, Part } from '@google/genai';
+import type { FileDiff, McpAppResultDisplay } from '../tools/tools.js';
 import {
   deserializeSnapshots,
   serializeSnapshot,
@@ -40,7 +47,13 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
+import {
+  shellResultText,
+  type ShellResultDisplay,
+} from '../utils/shell-result.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { CompressionStatus } from '../core/turn.js';
+import { markApiHistoryPrompt } from './session-api-history.js';
 
 function branchTestRecord(
   uuid: string,
@@ -141,7 +154,7 @@ describe('ChatRecordingService', () => {
       parts.pop();
       return parts.join('/');
     });
-    vi.mocked(execSync).mockReturnValue('main\n');
+    vi.mocked(execFileSync).mockReturnValue('main\n');
     vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
@@ -186,10 +199,104 @@ describe('ChatRecordingService', () => {
     vi.restoreAllMocks();
   });
 
+  describe('background execution recording ownership', () => {
+    const turn: BackgroundNotificationTurn = {
+      turnId: 'automatic-turn',
+      taskId: 'completed-agent',
+      kind: 'agent',
+      sourceTurnId: 'original-user-turn',
+      toolUseId: 'launch-tool',
+      startedAt: 1234,
+    };
+
+    it.each([
+      ['ordinary execution', undefined, null, false],
+      ['active parent execution', 'test-session-id', null, true],
+      ['different session', 'other-session-id', null, false],
+      ['nested subagent', 'test-session-id', 'nested-agent', false],
+    ] as const)(
+      'records ownership for %s',
+      async (_, sessionId, agentId, tagged) => {
+        const record = async () =>
+          chatRecordingService.recordUserMessage([{ text: 'message' }]);
+        const inAgent = () =>
+          agentId ? runWithAgentContext(agentId, record) : record();
+        if (sessionId) {
+          await backgroundTurnContext.run(
+            { sessionId, turn, active: true },
+            async () => {
+              await Promise.resolve();
+              await inAgent();
+            },
+          );
+        } else {
+          await inAgent();
+        }
+        await chatRecordingService.flush();
+
+        const persisted = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(persisted.backgroundTurn).toEqual(tagged ? turn : undefined);
+      },
+    );
+
+    it('records task completion as session metadata without model content', async () => {
+      const payload = {
+        displayText: 'A separate background task completed',
+        backgroundTask: {
+          taskId: 'other-agent',
+          status: 'completed',
+          kind: 'agent' as const,
+          sourceTurnId: 'earlier-turn',
+        },
+      };
+      backgroundTurnContext.run(
+        { sessionId: 'test-session-id', turn, active: true },
+        () => chatRecordingService.recordBackgroundTaskCompleted(payload),
+      );
+      await chatRecordingService.flush();
+
+      const persisted = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      expect(persisted).toMatchObject({
+        type: 'system',
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      });
+      expect(persisted.message).toBeUndefined();
+      expect(persisted.backgroundTurn).toBeUndefined();
+    });
+
+    it('does not tag a callback inherited from a completed automatic execution', async () => {
+      const context = { sessionId: 'test-session-id', turn, active: true };
+      let resume!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const delayed = backgroundTurnContext.run(context, async () => {
+        await gate;
+        chatRecordingService.recordUserMessage([{ text: 'late callback' }]);
+      });
+      context.active = false;
+      resume();
+      await delayed;
+      await chatRecordingService.flush();
+
+      const persisted = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      expect(persisted.backgroundTurn).toBeUndefined();
+    });
+  });
+
   describe('recordUserMessage', () => {
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
-      chatRecordingService.recordUserMessage(userParts);
+      chatRecordingService.recordUserMessage(
+        userParts,
+        undefined,
+        undefined,
+        'prompt-1',
+      );
       await chatRecordingService.flush();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
@@ -205,7 +312,116 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.promptId).toBe('prompt-1');
+      expect(record.daemonPromptId).toBeUndefined();
     });
+
+    it('preserves prompt identities in compression checkpoints', async () => {
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'prompt' }],
+      };
+      markApiHistoryPrompt(content, 'prompt-1');
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [content],
+      });
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
+    });
+
+    it('freezes the compression snapshot array against later live-history mutation', async () => {
+      // Deferred serialization must keep entries aligned with promptIds.
+      const first: Content = { role: 'user', parts: [{ text: 'A' }] };
+      const second: Content = { role: 'user', parts: [{ text: 'B' }] };
+      markApiHistoryPrompt(first, 'prompt-1');
+      markApiHistoryPrompt(second, 'prompt-2');
+      const liveHistory: Content[] = [first, second];
+
+      chatRecordingService.recordChatCompression({
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: liveHistory,
+      });
+
+      // Mutations the same turn performs before the queued write drains.
+      liveHistory.splice(1, 0, {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'tool', response: {} },
+          } as Part,
+        ],
+      });
+      liveHistory.push({ role: 'user', parts: [{ text: 'C' }] });
+
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const payload = record.systemPayload as {
+        compressedHistory: Content[];
+        promptIds: Array<string | null>;
+      };
+      expect(payload.compressedHistory).toHaveLength(2);
+      expect(payload.compressedHistory).toHaveLength(payload.promptIds.length);
+      expect(payload.promptIds).toEqual(['prompt-1', 'prompt-2']);
+      expect(
+        payload.compressedHistory.map((c) =>
+          c.parts?.map((p) => ('text' in p ? p.text : undefined)),
+        ),
+      ).toEqual([['A'], ['B']]);
+    });
+
+    it('persists the daemon prompt identity before any turn result', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'same prompt' }],
+        undefined,
+        undefined,
+        undefined,
+        'daemon-prompt-1',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.writeLine).mock.calls[0][1]).toMatchObject({
+        type: 'user',
+        daemonPromptId: 'daemon-prompt-1',
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      });
+    });
+
+    it.each(['42', '9007199254740992'])(
+      'keeps daemon IDs ending in ########%s out of CLI turn recovery',
+      async (turn) => {
+        const daemonPromptId = `test-session-id########${turn}`;
+        chatRecordingService.recordUserMessage(
+          [{ text: 'same prompt' }],
+          undefined,
+          undefined,
+          undefined,
+          daemonPromptId,
+        );
+        await chatRecordingService.flush();
+
+        const record = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(record.daemonPromptId).toBe(daemonPromptId);
+        expect(record).not.toHaveProperty('promptId');
+        expect(computeInitialTurnFromHistory([record], 'test-session-id')).toBe(
+          1,
+        );
+      },
+    );
 
     it('preserves model-bound parts and records clean display text', async () => {
       const modelParts: Part[] = [
@@ -348,6 +564,38 @@ describe('ChatRecordingService', () => {
         parts: modelFacingParts,
       });
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
+    });
+
+    it('writes original resource links on an attachment-only user record', async () => {
+      const resourceLinks = [
+        {
+          type: 'resource_link' as const,
+          uri: 'transit://resource-a',
+          name: 'notes.md',
+          mimeType: 'text/markdown',
+          size: 0,
+          description: 'Original reference',
+          annotations: { audience: ['user' as const], priority: 0.5 },
+          _meta: { preview: { version: 1 } },
+        },
+      ];
+      chatRecordingService.recordUserMessage(
+        '',
+        undefined,
+        { displayText: '', hookContext: '', resourceLinks },
+        undefined,
+        'resource-prompt',
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('user');
+      expect(record.daemonPromptId).toBe('resource-prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: '',
+        resourceLinks,
+      });
     });
 
     it('records mid-turn attachment references without inline bytes', async () => {
@@ -1422,6 +1670,48 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordGoalTurnEnd', () => {
+    it('waits for the durable system record and copies the Goal permit', async () => {
+      let resolveWrite!: () => void;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveWrite = resolve;
+          }),
+      );
+      const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+      const pending = chatRecordingService.recordGoalTurnEnd('finish', permit);
+      permit.turnId = 'changed';
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      resolveWrite();
+      await pending;
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0]![1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'goal_turn_end',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+        systemPayload: { toolCallId: 'finish' },
+      });
+      expect(record.message).toBeUndefined();
+    });
+
+    it('rejects a failed append instead of reporting a persisted boundary', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      await expect(
+        chatRecordingService.recordGoalTurnEnd('finish', {
+          goalId: 'goal',
+          revision: 1,
+          turnId: 'turn',
+        }),
+      ).rejects.toThrow('disk full');
+    });
+  });
+
   describe('recordTurnResult', () => {
     it('normalizes hostile and oversized error fields without throwing', () => {
       const hostile = Object.create(null, {
@@ -1480,6 +1770,24 @@ describe('ChatRecordingService', () => {
           resultCode: 'RESULT_TEXT_TRUNCATED',
         }),
       ).toBe(false);
+    });
+
+    it.each([
+      [undefined, true],
+      [1_500, true],
+      [NaN, false],
+      [Infinity, false],
+      ['1500', false],
+    ])('validates cancellation timestamp %s', (cancelledAt, valid) => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1_000,
+          cancelledAt,
+          endedAt: 2_000,
+        }),
+      ).toBe(valid);
     });
 
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
@@ -2169,6 +2477,56 @@ describe('ChatRecordingService', () => {
       }
     });
 
+    it.each(['', 'small display', 'x'.repeat(40_000)])(
+      'observes structured shell display before and after recording (case %#)',
+      async (text) => {
+        const display: ShellResultDisplay = {
+          type: 'shell_result',
+          version: 1,
+          text,
+          output: text,
+          directory: '/tmp',
+          exitCode: 0,
+          signal: null,
+          pid: null,
+          error: null,
+          outcome: 'completed',
+          notices: [],
+          truncated: false,
+          outputFiles: [],
+        };
+        chatRecordingService.recordToolResult([{ text: 'model response' }], {
+          callId: 'shell-1',
+          status: 'success',
+          resultDisplay: display,
+        });
+        await chatRecordingService.flush();
+
+        const record = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        const savedText = shellResultText(record.toolCallResult?.resultDisplay);
+        expect(savedText).toBeDefined();
+        expect(savedText!.length).toBeLessThanOrEqual(
+          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+        );
+        for (const [stage, value] of [
+          ['recorder_input', text],
+          ['recorder_output', savedText],
+        ]) {
+          const observation = boundaryObserveMock.mock.calls.find(
+            ([entry]) => entry.stage === stage,
+          )?.[0];
+          const values = observation?.values;
+          expect(
+            (typeof values === 'function' ? values() : values)?.filter(
+              (entry) => entry.representation === 'display',
+            ),
+          ).toEqual([{ representation: 'display', value }]);
+        }
+        expect(display.text).toBe(text);
+      },
+    );
+
     it('should keep small file diff resultDisplay unchanged', async () => {
       const toolResultParts: Part[] = [
         {
@@ -2257,6 +2615,53 @@ describe('ChatRecordingService', () => {
       expect(resultDisplay).toContain('-tail');
       expect(resultDisplay).toContain('truncated for saved session preview');
       expect(resultDisplay).not.toContain('CLI history display');
+    });
+
+    // https://github.com/QwenLM/qwen-code/issues/10369 - the Web Shell mounts
+    // the sandboxed iframe only when the recorded `html` is non-empty, and it
+    // never re-fetches the `ui://` resource. Recording an empty `html` makes
+    // every replayed MCP App fall back to plain text permanently.
+    it('keeps MCP App html and toolResult in the recorded transcript', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'mcp__demo__dashboard',
+            response: { output: 'Dashboard ready' },
+          },
+        },
+      ];
+      const html = '<main id="dashboard">MCP_APP_HTML_MARKER</main>';
+      const toolResult = {
+        content: [{ type: 'text', text: 'Dashboard ready' }],
+      };
+      const metadata = {
+        callId: 'call-1',
+        status: 'success',
+        responseParts: toolResultParts,
+        resultDisplay: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html,
+          toolResult,
+          toolArguments: { region: 'APAC' },
+          fallbackText: 'Dashboard ready',
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const recorded = record.toolCallResult
+        ?.resultDisplay as McpAppResultDisplay;
+
+      expect(recorded.type).toBe('mcp_app');
+      expect(recorded.html).toBe(html);
+      expect(recorded.toolResult).toEqual(toolResult);
+      expect(recorded.fallbackText).toBe('Dashboard ready');
     });
 
     it('records promptId on tool results when provided', async () => {
@@ -2872,6 +3277,247 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordSessionApprovalMode', () => {
+    it('appends normalized approval state and skips identical payloads', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(true);
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'session_approval_mode',
+        systemPayload: {
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.DEFAULT,
+        },
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.DEFAULT,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.DEFAULT,
+          planExecutionMode: ApprovalMode.YOLO,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(
+        (vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord)
+          .systemPayload,
+      ).toEqual({
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.DEFAULT,
+        planExecutionMode: ApprovalMode.YOLO,
+      });
+    });
+
+    it('restores projected approval state for duplicate suppression', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionApprovalMode: { mode: ApprovalMode.YOLO },
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('restores approval state from a full-record replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'approval-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-08-31T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_approval_mode',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              systemPayload: { mode: ApprovalMode.YOLO },
+            },
+          ],
+        },
+        lastCompletedUuid: 'approval-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('re-anchors the supplied live approval state onto the rewind branch', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.rewindRecording(
+        1,
+        { truncatedCount: 1 },
+        undefined,
+        { mode: ApprovalMode.DEFAULT },
+      );
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_approval_mode',
+      ]);
+      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
+      expect(written[1]?.systemPayload).toEqual({
+        mode: ApprovalMode.DEFAULT,
+      });
+    });
+
+    it('re-anchors a pending approval change when rewind lands mid-write', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.DEFAULT,
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      await chatRecordingService.flush();
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      let releaseWrite: (() => void) | undefined;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          }),
+      );
+      const pendingChange = chatRecordingService.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      await vi.waitFor(() => {
+        expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(1);
+      });
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      releaseWrite?.();
+      await pendingChange;
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewindIndex = written.findIndex(
+        (record) => record.subtype === 'rewind',
+      );
+      expect(written[rewindIndex + 1]).toMatchObject({
+        subtype: 'session_approval_mode',
+        systemPayload: { mode: ApprovalMode.YOLO },
+      });
+    });
+
+    it('retries an identical approval state after a synchronous failure', async () => {
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.YOLO }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('does not suppress a later mode after a failed write races a newer one', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionApprovalMode: { mode: ApprovalMode.DEFAULT },
+      });
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+
+      const failed = service.recordSessionApprovalMode({
+        mode: ApprovalMode.YOLO,
+      });
+      const later = service.recordSessionApprovalMode({
+        mode: ApprovalMode.PLAN,
+      });
+      await expect(failed).resolves.toBe(false);
+      await expect(later).resolves.toBe(true);
+      const writesBefore = vi.mocked(jsonl.writeLine).mock.calls.length;
+
+      await expect(
+        service.recordSessionApprovalMode({ mode: ApprovalMode.DEFAULT }),
+      ).resolves.toBe(true);
+      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
+        writesBefore + 1,
+      );
+    });
+
+    it('rejects a Plan predecessor that is itself Plan', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          prePlanMode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('rejects Plan as its own execution mode', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.PLAN,
+          planExecutionMode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('ignores predecessor data on a non-Plan record', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionApprovalMode({
+          mode: ApprovalMode.YOLO,
+          prePlanMode: ApprovalMode.PLAN,
+          planExecutionMode: ApprovalMode.PLAN,
+        }),
+      ).resolves.toBe(true);
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({ mode: ApprovalMode.YOLO });
+    });
+  });
+
   describe('legacy recorder', () => {
     it('reanchors session source after more than the tail window is appended', async () => {
       await expect(
@@ -3121,7 +3767,7 @@ describe('ChatRecordingService', () => {
     });
 
     it('refreshes the cached git branch at the attribution turn boundary', async () => {
-      vi.mocked(execSync)
+      vi.mocked(execFileSync)
         .mockReturnValueOnce('main\n')
         .mockReturnValueOnce('feature\n');
 
@@ -3444,6 +4090,32 @@ describe('ChatRecordingService', () => {
 });
 
 describe('Goal turn token ledger', () => {
+  it('shares external spend with assistant usage and consumes each turn once', () => {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'assistant' }),
+      appendRecord: () => {},
+      maybeTriggerAutoTitle: () => {},
+    });
+    service.billGoalTurnTokens('turn-1', 30);
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 70 },
+      goalContext: { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+    });
+    for (const tokens of [NaN, Infinity, -1, 0])
+      service.billGoalTurnTokens('turn-2', tokens);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(100);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    service.billGoalTurnTokens('turn-1', 10);
+    service.billGoalTurnTokens('turn-2', 20);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(20);
+  });
+
   it('bills a Goal turn from the assistant records it produced', () => {
     // The wiring that matters: recordAssistantTurn must feed the ledger. A
     // ledger that is never fed reports every Goal turn as free.
@@ -3545,5 +4217,74 @@ describe('Goal turn token ledger', () => {
     accumulate('turn-1', { totalTokenCount: -5 });
 
     expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
+});
+
+describe('Goal turn tool result ledger', () => {
+  const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+
+  const toolResultMessage = () => [
+    { functionResponse: { id: 'call-1', name: 'run_shell', response: {} } },
+  ];
+
+  function recorderForToolResults() {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    const appended: unknown[] = [];
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'tool_result' }),
+      appendRecord: (record: unknown) => appended.push(record),
+      getSessionId: () => 'session-1',
+    });
+    return { service, appended };
+  }
+
+  it('counts the evidence-bearing tool results a Goal turn recorded', () => {
+    // The wiring that matters: recordToolResult must feed the ledger, or the
+    // no-progress bound reads every turn as idle.
+    const { service, appended } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    // A result outside a Goal turn belongs to no turn.
+    service.recordToolResult(toolResultMessage());
+
+    expect(appended).toHaveLength(3);
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(2);
+    // Consumed: a turn is counted once.
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+  });
+
+  it('does not count the Goal runtime talking to itself', () => {
+    // `get_goal` and `update_goal` results are recorded under the permit but
+    // are not evidence: a turn that only reads its own state is exactly the
+    // idling the count exists to notice.
+    const { service } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+      provenance: 'goal_runtime',
+    });
+
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+  });
+
+  it("does not credit one turn with another turn's results", () => {
+    const { service } = recorderForToolResults();
+
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: permit,
+    });
+    service.recordToolResult(toolResultMessage(), undefined, {
+      goalContext: { ...permit, turnId: 'turn-2' },
+    });
+
+    expect(service.takeGoalTurnToolResults('turn-1')).toBe(0);
+    expect(service.takeGoalTurnToolResults('turn-2')).toBe(1);
   });
 });

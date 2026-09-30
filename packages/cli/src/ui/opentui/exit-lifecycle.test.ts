@@ -13,6 +13,7 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
   registerCleanup,
   _resetCleanupFunctionsForTest,
@@ -38,10 +39,16 @@ describe('exitSession', () => {
   let exitSpy: MockInstance<
     (code?: string | number | null | undefined) => never
   >;
+  let requestShutdown: MockInstance<() => void>;
+  let config: Config;
 
   beforeEach(() => {
     _resetExitLifecycleForTest();
     _resetCleanupFunctionsForTest();
+    requestShutdown = vi.fn();
+    config = {
+      getLlmClient: () => ({ requestShutdown }),
+    } as unknown as Config;
     exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new ExitCalled(code);
     });
@@ -62,9 +69,30 @@ describe('exitSession', () => {
       order.push('second');
     });
 
-    await expect(exitSession(EXIT_CODE_INTERRUPT)).rejects.toThrow(ExitCalled);
+    await expect(exitSession(config, EXIT_CODE_INTERRUPT)).rejects.toThrow(
+      ExitCalled,
+    );
     expect(order).toEqual(['first', 'second']);
     expect(exitSpy).toHaveBeenCalledWith(EXIT_CODE_INTERRUPT);
+  });
+
+  it('signals the client before the drain so no work spawns mid-exit', async () => {
+    const order: string[] = [];
+    requestShutdown.mockImplementation(() => {
+      order.push('shutdown');
+    });
+    registerCleanup(() => {
+      order.push('cleanup');
+    });
+
+    await expect(exitSession(config, 0)).rejects.toThrow(ExitCalled);
+    expect(order).toEqual(['shutdown', 'cleanup']);
+  });
+
+  it('still exits when there is no client to signal', async () => {
+    config = { getLlmClient: () => undefined } as unknown as Config;
+    await expect(exitSession(config, 1)).rejects.toThrow(ExitCalled);
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
   it('uses signal-style exit codes', () => {
@@ -76,18 +104,19 @@ describe('exitSession', () => {
     const cleanup = vi.fn();
     registerCleanup(cleanup);
 
-    await expect(exitSession(0)).rejects.toThrow(ExitCalled);
+    await expect(exitSession(config, 0)).rejects.toThrow(ExitCalled);
     expect(cleanup).toHaveBeenCalledTimes(1);
     expect(isExitInProgress()).toBe(true);
 
-    // The second call returns a pending promise and must not re-run cleanup
-    // or exit again.
-    const second = exitSession(0);
+    // The second call returns a pending promise and must not re-run cleanup,
+    // re-signal the client, or exit again.
+    const second = exitSession(config, 0);
     await Promise.race([
       second,
       new Promise((resolve) => setTimeout(resolve, 20)),
     ]);
     expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(requestShutdown).toHaveBeenCalledTimes(1);
     expect(exitSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -95,7 +124,7 @@ describe('exitSession', () => {
     registerCleanup(() => {
       throw new Error('boom');
     });
-    await expect(exitSession(1)).rejects.toThrow(ExitCalled);
+    await expect(exitSession(config, 1)).rejects.toThrow(ExitCalled);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });

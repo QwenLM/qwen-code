@@ -101,6 +101,19 @@ describe('BuiltinAgentRegistry', () => {
   });
 
   describe('getBuiltinAgent', () => {
+    it.each([
+      ['claude-code', 'acp', 'claude-agent-acp'],
+      ['codex', 'codex', 'codex'],
+    ])(
+      'runs %s through its native executor in the foreground by default',
+      (name, kind, command) => {
+        expect(BuiltinAgentRegistry.getBuiltinAgent(name)).toMatchObject({
+          executor: { kind, command },
+          background: false,
+        });
+      },
+    );
+
     it('should return correct agent for valid name', () => {
       const agent = BuiltinAgentRegistry.getBuiltinAgent('general-purpose');
 
@@ -247,11 +260,9 @@ describe('BuiltinAgentRegistry', () => {
       expect(agent).not.toBeNull();
       const tools = agent!.tools ?? [];
 
-      // TOOL_SEARCH lets an agent reveal deferred tools at runtime, which
-      // defeats a closed list — and at 357 tokens/turn it costs more than
-      // two of the tools kept. (It does not leak into the parent: every
-      // launch is given its own rebuilt registry.)
+      // Both halves of the deferred-tool bridge would defeat a closed list.
       expect(tools).not.toContain(ToolNames.TOOL_SEARCH);
+      expect(tools).not.toContain(ToolNames.TOOL_CALL);
       // SKILL is not merely unused: its presence injects the startup skills
       // catalogue into the agent's first user turn, which measured 3,623
       // tokens against 504 without it.
@@ -269,6 +280,7 @@ describe('BuiltinAgentRegistry', () => {
       // `hasWildcard || (no strings && no inline decls)`, so a declared
       // `['*']` is the same surface as declaring nothing — both are caught.
       const inheriting = BuiltinAgentRegistry.getBuiltinAgents()
+        .filter((agent) => agent.executor === undefined)
         .filter(
           (agent) =>
             !agent.tools ||

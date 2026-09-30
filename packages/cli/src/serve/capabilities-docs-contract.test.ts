@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CONDITIONAL_SERVE_FEATURES,
-  SERVE_CAPABILITY_REGISTRY,
+  getAdvertisedServeFeatures,
   SERVE_PROTOCOL_VERSION,
 } from './capabilities.js';
 
@@ -39,21 +39,33 @@ describe('conditional serve capability documentation', () => {
     );
   });
 
-  it('keeps the daemon index capability counts in sync', async () => {
+  it('keeps volatile capability totals out of the daemon index', async () => {
     const index = await readFile(
       resolve(process.cwd(), '../../docs/developers/daemon/00-index.md'),
       'utf8',
     );
-    const match = index.match(
-      new RegExp(
-        `SERVE_PROTOCOL_VERSION = '${SERVE_PROTOCOL_VERSION}'\`; (\\d+) registered tags; (\\d+) conditional tags`,
-      ),
+    expect(index).toContain(
+      `SERVE_PROTOCOL_VERSION = '${SERVE_PROTOCOL_VERSION}'`,
     );
-
-    expect(match).not.toBeNull();
-    expect(Number(match?.[1])).toBe(
-      Object.keys(SERVE_CAPABILITY_REGISTRY).length,
-    );
-    expect(Number(match?.[2])).toBe(CONDITIONAL_SERVE_FEATURES.size);
+    expect(index).not.toMatch(/\d+ (?:registered|conditional) tags/);
   });
+});
+
+it('advertises runtime stop only with its complete management predicate', () => {
+  expect(getAdvertisedServeFeatures()).not.toContain('workspace_runtime_stop');
+  expect(
+    getAdvertisedServeFeatures(undefined, { workspaceRuntimeAvailable: true }),
+  ).not.toContain('workspace_runtime_stop');
+  expect(
+    getAdvertisedServeFeatures(undefined, {
+      workspaceRuntimeStopAvailable: true,
+    }),
+  ).toContain('workspace_runtime_stop');
+});
+
+it('advertises batched session catalogs for single and multiple workspaces', () => {
+  expect(getAdvertisedServeFeatures()).toContain('session_catalog_batch');
+  expect(
+    getAdvertisedServeFeatures(undefined, { workspaceRuntimeAvailable: true }),
+  ).toContain('session_catalog_batch');
 });

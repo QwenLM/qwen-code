@@ -1690,6 +1690,78 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments?.[0]?.fileName).toBe('secret.png');
+    expect(channel.envelopes[0]?.syntheticText).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'a transcribed voice message carries user-authored text',
+      event: 'message.voice',
+      payload: {
+        msgtype: 'voice',
+        voice: { content: 'please look at the build' },
+      },
+      text: 'please look at the build',
+      synthetic: undefined,
+    },
+    {
+      label: 'a slash-prefixed transcript is preserved',
+      event: 'message.voice',
+      payload: {
+        msgtype: 'voice',
+        voice: { content: '/review please look at the build' },
+      },
+      text: '/review please look at the build',
+      synthetic: undefined,
+    },
+    {
+      label: 'an untranscribed voice message runs as media',
+      event: 'message.voice',
+      payload: { msgtype: 'voice', voice: {} },
+      text: '(voice)',
+      synthetic: true,
+    },
+    {
+      label: 'a mixed message carries user-authored text',
+      event: 'message.mixed',
+      payload: {
+        msgtype: 'mixed',
+        mixed: {
+          msg_item: [
+            { msgtype: 'text', text: { content: 'inspect this' } },
+            { msgtype: 'image', image: {} },
+          ],
+        },
+      },
+      text: 'inspect this',
+      synthetic: undefined,
+    },
+    {
+      label: 'a mixed message with no text runs as media',
+      event: 'message.mixed',
+      payload: {
+        msgtype: 'mixed',
+        mixed: { msg_item: [{ msgtype: 'image', image: {} }] },
+      },
+      text: '',
+      synthetic: true,
+    },
+  ])('$label', async ({ event, payload, text, synthetic }) => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+
+    lastClient().emit(event, {
+      msgid: `msg-${event}`,
+      chattype: 'single',
+      from: { userid: 'alice' },
+      ...payload,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.text).toBe(text);
+    expect(channel.envelopes[0]?.syntheticText).toBe(synthetic);
   });
 
   it('logs sanitized payloads only when debug payload logging is enabled', async () => {
@@ -2743,6 +2815,9 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(channel.envelopes[0]?.text).toBe(
+      '(User sent media but download failed)',
+    );
     expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('media download failed: HTTP 500'),

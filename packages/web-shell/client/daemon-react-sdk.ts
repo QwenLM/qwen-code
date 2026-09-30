@@ -157,6 +157,12 @@ export { useDaemonTranscriptState as useTranscriptState } from './daemon/session
 /** Direct access to the transcript store (subscribe, getSnapshot). */
 export { useDaemonTranscriptStore as useTranscriptStore } from './daemon/session/index.js';
 
+/** Headless session-wide turn metadata and historical-page state. */
+export { useDaemonTurnNavigationState as useTurnNavigationState } from './daemon/session/index.js';
+
+/** Direct access to the session-wide turn navigation external store. */
+export { useDaemonTurnNavigationStore as useTurnNavigationStore } from './daemon/session/index.js';
+
 /** Low-level prompt lifecycle status (queued, streaming, idle). */
 export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index.js';
 
@@ -218,6 +224,16 @@ export type {
   /** Props accepted by `<DaemonSessionProvider>`. */
   DaemonSessionProviderProps,
   DaemonTranscriptHistory,
+  DaemonProvisionalTurn,
+  DaemonSelectedTurnState,
+  DaemonTurnIndexPage,
+  DaemonTurnLocation,
+  DaemonTurnNavigationError,
+  DaemonTurnNavigationSnapshot,
+  DaemonTurnNavigationStore,
+  HistoricalTranscriptPage,
+  HistoricalTranscriptRange,
+  TranscriptBoundary,
   /** Streaming lifecycle: `'idle' | 'waiting' | 'responding' | 'thinking'`. */
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */

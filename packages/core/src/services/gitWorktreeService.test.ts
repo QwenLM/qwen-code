@@ -12,6 +12,7 @@ import { GitWorktreeService } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 
 const hoistedMockSimpleGit = vi.hoisted(() => vi.fn());
+const hoistedMockEnv = vi.hoisted(() => vi.fn());
 const hoistedMockCheckIsRepo = vi.hoisted(() => vi.fn());
 const hoistedMockInit = vi.hoisted(() => vi.fn());
 const hoistedMockAdd = vi.hoisted(() => vi.fn());
@@ -68,18 +69,23 @@ describe('GitWorktreeService', () => {
     hoistedMockGetGlobalQwenDir.mockReturnValue('/mock-qwen');
     (isCommandAvailable as Mock).mockReturnValue({ available: true });
 
-    hoistedMockSimpleGit.mockImplementation(() => ({
-      checkIsRepo: hoistedMockCheckIsRepo,
-      init: hoistedMockInit,
-      add: hoistedMockAdd,
-      commit: hoistedMockCommit,
-      revparse: hoistedMockRevparse,
-      raw: hoistedMockRaw,
-      branch: hoistedMockBranch,
-      diff: hoistedMockDiff,
-      merge: hoistedMockMerge,
-      stash: hoistedMockStash,
-    }));
+    hoistedMockSimpleGit.mockImplementation(() => {
+      const git = {
+        env: hoistedMockEnv,
+        checkIsRepo: hoistedMockCheckIsRepo,
+        init: hoistedMockInit,
+        add: hoistedMockAdd,
+        commit: hoistedMockCommit,
+        revparse: hoistedMockRevparse,
+        raw: hoistedMockRaw,
+        branch: hoistedMockBranch,
+        diff: hoistedMockDiff,
+        merge: hoistedMockMerge,
+        stash: hoistedMockStash,
+      };
+      hoistedMockEnv.mockReturnValue(git);
+      return git;
+    });
 
     hoistedMockCheckIsRepo.mockResolvedValue(true);
     hoistedMockInit.mockResolvedValue(undefined);
@@ -333,6 +339,8 @@ describe('GitWorktreeService', () => {
     expect(diff).toBe('diff --git a/a.ts b/a.ts');
     expect(hoistedMockAdd).toHaveBeenCalledWith(['--all']);
     expect(hoistedMockDiff).toHaveBeenCalledWith([
+      '--no-ext-diff',
+      '--no-textconv',
       '--binary',
       '--cached',
       'main',
@@ -355,6 +363,8 @@ describe('GitWorktreeService', () => {
     expect(hoistedMockAdd).toHaveBeenCalledWith(['--all']);
     // Should diff against the baseline commit, not merge-base
     expect(hoistedMockDiff).toHaveBeenCalledWith([
+      '--no-ext-diff',
+      '--no-textconv',
       '--binary',
       '--cached',
       'baseline-sha',
@@ -758,6 +768,34 @@ describe('GitWorktreeService', () => {
       const service = new GitWorktreeService('/srv/proj\r');
 
       await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj\r');
+    });
+  });
+
+  describe('validateUserWorktreeSlug', () => {
+    it('reserves pr-<number> slugs for PR-backed worktrees', () => {
+      expect(GitWorktreeService.validateUserWorktreeSlug('pr-42')).toMatch(
+        /reserved/,
+      );
+      // `pr-0` is not the reserved shape and stays a legal user slug; the
+      // backfill's [1-9] pattern simply never binds it.
+      expect(GitWorktreeService.validateUserWorktreeSlug('pr-0')).toBeNull();
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('my-pr-42'),
+      ).toBeNull();
+    });
+
+    it('allows the pr-<number> shape for PR-backed creators only', () => {
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('pr-42', {
+          allowPrBackedShape: true,
+        }),
+      ).toBeNull();
+      // The other slug rules still apply.
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('pr-42/..', {
+          allowPrBackedShape: true,
+        }),
+      ).toMatch(/may only contain/);
     });
   });
 });

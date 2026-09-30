@@ -60,16 +60,41 @@ jobs:
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
 
+          # One fetch feeds both projections below. `gh api` writes a non-2xx
+          # body to stdout before exiting non-zero, so an errored call parks its
+          # error JSON here instead of in a projection: both jq passes reject a
+          # body with no `.jobs` and emit nothing, which is the degradation the
+          # per-commit body already handles.
+          jobs_json="${RUNNER_TEMP}/run-jobs.json"
+          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
+            --paginate > "${jobs_json}"; then
+            echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
+          fi
+
           mapfile -t job_ids < <(
-            gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
-              --paginate \
-              --jq '.jobs[] | select(.conclusion == "failure") | .id'
+            jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
+              "${jobs_json}" 2>/dev/null
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
+          # A lane that dies before printing any test result leaves the helper
+          # nothing to dedupe on, but the same payload still names the job and
+          # the step that failed — the one identity the per-commit issue can
+          # carry. Tolerated like a missing log: it costs precision, never the
+          # issue.
+          jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv' \
+            "${jobs_json}" 2>/dev/null \
+            > "${RUNNER_TEMP}/failed-jobs.tsv" || true
+
+          # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a response
+          # carrying terminal escape sequences unless opted in, and the
+          # colourised vitest/pytest logs always carry them: without the flag
+          # every download fails and the plan below falls back to a
+          # per-commit issue naming no failing test. The analyzer strips ANSI
+          # before matching, so none of it reaches an issue body.
           for job_id in "${job_ids[@]}"; do
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
-              > "${log_dir}/${job_id}.log"; then
+              --allow-escape-sequences > "${log_dir}/${job_id}.log"; then
               # A missing log only costs precision: with no identifiable test the
               # plan below falls back to the per-commit issue.
               echo "::warning::Could not download the log of job ${job_id}"
@@ -95,7 +120,8 @@ jobs:
 
           helper='.github/scripts/ci/main-failure-signature.mjs'
           analysis="${RUNNER_TEMP}/analysis.json"
-          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" "${logs[@]}" \
+          node "${helper}" analyze --workflow "${WORKFLOW_NAME}" \
+            --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" \
             > "${analysis}"
           echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
           jq -r '.tests[].id' "${analysis}"

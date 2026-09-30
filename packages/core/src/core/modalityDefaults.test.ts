@@ -12,6 +12,10 @@ import {
 } from './modalityDefaults.js';
 
 describe('defaultModalities', () => {
+  it('does not infer modalities for an unrecognized batch route', () => {
+    expect(defaultModalities('google/gemini-2.5-flash:batch')).toEqual({});
+  });
+
   describe('Google Gemini', () => {
     it('returns full multimodal for gemini-3-pro', () => {
       expect(defaultModalities('gemini-3-pro-preview')).toEqual({
@@ -141,6 +145,21 @@ describe('defaultModalities', () => {
       expect(m.video).toBe(true);
       expect(m.pdf).toBeUndefined();
       expect(m.audio).toBeUndefined();
+    });
+
+    it('returns full multimodal for qwen omni models', () => {
+      for (const model of [
+        'qwen3.5-omni-plus',
+        'qwen3-omni-flash',
+        'qwen-omni-turbo',
+      ]) {
+        expect(defaultModalities(model)).toEqual({
+          image: true,
+          pdf: true,
+          audio: true,
+          video: true,
+        });
+      }
     });
 
     it('returns image + video for qwen3.7-plus', () => {

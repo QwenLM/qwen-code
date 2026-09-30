@@ -8,6 +8,8 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
+import path from 'node:path';
+import * as workspaceContextUtils from '../utils/workspaceContext.js';
 
 const mockOsPlatform = vi.hoisted(() =>
   vi.fn<() => NodeJS.Platform>(() => 'linux'),
@@ -27,6 +29,10 @@ vi.mock('node:os', async (importOriginal) => {
 
 // Mock child_process.spawn
 const mockSpawn = vi.hoisted(() => vi.fn());
+const mockRuntimeShell = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: mockRuntimeShell,
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
 
@@ -140,9 +146,14 @@ vi.mock('../utils/shellAstParser.js', () => ({
 
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
+import type {
+  ShellExecutionResult,
+  ShellOutputEvent,
+} from '../services/shellExecutionService.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 
 /**
  * Create a mock child process with controllable stdout/stderr/events.
@@ -201,6 +212,7 @@ describe('MonitorTool', () => {
     delete process.env['GIT_PAGER'];
 
     vi.clearAllMocks();
+    mockRuntimeShell.mockReset();
     mockOsPlatform.mockReturnValue('linux');
 
     monitorRegistry = new MonitorRegistry();
@@ -213,6 +225,7 @@ describe('MonitorTool', () => {
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getShellExecutionSandbox: vi.fn().mockReturnValue(undefined),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({
@@ -274,6 +287,152 @@ describe('MonitorTool', () => {
         };
       }
     ).createInvocation(params);
+
+  describe('tool execution sandbox', () => {
+    beforeEach(() => {
+      vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue(
+        {} as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>,
+      );
+    });
+
+    it('streams stdout and stderr independently and settles the existing registry', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      let finish!: (result: ShellExecutionResult) => void;
+      const result = new Promise<ShellExecutionResult>((resolve) => {
+        finish = resolve;
+      });
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { pid: 9876, result };
+        },
+      );
+      const emit = vi.spyOn(monitorRegistry, 'emitEvent');
+      const turn = new AbortController();
+      await createInvocation({ command: 'watch command' }).execute(turn.signal);
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockRuntimeShell).toHaveBeenCalledWith(
+        mockConfig,
+        'watch command',
+        '/test/dir',
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        { maxBufferedOutputBytes: 4096 },
+        { streamStdout: true },
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      expect(entry.pid).toBe(9876);
+      turn.abort();
+      expect(signal.aborted).toBe(false);
+      output({ type: 'data', chunk: 'out', stream: 'stdout' });
+      output({ type: 'data', chunk: 'err\n', stream: 'stderr' });
+      output({ type: 'data', chunk: 'put\nlast', stream: 'stdout' });
+      finish({ exitCode: 0, signal: null } as ShellExecutionResult);
+      await result;
+      await Promise.resolve();
+      expect(emit.mock.calls.map((call) => call[1])).toEqual([
+        'err',
+        'output',
+        'last',
+      ]);
+      expect(entry.status).toBe('completed');
+    });
+
+    it('fails and stops a sandboxed monitor after binary output', async () => {
+      let output!: (event: ShellOutputEvent) => void;
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, onOutput, abortSignal) => {
+          output = onOutput;
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      const entry = monitorRegistry.getRunning()[0]!;
+      output({ type: 'binary_detected' });
+      expect(entry.status).toBe('failed');
+      expect(signal.aborted).toBe(true);
+    });
+
+    it('fails an unconfirmed sandbox completion', async () => {
+      mockRuntimeShell.mockResolvedValue({
+        result: Promise.resolve({
+          error: new Error('Sandbox termination is unconfirmed'),
+          exitCode: 0,
+          signal: null,
+        }),
+      });
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      await Promise.resolve();
+      expect(monitorRegistry.getAll()[0]?.status).toBe('failed');
+    });
+
+    it('stops through the monitor abort controller without replaying on the host', async () => {
+      let signal!: AbortSignal;
+      mockRuntimeShell.mockImplementation(
+        async (_config, _command, _cwd, _output, abortSignal) => {
+          signal = abortSignal;
+          return { result: new Promise(() => {}) };
+        },
+      );
+      await createInvocation({ command: 'watch command' }).execute(
+        new AbortController().signal,
+      );
+      monitorRegistry.cancel(monitorRegistry.getRunning()[0]!.monitorId);
+      expect(signal.aborted).toBe(true);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('fails setup without falling back to a host process', async () => {
+      mockRuntimeShell.mockRejectedValue(new Error('sandbox unavailable'));
+      const result = await createInvocation({
+        command: 'watch command',
+      }).execute(new AbortController().signal);
+      expect(result.llmContent).toContain('sandbox unavailable');
+      expect(monitorRegistry.getRunning()).toEqual([]);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('rejects an existing directory outside the sandbox at build time', () => {
+      vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue({
+        workspace: '/test/dir',
+        installation: '/install',
+        state: '/state',
+        filesystem: 'workspace-write',
+        network: 'closed',
+      });
+
+      expect(() =>
+        monitorTool.build({ command: 'tail -f log', directory: '/' }),
+      ).toThrow(
+        "Directory '/' must be an existing directory inside the execution sandbox workspace.",
+      );
+    });
+
+    it('rejects a directory the sandbox will not admit', () => {
+      vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue({
+        workspace: '/test/dir',
+      } as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>);
+      expect(validate({ command: 'tail -f log', directory: '/' })).toContain(
+        'inside the execution sandbox workspace',
+      );
+    });
+
+    it('does not run host AST permission probes', async () => {
+      const invocation = createInvocation({ command: 'git status' });
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      await invocation.getConfirmationDetails(new AbortController().signal);
+      expect(mockIsShellCommandReadOnlyAST).not.toHaveBeenCalled();
+    });
+  });
 
   describe('schema', () => {
     it('declares monitor limits as integers', () => {
@@ -509,13 +668,44 @@ describe('MonitorTool', () => {
       await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
     });
 
-    it('allows read-only monitor commands by default', async () => {
-      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+    it.each([undefined, '/test/dir/sub', '/test/dir/sub/..'])(
+      'allows read-only monitor commands within the workspace in %s',
+      async (directory) => {
+        vi.mocked(mockConfig.getWorkspaceContext).mockReturnValue(
+          createMockWorkspaceContext('/test/dir'),
+        );
+        mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+        const invocation = monitorTool.build({
+          command: 'tail -f /tmp/app.log',
+          directory,
+        });
+
+        await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+        const details = await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        );
+        expect(details).not.toHaveProperty('warnings');
+      },
+    );
+
+    it('asks for a read-only command in a directory outside the workspace', async () => {
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+      mockIsPathWithinWorkspace.mockReturnValue(false);
       const invocation = createInvocation({
-        command: 'tail -f /tmp/app.log',
+        command: 'tail -f log',
+        directory: '/elsewhere/project-a-evil/x',
       });
 
-      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+      await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+      expect(mockIsPathWithinWorkspace).toHaveBeenCalledWith(
+        '/elsewhere/project-a-evil/x',
+      );
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { warnings?: string[] };
+      expect(details.warnings ?? []).toContain(
+        'Runs outside the workspace in /elsewhere/project-a-evil/x',
+      );
     });
 
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {
@@ -636,25 +826,49 @@ describe('MonitorTool', () => {
       expect(result).toContain('user skills directory is not allowed');
     });
 
-    it('rejects directory outside workspace (delegates to WorkspaceContext)', () => {
-      mockIsPathWithinWorkspace.mockReturnValueOnce(false);
-      const result = validate({
-        command: 'tail -f log',
-        directory: '/tmp/project-a-evil/x',
-      });
-      expect(result).toContain('not within any of the registered workspace');
-      expect(mockIsPathWithinWorkspace).toHaveBeenCalledWith(
-        '/tmp/project-a-evil/x',
-      );
-    });
+    it.each(['/outside', '/tmp/project-a-evil/x', '/tmp/project-a/../etc'])(
+      'accepts an outside directory %s but asks and warns even for read-only commands',
+      async (directory) => {
+        const resolver = vi
+          .spyOn(workspaceContextUtils, 'resolveWorkspacePath')
+          .mockImplementation((value) => path.resolve(value));
+        try {
+          const workspaceContext = createMockWorkspaceContext('/test/dir', [
+            '/tmp/project-a',
+          ]);
+          vi.mocked(mockConfig.getWorkspaceContext).mockReturnValue(
+            workspaceContext,
+          );
+          mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+          const params = { command: 'tail -f log', directory };
 
-    it('rejects directory with parent-reference traversal', () => {
-      mockIsPathWithinWorkspace.mockReturnValueOnce(false);
-      const result = validate({
-        command: 'tail -f log',
-        directory: '/tmp/project-a/../etc',
-      });
-      expect(result).toContain('not within any of the registered workspace');
+          expect(validate(params)).toBeNull();
+          const invocation = monitorTool.build(params);
+          await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+          const details = await invocation.getConfirmationDetails(
+            new AbortController().signal,
+          );
+          expect(details.type).toBe('exec');
+          expect(details).toHaveProperty('warnings', [
+            `Runs outside the workspace in ${directory}`,
+          ]);
+          expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+            directory,
+          );
+        } finally {
+          resolver.mockRestore();
+        }
+      },
+    );
+
+    it('leaves a directory outside the workspace to the permission check', () => {
+      mockIsPathWithinWorkspace.mockReturnValue(false);
+      expect(
+        validate({
+          command: 'tail -f log',
+          directory: '/tmp/project-a/../etc',
+        }),
+      ).toBeNull();
     });
 
     it('accepts directory within workspace', () => {

@@ -549,7 +549,7 @@ describe('errors', () => {
     });
 
     describe('permission denied warnings', () => {
-      it('should show warning when EXECUTION_DENIED in non-interactive text mode', () => {
+      it('shows the approval hint when the call was denied for approval in non-interactive text mode', () => {
         (mockConfig.getDebugMode as Mock).mockReturnValue(false);
         (mockConfig.isInteractive as Mock).mockReturnValue(false);
         (
@@ -561,6 +561,8 @@ describe('errors', () => {
           toolError,
           mockConfig,
           ToolErrorType.EXECUTION_DENIED,
+          undefined,
+          { approvalRequired: true },
         );
 
         expect(processStderrWriteSpy).toHaveBeenCalledWith(
@@ -572,6 +574,84 @@ describe('errors', () => {
           expect.stringContaining('use the -y flag (YOLO mode)'),
         );
         expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('reports the denial reason instead of the approval hint for other denials', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          new Error('no shell today'),
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+          'no shell today',
+        );
+
+        expect(processStderrWriteSpy).toHaveBeenCalledWith(
+          'Warning: Tool "test-tool" was not run: no shell today\n\n',
+        );
+        const written = processStderrWriteSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        expect(written).not.toContain('requires user approval');
+        expect(written).not.toContain('-y flag');
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the error message when a denial has no display text', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          new Error('Matching deny rule: "Bash"'),
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+        );
+
+        expect(processStderrWriteSpy).toHaveBeenCalledWith(
+          'Warning: Tool "test-tool" was not run: Matching deny rule: "Bash"\n\n',
+        );
+      });
+
+      it('strips terminal escapes from the echoed reason and bounds its length', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+        const hostile =
+          '\u001b]52;c;cHduZWQ=\u0007\u202Eblocked\u200B by\nhook ' +
+          'x'.repeat(600);
+
+        handleToolError(
+          '\u001b[2Jtool',
+          new Error(hostile),
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+          hostile,
+        );
+
+        const written = String(processStderrWriteSpy.mock.calls[0]?.[0]);
+        expect(written.startsWith('Warning: Tool "tool" was not run: ')).toBe(
+          true,
+        );
+        const reason = written
+          .slice('Warning: Tool "tool" was not run: '.length)
+          .replace(/\n\n$/, '');
+        // eslint-disable-next-line no-control-regex
+        expect(reason).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+        expect(reason).not.toMatch(/\p{Cf}/u);
+        expect(reason.startsWith('blocked by hook x')).toBe(true);
+        expect(reason.length).toBe(501);
+        expect(reason.endsWith('…')).toBe(true);
       });
 
       it('should not show warning when EXECUTION_DENIED in interactive mode', () => {

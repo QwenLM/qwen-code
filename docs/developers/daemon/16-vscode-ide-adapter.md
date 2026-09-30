@@ -85,7 +85,7 @@ exception paths call `onEndTurn('error')`.
 
 ### Webview bridging
 
-The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview itself uses the shared `packages/webui/` component library to render — see Adapter Matrix in [`01-architecture.md`](./01-architecture.md).
+The connection class is **transport-only**. The actual VS Code integration lives in `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (and friends). The provider subscribes to the connection's callbacks and translates them into webview `postMessage` calls. The webview embeds Web Shell for rendering.
 
 ### Connect serialization
 
@@ -174,7 +174,7 @@ sequenceDiagram
 
 - `packages/sdk-typescript/src/daemon/` — `DaemonClient`, `DaemonSessionClient` (the actual transport).
 - VS Code extension API (`vscode.*`) — host APIs, quick-pick, webview.
-- `packages/webui/src/adapters/ACPAdapter.ts` — webview rendering of ACP-shaped messages relayed via `postMessage`.
+- `packages/web-shell/client/` — embedded webview rendering for daemon session events.
 
 ## Configuration
 
@@ -201,6 +201,6 @@ sequenceDiagram
 - `packages/vscode-ide-companion/src/services/daemonIdeConnection.ts` (`createSdkDaemonSessionFactory`)
 - `packages/vscode-ide-companion/src/types/connectionTypes.ts` (legacy `AcpConnectionState`)
 - `packages/vscode-ide-companion/src/webview/providers/ChatWebviewViewProvider.ts` (webview bridge)
-- `packages/webui/src/adapters/ACPAdapter.ts` (webview ACP-message adapter)
+- `packages/web-shell/client/` (embedded Web Shell renderer)
 - Draft design: [`../daemon-client-adapters/ide.md`](../daemon-client-adapters/ide.md)
 - SDK reference: [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)

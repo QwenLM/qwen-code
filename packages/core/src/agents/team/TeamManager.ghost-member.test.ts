@@ -5,8 +5,9 @@
  */
 
 /**
- * @fileoverview Regression test for #10208 — failed concurrent spawn
- * can persist a ghost member in config.json.
+ * @fileoverview Regression tests for #10208 — failed concurrent spawn
+ * can persist a ghost member in config.json — and for the #10297
+ * commit-aware failed-spawn compensating-write gate.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -523,5 +524,137 @@ describe('TeamManager ghost member regression (#10208)', () => {
     const inMemoryNames = inMemory.members.map((m) => m.name);
     expect(inMemoryNames).toContain('alpha');
     expect(inMemoryNames).not.toContain('beta');
+  });
+});
+
+describe('TeamManager commit-aware compensating-write gate (#10297)', () => {
+  let harness: TeamCoordinationHarness | undefined;
+
+  afterEach(async () => {
+    await harness?.cleanup();
+    harness = undefined;
+    vi.restoreAllMocks();
+  });
+
+  async function createHarness(): Promise<TeamCoordinationHarness> {
+    const h = await TeamCoordinationHarness.create();
+    setMockDir(h.tmpDir);
+    harness = h;
+    return h;
+  }
+
+  it('skips the compensating write when the only write in the window rejected (solo)', async () => {
+    const h = await createHarness();
+
+    const leaderSpy = vi.fn();
+    h.teamManager.setLeaderMessageCallback(leaderSpy);
+
+    // Disk full: the member's own roster write rejects, and a
+    // compensating write attempted while the disk is still full would
+    // reject too.
+    const writeSpy = vi
+      .spyOn(teamHelpers, 'writeTeamFile')
+      .mockRejectedValueOnce(new Error('ENOSPC: no space left on device'))
+      .mockRejectedValueOnce(new Error('ENOSPC: no space left on device'));
+
+    await expect(
+      h.teamManager.spawnTeammate({ name: 'alpha', cwd: h.tmpDir }),
+    ).rejects.toThrow('ENOSPC');
+
+    // The only write that ran in the member's window rejected and
+    // persisted nothing, so there is nothing to compensate: exactly one
+    // write attempt...
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    // ...and no ghost-member notice reaches the leader on top of the
+    // spawn error that already carries the real cause (disk full).
+    expect(leaderSpy).not.toHaveBeenCalled();
+
+    // The member is rolled back in memory and nothing reached the disk.
+    const inMemory = (h.teamManager as unknown as { teamFile: TeamFile })
+      .teamFile;
+    expect(inMemory.members).toHaveLength(0);
+    const persisted = await readTeamFile(h.teamName);
+    expect(persisted).toBeDefined();
+    expect(persisted!.members).toHaveLength(0);
+  });
+
+  it('still repairs a member persisted by a committed window write (five-step interleaving)', async () => {
+    // The issue's counterexample to decrement-on-reject:
+    // 1. alpha's write starts (snapshot taken) and hangs in an fs await;
+    // 2. beta is pushed while it is in flight;
+    // 3. alpha's write rejects — a decrement would drop the counter
+    //    back to beta's push watermark;
+    // 4. gamma's write starts, reusing that counter value, and commits
+    //    a snapshot that still contains beta;
+    // 5. beta's spawn fails — the gate must still fire the repair,
+    //    or gamma's committed write leaves ghost beta on disk (#10208).
+    const h = await createHarness();
+    const teamName = h.teamName;
+    const backend = h.backend;
+
+    const deferredA = createDeferred<void>();
+    const deferredB = createDeferred<void>();
+    gateSpawns(
+      backend,
+      new Map([
+        [formatAgentId('alpha', teamName), deferredA.promise],
+        [formatAgentId('beta', teamName), deferredB.promise],
+      ]),
+      { passthroughUnknown: true },
+    );
+
+    const realWriteTeamFile = teamHelpers.writeTeamFile;
+    let writeCalls = 0;
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((r) => {
+      releaseFirstWrite = r;
+    });
+    vi.spyOn(teamHelpers, 'writeTeamFile').mockImplementation(
+      async (name, tf) => {
+        writeCalls++;
+        if (writeCalls === 1) {
+          await firstWriteGate; // like the real await fs.mkdir
+          throw new Error('ENOSPC: no space left on device');
+        }
+        return realWriteTeamFile(name, tf);
+      },
+    );
+
+    const spawnA = h.teamManager.spawnTeammate({
+      name: 'alpha',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Alpha succeeds; its write starts and hangs, then beta is pushed
+    // while it is in flight.
+    deferredA.resolve();
+    await vi.waitFor(() => expect(writeCalls).toBe(1));
+
+    const spawnB = h.teamManager.spawnTeammate({
+      name: 'beta',
+      cwd: h.tmpDir,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Alpha's write rejects; alpha rolls back. Nothing has committed.
+    releaseFirstWrite();
+    await expect(spawnA).rejects.toThrow('ENOSPC');
+
+    // Gamma succeeds; its write snapshots the live roster — beta is
+    // still in it — and commits beta to disk.
+    await h.teamManager.spawnTeammate({ name: 'gamma', cwd: h.tmpDir });
+
+    // Beta's spawn fails. A write inside beta's window committed a
+    // snapshot containing beta, so the compensating write must run.
+    deferredB.reject(new Error('spawn failed'));
+    await expect(spawnB).rejects.toThrow('spawn failed');
+
+    const persisted = await readTeamFile(teamName);
+    expect(persisted).toBeDefined();
+    const persistedNames = persisted!.members.map((m) => m.name);
+    expect(persistedNames).toContain('gamma');
+    expect(persistedNames).not.toContain('alpha');
+    expect(persistedNames).not.toContain('beta');
   });
 });

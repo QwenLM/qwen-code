@@ -13,6 +13,22 @@ import {
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
+
+const walkFailure = vi.hoisted(() => ({ fail: false }));
+vi.mock('acorn-walk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('acorn-walk')>();
+  return {
+    ...actual,
+    simple: (...args: Parameters<typeof actual.simple>) => {
+      if (walkFailure.fail) {
+        throw new TypeError('baseVisitor[type] is not a function');
+      }
+      return actual.simple(...args);
+    },
+  };
+});
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -703,6 +719,208 @@ describe('createWorkflowSandbox security', () => {
     expect(sandbox.getPhases()).toEqual(['Search']);
   });
 
+  // effort is validated and normalized on the revived copy, so the host (and
+  // the resume key) sees one canonical tier for every alias /effort accepts.
+  it('agent({effort}) hands the host the canonical tier', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.effort);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { effort: "high" });
+      await agent("b", { effort: "X-High" });
+      await agent("c", { effort: "med" });
+      await agent("d", {});
+      return "done";
+    `);
+    expect(seen).toEqual(['high', 'xhigh', 'medium', undefined]);
+  });
+
+  it.each([['"turbo"'], ['3'], ['{}']])(
+    'agent({effort: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { effort: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{effort\}\): unknown effort tier .*Known tiers are: low, medium, high, xhigh, max\./,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // Order and duplicates are not part of what the list means, so they must
+  // not reach the resume key; an empty list denies nothing and is dropped.
+  it('agent({disallowedTools}) hands the host a sorted, de-duplicated list', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.disallowedTools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { disallowedTools: ["write_file", "run_shell_command", "write_file"] });
+      await agent("b", { disallowedTools: [] });
+      return "done";
+    `);
+    expect(seen).toEqual([['run_shell_command', 'write_file'], undefined]);
+  });
+
+  it.each([['"run_shell_command"'], ['[""]'], ['[" edit"]'], ['[42]']])(
+    'agent({disallowedTools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { disallowedTools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{disallowedTools\}\): must be an array of non-empty tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names effort, disallowedTools and tools among the known options', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { efort: "low" });`),
+    ).rejects.toThrow(/Known options are: .*effort.*disallowedTools, tools\./);
+  });
+
+  // The allowlist gets the deny list's normalization: one built-in named two
+  // ways, or the same tools in another order, is one resume key. Other names
+  // reach the host as written.
+  it('agent({tools}) hands the host a sorted, de-duplicated list of names', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.tools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { tools: ["run_shell_command", "ReadFile", "Shell"] });
+      await agent("b", { tools: ["mcp__warehouse__query"] });
+      await agent("c", {});
+      return "done";
+    `);
+    expect(seen).toEqual([
+      ['read_file', 'run_shell_command'],
+      ['mcp__warehouse__query'],
+      undefined,
+    ]);
+  });
+
+  // Unlike an empty deny list, an empty allowlist would leave nothing to call.
+  it.each([['"read_file"'], ['[]'], ['[""]'], ['[" read_file"]'], ['[42]']])(
+    'agent({tools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{tools\}\): must be a non-empty array of tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['"*"', /"\*" is a pattern, and the allowlist takes exact tool names/],
+    ['"mcp__warehouse__*"', /is a pattern/],
+    ['"mcp__warehouse"', /names a whole MCP server/],
+    ['"exec"', /"exec" is the code-mode surface, not a tool to allow/],
+    ['"Exec"', /is the code-mode surface/],
+  ])(
+    'agent({tools: ["read_file", %s]}) is rejected before dispatch',
+    async (entry, message) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ["read_file", ${entry}] });`),
+      ).rejects.toThrow(message);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // The refused entry is script-controlled and echoed in the message.
+  it('strips control characters from an echoed tools entry', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const error = (await sandbox
+      .run(`return agent("x", { tools: ["mcp\u0085__srv__*"] });`)
+      .catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(
+      /agent\(\{tools\}\): "mcp__srv__\*" is a pattern/,
+    );
+    expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+  });
+
+  // A rejected call must leave no phase behind: the phase is recorded only
+  // after every option gate has passed.
+  it.each([
+    ['effort: "turbo"', /unknown effort tier/],
+    ['disallowedTools: "edit"', /must be an array/],
+    ['tools: []', /must be a non-empty array/],
+    ['tools: ["exec"]', /is the code-mode surface/],
+  ])(
+    'records no phase for a call rejected over %s',
+    async (option, message) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("x", { phase: "Verify", ${option} });`),
+      ).rejects.toThrow(message);
+      expect(sandbox.getPhases()).toEqual([]);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // The rejected value is script-controlled, and JSON.stringify leaves DEL and
+  // C1 (incl. NEL) in place, so the echo is sanitized before the message.
+  it('strips control characters from an echoed effort value', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const error = (await sandbox
+      .run(`return agent("x", { effort: "turbo\u0085inject\u007f" });`)
+      .catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(/unknown effort tier "turboinject"/);
+    expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+  });
+
+  // Built-in display names become tool names before the resume key is
+  // derived, so renaming Edit to edit keeps the cache; MCP patterns pass as is.
+  it('hands the host built-in deny names as tool names', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.disallowedTools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(
+      `return agent("a", { disallowedTools: ["Edit", "edit", "WriteFile", "mcp__github"] });`,
+    );
+    expect(seen).toEqual([['edit', 'mcp__github', 'write_file']]);
+  });
+
   // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
     const emitted: string[] = [];
@@ -1054,7 +1272,7 @@ describe('createWorkflowSandbox security', () => {
     // The banked remainder (~80 ms) fires promptly; a fresh full budget
     // (200 ms) would overshoot the upper bound, and a pause-duration
     // deduction would fire before the lower bound.
-    expect(Date.now() - resumedAt).toBeLessThan(150);
+    expectWithinLatencyBudget(Date.now() - resumedAt, 150);
     expect(Date.now() - resumedAt).toBeGreaterThan(40);
   });
 
@@ -1531,6 +1749,35 @@ describe('createWorkflowSandbox security', () => {
     `);
     expect(result).not.toMatch(/object|darwin|linux|win32/i);
     expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  it('pipeline() refuses too many stages before they reach the host', async () => {
+    const pipeline = vi.fn(async () => []);
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+      pipeline,
+    });
+    const result = await sandbox.run(`
+      const stages = Array.from({ length: 4097 }, () => (x) => x);
+      try { await pipeline([1], ...stages); return 'resolved'; }
+      catch (e) {
+        let escaped;
+        try {
+          escaped = String(e.constructor.constructor('return typeof process')());
+        } catch (inner) { escaped = 'threw'; }
+        return [e.message, escaped];
+      }
+    `);
+    const [message, escaped] = result as [string, string];
+    expect(message).toContain('pipeline() stages: 4097 entries');
+    expect(escaped).toMatch(/^undefined|^threw/);
+    expect(pipeline).not.toHaveBeenCalled();
+
+    await sandbox.run(`
+      await pipeline([1], ...Array.from({ length: 4096 }, () => (x) => x));
+    `);
+    expect(pipeline).toHaveBeenCalledTimes(1);
   });
 
   it('opts.budget overrides the throwing stub when provided', async () => {
@@ -2774,6 +3021,162 @@ describe('createWorkflowSandbox primitives', () => {
       await expect(
         sandbox.run('const declared = 1; return declared;'),
       ).resolves.toBe(1);
+    });
+  });
+
+  describe('dynamic import() refusal', () => {
+    function refusal(source: string): WorkflowUnsupportedSyntaxError {
+      try {
+        compileWorkflowScript(source);
+      } catch (e) {
+        expect(e).toBeInstanceOf(WorkflowUnsupportedSyntaxError);
+        return e as WorkflowUnsupportedSyntaxError;
+      }
+      throw new Error('expected the source to be refused');
+    }
+
+    it.each([
+      ['awaited after an agent', "await agent('a');\nawait import('node:fs');"],
+      ['not awaited', "import('node:fs');\nreturn 1;"],
+      ['in a dead branch', "if (false) { await import('node:fs'); }"],
+      [
+        'in a function that is never called',
+        "function load() { return import('node:fs'); }",
+      ],
+      ['in a template substitution', "const s = `${import('node:fs')}`;"],
+      ['with a comment between the tokens', "import /* x */ ('node:fs');"],
+      [
+        'with a computed module name',
+        "const m = 'node:' + 'fs'; await import(m);",
+      ],
+      ['with import options', "await import('x.json', { with: {} });"],
+    ])('refuses import() %s before running', (_name, source) => {
+      expect(refusal(source).message).toMatch(
+        /dynamic import\(\) is not supported in workflow scripts/,
+      );
+    });
+
+    it('never dispatches an agent that precedes the import', async () => {
+      const dispatch = vi.fn(async () => 'ok');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run("await agent('must-not-run');\nimport('node:fs');"),
+      ).rejects.toThrow(/dynamic import\(\)/);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a string', 'return \'import("node:fs")\';'],
+      ['a line comment', "// import('node:fs')\nreturn 1;"],
+      ['a block comment', "/* import('node:fs') */ return 1;"],
+      ['a regex literal', "return /import\\('node:fs'\\)/.source.length > 0;"],
+      ['template text', "return `import('node:fs')`.length > 0;"],
+      ['a member call', 'const o = { import: () => 1 }; return o.import();'],
+      [
+        'an object method',
+        'return ({ import() { return 1; } }).import() === 1;',
+      ],
+      ['a property key', "return ({ 'import': 1 }).import === 1;"],
+    ])('runs a script with import in %s', async (_name, source) => {
+      const sandbox = createWorkflowSandbox({
+        args: undefined,
+        dispatch: async () => 'ok',
+      });
+      await expect(sandbox.run(source)).resolves.toBeTruthy();
+    });
+
+    it('reports the line the author wrote after a multiline meta block', () => {
+      const source = `export const meta = {
+  name: 'n',
+  description: 'd',
+}
+await agent('a');
+await import('node:fs');`;
+      expect(refusal(source).message).toMatch(/^line 6: /);
+    });
+
+    it.each([
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+      ['lone CR', '\r'],
+      ['U+2028', '\u2028'],
+    ])('counts %s line breaks like the author', (_name, separator) => {
+      const source = ['const a = 1;', 'const b = 2;', "import('x');"].join(
+        separator,
+      );
+      expect(refusal(source).message).toMatch(/^line 3: /);
+    });
+
+    it('reports the first import when there are several', () => {
+      expect(
+        refusal("const a = 1;\nimport('a');\nimport('b');").message,
+      ).toMatch(/^line 2: /);
+    });
+
+    it.each([
+      ['a class static block', "class A { static { import('node:fs'); } }"],
+      ['a class field', "class A { f = import('node:fs'); }"],
+      ['a private static field', "class A { static #f = import('node:fs'); }"],
+      ['a parameter default', "function f(a = import('node:fs')) {}"],
+    ])('refuses import() in %s', (_name, source) => {
+      expect(refusal(source).message).toMatch(
+        /^line 1: dynamic import\(\) is not supported/,
+      );
+    });
+
+    // Newer V8 compiles `import.source()`, which the parser does not know.
+    // Whichever of the two refuses it, the script must not run unchecked, and
+    // a parser refusal carries its own cause rather than the syntax hint.
+    it('refuses a body the parser cannot read even when V8 compiles it', () => {
+      let caught: unknown;
+      try {
+        compileWorkflowScript("import.source('x');");
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeDefined();
+      if (!(caught instanceof SyntaxError)) {
+        expect(caught).toBeInstanceOf(WorkflowUnsupportedSyntaxError);
+        expect((caught as Error).message).toMatch(
+          /^line 1: the script could not be checked for unsupported syntax/,
+        );
+      }
+    });
+
+    it('refuses with its own cause when the walk itself fails', () => {
+      walkFailure.fail = true;
+      try {
+        expect(() => compileWorkflowScript('return 1;')).toThrow(
+          WorkflowUnsupportedSyntaxError,
+        );
+        expect(() => compileWorkflowScript('return 1;')).toThrow(
+          /could not be checked for unsupported syntax: baseVisitor/,
+        );
+      } finally {
+        walkFailure.fail = false;
+      }
+    });
+
+    it('leaves an ordinary syntax error to V8', () => {
+      expect(() =>
+        compileWorkflowScript("await import('x');\nconst x: string = 'a';"),
+      ).toThrow(SyntaxError);
+    });
+
+    it('accepts modern syntax V8 compiles', () => {
+      expect(() =>
+        compileWorkflowScript(
+          [
+            'class A { static #n = 1; static get n() { return A.#n; } }',
+            'const o = { a: { b: 1 } }; const v = o?.a?.b ?? 0;',
+            'let x = 0; x ||= 1; x &&= 2; x ??= 3;',
+            'const big = 1_000n; const re = /a/v;',
+            'for await (const r of [Promise.resolve(1)]) {}',
+            'label: { break label; }',
+            'return [A.n, v, x, big, re, Object.groupBy([], () => 1)];',
+          ].join('\n'),
+        ),
+      ).not.toThrow();
     });
   });
 

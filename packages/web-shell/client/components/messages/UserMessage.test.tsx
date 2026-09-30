@@ -4,6 +4,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { UserMessage } from './UserMessage';
 
 (
@@ -17,6 +18,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.restoreAllMocks();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -28,6 +30,17 @@ function render(node: ReactNode): HTMLElement {
   });
   mounted.push({ root, container });
   return container;
+}
+
+// React tracks a controlled field's value internally, so writing `.value`
+// directly is ignored; go through the prototype setter and fire `input`.
+function setTextareaValue(el: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 function referenceAnnotation(
@@ -69,6 +82,230 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('hello world');
   });
 
+  it('edits the message in place and submits the edited text', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={onEditSubmit}
+          onEditCancel={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+
+    expect(textarea).not.toBeNull();
+    expect(textarea?.value).toBe('hello world');
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    );
+
+    act(() => {
+      setTextareaValue(textarea!, 'edited text');
+    });
+    act(() => {
+      send?.click();
+    });
+
+    expect(onEditSubmit).toHaveBeenCalledWith('edited text');
+  });
+
+  it('cancels the in-place editor on Escape', () => {
+    const onEditCancel = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={vi.fn()}
+          onEditCancel={onEditCancel}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+
+    expect(onEditCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows progress and ignores input while the edit is being sent', () => {
+    const onEditSubmit = vi.fn();
+    const onEditCancel = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          submittingEdit
+          onEditSubmit={onEditSubmit}
+          onEditCancel={onEditCancel}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+    const buttons = [...container.querySelectorAll('button')];
+    const send = buttons.find((button) => button.textContent === 'Sending…');
+
+    expect(send).not.toBeUndefined();
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(textarea?.readOnly).toBe(true);
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      send?.click();
+    });
+
+    expect(onEditSubmit).not.toHaveBeenCalled();
+    expect(onEditCancel).not.toHaveBeenCalled();
+  });
+
+  it('submits on Enter and keeps Shift+Enter for a newline', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={onEditSubmit}
+          onEditCancel={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(onEditSubmit).not.toHaveBeenCalled();
+
+    act(() => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(onEditSubmit).toHaveBeenCalledWith('hello world');
+  });
+
+  it('disables Send while the draft is empty', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="hello world"
+          editing
+          onEditSubmit={onEditSubmit}
+          onEditCancel={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    );
+
+    act(() => {
+      setTextareaValue(textarea!, '   ');
+    });
+    expect(send?.disabled).toBe(true);
+
+    act(() => {
+      send?.click();
+    });
+    expect(onEditSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', 'Escape'])(
+    'ignores IME-owned %s after compositionend',
+    (key) => {
+      const onEditSubmit = vi.fn();
+      const onEditCancel = vi.fn();
+      const container = render(
+        <I18nProvider language="en">
+          <UserMessage
+            content="中文草稿"
+            editing
+            onEditSubmit={onEditSubmit}
+            onEditCancel={onEditCancel}
+          />
+        </I18nProvider>,
+      );
+      const event = new KeyboardEvent('keydown', {
+        key,
+        keyCode: 229,
+        isComposing: false,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        container.querySelector('textarea')!.dispatchEvent(event);
+      });
+      expect(onEditSubmit).not.toHaveBeenCalled();
+      expect(onEditCancel).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('can edit and resend an attachment-only message', () => {
+    const onEditSubmit = vi.fn();
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content=""
+          images={[{ data: 'aW1hZ2U=', mimeType: 'image/png' }]}
+          editing
+          onEditSubmit={onEditSubmit}
+        />
+      </I18nProvider>,
+    );
+    expect(container.querySelector('textarea')).not.toBeNull();
+    const send = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Send',
+    )!;
+    expect(send.disabled).toBe(false);
+    act(() => {
+      send.click();
+    });
+    expect(onEditSubmit).toHaveBeenCalledWith('');
+  });
+
+  it('does not render an in-place editor by default', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage content="hello world" />
+      </I18nProvider>,
+    );
+    expect(container.querySelector('textarea')).toBeNull();
+  });
+
+  it('does not visually clip an overflowing message in document mode', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(500);
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content="full exported prompt" />
+      </TranscriptRenderModeProvider>,
+    );
+    const content = container.querySelector('[class*="chatContent"]');
+
+    expect(content?.className).not.toContain('chatContentCollapsed');
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.textContent).toContain('full exported prompt');
+  });
+
   it('renders scheduled-task context as a compact localized card', () => {
     const renderUserMessageContent = vi.fn(() => <span>custom message</span>);
     const content =
@@ -101,6 +338,29 @@ describe('UserMessage', () => {
       'Do not create or modify a schedule',
     );
     expect(renderUserMessageContent).not.toHaveBeenCalled();
+  });
+
+  it('linkifies URLs inside a scheduled-task prompt', () => {
+    const content =
+      'Scheduled task: Check incidents\n' +
+      'Task ID: task-2\n' +
+      'Schedule: 0 * * * *\n' +
+      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
+      'Trigger: scheduled\n' +
+      'Session: new chat for this run\n\n' +
+      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
+      'check https://status.example.com/incidents, then reply';
+    const container = render(<UserMessage content={content} />);
+
+    const message = container.querySelector(
+      '[data-web-shell-scheduled-task-run-message]',
+    );
+    expect(message).not.toBeNull();
+    const link = message?.querySelector(
+      'a[href="https://status.example.com/incidents"]',
+    );
+    expect(link).not.toBeNull();
+    expect(container.textContent).toContain(', then reply');
   });
 
   it('renders an accessible retry action for a failed send', () => {
@@ -247,6 +507,72 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('a@b.test');
   });
 
+  it('linkifies URLs in text parts from a host-provided parser', () => {
+    const container = render(
+      <WebShellCustomizationProvider
+        value={{
+          parseUserMessageContent: () => [
+            { type: 'text', text: 'see https://example.com/parsed ' },
+            {
+              type: 'tag',
+              tag: {
+                id: 'file:readme',
+                kind: 'file',
+                value: 'readme',
+                serialized: '@file:readme',
+              },
+            },
+          ],
+        }}
+      >
+        <UserMessage content="see https://example.com/parsed @file:readme" />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(
+      container.querySelector('a[href="https://example.com/parsed"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('readme');
+  });
+
+  it('renders URLs in message text as external links', () => {
+    const container = render(
+      <UserMessage content="see https://example.com/docs, then reply" />,
+    );
+
+    const link = container.querySelector(
+      '[data-web-shell-user-bubble] a[href="https://example.com/docs"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(container.textContent).toContain(
+      'see https://example.com/docs, then reply',
+    );
+  });
+
+  it('renders URLs as links alongside annotated reference chips', () => {
+    const content = 'open https://example.com with @ext:browser';
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, '@ext:browser', {
+            id: '@ext:browser',
+            kind: 'extension',
+            value: 'browser',
+            serialized: '@ext:browser',
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      container.querySelector('a[href="https://example.com"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[title="@ext:browser"]')).not.toBeNull();
+  });
+
   it('keeps references as text without input annotations', () => {
     const container = render(<UserMessage content="open @dataset:users" />);
 
@@ -388,6 +714,31 @@ describe('UserMessage', () => {
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,abc',
       expect.any(String),
+      undefined,
+    );
+  });
+
+  it('keeps uploaded images attachment-backed when opening the preview', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content=""
+        images={[
+          {
+            data: 'abc',
+            mimeType: 'image/png',
+            attachmentId: 'photo.png',
+          },
+        ]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    act(() => container.querySelector('img')?.click());
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,abc',
+      expect.any(String),
+      { kind: 'attachment', attachmentId: 'photo.png' },
     );
   });
 
@@ -441,6 +792,26 @@ describe('UserMessage', () => {
       container.querySelector('[data-web-shell-user-files]')?.parentElement
         ?.className,
     ).toContain('flash');
+  });
+
+  it.each([
+    ['report.HTML', 'text/html', 'HTML', 'html'],
+    ['README', 'text/plain', 'text/plain', 'file-text'],
+    ['LICENSE', '', 'FILE', 'file'],
+  ])('renders attachment metadata for %s', (name, mimeType, type, icon) => {
+    const container = render(
+      <UserMessage content="" files={[{ name, mimeType }]} />,
+    );
+    const card = container.querySelector('[data-web-shell-user-files]');
+    expect(card?.querySelector(`[title="${name}"]`)?.textContent).toBe(name);
+    expect(card?.querySelector(`[title="${type}"]`)?.textContent).toBe(type);
+    expect(
+      card?.querySelector(
+        icon === 'file-text'
+          ? 'svg.lucide-file-text'
+          : `[data-file-type-icon="${icon}"]`,
+      ),
+    ).not.toBeNull();
   });
 
   it('previews a sent text attachment when its chip is clicked', () => {
@@ -591,6 +962,8 @@ describe('UserMessage', () => {
       name: 'notes.txt',
       workspacePath: 'docs/notes.txt',
     });
+    expect(container.querySelector('svg.lucide-file-text')).not.toBeNull();
+    expect(container.textContent).toContain('docs/notes.txt');
   });
 
   it('does not make a sent directory tag previewable', () => {
@@ -823,11 +1196,14 @@ describe('UserMessage', () => {
           },
         }}
       >
-        <UserMessage content="raw <broken /> content" />
+        <UserMessage content="raw <broken /> https://example.com/x" />
       </WebShellCustomizationProvider>,
     );
 
-    expect(container.textContent).toBe('raw <broken /> content');
+    expect(container.textContent).toBe('raw <broken /> https://example.com/x');
+    expect(
+      container.querySelector('a[href="https://example.com/x"]'),
+    ).not.toBeNull();
     warn.mockRestore();
   });
 

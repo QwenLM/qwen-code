@@ -13,6 +13,11 @@ import type {
 } from '@google/genai';
 import { Type } from '@google/genai';
 import {
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+
+import {
   afterEach,
   beforeEach,
   describe,
@@ -21,7 +26,15 @@ import {
   vi,
   type Mock,
 } from 'vitest';
-import { Config, type ConfigParameters } from '../../config/config.js';
+import {
+  ApprovalMode,
+  Config,
+  deriveApprovalModeConfig,
+  deriveConfig,
+  deriveWorktreeConfig,
+  type ConfigParameters,
+} from '../../config/config.js';
+import type { ExecutionEnvironment } from '../../services/execution-environment.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import {
   createContentGenerator,
@@ -51,6 +64,7 @@ import {
   type AgentStreamTextEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
+  type AgentUsageEvent,
 } from './agent-events.js';
 import type {
   ModelConfig,
@@ -63,6 +77,8 @@ import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
+import { logSubagentExecution } from '../../telemetry/loggers.js';
+import type { SubagentExecutionEvent } from '../../telemetry/types.js';
 
 vi.mock('../../core/llm-chat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -107,6 +123,10 @@ vi.mock('../../core/environmentContext.js', () => ({
 vi.mock('../../core/nonInteractiveToolExecutor.js');
 vi.mock('../../ide/ide-client.js');
 vi.mock('../../core/client.js');
+vi.mock('../../telemetry/loggers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../telemetry/loggers.js')>()),
+  logSubagentExecution: vi.fn(),
+}));
 
 vi.mock('../../skills/skill-manager.js', () => {
   const SkillManagerMock = vi.fn();
@@ -389,6 +409,59 @@ describe('subagent.ts', () => {
     describe('create (Tool Validation)', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Test prompt' };
 
+      it('rejects a container requirement through real worktree and approval overlays', async () => {
+        const config = new Config({
+          model: DEFAULT_QWEN_MODEL,
+          targetDir: process.cwd(),
+          cwd: process.cwd(),
+          debugMode: false,
+          agentExecutionBackend: 'container',
+        });
+        const scoped = deriveApprovalModeConfig(
+          deriveWorktreeConfig(config, process.cwd()),
+          ApprovalMode.DEFAULT,
+        );
+        try {
+          await expect(
+            AgentHeadless.create(
+              'unsupported-direct-agent',
+              scoped.config,
+              promptConfig,
+              defaultModelConfig,
+              defaultRunConfig,
+            ),
+          ).rejects.toThrow('has no execution environment');
+          expect(LlmChat).not.toHaveBeenCalled();
+          expect(executeToolCall).not.toHaveBeenCalled();
+        } finally {
+          scoped.cleanup();
+        }
+      });
+
+      it('allows a required container with its injected environment and no factory', async () => {
+        const config = new Config({
+          model: DEFAULT_QWEN_MODEL,
+          targetDir: process.cwd(),
+          cwd: process.cwd(),
+          debugMode: false,
+          agentExecutionBackend: 'container',
+        });
+        const environment = {} as ExecutionEnvironment;
+        const scoped = deriveConfig(config, {
+          getExecutionEnvironment: () => environment,
+        });
+        expect(scoped.getExecutionEnvironmentFactory()).toBeUndefined();
+        await expect(
+          AgentHeadless.create(
+            'contained-agent',
+            scoped,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+          ),
+        ).resolves.toBeInstanceOf(AgentHeadless);
+      });
+
       it('should create a AgentHeadless successfully with minimal config', async () => {
         const { config } = await createMockConfig();
         const scope = await AgentHeadless.create(
@@ -497,6 +570,71 @@ describe('subagent.ts', () => {
     });
 
     describe('execute - Initialization and Prompting', () => {
+      it('owns createChat and prepareTools before entering the reasoning loop', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getHookSystem').mockReturnValue({
+          runtimeId: 'headless-runtime',
+        } as unknown as ReturnType<Config['getHookSystem']>);
+        const scope = await AgentHeadless.create(
+          'A',
+          config,
+          { systemPrompt: '' },
+          defaultModelConfig,
+          defaultRunConfig,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'explicit-A',
+        );
+        const expected = {
+          runtimeId: 'headless-runtime',
+          sessionId: config.getSessionId(),
+          agentId: scope.getCore().subagentId,
+        };
+        const stages: string[] = [];
+        vi.spyOn(scope.getCore(), 'createChat').mockImplementation(async () => {
+          stages.push('chat');
+          expect(getHookExecutionOwner()).toEqual(expected);
+          return {} as LlmChat;
+        });
+        vi.spyOn(scope.getCore(), 'prepareTools').mockImplementation(
+          async () => {
+            stages.push('prepare');
+            expect(getHookExecutionOwner()).toEqual(expected);
+            throw new Error('stop after preparation');
+          },
+        );
+        const foreign = {
+          runtimeId: 'other',
+          sessionId: 'other',
+          agentId: 'B',
+        };
+        await runWithHookExecutionOwner(foreign, async () => {
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'stop after preparation',
+          );
+          expect(getHookExecutionOwner()).toEqual(foreign);
+        });
+        expect(stages).toEqual(['chat', 'prepare']);
+      });
+
+      it('sends an explicit empty tools list for a no-tool agent', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+        const scope = await AgentHeadless.create(
+          'metadata-only-agent',
+          config,
+          { systemPrompt: 'Return metadata.' },
+          defaultModelConfig,
+          defaultRunConfig,
+          { tools: [] },
+        );
+        await scope.execute(new ContextState());
+        expect(mockSendMessageStream.mock.calls[0][1].config.tools).toEqual([]);
+      });
+
       it('should correctly template the system prompt and initialize LlmChat', async () => {
         const { config } = await createMockConfig();
 
@@ -550,6 +688,38 @@ describe('subagent.ts', () => {
             ],
           },
         ]);
+      });
+
+      it('withholds the skills reminder from an agent whose policy denies Skill', async () => {
+        // Pins the consumer wiring, not just the predicate. The skill-gate
+        // suite calls `willHaveSkillTool()` directly, so hardcoding `true` at
+        // the `includeAvailableSkillsReminder` call site keeps that suite green
+        // while every skill-denied subagent receives an `<available_skills>`
+        // listing it cannot act on — the listing-versus-capability
+        // disagreement #12424 exists to remove. A finite allowlist omitting
+        // `skill` is one of the two shapes in #12424's measured scope.
+        const { config } = await createMockConfig();
+
+        vi.mocked(LlmChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const toolConfig: ToolConfig = { tools: [ToolNames.READ_FILE] };
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'Test prompt' },
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: false,
+        });
       });
 
       it('should reuse chat and tools for sequential follow-up turns', async () => {
@@ -653,6 +823,42 @@ describe('subagent.ts', () => {
           { kind: 'notification', text: 'monitor fired' },
         ]);
         expect(scope.getExecutionSummary()).toMatchObject({ rounds: 2 });
+      });
+
+      it('should keep usage rounds unique across finishing input segments', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [{ content: { parts: [{ text: 'Done.' }] } }],
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const usageRounds: number[] = [];
+        scope
+          .getEventEmitter()
+          .on(AgentEventType.USAGE_METADATA, (event: AgentUsageEvent) => {
+            usageRounds.push(event.round);
+          });
+
+        await scope.execute(new ContextState());
+        await scope.executeExternalInputs(['late correction'], undefined, {
+          resetStats: false,
+        });
+
+        expect(usageRounds).toEqual([1, 2]);
       });
 
       it('should preserve statistics for continuation work in the same logical turn', async () => {
@@ -2234,6 +2440,397 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(listDirectoryInvocation.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
+      it('keeps polling task_list while the task board changes (issue #9450)', async () => {
+        // Identical task_list arguments do not imply an identical result:
+        // teammates mutate the shared board between calls. The agent must
+        // not be halted while the observed results keep changing.
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const pollCount = 8; // well past the consecutive-identical threshold
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: pollCount }, (_, index) => [
+              {
+                id: `poll_${index + 1}`,
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        let boardVersion = 0;
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          // A peer completes/claims a task between polls, so every result
+          // differs even though the arguments are identical.
+          execute: vi.fn().mockImplementation(async () => {
+            boardVersion += 1;
+            const status = boardVersion % 2 === 0 ? 'completed' : 'in_progress';
+            return {
+              llmContent: `#7 [${status}] @peer-a — task (v${boardVersion})`,
+              returnDisplay: 'Listed tasks',
+            };
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(pollCount);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(pollCount + 1);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+      });
+
+      it('still halts task_list polling when the board is frozen (issue #9450)', async () => {
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `poll_${index + 1}`,
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          // No teammate activity: every poll returns the identical board.
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '#7 [in_progress] @peer-a — task',
+            returnDisplay: 'Listed tasks',
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const finishEvents: Array<{ loopType?: string }> = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.FINISH, (event: unknown) => {
+          finishEvents.push(event as { loopType?: string });
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(4);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        // The exact detector is attributable in the finish event (#9450).
+        expect(finishEvents).toHaveLength(1);
+        expect(finishEvents[0].loopType).toBe(
+          'consecutive_identical_tool_calls',
+        );
+        // The telemetry completion record carries the same attribution; a
+        // SubagentExecutionEvent without loop_type would silently drop the
+        // spread and journal the stop as unattributable.
+        const completionEvents = vi
+          .mocked(logSubagentExecution)
+          .mock.calls.map((call) => call[1])
+          .filter(
+            (event): event is SubagentExecutionEvent =>
+              event.status !== 'started',
+          );
+        expect(completionEvents).toHaveLength(1);
+        expect(completionEvents[0]?.loop_type).toBe(
+          'consecutive_identical_tool_calls',
+        );
+      });
+
+      it('counts a provider-duplicate call id once so result evidence stays in sync (issue #9450)', async () => {
+        // A provider can stream the SAME call id twice in one response — the
+        // exact pathology dedupeToolCallsById exists for. Execution collapses
+        // the pair to one call (one recorded result), so the loop guard must
+        // also count one request; otherwise the request counter runs one
+        // ahead of the result evidence and the result-aware exemption
+        // fails safe, halting a fully productive poller.
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        // Round 1 emits the same call id twice (the provider duplicate); the
+        // remaining rounds emit one call each, the board changing every time.
+        const duplicateId = 'dup_call_0';
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: duplicateId, name: 'task_list', args: taskListArgs },
+              { id: duplicateId, name: 'task_list', args: taskListArgs },
+            ],
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `poll_${index + 1}`,
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        let boardVersion = 0;
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          // Every executed poll returns a changed board.
+          execute: vi.fn().mockImplementation(async () => {
+            boardVersion += 1;
+            return {
+              llmContent: `#7 [in_progress] @peer-a — task (v${boardVersion})`,
+              returnDisplay: 'Listed tasks',
+            };
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 20 },
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        // The duplicate id executes once (dedupeToolCallsById), so 6 executed
+        // polls across 7 model turns; the changed board must carry the agent
+        // to goal instead of a false loop halt.
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(6);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(7);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+      });
+
+      it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `poll_${index + 1}`,
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: '#7 [in_progress] @peer-a — task',
+            returnDisplay: 'Listed tasks',
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const finishEvents: Array<{
+          loopType?: string;
+          terminateReason?: string;
+        }> = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.FINISH, (event: unknown) => {
+          finishEvents.push(
+            event as { loopType?: string; terminateReason?: string },
+          );
+        });
+        eventEmitter.on(AgentEventType.ERROR, () => undefined);
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        // Run 1 halts on the frozen board with an attribution.
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+
+        // Run 2 on the same instance (stop-hook continuation / resident
+        // turns) errors before any loop fires: it must not carry run 1's
+        // loopType into its FINISH/telemetry.
+        mockSendMessageStream.mockRejectedValueOnce(
+          new Error('simulated model error'),
+        );
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'simulated model error',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+
+        expect(finishEvents).toHaveLength(2);
+        expect(finishEvents[0].loopType).toBe(
+          'consecutive_identical_tool_calls',
+        );
+        expect(finishEvents[1].loopType).toBeUndefined();
       });
 
       it('should ignore duplicate provider tool-call ids already present in chat history', async () => {

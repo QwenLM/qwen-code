@@ -1,0 +1,464 @@
+// @vitest-environment jsdom
+
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { describe, expect, it, vi } from 'vitest';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
+import { I18nProvider } from '../../i18n';
+import { SessionWorkflowInspector } from './SessionWorkflowInspector';
+
+describe('SessionWorkflowInspector', () => {
+  it('keeps routine workflow inspection in a list and escalates the DAG explicitly', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onSelectedTodoIdChange = vi.fn();
+    const onExpandGraph = vi.fn();
+    const onOpenSubagent = vi.fn();
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['prepare'],
+      },
+    ];
+    const shippingAgent: ACPToolCall = {
+      callId: 'ship-agent',
+      toolName: 'Agent',
+      title: 'Shipping Agent',
+      status: 'in_progress',
+      parentToolCallId: 'ship-step',
+    };
+    const tools: ACPToolCall[] = [
+      {
+        callId: 'ship-step',
+        toolName: 'workflow_step',
+        status: 'in_progress',
+        args: { todo_id: 'ship' },
+        subTools: [shippingAgent],
+      },
+    ];
+    const tasks = [
+      {
+        kind: 'agent' as const,
+        id: 'ship-task',
+        label: 'Shipping Agent',
+        description: 'Publishing the result',
+        status: 'running' as const,
+        startTime: 1,
+        runtimeMs: 5_000,
+        isBackgrounded: true,
+        toolUseId: 'ship-agent',
+        stats: { toolUses: 4, totalTokens: 1_200, durationMs: 5_000 },
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={tools}
+            tasks={tasks}
+            artifacts={[]}
+            onSelectedTodoIdChange={onSelectedTodoIdChange}
+            onExpandGraph={onExpandGraph}
+            onOpenSubagent={onOpenSubagent}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[data-plan-node-id]')).toBeNull();
+    expect(container.textContent).toContain('Ship result');
+    expect(container.textContent).toContain('Prepare inputs');
+    expect(container.textContent).toContain('Shipping Agent');
+    expect(container.textContent).toContain('4 tool calls');
+    expect(container.textContent).toContain('1,200 tokens');
+    expect(onSelectedTodoIdChange).toHaveBeenCalledWith('ship');
+    const stepList = container.querySelector(
+      '[data-testid="workflow-step-list"]',
+    );
+    const stepDetail = container.querySelector(
+      '[data-testid="workflow-step-detail"]',
+    );
+    expect(
+      stepList?.compareDocumentPosition(stepDetail as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    const expand = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Expand dependency graph'),
+    );
+    act(() => expand?.click());
+    expect(onExpandGraph).toHaveBeenCalledOnce();
+
+    const agent = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Shipping Agent'),
+    );
+    act(() => agent?.click());
+    expect(onOpenSubagent).toHaveBeenCalledWith(shippingAgent);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('gates both linked-agent and activity detail buttons until ready', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onOpenSubagent = vi.fn();
+    const render = (subagentSessionReady: boolean) => {
+      const agent: ACPToolCall = {
+        callId: 'ship-agent',
+        toolName: 'Agent',
+        title: 'Shipping Agent',
+        status: 'in_progress',
+        args: { todo_id: 'ship' },
+        subagentSessionReady,
+      };
+      act(() =>
+        root.render(
+          <I18nProvider language="zh-CN">
+            <SessionWorkflowInspector
+              todos={[{ id: 'ship', content: 'Ship', status: 'in_progress' }]}
+              tools={[agent]}
+              tasks={[
+                {
+                  kind: 'agent',
+                  id: 'ship-task',
+                  label: 'Shipping Agent',
+                  description: 'Ship',
+                  status: 'running',
+                  startTime: 1,
+                  runtimeMs: 1000,
+                  isBackgrounded: false,
+                  toolUseId: 'ship-agent',
+                },
+              ]}
+              artifacts={[]}
+              onSelectedTodoIdChange={vi.fn()}
+              onExpandGraph={vi.fn()}
+              onOpenSubagent={onOpenSubagent}
+            />
+          </I18nProvider>,
+        ),
+      );
+    };
+    try {
+      render(false);
+      const buttons = [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          'button[title="创建中"]',
+        ),
+      ];
+      expect(buttons).toHaveLength(2);
+      for (const button of buttons) {
+        expect(button.getAttribute('aria-disabled')).toBe('true');
+        button.focus();
+        expect(document.activeElement).toBe(button);
+        act(() => button.click());
+      }
+      expect(onOpenSubagent).not.toHaveBeenCalled();
+      render(true);
+      for (const button of buttons) {
+        expect(button.hasAttribute('aria-disabled')).toBe(false);
+        expect(button.title).not.toBe('创建中');
+        act(() => button.click());
+      }
+      expect(onOpenSubagent).toHaveBeenCalledTimes(2);
+      expect(onOpenSubagent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          callId: 'ship-agent',
+          subagentSessionReady: true,
+        }),
+      );
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  // R11-2: same input as the overview strip's transcript-only case — one
+  // in_progress Agent tool call, no live daemon tasks. The strip reports
+  // "Active agents: 1" via the executionStatus fallback; the summary here
+  // must not contradict it with a live-only count of 0.
+  it('counts transcript-only agents the same as the overview strip', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'build', content: 'Build', status: 'in_progress' },
+    ];
+    const tools: ACPToolCall[] = [
+      {
+        callId: 'build-agent',
+        toolName: 'Agent',
+        title: 'Build Agent',
+        status: 'in_progress',
+        args: { todo_id: 'build' },
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={tools}
+            tasks={[]}
+            artifacts={[]}
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('1 active Agent');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('selects the referenced step from a dependency, by number and title', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onSelectedTodoIdChange = vi.fn();
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['prepare'],
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="ship"
+            onSelectedTodoIdChange={onSelectedTodoIdChange}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const upstream = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-dependency-prepare"]',
+    );
+    // The reference reads as the step it points at — the step number the list
+    // and graph both show, plus its title — not the bare `prepare` id.
+    expect(upstream).toBeTruthy();
+    expect(upstream?.textContent).toContain('1');
+    expect(upstream?.textContent).toContain('Prepare inputs');
+    // The host keyboard handlers isolate plan controls through this marker
+    // (TasksStatusMessage/ToolApproval early-return on it), so these
+    // controls must carry it like the graph's own buttons do.
+    expect(upstream?.hasAttribute('data-plan-interactive')).toBe(true);
+
+    onSelectedTodoIdChange.mockClear();
+    act(() => upstream?.click());
+    expect(onSelectedTodoIdChange).toHaveBeenCalledWith('prepare');
+
+    // Downstream too: the two directions render through the same helper but
+    // read from different sources (`blockedBy` vs the projection's
+    // `dependentsByTodo`), so covering one does not cover the other.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="prepare"
+            onSelectedTodoIdChange={onSelectedTodoIdChange}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    const downstream = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-dependency-ship"]',
+    );
+    expect(downstream?.textContent).toContain('2');
+    expect(downstream?.textContent).toContain('Ship result');
+    expect(downstream?.hasAttribute('data-plan-interactive')).toBe(true);
+    onSelectedTodoIdChange.mockClear();
+    act(() => downstream?.click());
+    expect(onSelectedTodoIdChange).toHaveBeenCalledWith('ship');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('dedups a repeated dependency id in the upstream list', () => {
+    // blockedBy is model-authored and can repeat an id; without the dedup
+    // the list rendered two links sharing one key.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['prepare', 'prepare'],
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="ship"
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelectorAll('[data-testid="workflow-dependency-prepare"]'),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('drops a self-reference from the upstream list', () => {
+    // The projection's dependentsByTodo builder skips self-blocks
+    // (session-workflow-model.ts), and the DAG draws no edge for them; the
+    // inspector's upstream filter must apply the same rule, or a todo
+    // naming itself in blockedBy renders a chip that only re-selects the
+    // already-selected step.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['ship', 'prepare'],
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="ship"
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="workflow-dependency-ship"]'),
+    ).toBeNull();
+    expect(
+      container.querySelectorAll('[data-testid="workflow-dependency-prepare"]'),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('keeps every activity row reachable past the preview cap', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'build', content: 'Build', status: 'in_progress' },
+    ];
+    const tools: ACPToolCall[] = Array.from({ length: 8 }, (_, index) => ({
+      callId: `agent-${index}`,
+      toolName: 'Agent',
+      title: `Agent ${index}`,
+      status: 'completed' as const,
+      args: { todo_id: 'build' },
+    }));
+    const tasks = tools.map((tool, index) => ({
+      kind: 'agent' as const,
+      id: `task-${index}`,
+      label: `Agent ${index}`,
+      description: `Ran step ${index}`,
+      status: 'completed' as const,
+      startTime: 1_000 + index,
+      endTime: 2_000 + index,
+      runtimeMs: 1_000,
+      isBackgrounded: true,
+      toolUseId: tool.callId,
+    }));
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={tools}
+            tasks={tasks}
+            artifacts={[]}
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const activityList = () =>
+      Array.from(container.querySelectorAll('button')).filter((button) =>
+        /^\d{1,2}:\d{2}/.test(button.textContent?.trim() ?? ''),
+      );
+    const beforeExpand = activityList().length;
+    const showAll = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-activity-show-all"]',
+    );
+    // The count beside the list reports the true total, so the cap has to be
+    // an invitation rather than a silent truncation.
+    expect(beforeExpand).toBe(6);
+    expect(showAll?.textContent).toContain('8');
+    // Same host-keyboard isolation as the dependency links above.
+    expect(showAll?.hasAttribute('data-plan-interactive')).toBe(true);
+
+    act(() => showAll?.click());
+    expect(activityList().length).toBe(8);
+    expect(
+      container.querySelector('[data-testid="workflow-activity-show-all"]'),
+    ).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+});

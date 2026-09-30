@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import type React from 'react';
 import { renderHook } from '@testing-library/react';

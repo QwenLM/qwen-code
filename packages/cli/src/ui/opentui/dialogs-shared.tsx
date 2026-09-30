@@ -21,6 +21,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { MouseButton } from '@opentui/core';
 import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
 import {
@@ -55,6 +56,26 @@ export function useDialogFrameKeys(handlers: {
 }
 
 /**
+ * Width ink gives every popup: the terminal minus the two-column margins the
+ * dialog wrapper adds, capped at 100 so wide terminals keep a readable measure
+ * instead of stretching bordered boxes edge to edge. The cap is what makes the
+ * border stop at column 97 rather than the last column.
+ */
+export function dialogAreaWidth(terminalWidth: number): number {
+  return Math.min(terminalWidth - 4, 100);
+}
+
+/**
+ * Columns available inside a `DialogFrame` at the given terminal width: the
+ * popup area minus one column of border and one of padding on each side. A
+ * full-width rule has to be spelled out to this many characters because
+ * OpenTUI has no single-sided border to draw one with.
+ */
+export function dialogContentWidth(terminalWidth: number): number {
+  return Math.max(0, dialogAreaWidth(terminalWidth) - 4);
+}
+
+/**
  * Dialog frame matching the ink dialogs' chrome: `borderStyle="round"` +
  * padding 1 (OpenTUI spells the rounded border style "rounded").
  */
@@ -66,7 +87,7 @@ export function DialogFrame(props: {
     <box
       flexDirection="column"
       borderStyle="rounded"
-      borderColor={props.borderColor ?? C.dim}
+      borderColor={props.borderColor ?? C.borderDefault}
       padding={1}
     >
       {props.children}
@@ -140,6 +161,8 @@ export interface UseDialogSelectOptions<TItem extends DialogListItem<unknown>> {
 
 export interface UseDialogSelectResult<TItem extends DialogListItem<unknown>> {
   activeIndex: number;
+  /** The highlight as the current key/wheel burst sees it. */
+  activeIndexRef: Readonly<{ current: number }>;
   scrollOffset: number;
   setScrollOffset: (offset: number) => void;
   setActiveIndex: (index: number) => void;
@@ -170,9 +193,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     onHighlight,
   } = options;
 
-  const [activeIndex, setActiveIndexState] = useState(() =>
-    computeInitialActiveIndex(initialIndex, items),
-  );
+  const {
+    cursor: activeIndex,
+    cursorRef,
+    setCursor: moveCursor,
+  } = useBatchSafeCursor(() => computeInitialActiveIndex(initialIndex, items));
   const [scrollOffset, setScrollOffset] = useState(() =>
     getSelectionScrollOffset(
       computeInitialActiveIndex(initialIndex, items),
@@ -183,6 +208,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
 
   const numberBuffer = useRef('');
   const numberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Last items array this hook synced its cursor against (see the items
+  // re-sync below). Declared before the resync block because a view swap
+  // must count as a sync too.
+  const itemsRef = useRef(items);
 
   // Resync during render when the key changes (React's adjust-state-during-
   // render pattern): consumers that swap views over one mounted hook get
@@ -197,8 +227,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       numberTimer.current = null;
     }
     numberBuffer.current = '';
+    // The swapped-in items are already accounted for by this reset; the
+    // key-follow below must not override it with the previous view's key.
+    itemsRef.current = items;
     const next = computeInitialActiveIndex(initialIndex, items);
-    setActiveIndexState(next);
+    moveCursor(next);
     setScrollOffset(
       getSelectionScrollOffset(next, items.length, maxItemsToShow),
     );
@@ -209,6 +242,32 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // double-invokes them) and React re-renders keep the ref current.
   const latestRef = useRef({ items, activeIndex, onSelect });
   latestRef.current = { items, activeIndex, onSelect };
+
+  // Ink parity: useSelectionList re-runs its INITIALIZE reducer on every
+  // items change — the cursor follows the active item's key when it
+  // survives the change and falls back to the initial index otherwise, so
+  // a shrinking list (uninstalling the last extension) never strands the
+  // cursor beyond the end where Enter would read items[activeIndex] ===
+  // undefined.
+  if (itemsRef.current !== items) {
+    const prevItems = itemsRef.current;
+    itemsRef.current = items;
+    const prevKey = prevItems[activeIndex]?.key;
+    const followed =
+      prevKey === undefined
+        ? -1
+        : items.findIndex((item) => item.key === prevKey);
+    if (followed !== activeIndex) {
+      const next =
+        followed >= 0
+          ? followed
+          : computeInitialActiveIndex(initialIndex, items);
+      moveCursor(next);
+      setScrollOffset(
+        getSelectionScrollOffset(next, items.length, maxItemsToShow),
+      );
+    }
+  }
 
   useEffect(
     () => () => {
@@ -238,9 +297,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   };
 
   const highlightIndex = (index: number) => {
-    if (index < 0 || index >= items.length || index === activeIndex) return;
+    if (index < 0 || index >= items.length || index === cursorRef.current) {
+      return;
+    }
     if (items[index]?.disabled) return;
-    setActiveIndexState(index);
+    moveCursor(index);
     const item = items[index];
     if (item) onHighlight?.(item.value, index);
   };
@@ -249,12 +310,14 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // like wheel/hover navigation step one row per gesture, and rejecting
   // disabled targets would leave them permanently stuck on a disabled row.
   const setActiveIndex = (index: number) => {
-    if (index < 0 || index >= items.length || index === activeIndex) return;
+    if (index < 0 || index >= items.length || index === cursorRef.current) {
+      return;
+    }
     // Moving the highlight by any means (wheel, hover) invalidates a
     // pending numeric flush: the flush must commit the typed row, not
     // wherever the pointer happened to land.
     clearNumberBuffer();
-    setActiveIndexState(index);
+    moveCursor(index);
     const item = items[index];
     if (item) onHighlight?.(item.value, index);
   };
@@ -268,7 +331,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     // ink dispatches SET_ACTIVE_INDEX before SELECT_CURRENT, so highlight
     // consumers (theme preview, scope selection) stay synced on mouse input
     // too, not just keyboard input.
-    setActiveIndexState(index);
+    moveCursor(index);
     onHighlight?.(item.value, index);
     onSelect?.(item.value);
   };
@@ -292,13 +355,13 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       );
       numberBuffer.current = result.buffer;
       if (result.activeIndex !== undefined) {
-        setActiveIndexState(result.activeIndex);
+        moveCursor(result.activeIndex);
         const item = items[result.activeIndex];
         if (item) onHighlight?.(item.value, result.activeIndex);
       }
       if (result.selectNow) {
         clearNumberBuffer();
-        const item = items[result.activeIndex ?? activeIndex];
+        const item = items[result.activeIndex ?? cursorRef.current];
         if (item && !item.disabled) onSelect?.(item.value);
       } else if (result.pendingSelect) {
         numberTimer.current = setTimeout(() => {
@@ -318,21 +381,24 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     clearNumberBuffer();
 
     if (keyMatchers[Command.SELECTION_UP](original)) {
-      highlightIndex(findNextEnabledIndex(items, activeIndex, 'up'));
+      highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'up'));
       return;
     }
     if (keyMatchers[Command.SELECTION_DOWN](original)) {
-      highlightIndex(findNextEnabledIndex(items, activeIndex, 'down'));
+      highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'down'));
       return;
     }
     if (original.name === 'return') {
-      const item = items[activeIndex];
+      const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }
   });
 
   return {
     activeIndex,
+    // Handlers of a key or wheel burst read the live index, not the one this
+    // render captured.
+    activeIndexRef: cursorRef,
     scrollOffset,
     setScrollOffset,
     setActiveIndex,

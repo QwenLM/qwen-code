@@ -5,7 +5,10 @@
  */
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   checkArgumentSafety,
   checkCommandPermissions,
@@ -744,6 +747,33 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
 
+  // Bash treats these as ordinary word characters, so at the edge of a command
+  // they are part of the last word — for `echo x >\u00a0` the redirection
+  // target — and trimming them off discards it (#11865).
+  it('should keep edge characters bash does not treat as whitespace', async () => {
+    expect(stripShellWrapper('echo x >\u00a0')).toEqual('echo x >\u00a0');
+    expect(stripShellWrapper('echo x >\v')).toEqual('echo x >\v');
+    expect(stripShellWrapper('echo x >\f')).toEqual('echo x >\f');
+  });
+
+  it('should still trim plain whitespace and CRLF at the edges', async () => {
+    expect(stripShellWrapper('  echo x  ')).toEqual('echo x');
+    expect(stripShellWrapper('echo x\r\n')).toEqual('echo x');
+  });
+
+  // The `$`-anchored `g` regex this replaced retried its end-anchored
+  // alternative at every index, which is quadratic inside an *interior*
+  // whitespace run: ~3.2 s at 64 k characters, synchronously, on
+  // model-controlled input, in the permission gate. The two-pointer trim is
+  // linear; 500 ms is orders of magnitude above its cost and far below the
+  // regex's.
+  it('should trim a long interior whitespace run in linear time', async () => {
+    const command = `echo x${' '.repeat(64_000)}&& rm -rf /tmp/x`;
+    const started = Date.now();
+    expect(stripShellWrapper(command)).toEqual(command);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it('should strip absolute-path wrapper /bin/bash -c', async () => {
     expect(stripShellWrapper("/bin/bash -c 'sleep 5'")).toEqual('sleep 5');
     expect(stripShellWrapper('/usr/bin/zsh -c "ls -l"')).toEqual('ls -l');
@@ -1430,6 +1460,38 @@ describe('checkArgumentSafety', () => {
 // `bash -c`) — was untested. Without coverage, removing the
 // `|| detectCommandSubstitution(rawCommand)` clause would not regress
 // any test in this file.
+describe('buildOutsideWorkspaceWarning', () => {
+  it('names the directory as given when nothing resolves differently', () => {
+    expect(buildOutsideWorkspaceWarning('/elsewhere/project')).toBe(
+      'Runs outside the workspace in /elsewhere/project',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names where a symlinked directory really points',
+    async () => {
+      const { tmpdir } =
+        await vi.importActual<typeof import('node:os')>('node:os');
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(tmpdir(), 'outside-warning-')),
+      );
+      try {
+        const target = path.join(root, 'elsewhere');
+        const link = path.join(root, 'workspace', 'link-out');
+        fs.mkdirSync(target);
+        fs.mkdirSync(path.dirname(link));
+        fs.symlinkSync(target, link);
+
+        expect(buildOutsideWorkspaceWarning(link)).toBe(
+          `Runs outside the workspace in ${target} (via ${link})`,
+        );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe('buildShellExecWarnings', () => {
   it('returns undefined when neither stripped nor raw command has substitution', () => {
     expect(

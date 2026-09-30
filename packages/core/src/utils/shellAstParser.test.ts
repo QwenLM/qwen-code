@@ -510,7 +510,21 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 
 describe('classifyShellCommandSafety', () => {
-  const maxClassificationCpuMs = 1000;
+  // Budget for `process.cpuUsage()`, which is process-wide: it sums user +
+  // system across every thread for the window, so V8's background GC and JIT
+  // threads and the parser runtime's own threads are charged to it alongside
+  // the work under test. Measured against the built package on an idle
+  // machine, that reports 2.1-3.1x the wall time of the same commands -- 2.1x
+  // even when they run sequentially, so the inflation is the accounting, not
+  // the `Promise.all` fan-out below. The 1000 this replaces was a wall-clock
+  // number carried over unchanged when the metric changed, which put it below
+  // the floor of what a healthy run reports: ~270 ms here, 1232-1361 ms on
+  // GitHub-hosted runners.
+  //
+  // These tests guard against catastrophic backtracking on 10k-repetition
+  // adversarial inputs, which costs orders of magnitude rather than a small
+  // multiple, so the headroom below does not blunt them.
+  const maxClassificationCpuMs = 4000;
 
   it.each([
     'ls -la',
@@ -544,6 +558,8 @@ describe('classifyShellCommandSafety', () => {
     "sed 's/hello/world/' file",
     "sed 's/error/warning/g' file",
     "sed -n '/needle/p' file",
+    "sed --quiet 's/a/b/' file",
+    "sed --silent 's/a/b/' file",
     "sed '/pattern/d' file",
     "sed 's/a/woutput/' file",
     "sed 's#x#s/a/b/woutput#' file",
@@ -649,6 +665,8 @@ describe('classifyShellCommandSafety', () => {
     "sed -ni.bak 's/a/b/' file",
     "sed -nI.bak 's/a/b/' file",
     "sed 's/a/b/w output' file",
+    "sed --quiet 'w output' file",
+    "sed --silent 'w output' file",
     "sed -e 's/a/b/' -e 'woutput' file",
     "sed 's/a/b/woutput' file",
     "sed 'woutput' file",

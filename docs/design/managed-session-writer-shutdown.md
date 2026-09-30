@@ -1,5 +1,16 @@
 # Managed session writer shutdown
 
+> **Conversations-runtime update (2026-09-06):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> is implemented by [#10924](https://github.com/QwenLM/qwen-code/pull/10924)'s
+> mandatory writer fences and [#11207](https://github.com/QwenLM/qwen-code/pull/11207)'s
+> global-owner cutover. Conversations ACP writers and standalone lifecycle
+> operations select the hardened local reclaim policy. This supersedes the
+> no-SIGKILL-recovery rule only for a well-formed active record proved stale in
+> the same local identity domain, including the same boot and PID namespace on
+> Linux. Certified sealed handoff remains unchanged; foreign, identity-less,
+> transition, and uncertain active states remain fenced.
+
 ## Problem
 
 A managed `qwen serve` replacement can start on a new hostname while the

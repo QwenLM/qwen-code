@@ -16,6 +16,7 @@ import {
   BlocksIcon,
   CopyIcon,
   EllipsisVerticalIcon,
+  FolderOpenIcon,
   GitForkIcon,
   PencilIcon,
   PlugIcon,
@@ -24,6 +25,7 @@ import {
   SettingsIcon,
   SparklesIcon,
   SquarePenIcon,
+  TerminalIcon,
   Trash2Icon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -36,8 +38,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
-import { formatOverviewValue } from './WorkspaceOverview';
 import {
+  formatOverviewValue,
   type WorkspaceManagementTarget,
   type WorkspaceOverviewSnapshot,
 } from './workspaceOverviewModel';
@@ -50,6 +52,8 @@ import {
 export interface WorkspaceMenuActions {
   rename?: () => void;
   copyPath?: () => void;
+  openFolder?: () => void;
+  openTerminal?: () => void;
   newSession?: () => void;
   newWorktreeSession?: () => void;
   openManagement?: (target: WorkspaceManagementTarget) => void;
@@ -130,6 +134,22 @@ export function WorkspaceMenu({
       <DropdownMenuItem key="copy" onSelect={actions.copyPath}>
         <CopyIcon />
         {t('sidebar.copyWorkspacePath')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.openFolder) {
+    primary.push(
+      <DropdownMenuItem key="open-folder" onSelect={actions.openFolder}>
+        <FolderOpenIcon />
+        {t('sidebar.openWorkspaceFolder')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.openTerminal) {
+    primary.push(
+      <DropdownMenuItem key="open-terminal" onSelect={actions.openTerminal}>
+        <TerminalIcon />
+        {t('sidebar.openWorkspaceTerminal')}
       </DropdownMenuItem>,
     );
   }

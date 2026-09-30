@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookExecutionOwner } from '../hooks/hook-execution-context.js';
+
 import { randomUUID } from 'node:crypto';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
@@ -21,7 +23,8 @@ import {
 /**
  * Ceiling on how long {@link MessageDisplayDispatcher.finish} waits for the
  * final payload's delivery to complete before letting the turn's teardown
- * proceed anyway. Well short of `DEFAULT_HOOK_TIMEOUT` (60s, hookRunner.ts)
+ * proceed anyway. Well short of the 60s default command hook timeout
+ * (`DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS` in hooks/hook-timeout.ts)
  * because a slow or hung MessageDisplay hook shouldn't be able to freeze
  * `qwen -p` or an ACP stream loop's `finally` for anywhere near that long.
  * The budget is shared across finish() calls (client.ts calls it from an
@@ -92,6 +95,7 @@ export class MessageDisplayDispatcher {
     private readonly signal: AbortSignal,
     private readonly warn: (message: string) => void,
     nowMs: number = Date.now(),
+    private readonly owner?: HookExecutionOwner,
   ) {
     this.state = createInitialMessageDisplayState(nowMs);
   }
@@ -164,6 +168,7 @@ export class MessageDisplayDispatcher {
       .request<HookExecutionRequest, HookExecutionResponse>(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          owner: this.owner,
           eventName: 'MessageDisplay',
           input: {
             message_id: this.messageId,

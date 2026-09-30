@@ -52,15 +52,20 @@ interface CreateServeFeaturesDeps {
   channelManagementAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  agentCollaborationEnabled: () => boolean;
   dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
   realtimeVoiceEnabled: () => boolean;
+  realtimeVoiceWebEnabled?: () => boolean;
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable: () => boolean;
+  workspaceRuntimeStopAvailable?: () => boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
@@ -90,15 +95,20 @@ export function createServeFeatures(
     channelManagementAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    agentCollaborationEnabled,
     dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
     realtimeVoiceEnabled,
+    realtimeVoiceWebEnabled,
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
+    workspaceRuntimeStopAvailable,
+    localPathOpenAvailable,
+    localTerminalOpenAvailable,
     workspaceTrustHotReloadAvailable,
   } = deps;
   const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
@@ -125,6 +135,7 @@ export function createServeFeatures(
       const currentAcpHttpEnabled =
         acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
       return getAdvertisedServeFeatures(undefined, {
+        hostedHarness: opts.profile === 'hosted-harness',
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:
@@ -147,6 +158,7 @@ export function createServeFeatures(
         channelControlAvailable,
         channelManagementAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        agentCollaborationEnabled: agentCollaborationEnabled(),
         dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
         scratchWorkspaceRegistrationAvailable:
@@ -154,9 +166,14 @@ export function createServeFeatures(
         workspaceRuntimeRemovalAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
+        workspaceRuntimeStopAvailable:
+          workspaceRuntimeStopAvailable?.() === true,
+        localPathOpenAvailable,
+        localTerminalOpenAvailable,
         workspaceTrustHotReloadAvailable,
         acpHttpEnabled: currentAcpHttpEnabled,
         realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        realtimeVoiceWebEnabled: realtimeVoiceWebEnabled?.() === true,
         standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,

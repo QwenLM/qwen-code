@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SessionStartupConfigError } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import express, { type RequestHandler } from 'express';
 import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,6 +27,13 @@ function createHarness({
   isWorkspaceTrusted?: () => boolean;
 } = {}) {
   const service = {
+    getOptions: vi.fn(async () => ({
+      v: 1 as const,
+      initialized: true,
+      current: { authType: 'openai', modelId: 'qwen-test' },
+      approvalMode: 'default' as const,
+      providers: [],
+    })),
     create: vi.fn(async () => ({
       session: {
         sessionId,
@@ -101,6 +109,86 @@ function createHarness({
 
 describe('standalone session routes', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it('forwards startup selection and rejects malformed or conflicting selection before create', async () => {
+    const { app, service } = createHarness();
+    const startupConfig = {
+      modelServiceId: 'gpt-5.4(openai)',
+      reasoningEffort: 'high',
+    };
+    await request(app)
+      .post('/standalone/sessions')
+      .send({ sessionId, startupConfig })
+      .expect(200);
+    expect(service.create).toHaveBeenCalledWith({ sessionId, startupConfig });
+    service.create.mockClear();
+    for (const body of [
+      { sessionId, startupConfig: {} },
+      { sessionId, startupConfig: { modelServiceId: 'x'.repeat(257) } },
+      { sessionId, startupConfig, modelServiceId: 'legacy' },
+      { sessionId, startupConfig: { ...startupConfig, extra: true } },
+    ]) {
+      const response = await request(app)
+        .post('/standalone/sessions')
+        .send(body)
+        .expect(400);
+      expect(response.body.code).toBe('invalid_startup_config');
+    }
+    expect(service.create).not.toHaveBeenCalled();
+  });
+
+  it('returns 422 for a definite startup selection rejection', async () => {
+    const { app, service } = createHarness();
+    service.create.mockRejectedValueOnce(
+      new SessionStartupConfigError(
+        'startup_config_rejected',
+        'unsupported effort',
+      ),
+    );
+    const response = await request(app)
+      .post('/standalone/sessions')
+      .send({
+        sessionId,
+        startupConfig: { modelServiceId: 'm', reasoningEffort: 'high' },
+      })
+      .expect(422);
+    expect(response.body).toMatchObject({
+      code: 'startup_config_rejected',
+      error: 'unsupported effort',
+    });
+  });
+
+  it('rejects invalid standalone compacted replay mode', async () => {
+    const { app, service } = createHarness();
+    const response = await request(app)
+      .post(`/standalone/sessions/${sessionId}/load`)
+      .send({ compactedReplayMode: 'invalid' });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_request');
+    expect(service.load).not.toHaveBeenCalled();
+  });
+
+  it('returns session options without accepting workspace inputs', async () => {
+    const { app, service } = createHarness();
+
+    const response = await request(app).get('/standalone/session-options');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      v: 1,
+      initialized: true,
+      current: { authType: 'openai', modelId: 'qwen-test' },
+      approvalMode: 'default',
+      providers: [],
+    });
+    expect(service.getOptions).toHaveBeenCalledOnce();
+
+    const invalid = await request(app).get(
+      '/standalone/session-options?cwd=/tmp',
+    );
+    expect(invalid.status).toBe(400);
+    expect(service.getOptions).toHaveBeenCalledOnce();
+  });
 
   it('creates a prompt-less standalone session without workspace inputs', async () => {
     const { app, service } = createHarness();
@@ -307,6 +395,7 @@ describe('standalone session routes', () => {
         .send({
           historyPageSize: 20,
           liveReplayMode: 'summary',
+          compactedReplayMode: 'summary',
           hideInheritedHistory: true,
         });
 
@@ -315,6 +404,7 @@ describe('standalone session routes', () => {
         clientId: 'client-1',
         historyPageSize: 20,
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
         hideInheritedHistory: true,
       });
 

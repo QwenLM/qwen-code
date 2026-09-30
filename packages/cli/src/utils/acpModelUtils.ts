@@ -14,6 +14,30 @@ import { z } from 'zod';
 
 export const ACP_ROUTE_ID_PREFIX = 'qwen-route:v1:';
 
+export function publicProviderBaseUrl(baseUrl: string): string | undefined {
+  if (!/^https?:\/\//i.test(baseUrl.trim())) return undefined;
+  try {
+    const url = new URL(baseUrl);
+    // Clearing the four fields below does not touch `pathname`, so a second
+    // authority folded into the path survives all of them and `url.href`
+    // re-emits it verbatim: `https://gw/v1/https://user:sk@other/v1` reads
+    // empty on username, password, search and hash while the credential is
+    // still in the returned string. Enumerating the join characters does not
+    // converge — a plain `/` needs no folding at all, and `;` and `{` behave
+    // differently only by accident of percent-encoding — so reject the shape
+    // rather than list it. A legitimate provider endpoint never carries a
+    // second scheme in its path.
+    if (/:\/\//.test(url.pathname)) return undefined;
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
 function getRouteEndpointIdentity(baseUrl: string | undefined): string | null {
   if (!baseUrl) return null;
   try {

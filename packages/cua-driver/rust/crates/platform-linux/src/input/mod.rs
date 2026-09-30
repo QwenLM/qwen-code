@@ -959,6 +959,28 @@ fn ewmh_activate_window(
     }
 }
 
+fn prepare_x11_focus(display: *mut x11::xlib::Display, target: x11::xlib::Window) {
+    let active = ewmh_active_window(display);
+    if active != Some(target) {
+        ewmh_activate_window(display, target, active.unwrap_or(0));
+    }
+    // Preserve widget-local X focus when it already belongs to the target.
+    // Focusing its toplevel instead can route keys away from that widget.
+    if !x11_focus_is_within(display, target) {
+        unsafe {
+            let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+            x11::xlib::XSetInputFocus(
+                display,
+                target,
+                x11::xlib::RevertToParent,
+                x11::xlib::CurrentTime,
+            );
+            x11::xlib::XSync(display, 0);
+            x11::xlib::XSetErrorHandler(previous_handler);
+        }
+    }
+}
+
 /// Foreground rung for X11 (`delivery_mode:"foreground"`): briefly activate
 /// `xid` via EWMH `_NET_ACTIVE_WINDOW`, run `body` (which injects the input
 /// while the window holds focus), then restore the prior active window. The
@@ -972,6 +994,7 @@ fn ewmh_activate_window(
 /// `XSetInputFocus` return is not evidence that global XTest input is safe.
 /// `settle_ms` is retained as a compatibility hint and folded into the bounded
 /// confirmation timeout; it is no longer an unconditional sleep.
+/// If the target already holds focus, keep focus changes made by the action.
 pub fn with_x11_foreground<T>(
     xid: u64,
     settle_ms: u64,
@@ -987,33 +1010,16 @@ pub fn with_x11_foreground<T>(
     unsafe {
         x11::xlib::XGetInputFocus(display, &mut prior_core_focus, &mut prior_revert);
     }
-    ewmh_activate_window(display, xid as x11::xlib::Window, prior.unwrap_or(0));
-    unsafe {
-        x11::xlib::XSync(display, 0);
-    }
-    // EWMH `_NET_ACTIVE_WINDOW` is honored as *raise-only* by WMs with
-    // focus-stealing prevention (e.g. KWin): the window reaches the top of the
-    // stack — enough for a coordinate click, which lands by stacking — but the X
-    // *input focus* never transfers, so XTest key events (which the server routes
-    // to the focused window) go to whatever was focused before. Set the input
-    // focus explicitly too, exactly as `xdotool windowactivate` does, so the
-    // foreground key/hotkey rung actually reaches the target. Guarded against
-    // BadMatch on a not-yet-viewable window — Xlib's default handler would exit
-    // the process — reusing the scoped `ignore_x_error` pattern used elsewhere.
-    unsafe {
-        let prev_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
-        x11::xlib::XSetInputFocus(
-            display,
-            xid as x11::xlib::Window,
-            x11::xlib::RevertToParent,
-            x11::xlib::CurrentTime,
-        );
-        x11::xlib::XSync(display, 0);
-        x11::xlib::XSetErrorHandler(prev_handler);
-    }
-    let timeout = std::time::Duration::from_millis(settle_ms.max(400));
-    let deadline = std::time::Instant::now() + timeout;
+    let timeout = std::time::Duration::from_millis(settle_ms.max(1000));
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
+    let retry_at = started + timeout / 2;
+    let mut retried = false;
     let target = xid as x11::xlib::Window;
+    let target_pid = crate::x11::window_owner_pid(xid);
+    let target_owner = x11_transient_owner(display, target);
+    let restore_focus = prior != Some(target) || !x11_focus_is_within(display, target);
+    prepare_x11_focus(display, target);
     let focused = loop {
         let active = ewmh_active_window(display) == Some(target);
         if active && x11_focus_is_within(display, target) {
@@ -1021,6 +1027,12 @@ pub fn with_x11_foreground<T>(
         }
         if std::time::Instant::now() >= deadline {
             break false;
+        }
+        // Only preparation is retried. The input callback still runs at most
+        // once, even when it fails after dispatching part of an action.
+        if !retried && std::time::Instant::now() >= retry_at {
+            retried = true;
+            prepare_x11_focus(display, target);
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
@@ -1035,27 +1047,106 @@ pub fn with_x11_foreground<T>(
         ))
     };
 
-    // Restore both the EWMH active toplevel and the exact prior core focus.
-    if let Some(p) = prior {
-        ewmh_activate_window(display, p, xid as x11::xlib::Window);
-    }
-    if prior_core_focus != 0 {
-        unsafe {
-            let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
-            x11::xlib::XSetInputFocus(
-                display,
-                prior_core_focus,
-                prior_revert,
-                x11::xlib::CurrentTime,
-            );
-            x11::xlib::XSync(display, 0);
-            x11::xlib::XSetErrorHandler(previous_handler);
+    let restored = (|| -> Result<()> {
+        if !focused && prior_core_focus != 0 && x11_focus_is_within(display, target) {
+            restore_x11_core_focus(display, prior_core_focus, prior_revert);
         }
-    }
+        if !restore_focus {
+            return Ok(());
+        }
+        let Some(prior) = prior else {
+            return Ok(());
+        };
+        let current = ewmh_active_window(display);
+        if current == Some(prior) && x11_focus_is_within(display, prior) {
+            return Ok(());
+        }
+        let owned = current.is_some_and(|active| {
+            active == target
+                || Some(active) == target_owner
+                || x11_transient_reaches(display, active, target)
+        });
+        if !owned {
+            if target_pid.is_some() && current.and_then(crate::x11::window_owner_pid) == target_pid
+            {
+                bail!("focus_restore_unconfirmed: another window of the app took focus; input may have been dispatched; observe before retrying");
+            }
+            return Ok(());
+        }
+        ewmh_activate_window(display, prior, target);
+        let restore_deadline = std::time::Instant::now() + timeout;
+        loop {
+            let active = ewmh_active_window(display);
+            if active == Some(prior) && x11_focus_is_within(display, prior) {
+                break;
+            }
+            if active.is_some_and(|active| {
+                active != prior
+                    && active != target
+                    && Some(active) != target_owner
+                    && !x11_transient_reaches(display, active, target)
+            }) {
+                if target_pid.is_some()
+                    && active.and_then(crate::x11::window_owner_pid) == target_pid
+                {
+                    bail!("focus_restore_unconfirmed: another window of the app took focus; input may have been dispatched; observe before retrying");
+                }
+                return Ok(());
+            }
+            if std::time::Instant::now() >= restore_deadline {
+                bail!("focus_restore_failed: input may have been dispatched; observe the app before retrying");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if prior_core_focus != 0 && ewmh_active_window(display) == Some(prior) {
+            restore_x11_core_focus(display, prior_core_focus, prior_revert);
+        }
+        Ok(())
+    })();
     unsafe {
         x11::xlib::XCloseDisplay(display);
     }
-    result
+    result.and_then(|value| restored.map(|()| value))
+}
+
+fn restore_x11_core_focus(display: *mut x11::xlib::Display, focus: x11::xlib::Window, revert: i32) {
+    unsafe {
+        let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+        x11::xlib::XSetInputFocus(display, focus, revert, x11::xlib::CurrentTime);
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+    }
+}
+
+fn x11_transient_owner(
+    display: *mut x11::xlib::Display,
+    window: x11::xlib::Window,
+) -> Option<x11::xlib::Window> {
+    unsafe {
+        let previous_handler = x11::xlib::XSetErrorHandler(Some(ignore_x_error));
+        let mut owner = 0;
+        let status = x11::xlib::XGetTransientForHint(display, window, &mut owner);
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
+        (status != 0 && owner != 0 && owner != window).then_some(owner)
+    }
+}
+
+fn x11_transient_reaches(
+    display: *mut x11::xlib::Display,
+    mut window: x11::xlib::Window,
+    target: x11::xlib::Window,
+) -> bool {
+    for _ in 0..32 {
+        let Some(owner) = x11_transient_owner(display, window) else {
+            return false;
+        };
+        if owner == target {
+            return true;
+        }
+        window = owner;
+    }
+    false
 }
 
 fn x11_focus_is_within(display: *mut x11::xlib::Display, target: x11::xlib::Window) -> bool {

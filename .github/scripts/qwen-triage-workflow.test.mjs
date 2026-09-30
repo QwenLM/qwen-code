@@ -33,7 +33,7 @@ const cacheProducerPath = join(
   dirname(fileURLToPath(import.meta.url)),
   '..',
   'workflows',
-  'npm-cache.yml',
+  'pnpm-store.yml',
 );
 const cacheProducerDoc = parse(readFileSync(cacheProducerPath, 'utf8'));
 const prWorkflowPath = join(
@@ -110,6 +110,10 @@ const ciWebShellOwnershipStep = ciWebShellJob.steps.find(
 );
 const ciIntegrationJob = ciDoc.jobs.integration_cli;
 const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
+const ciLintJob = ciDoc.jobs.lint_and_static;
+const ciLintOwnershipStep = ciLintJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
 
@@ -371,7 +375,10 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     // included. The step must therefore truncate all four after the agent,
     // on every exit path.
     const statusIdx = run.indexOf('status=$?');
-    assert.ok(statusIdx > -1, 'the run block must capture the qwen exit status');
+    assert.ok(
+      statusIdx > -1,
+      'the run block must capture the qwen exit status',
+    );
     for (const file of [
       'GITHUB_ENV',
       'GITHUB_PATH',
@@ -380,7 +387,10 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     ]) {
       const trunc = `: > "\${${file}:?}" || true`;
       const idx = run.indexOf(trunc);
-      assert.ok(idx > -1, `${file} must be truncated after the qwen invocation`);
+      assert.ok(
+        idx > -1,
+        `${file} must be truncated after the qwen invocation`,
+      );
       assert.ok(
         idx > statusIdx,
         `${file} truncation must run on the exit path, after status=$?`,
@@ -400,7 +410,7 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       'the workspace settings removal must precede the qwen invocation',
     );
     assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
-    assert.ok(run.includes("printf '\\n::%s::\\n' \"$stop_token\""));
+    assert.ok(run.includes('printf \'\\n::%s::\\n\' "$stop_token"'));
     assert.ok(run.includes('--approval-mode yolo'));
     for (const key of Object.keys(resolveConflictsStep.env)) {
       assert.ok(
@@ -1024,6 +1034,18 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
     );
   });
 
+  it('lint_and_static restores ownership unconditionally', () => {
+    // The split copied the recovery prelude into the new lane; a
+    // poisoning-recovery edit landing only in this copy would leave every
+    // other pin green while the future required check fails checkout with
+    // EACCES on the next contaminated runner.
+    assertUnconditional(
+      ciLintJob.steps,
+      ciLintOwnershipStep,
+      'ci.yml lint_and_static',
+    );
+  });
+
   it('cleanup step removes .qwen but no longer any .stale.* dirs', () => {
     assert.ok(
       ciCleanStep,
@@ -1117,16 +1139,19 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
   });
 });
 
-describe('qwen-triage: npm cache restore-only invariant', () => {
+describe('qwen-triage: pnpm store restore-only invariant', () => {
   for (const [jobName, jobDef] of [
     ['verify', verifyJob],
     ['tmux-testing', tmuxJob],
   ]) {
     it(`${jobName}: uses actions/cache/restore with no save path`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
-      assert.ok(cacheStep, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        cacheStep,
+        `'Restore pnpm store' step must exist in ${jobName}`,
+      );
       assert.match(
         cacheStep.uses,
         /^actions\/cache\/restore@/,
@@ -1143,9 +1168,9 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       }
     });
 
-    it(`${jobName}: npm ci --cache matches the restored directory`, () => {
+    it(`${jobName}: pnpm install --store-dir matches the restored directory`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       const prepareStep = jobDef.steps.find(
         (s) => s.name === 'Install and build PR app',
@@ -1160,25 +1185,25 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       );
       assert.ok(dir, 'cache path must resolve to a directory name');
       assert.ok(
-        prepareStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
-        `npm ci must use --cache "$RUNNER_TEMP/${dir}"`,
+        prepareStep.run.includes(`--store-dir "$RUNNER_TEMP/${dir}"`),
+        `pnpm install must use --store-dir "$RUNNER_TEMP/${dir}"`,
       );
     });
 
-    it(`${jobName}: clears stale npm cache before restore`, () => {
+    it(`${jobName}: clears stale pnpm store before restore`, () => {
       const clearIdx = jobDef.steps.findIndex(
-        (s) => s.name === 'Clear stale npm cache',
+        (s) => s.name === 'Clear stale pnpm store',
       );
       const restoreIdx = jobDef.steps.findIndex(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.ok(
         clearIdx !== -1,
-        `'Clear stale npm cache' step must exist in ${jobName}`,
+        `'Clear stale pnpm store' step must exist in ${jobName}`,
       );
       assert.ok(
         restoreIdx !== -1,
-        `'Restore npm cache' step must exist in ${jobName}`,
+        `'Restore pnpm store' step must exist in ${jobName}`,
       );
       assert.ok(
         clearIdx < restoreIdx,
@@ -1190,7 +1215,7 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
         'clear step must rm -rf the cache directory',
       );
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       const dir = cacheStep.with.path.replace(
         /^\$\{\{\s*runner\.temp\s*\}\}\//,
@@ -1204,34 +1229,34 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
 
     it(`${jobName}: reports the cache hit so a permanent miss is visible`, () => {
       const cacheStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.equal(
         cacheStep.id,
-        'npm-cache',
+        'pnpm-store',
         'restore step needs an id so its cache-hit output is readable',
       );
       const reportStep = jobDef.steps.find(
-        (s) => s.name === 'Report npm cache hit',
+        (s) => s.name === 'Report pnpm store hit',
       );
-      assert.ok(reportStep, "'Report npm cache hit' step must exist");
+      assert.ok(reportStep, "'Report pnpm store hit' step must exist");
       assert.match(
         reportStep.run,
-        /steps\.npm-cache\.outputs\.cache-hit/,
+        /steps\.pnpm-store\.outputs\.cache-hit/,
         'report step must surface the cache-hit output',
       );
     });
   }
 });
 
-describe('qwen-triage: npm cache producer workflow', () => {
+describe('qwen-triage: pnpm store producer workflow', () => {
   const saveJob = cacheProducerDoc.jobs.save;
 
   it('triggers on push to main only', () => {
     const push = cacheProducerDoc.on.push ?? cacheProducerDoc[true]?.push;
     assert.ok(push, 'must have a push trigger');
     assert.deepEqual(push.branches, ['main']);
-    assert.deepEqual(push.paths, ['package-lock.json']);
+    assert.deepEqual(push.paths, ['pnpm-lock.yaml']);
   });
 
   it('saves with the same key and path the triage lanes restore', () => {
@@ -1244,7 +1269,7 @@ describe('qwen-triage: npm cache producer workflow', () => {
       ['tmux-testing', tmuxJob],
     ]) {
       const restoreStep = jobDef.steps.find(
-        (s) => s.name === 'Restore npm cache',
+        (s) => s.name === 'Restore pnpm store',
       );
       assert.equal(
         saveStep.with.path,
@@ -1270,12 +1295,12 @@ describe('qwen-triage: npm cache producer workflow', () => {
     );
     assert.ok(dir, 'save path must resolve to a directory name');
     const populateStep = saveJob.steps.find(
-      (s) => s.name === 'Populate npm cache',
+      (s) => s.name === 'Populate pnpm store',
     );
-    assert.ok(populateStep, "'Populate npm cache' step must exist");
+    assert.ok(populateStep, "'Populate pnpm store' step must exist");
     assert.ok(
-      populateStep.run.includes(`--cache "$RUNNER_TEMP/${dir}"`),
-      `populate step must fill the saved cache directory (--cache "$RUNNER_TEMP/${dir}")`,
+      populateStep.run.includes(`--store-dir "$RUNNER_TEMP/${dir}"`),
+      `populate step must fill the saved store directory (--store-dir "$RUNNER_TEMP/${dir}")`,
     );
   });
 
@@ -1428,13 +1453,24 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
       'the scrubbed child must copy the parent-recorded diff, never re-run git under env -i',
     );
-    const recordDiffAt = recordStep.run.search(/^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m);
+    const recordDiffAt = recordStep.run.search(
+      /^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m,
+    );
     const recordReExecAt = recordStep.run.search(/exec \/usr\/bin\/env -i/);
-    const recordCpAt = recordStep.run.search(/^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m);
-    const recordInstallAt = recordStep.run.search(/^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m);
+    const recordCpAt = recordStep.run.search(
+      /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
+    );
+    const recordInstallAt = recordStep.run.search(
+      /^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m,
+    );
     assert.ok(
-      recordDiffAt !== -1 && recordReExecAt !== -1 && recordCpAt !== -1 && recordInstallAt !== -1 &&
-        recordDiffAt < recordReExecAt && recordReExecAt < recordInstallAt && recordInstallAt < recordCpAt,
+      recordDiffAt !== -1 &&
+        recordReExecAt !== -1 &&
+        recordCpAt !== -1 &&
+        recordInstallAt !== -1 &&
+        recordDiffAt < recordReExecAt &&
+        recordReExecAt < recordInstallAt &&
+        recordInstallAt < recordCpAt,
       'the diff must be recorded in the parent arm before the env -i re-exec, and copied into the recreated root-only home',
     );
     // The scrubbed child must never re-run git under env -i: the ordering
@@ -1442,7 +1478,10 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // second git in the child. Strip comments first (the child's own docs
     // name `git diff` when describing what NOT to do) before asserting.
     assert.doesNotMatch(
-      recordStep.run.slice(recordReExecAt).replace(/^\s*#.*$/gm, '').replace(/\\\n/g, ' '),
+      recordStep.run
+        .slice(recordReExecAt)
+        .replace(/^\s*#.*$/gm, '')
+        .replace(/\\\n/g, ' '),
       /\bgit\b[^\n]*\b(diff|log|show|whatchanged)\b/,
       'the scrubbed child must never re-run git under env -i — that is the failure shape of run 32227155960',
     );
@@ -3846,12 +3885,19 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
           timeout: 30_000,
         },
       );
-      assert.equal(res.status, 0, `the gate refusal is fail-open: ${res.stderr}`);
+      assert.equal(
+        res.status,
+        0,
+        `the gate refusal is fail-open: ${res.stderr}`,
+      );
       const outputs = Object.fromEntries(
         readFileSync(out, 'utf8')
           .split('\n')
           .filter((l) => l.includes('='))
-          .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+          .map((l) => [
+            l.slice(0, l.indexOf('=')),
+            l.slice(l.indexOf('=') + 1),
+          ]),
       );
       assert.equal(outputs.flake_verdict, 'error');
       assert.match(
@@ -4218,7 +4264,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       undefined,
       'no verdict may be written on a poisoned startup',
     );
-    assert.equal(counts('a.test.js'), 0, 'no round may run on a poisoned startup');
+    assert.equal(
+      counts('a.test.js'),
+      0,
+      'no round may run on a poisoned startup',
+    );
   });
 
   it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — bash refuses it at startup', () => {
@@ -4246,7 +4296,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       undefined,
       'no verdict may be written on a poisoned startup',
     );
-    assert.equal(counts('a.test.js'), 0, 'the body must never run on a poisoned startup');
+    assert.equal(
+      counts('a.test.js'),
+      0,
+      'the body must never run on a poisoned startup',
+    );
   });
 
   it('a same-stem sibling (X.test.tsx next to changed X.test.ts) runs in ONE merged group, never attributed separately', () => {

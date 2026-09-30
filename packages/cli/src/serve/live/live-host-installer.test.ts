@@ -268,7 +268,10 @@ describe('LiveHostInstaller', () => {
   });
 
   it('launches an existing verified installation without downloading', async () => {
-    const inspectInstalled = vi.fn(async () => ({ version: '0.1.0' }));
+    const inspectInstalled = vi.fn(async () => ({
+      version: '0.1.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    }));
     const installLatest = vi.fn();
     const launch = vi.fn(async () => {});
     const installer = new LiveHostInstaller({
@@ -287,15 +290,43 @@ describe('LiveHostInstaller', () => {
     expect(launch).toHaveBeenCalledOnce();
   });
 
+  it('replaces an installed Host with an incompatible protocol', async () => {
+    const installLatest = vi.fn(async () => ({
+      version: '0.2.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    }));
+    const installer = new LiveHostInstaller({
+      platform: 'darwin',
+      architecture: 'arm64',
+      inspectInstalled: async () => ({
+        version: '0.1.0',
+        protocolVersion: LIVE_HOST_PROTOCOL_VERSION - 1,
+      }),
+      installLatest,
+      launch: async () => {},
+    });
+
+    await expect(installer.ensureInstalled()).resolves.toEqual({
+      state: 'installed',
+      version: '0.2.0',
+    });
+    expect(installLatest).toHaveBeenCalledOnce();
+  });
+
   it('coalesces concurrent installs and exposes progress', async () => {
-    let finish: ((value: { version: string }) => void) | undefined;
+    let finish:
+      | ((value: { version: string; protocolVersion: number }) => void)
+      | undefined;
     const installLatest = vi.fn(
       async (
         _architecture: 'arm64' | 'x64',
         onStatus: (status: { state: 'downloading'; progress: number }) => void,
       ) => {
         onStatus({ state: 'downloading', progress: 0.5 });
-        return await new Promise<{ version: string }>((resolve) => {
+        return await new Promise<{
+          version: string;
+          protocolVersion: number;
+        }>((resolve) => {
           finish = resolve;
         });
       },
@@ -316,7 +347,10 @@ describe('LiveHostInstaller', () => {
         progress: 0.5,
       });
     });
-    finish?.({ version: '0.1.0' });
+    finish?.({
+      version: '0.1.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    });
     await expect(first).resolves.toMatchObject({ state: 'installed' });
     await expect(second).resolves.toMatchObject({ state: 'installed' });
     expect(installLatest).toHaveBeenCalledOnce();

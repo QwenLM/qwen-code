@@ -13,7 +13,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { RELEASE_TARGETS } from './build-standalone-release.js';
-import { TARGETS } from './create-standalone-package.js';
+import { standaloneArchiveName } from './create-standalone-package.js';
 import {
   fail,
   isMainModule,
@@ -27,7 +27,9 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 const EXPECTED_STANDALONE_ARCHIVE_NAMES =
-  standaloneArchiveNamesFromReleaseTargets(RELEASE_TARGETS);
+  standaloneArchiveNamesFromReleaseTargets('node');
+const OPENTUI_PREVIEW_ARCHIVE_NAMES =
+  standaloneArchiveNamesFromReleaseTargets('bun');
 // Release artifacts that the installer chain expects in a GitHub Release.
 // Hosted installer scripts are served from a separate endpoint and are
 // intentionally not part of this set; they have their own staging path in
@@ -38,19 +40,30 @@ const EXPECTED_RELEASE_ASSET_NAMES = [
 ];
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 
-// Mirrors `build-standalone-release.js`'s archive-name derivation. The two
-// must stay aligned: any new platform/extension landing in RELEASE_TARGETS
-// has to be reflected here (and there) before a new target ships, otherwise
+// Mirrors `build-standalone-release.js`'s archive-name derivation via the
+// shared standaloneArchiveName() helper. Release targets and flavors must stay
+// aligned across the two scripts: any new platform/extension or preview flavor
+// landing there has to be reflected here before a new target ships, otherwise
 // the verify and the build will disagree on expected filenames.
-function standaloneArchiveNamesFromReleaseTargets(releaseTargets) {
-  return releaseTargets.map(({ qwenTarget }) =>
-    standaloneArchiveName(qwenTarget),
+function standaloneArchiveNamesFromReleaseTargets(runtime) {
+  return RELEASE_TARGETS.map(({ qwenTarget }) =>
+    standaloneArchiveName(qwenTarget, runtime),
   );
+}
+
+function standaloneArchiveNames({ includeOpentuiPreview = false } = {}) {
+  return includeOpentuiPreview
+    ? [...EXPECTED_STANDALONE_ARCHIVE_NAMES, ...OPENTUI_PREVIEW_ARCHIVE_NAMES]
+    : EXPECTED_STANDALONE_ARCHIVE_NAMES;
 }
 
 const ARG_DEFS = {
   '--dir': { key: 'dir', type: 'value' },
   '--base-url': { key: 'baseUrl', type: 'value' },
+  '--include-opentui-preview': {
+    key: 'includeOpentuiPreview',
+    type: 'flag',
+  },
   '--list-release-asset-paths': {
     key: 'listReleaseAssetPaths',
     type: 'flag',
@@ -78,22 +91,24 @@ async function main() {
   if (args.listReleaseAssetPaths && args.baseUrl) {
     fail('Pass --list-release-asset-paths with --dir, not --base-url.');
   }
+  const archiveNames = standaloneArchiveNames(args);
   if (args.listReleaseAssetPaths) {
     const dir = path.resolve(
       args.dir || path.join(rootDir, 'dist', 'standalone'),
     );
-    await verifyReleaseDirectory(dir, { silent: true });
-    for (const assetPath of releaseAssetPaths(dir)) {
+    await verifyReleaseDirectory(dir, { silent: true, archiveNames });
+    for (const assetPath of releaseAssetPaths(dir, archiveNames)) {
       console.log(assetPath);
     }
     return;
   }
   if (args.baseUrl) {
-    await verifyReleaseBaseUrl(args.baseUrl);
+    await verifyReleaseBaseUrl(args.baseUrl, { archiveNames });
     return;
   }
   await verifyReleaseDirectory(
     path.resolve(args.dir || path.join(rootDir, 'dist', 'standalone')),
+    { archiveNames },
   );
 }
 
@@ -108,6 +123,9 @@ Options:
   --dir PATH         Verify a local release directory. Defaults to dist/standalone.
   --base-url URL     Verify a remote release URL (e.g. a GitHub release download
                      prefix). Cannot be combined with --dir.
+  --include-opentui-preview
+                     Also expect the bun/OpenTUI preview archives
+                     (qwen-code-*-opentui-preview.*) in the release.
   --list-release-asset-paths
                      Verify --dir, then print explicit asset paths for upload.
   -h, --help         Show this help message.
@@ -115,19 +133,21 @@ Options:
 }
 
 async function verifyReleaseDirectory(dir, options = {}) {
-  const { silent = false } = options;
+  const { silent = false, archiveNames = EXPECTED_STANDALONE_ARCHIVE_NAMES } =
+    options;
+  const assetNames = [...archiveNames, 'SHA256SUMS'];
   const checksums = readReleaseChecksums(dir);
-  assertExpectedChecksumEntries(checksums);
+  assertExpectedChecksumEntries(checksums, archiveNames);
 
   const unexpected = fs
     .readdirSync(dir)
-    .filter((fileName) => !EXPECTED_RELEASE_ASSET_NAMES.includes(fileName))
+    .filter((fileName) => !assetNames.includes(fileName))
     .sort();
   if (unexpected.length > 0) {
     fail(`Unexpected file(s) in release directory: ${unexpected.join(', ')}`);
   }
 
-  for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
+  for (const assetName of archiveNames) {
     const assetPath = path.join(dir, assetName);
     if (!fs.existsSync(assetPath)) {
       fail(`Missing release asset: ${assetName}`);
@@ -146,23 +166,31 @@ async function verifyReleaseDirectory(dir, options = {}) {
 
   if (!silent) {
     console.log(
-      `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets in ${dir}`,
+      `Verified ${assetNames.length} installation release assets in ${dir}`,
     );
   }
 }
 
 async function verifyReleaseBaseUrl(baseUrl, options = {}) {
-  const { fetchImpl = fetch } = options;
+  const {
+    fetchImpl = fetch,
+    archiveNames = EXPECTED_STANDALONE_ARCHIVE_NAMES,
+  } = options;
   const normalizedBaseUrl = normalizeHttpsBaseUrl(baseUrl);
   const displayBaseUrl = redactUrlForLog(normalizedBaseUrl);
   const checksumUrl = new URL('SHA256SUMS', normalizedBaseUrl).toString();
   const checksums = parseSha256Sums(await fetchText(checksumUrl, fetchImpl));
-  assertExpectedChecksumEntries(checksums);
+  assertExpectedChecksumEntries(checksums, archiveNames);
 
-  await assertRemoteAssetChecksums(normalizedBaseUrl, checksums, fetchImpl);
+  await assertRemoteAssetChecksums(
+    normalizedBaseUrl,
+    checksums,
+    archiveNames,
+    fetchImpl,
+  );
 
   console.log(
-    `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets at ${displayBaseUrl}`,
+    `Verified ${archiveNames.length + 1} installation release assets at ${displayBaseUrl}`,
   );
 }
 
@@ -178,9 +206,12 @@ function readReleaseChecksums(dir) {
   return parseSha256Sums(fs.readFileSync(checksumPath, 'utf8'));
 }
 
-function assertExpectedChecksumEntries(checksums) {
-  const expected = new Set(EXPECTED_STANDALONE_ARCHIVE_NAMES);
-  const missing = EXPECTED_STANDALONE_ARCHIVE_NAMES.filter(
+function assertExpectedChecksumEntries(
+  checksums,
+  expectedArchives = EXPECTED_STANDALONE_ARCHIVE_NAMES,
+) {
+  const expected = new Set(expectedArchives);
+  const missing = expectedArchives.filter(
     (assetName) => !checksums.has(assetName),
   );
   const extra = Array.from(checksums.keys()).filter(
@@ -195,8 +226,11 @@ function assertExpectedChecksumEntries(checksums) {
   }
 }
 
-function releaseAssetPaths(dir) {
-  return EXPECTED_RELEASE_ASSET_NAMES.map((assetName) =>
+function releaseAssetPaths(
+  dir,
+  archiveNames = EXPECTED_STANDALONE_ARCHIVE_NAMES,
+) {
+  return [...archiveNames, 'SHA256SUMS'].map((assetName) =>
     path.join(dir, assetName),
   );
 }
@@ -204,10 +238,11 @@ function releaseAssetPaths(dir) {
 async function assertRemoteAssetChecksums(
   normalizedBaseUrl,
   checksums,
+  archiveNames = EXPECTED_STANDALONE_ARCHIVE_NAMES,
   fetchImpl,
 ) {
   const failures = [];
-  for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
+  for (const assetName of archiveNames) {
     try {
       const assetUrl = new URL(assetName, normalizedBaseUrl).toString();
       const actual = await fetchSha256(assetUrl, fetchImpl);
@@ -228,7 +263,7 @@ async function assertRemoteAssetChecksums(
   if (failures.length === 0) {
     return;
   }
-  if (failures.length === EXPECTED_STANDALONE_ARCHIVE_NAMES.length) {
+  if (failures.length === archiveNames.length) {
     const displayBaseUrl = redactUrlForLog(normalizedBaseUrl);
     fail(
       `All ${failures.length} release asset URLs are unavailable; check --base-url: ${displayBaseUrl}`,
@@ -328,14 +363,6 @@ function redactUrlForLog(url) {
       ? '<redacted URL>'
       : value;
   }
-}
-
-function standaloneArchiveName(qwenTarget) {
-  const targetConfig = TARGETS.get(qwenTarget);
-  if (!targetConfig) {
-    fail(`Unknown release target: ${qwenTarget}`);
-  }
-  return `qwen-code-${qwenTarget}.${targetConfig.outputExtension}`;
 }
 
 function isPrivateOrReservedHost(hostname) {
@@ -497,6 +524,7 @@ export {
   isPrivateOrReservedHost,
   redactUrlForLog,
   releaseAssetPaths,
+  standaloneArchiveNames,
   verifyReleaseBaseUrl,
   verifyReleaseDirectory,
 };
