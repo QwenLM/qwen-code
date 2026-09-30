@@ -161,6 +161,12 @@ function ManagedSessionsContent({
         : null,
     [approvals.action, messages],
   );
+  const approvalCause = approvals.answerError;
+  const approvalForbidden =
+    typeof approvalCause === 'object' &&
+    approvalCause !== null &&
+    'code' in approvalCause &&
+    approvalCause.code === 'action_forbidden';
 
   useEffect(() => {
     const abort = new AbortController();
@@ -509,6 +515,11 @@ function ManagedSessionsContent({
                   approvals.respond(actionId, optionId)
                 }
               />
+              {pendingApproval.rawInput === undefined && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  {t('managed.approval.argumentsUnavailable')}
+                </p>
+              )}
             </div>
           )}
           {approvals.loadError !== undefined && (
@@ -524,7 +535,11 @@ function ManagedSessionsContent({
           )}
           {approvals.answerError !== undefined && (
             <p role="alert" className="text-sm text-destructive">
-              {t('managed.approval.failed')}
+              {t(
+                approvalForbidden
+                  ? 'managed.approval.forbidden'
+                  : 'managed.approval.failed',
+              )}
             </p>
           )}
           <ManagedSessionProgress

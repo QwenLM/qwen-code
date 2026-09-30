@@ -127,9 +127,13 @@ const EN: Messages = {
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
-    'The approval answer could not be sent. Try again.',
+    'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
   'managed.approval.loadFailed': 'Pending approvals could not be loaded.',
-  'managed.approval.retry': 'Retry',
+  'managed.approval.retry': 'Retry loading approvals',
+  'managed.approval.forbidden':
+    'Only the Session creator can answer this approval.',
+  'managed.approval.argumentsUnavailable':
+    'Tool arguments are unavailable for this approval.',
   'managed.phase.created': 'Created',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
@@ -4295,9 +4299,12 @@ const ZH: Messages = {
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
-  'managed.approval.failed': '审批回答未能发送，请重试。',
+  'managed.approval.failed':
+    '无法确认审批回答的结果。请重试同一选项，或刷新以查看状态。',
   'managed.approval.loadFailed': '待审批请求加载失败。',
-  'managed.approval.retry': '重试',
+  'managed.approval.retry': '重新读取审批',
+  'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
+  'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
   'managed.phase.created': '已创建',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',

@@ -51,7 +51,7 @@ export function createJavaManagedAgentProvider(
         return page.data.flatMap(toPendingAction);
       },
       async respond(action, optionId, command) {
-        await client.respondAction(
+        const result = await client.respondAction(
           {
             requestId: managedRequestId(),
             idempotencyKey: command.idempotencyKey,
@@ -66,6 +66,11 @@ export function createJavaManagedAgentProvider(
           },
           command.signal,
         );
+        if (result.status === 'failed') {
+          throw new Error(
+            `Managed Agent approval answer failed (${result.failureCode ?? 'unknown'})`,
+          );
+        }
       },
     },
     ...(options.enableWorkspaceBinding

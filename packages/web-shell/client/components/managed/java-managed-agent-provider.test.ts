@@ -446,7 +446,7 @@ describe('createJavaManagedAgentProvider', () => {
     expect(transcript.lastEventId).toBe(4);
   });
 
-  it('lists pending permission Actions and answers with their revisions', async () => {
+  it('lists pending Actions, sends revisions, and rejects a failed replay', async () => {
     const permission = {
       actionId: 'tool_approval_1',
       sessionId: 'session-1',
@@ -532,6 +532,28 @@ describe('createJavaManagedAgentProvider', () => {
         optionId: 'deny',
       },
     });
+
+    fetchImpl.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          operationId: 'op-1',
+          sessionId: 'session-1',
+          type: 'action_response',
+          status: 'failed',
+          admissionStage: 'java_durable',
+          deliveryState: 'blocked',
+          failureCode: 'action_delivery_failed',
+          replayed: true,
+        }),
+        { status: 202, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    await expect(
+      provider.actions!.respond(pending[0], 'deny', {
+        clientId: 'client-1',
+        idempotencyKey: 'tool_approval_1:deny',
+      }),
+    ).rejects.toThrow('action_delivery_failed');
   });
 
   it('reports the actions capability only when the Session has it', async () => {

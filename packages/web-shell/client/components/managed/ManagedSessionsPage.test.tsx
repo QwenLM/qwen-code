@@ -87,6 +87,21 @@ async function flush() {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
+const pendingAction = {
+  actionId: 'tool_approval_1',
+  sessionId: 's1',
+  turnId: 'p1',
+  functionCallId: 'call-1',
+  toolName: 'write_file',
+  inputRevision: 1,
+  policyRevision: 'hosted-tool-approval/1',
+  expiresAt: Date.now() + 600_000,
+  options: [
+    { id: 'allow', label: 'Allow' },
+    { id: 'deny', label: 'Deny' },
+  ],
+};
+
 describe('ManagedSessionsPage', () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -183,25 +198,15 @@ describe('ManagedSessionsPage', () => {
         capabilities: { canSend: false, canCancel: true, actions: true },
       }),
     );
-    const action = {
-      actionId: 'tool_approval_1',
-      sessionId: 's1',
-      turnId: 'p1',
-      functionCallId: 'call-1',
-      toolName: 'write_file',
-      inputRevision: 1,
-      policyRevision: 'hosted-tool-approval/1',
-      expiresAt: Date.now() + 600_000,
-      options: [
-        { id: 'allow', label: 'Allow' },
-        { id: 'deny', label: 'Deny' },
-      ],
-    };
+    const action = pendingAction;
     const listPending = vi
       .fn()
       .mockResolvedValueOnce([action])
       .mockResolvedValue([]);
-    const respond = vi.fn().mockResolvedValue(undefined);
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(undefined);
     provider = { ...provider, actions: { listPending, respond } };
 
     await render('s1');
@@ -209,6 +214,7 @@ describe('ManagedSessionsPage', () => {
 
     const card = container.querySelector('[data-testid="managed-approval"]');
     expect(card).not.toBeNull();
+    expect(card!.textContent).toContain('Tool arguments are unavailable');
     const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Yes, allow once'),
     );
@@ -218,6 +224,17 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
 
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Retry the same option',
+    );
+    const retry = Array.from(
+      container.querySelectorAll('[data-testid="managed-approval"] button'),
+    ).find((button) => button.textContent?.includes('Yes, allow once'));
+    await act(async () => {
+      (retry as HTMLButtonElement).click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
     expect(respond).toHaveBeenCalledWith(action, 'allow', {
       clientId: expect.any(String),
       idempotencyKey: 'tool_approval_1:allow',
@@ -225,6 +242,69 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+  });
+
+  it('offers a direct retry when pending approvals could not be loaded', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { capabilities: { canSend: false, actions: true } }),
+    );
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(503, 'unavailable', 'Busy'),
+      )
+      .mockResolvedValue([pendingAction]);
+    const respond = vi.fn();
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Pending approvals could not be loaded',
+    );
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+    const retry = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Retry loading approvals',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry!.click();
+      await flush();
+    });
+    expect(listPending).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('explains that a reader cannot answer a creator-only approval', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { capabilities: { canSend: false, actions: true } }),
+    );
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond: vi
+          .fn()
+          .mockRejectedValue(
+            new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+          ),
+      },
+    };
+    await render('s1');
+    const allow = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Yes, allow once'),
+    );
+    await act(async () => {
+      allow!.click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Only the Session creator can answer this approval.',
+    );
   });
 
   it('does not read approvals for a Session without the actions capability', async () => {

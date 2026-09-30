@@ -96,17 +96,17 @@ export function useManagedActions(
     };
   }, [reader, sessionId, clientId, trigger, revision]);
 
+  const earliestExpiry = pending.actions.length
+    ? Math.min(...pending.actions.map((action) => action.expiresAt))
+    : undefined;
   useEffect(() => {
-    if (pending.actions.length === 0) return undefined;
-    const earliest = Math.min(
-      ...pending.actions.map((action) => action.expiresAt),
-    );
+    if (earliestExpiry === undefined) return undefined;
     const timer = setTimeout(
       () => setRevision((value) => value + 1),
-      Math.max(0, earliest - Date.now()) + EXPIRY_GRACE_MS,
+      Math.max(0, earliestExpiry - Date.now()) + EXPIRY_GRACE_MS,
     );
     return () => clearTimeout(timer);
-  }, [pending]);
+  }, [earliestExpiry]);
 
   const actions = useMemo(
     () => (pending.sessionId === sessionId ? pending.actions : []),
@@ -135,6 +135,7 @@ export function useManagedActions(
           return next;
         });
         setAnswerError(failure);
+        throw failure;
       }
     },
     [actions, reader, clientId],
