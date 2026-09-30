@@ -34,6 +34,7 @@ import {
   SessionTranscriptDurabilityError,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
+  getApiHistoryPromptId,
   normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
@@ -2036,7 +2037,7 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(7);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -4589,10 +4590,14 @@ describe('SessionService', () => {
 
   describe('buildApiHistoryFromConversation', () => {
     it('should return linear messages when no compression checkpoint exists', () => {
+      const identifiedUser: ChatRecord = {
+        ...recordA1,
+        promptId: 'prompt-1',
+      };
       const assistantA1: ChatRecord = {
         ...recordB2,
         sessionId: sessionIdA,
-        parentUuid: recordA1.uuid,
+        parentUuid: identifiedUser.uuid,
       };
 
       const conversation: ConversationRecord = {
@@ -4600,12 +4605,28 @@ describe('SessionService', () => {
         projectHash: 'test-project-hash',
         startTime: '2024-01-01T00:00:00Z',
         lastUpdated: '2024-01-01T00:00:00Z',
-        messages: [recordA1, assistantA1],
+        messages: [identifiedUser, assistantA1],
       };
 
       const history = buildApiHistoryFromConversation(conversation);
 
-      expect(history).toEqual([recordA1.message, assistantA1.message]);
+      expect(
+        history.map((content) => ({
+          role: content.role,
+          parts: content.parts,
+        })),
+      ).toEqual([
+        {
+          role: identifiedUser.message!.role,
+          parts: identifiedUser.message!.parts,
+        },
+        {
+          role: assistantA1.message!.role,
+          parts: assistantA1.message!.parts,
+        },
+      ]);
+      expect(getApiHistoryPromptId(history[0]!)).toBe('prompt-1');
+      expect(JSON.stringify(history[0])).not.toContain('prompt-1');
     });
 
     it('keeps Realtime dialogue out of backend model history', () => {
@@ -5270,6 +5291,128 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('copies the selected branch approval state into a fork', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111131';
+      const newId = '22222222-2222-2222-2222-222222222242';
+      const { file, lines } = seedSession(oldId);
+      lines[1]!['parentUuid'] = 'approval-yolo';
+      fs.writeFileSync(
+        file,
+        [
+          lines[0],
+          {
+            uuid: 'approval-yolo',
+            parentUuid: 'u1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_approval_mode',
+            timestamp: '2026-04-22T00:00:00.500Z',
+            cwd,
+            version: 'test',
+            systemPayload: { mode: 'yolo' },
+          },
+          lines[1],
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written).toContainEqual(
+        expect.objectContaining({
+          sessionId: newId,
+          subtype: 'session_approval_mode',
+          systemPayload: { mode: 'yolo' },
+        }),
+      );
+    });
+
+    it('copies approval state at a historical fork checkpoint', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111132';
+      const newId = '22222222-2222-2222-2222-222222222243';
+      const { file, lines } = seedSession(oldId);
+      lines[1]!['parentUuid'] = 'approval-default';
+      const checkpoint = {
+        uuid: 'checkpoint-approval',
+        parentUuid: 'u2',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        timestamp: '2026-04-22T00:00:01.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: 1,
+          startExclusiveRecordUuid: null,
+          assistantRecordUuid: 'u2',
+          promptId: `${oldId}########0`,
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [
+          lines[0],
+          {
+            uuid: 'approval-default',
+            parentUuid: 'u1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_approval_mode',
+            timestamp: '2026-04-22T00:00:00.500Z',
+            cwd,
+            version: 'test',
+            systemPayload: { mode: 'default' },
+          },
+          lines[1],
+          checkpoint,
+          {
+            uuid: 'approval-yolo',
+            parentUuid: 'checkpoint-approval',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_approval_mode',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: { mode: 'yolo' },
+          },
+          {
+            uuid: 'u3',
+            parentUuid: 'approval-yolo',
+            sessionId: oldId,
+            type: 'user',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd,
+            version: 'test',
+            message: { role: 'user', parts: [{ text: 'later' }] },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        atRecordId: 'checkpoint-approval',
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const approvalRecords = written.filter(
+        (record) => record.subtype === 'session_approval_mode',
+      );
+
+      expect(approvalRecords).toHaveLength(1);
+      expect(approvalRecords[0].systemPayload).toEqual({ mode: 'default' });
+    });
+
     it('remaps persisted telemetry prompt ids into the fork', async () => {
       const oldId = '51515151-5151-5151-5151-515151515151';
       const newId = '61616161-6161-6161-6161-616161616161';
@@ -5310,6 +5453,65 @@ describe('SessionService', () => {
       expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
         `${newId}#Explore#0`,
       );
+    });
+
+    it('remaps record and chat_compression promptIds into the fork', async () => {
+      // Forked ids must remain visible to the new session's seed.
+      const oldId = '71717171-7171-7171-7171-717171717171';
+      const newId = '81818181-8181-8181-8181-818181818181';
+      const { file, lines } = seedSession(oldId);
+      const userRecord = {
+        ...(lines[0] as Record<string, unknown>),
+        promptId: `${oldId}########0`,
+      };
+      fs.writeFileSync(
+        file,
+        [
+          userRecord,
+          lines[1]!,
+          {
+            uuid: 'compression-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'chat_compression',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 40,
+                compressionStatus: 'compressed',
+              },
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'summary' }] },
+              ],
+              promptIds: [`${oldId}########0`, null],
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      const copiedUser = written.find((record) => record.uuid === 'u1');
+      expect(copiedUser.promptId).toBe(`${newId}########0`);
+
+      const copiedCompression = written.find(
+        (record) => record.subtype === 'chat_compression',
+      );
+      expect(copiedCompression.systemPayload.promptIds).toEqual([
+        `${newId}########0`,
+        null,
+      ]);
     });
 
     it('does not copy source turn_result identities into a fork', async () => {
@@ -7932,6 +8134,74 @@ describe('SessionService', () => {
         version: 'test',
         systemPayload: { text: 'x'.repeat(350) },
       }));
+
+    it('excludes a source before applying the page size', async () => {
+      const visibleId = '00000000-0000-4000-8000-000000000001';
+      const hiddenId = '00000000-0000-4000-8000-000000000002';
+      const hiddenAgentId = '00000000-0000-4000-8000-000000000003';
+      const visibleFile = writeSession(visibleId, [
+        userLine(visibleId, 'visible'),
+      ]);
+      const hiddenFile = writeSession(hiddenId, [
+        userLine(hiddenId, 'hidden'),
+        {
+          ...sessionSourceLine(hiddenId),
+          systemPayload: { sourceType: 'agent-host' },
+        },
+      ]);
+      // A second excluded source (a mesh agent's body session) must be dropped
+      // by the same list option, not just the one name it was built for.
+      const hiddenAgentFile = writeSession(hiddenAgentId, [
+        userLine(hiddenAgentId, 'hidden agent'),
+        {
+          ...sessionSourceLine(hiddenAgentId),
+          systemPayload: { sourceType: 'agent' },
+        },
+      ]);
+      fs.utimesSync(visibleFile, new Date(1), new Date(1));
+      fs.utimesSync(hiddenFile, new Date(2), new Date(2));
+      fs.utimesSync(hiddenAgentFile, new Date(3), new Date(3));
+
+      await expect(
+        service.listSessions({
+          size: 1,
+          excludeSourceTypes: ['agent-host', 'agent'],
+        }),
+      ).resolves.toMatchObject({
+        items: [{ sessionId: visibleId }],
+        hasMore: false,
+        nextCursor: undefined,
+      });
+    });
+
+    it('excludes the source from active and archived counts', async () => {
+      const visibleId = '00000000-0000-4000-8000-000000000001';
+      const hiddenId = '00000000-0000-4000-8000-000000000002';
+      writeSession(visibleId, [userLine(visibleId, 'visible')]);
+      const archiveDir = realPath.join(getChatsDir(), 'archive');
+      fs.mkdirSync(archiveDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(archiveDir, `${hiddenId}.jsonl`),
+        `${[
+          userLine(hiddenId, 'hidden'),
+          {
+            ...sessionSourceLine(hiddenId),
+            systemPayload: { sourceType: 'agent-host' },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n')}\n`,
+      );
+
+      await expect(
+        service.getSessionInfoCounts({ excludeSourceTypes: ['agent-host'] }),
+      ).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: false,
+      });
+    });
 
     // Short complete fixtures answer from parsed records before the scan runs.
     // The long and truncated fixtures below drive the real tail-window scan

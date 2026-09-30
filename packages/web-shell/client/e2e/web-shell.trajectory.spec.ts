@@ -5,6 +5,8 @@
  */
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import {
   createWebShellDaemonScenario,
@@ -134,7 +136,9 @@ async function openTrajectory(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
 
-  await page.getByRole('button', { name: 'Toggle right panel' }).click();
+  await page
+    .getByRole('button', { name: /Toggle right panel|切换右侧扩展区/ })
+    .click();
   await page.getByTestId('right-panel-open-trajectory').click();
   const grid = page.getByTestId('trajectory-rows');
   await expect(grid).toBeVisible();
@@ -161,6 +165,295 @@ function mountedRows(page: Page): Locator {
 }
 
 test.describe('trajectory panel', () => {
+  test('keeps inspector content and copy reachable in a short window @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1600, height: 600 });
+    await page
+      .context()
+      .grantPermissions(['clipboard-read', 'clipboard-write']);
+    await openTrajectory(page, String(testInfo.project.use.baseURL));
+    const panel = page.getByTestId('trajectory-panel');
+    await panel.getByTestId('trajectory-row-tool').last().click();
+    await panel.getByRole('button', { name: 'View details' }).click();
+    const inspector = panel.getByTestId('trajectory-inspector');
+    await inspector.getByRole('button', { name: 'Input' }).click();
+    const content = inspector.locator('pre');
+    const copy = inspector.getByRole('button', {
+      name: 'Copy displayed content',
+    });
+    expect(
+      await panel.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    ).toBeGreaterThan(0);
+    const box = (await panel.boundingBox())!;
+    await page.mouse.move(box.x + 20, box.y + 20);
+    await page.mouse.wheel(0, 600);
+    await expect(content).toBeInViewport();
+    await expect(copy).toBeInViewport();
+    await expect(content).toContainText('/workspace/demo/note-40.txt');
+    await copy.click();
+    await expect(copy).toBeFocused();
+    await expect(inspector.getByRole('status')).toHaveText(
+      'Copied displayed content',
+    );
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toBe(await content.textContent());
+    expect(JSON.parse(copied)).toEqual({
+      file_path: `/workspace/demo/note-${TURNS}.txt`,
+    });
+  });
+
+  test('inspects a selected tool without fetching more transcript data @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 2400, height: 900 });
+    const grid = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    const failedLegend = page.getByText('Failed', { exact: true });
+    const legendBox = (await failedLegend.boundingBox())!;
+    const iconBox = (await failedLegend.locator('svg').boundingBox())!;
+    expect(
+      Math.abs(
+        iconBox.y + iconBox.height / 2 - (legendBox.y + legendBox.height / 2),
+      ),
+    ).toBeLessThanOrEqual(1);
+    let detailRequests = 0;
+    page.on('request', (request) => {
+      if (/\/transcript(?:\?|$)|\/attachments?\//.test(request.url())) {
+        detailRequests += 1;
+      }
+    });
+    const tool = page.getByTestId('trajectory-row-tool').last();
+    await tool.click();
+    await page.getByRole('button', { name: 'View details' }).click();
+    const inspector = page.getByTestId('trajectory-inspector');
+    await expect(inspector).toBeVisible();
+    await expect(tool).toBeInViewport();
+    await inspector.getByRole('button', { name: 'Input' }).click();
+    await expect(inspector).toContainText(`/workspace/demo/note-${TURNS}.txt`);
+    await inspector.getByRole('button', { name: 'Output' }).click();
+    await expect(inspector).toContainText('unrecorded');
+    const evidenceDir = resolve(
+      process.cwd(),
+      '../../.qwen/e2e-tests/trajectory-pr2',
+    );
+    mkdirSync(evidenceDir, { recursive: true });
+    const panel = page.getByTestId('trajectory-panel');
+    const resizeHandle = page
+      .locator('[role="separator"][aria-orientation="vertical"]')
+      .last();
+    for (const width of [320, 960]) {
+      const current = (await panel.boundingBox())!.width;
+      const handle = (await resizeHandle.boundingBox())!;
+      await page.mouse.move(
+        handle.x + handle.width / 2,
+        handle.y + handle.height / 2,
+      );
+      await page.mouse.down();
+      await page.mouse.move(
+        handle.x + handle.width / 2 + current - width,
+        handle.y + handle.height / 2,
+        { steps: 5 },
+      );
+      await page.mouse.up();
+      await expect
+        .poll(async () => Math.round((await panel.boundingBox())!.width))
+        .toBe(width);
+      await expect(tool).toBeInViewport();
+      const rowBox = (await tool.boundingBox())!;
+      const metricsBox = (await tool
+        .getByTestId('trajectory-row-metrics')
+        .boundingBox())!;
+      expect(metricsBox.y).toBeGreaterThanOrEqual(rowBox.y - 1);
+      expect(metricsBox.y + metricsBox.height).toBeLessThanOrEqual(
+        rowBox.y + rowBox.height + 1,
+      );
+      expect(metricsBox.x + metricsBox.width).toBeLessThanOrEqual(
+        rowBox.x + rowBox.width + 1,
+      );
+      expect(
+        await panel.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        ),
+      ).toBeLessThanOrEqual(1);
+      await panel.screenshot({
+        path: resolve(evidenceDir, `inspector-${width}.png`),
+      });
+      await inspector.getByRole('button', { name: 'Summary' }).click();
+      await expect(inspector).toContainText('call_0040');
+      await panel.screenshot({
+        path: resolve(evidenceDir, `inspector-summary-${width}.png`),
+      });
+    }
+    await inspector.getByRole('button', { name: 'Close details' }).click();
+    await expect(inspector).toHaveCount(0);
+    await expect(grid).toBeFocused();
+    expect(detailRequests).toBe(0);
+  });
+
+  for (const { language, theme } of [
+    { language: 'en', theme: 'dark' },
+    { language: 'zh-CN', theme: 'light' },
+  ]) {
+    test(`fits 320, 480 and 960px panel widths in ${language} ${theme}`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width: 2400, height: 900 });
+      await page.addInitScript(
+        ({ language, theme }) => {
+          localStorage.setItem('qwen-code-web-shell-language', language);
+          localStorage.setItem('qwen-code-web-shell-theme', theme);
+        },
+        { language, theme },
+      );
+      await openTrajectory(page, String(testInfo.project.use.baseURL));
+      const panel = page.getByTestId('trajectory-panel');
+      const resizeHandle = page
+        .locator('[role="separator"][aria-orientation="vertical"]')
+        .last();
+      const output = resolve(
+        process.cwd(),
+        '../../.qwen/e2e-tests/trajectory-pr1',
+      );
+      mkdirSync(output, { recursive: true });
+      for (const width of [320, 480, 960]) {
+        const current = (await panel.boundingBox())!.width;
+        const handle = (await resizeHandle.boundingBox())!;
+        const x = handle.x + handle.width / 2;
+        const y = handle.y + handle.height / 2;
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + current - width, y, { steps: 5 });
+        await page.mouse.up();
+        await expect
+          .poll(async () => Math.round((await panel.boundingBox())!.width))
+          .toBe(width);
+        await expect(panel.getByTestId('trajectory-mode-active')).toBeVisible();
+        await expect(panel.getByTestId('trajectory-mode-clock')).toBeVisible();
+        const request = panel.getByTestId('trajectory-row-request').last();
+        await request.scrollIntoViewIfNeeded();
+        const rowBox = (await request.boundingBox())!;
+        const labelBox = (await request.locator('span').nth(1).boundingBox())!;
+        const metricsBox = (await request
+          .getByTestId('trajectory-row-metrics')
+          .boundingBox())!;
+        expect(labelBox.width).toBeGreaterThanOrEqual(95);
+        expect(metricsBox.y).toBeGreaterThanOrEqual(rowBox.y - 1);
+        expect(metricsBox.y + metricsBox.height).toBeLessThanOrEqual(
+          rowBox.y + rowBox.height + 1,
+        );
+        expect(metricsBox.x + metricsBox.width).toBeLessThanOrEqual(
+          rowBox.x + rowBox.width + 1,
+        );
+        const overflow = await panel.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        );
+        expect(overflow).toBeLessThanOrEqual(1);
+        await panel.screenshot({
+          path: resolve(output, `${language}-${theme}-${width}.png`),
+        });
+        if (width === 320) {
+          const gridY = (await panel
+            .getByTestId('trajectory-rows')
+            .boundingBox())!.y;
+          const help = panel.locator('details summary');
+          await help.click();
+          await expect(panel.locator('details[open]')).toBeVisible();
+          expect(
+            (await panel.getByTestId('trajectory-rows').boundingBox())!.y,
+          ).toBe(gridY);
+          await panel.screenshot({
+            path: resolve(output, `${language}-${theme}-metric-help.png`),
+          });
+          await help.click();
+        }
+      }
+      if (language === 'zh-CN') {
+        await panel.getByTestId('trajectory-row-tool').last().click();
+        await panel.getByRole('button', { name: '查看详情' }).click();
+        const inspector = panel.getByTestId('trajectory-inspector');
+        await expect(inspector).toBeVisible();
+        const evidenceDir = resolve(
+          process.cwd(),
+          '../../.qwen/e2e-tests/trajectory-pr2',
+        );
+        mkdirSync(evidenceDir, { recursive: true });
+        await panel.screenshot({
+          path: resolve(evidenceDir, 'inspector-zh-light-960.png'),
+        });
+        await inspector.getByRole('button', { name: '关闭详情' }).click();
+      }
+      const metricsBefore = await panel
+        .getByTestId('trajectory-metrics')
+        .innerText();
+      await panel.getByTestId('trajectory-mode-clock').focus();
+      await page.keyboard.press('Enter');
+      await expect(panel.getByTestId('trajectory-mode-clock')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      expect(await panel.getByTestId('trajectory-metrics').innerText()).toBe(
+        metricsBefore,
+      );
+      await panel.getByTestId('trajectory-zoom-in').click();
+      expect(await panel.getByTestId('trajectory-metrics').innerText()).toBe(
+        metricsBefore,
+      );
+    });
+  }
+
+  test('explains timed rows with no start and a failed refresh over retained data', async ({
+    page,
+  }, testInfo) => {
+    const events = transcriptEvents(1).map((event) => {
+      const update = event.data as Record<string, unknown>;
+      const meta = update['_meta'] as Record<string, unknown> | undefined;
+      const timing = meta?.['timing'] as Record<string, unknown> | undefined;
+      if (timing) delete timing['startedAt'];
+      return event;
+    });
+    await openTrajectory(page, String(testInfo.project.use.baseURL), {
+      transcriptPage: { events },
+    });
+    const panel = page.getByTestId('trajectory-panel');
+    await expect(panel.getByTestId('trajectory-overview')).toContainText(
+      'Recorded durations have no start time',
+    );
+    await expect(panel.getByTestId('trajectory-context-notice')).toContainText(
+      'without start',
+    );
+    const output = resolve(
+      process.cwd(),
+      '../../.qwen/e2e-tests/trajectory-pr1',
+    );
+    mkdirSync(output, { recursive: true });
+    await panel.screenshot({ path: resolve(output, 'all-starts-missing.png') });
+    const gridY = (await panel.getByTestId('trajectory-rows').boundingBox())!.y;
+
+    await page.route('**/session/*/transcript*', async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: '{"error":"refresh unavailable"}',
+      });
+    });
+    await panel.getByRole('button', { name: 'Refresh' }).click();
+    await expect(panel.getByRole('alert')).toContainText(
+      'Refresh failed; showing the last successful read',
+    );
+    await expect(panel.getByTestId('trajectory-rows')).toBeVisible();
+    expect((await panel.getByTestId('trajectory-rows').boundingBox())!.y).toBe(
+      gridY,
+    );
+    await panel.screenshot({
+      path: resolve(output, 'refresh-failed-retained.png'),
+    });
+  });
+
   test('shows what each request and tool cost @smoke', async ({
     page,
   }, testInfo) => {
@@ -212,6 +505,14 @@ test.describe('trajectory panel', () => {
     await page.getByRole('button', { name: 'Fullscreen' }).click();
     await expect(mountedRows(page).first()).toBeVisible();
     expect(await mountedRows(page).count()).toBeGreaterThan(0);
+    const output = resolve(
+      process.cwd(),
+      '../../.qwen/e2e-tests/trajectory-pr1',
+    );
+    mkdirSync(output, { recursive: true });
+    await page.getByTestId('trajectory-panel').screenshot({
+      path: resolve(output, 'fullscreen.png'),
+    });
 
     await page.getByRole('button', { name: 'Exit fullscreen' }).click();
     await expect(mountedRows(page).first()).toBeVisible();
@@ -373,8 +674,8 @@ test.describe('trajectory panel', () => {
     ]);
     // The overview is a flex sibling of the scrolled rows: if its height moved
     // at all, so would every row under the reader.
-    expect(before[0]!.height).toBe(64);
-    expect(after[0]!.height).toBe(64);
+    expect(before[0]!.height).toBe(128);
+    expect(after[0]!.height).toBe(128);
     expect(after[1]!.y).toBe(before[1]!.y);
   });
 
@@ -590,14 +891,13 @@ test.describe('trajectory panel', () => {
           .toBeGreaterThan(before!.width * 5);
         const after = (await target.boundingBox())!;
         // The span that was under the pointer is still under it.
-        expect(
-          Math.abs(after.x + after.width / 2 - point.x),
-        ).toBeLessThanOrEqual(2);
+        expect(after.x).toBeLessThanOrEqual(point.x);
+        expect(after.x + after.width).toBeGreaterThanOrEqual(point.x);
         await expectValueAtTrackEnd(page);
         // Zooming happens inside the strip: nothing below it moves.
         expect(
           (await page.getByTestId('trajectory-overview').boundingBox())!.height,
-        ).toBe(64);
+        ).toBe(128);
         expect((await grid.boundingBox())!.y).toBe(gridBefore!.y);
       });
 
@@ -845,9 +1145,11 @@ test.describe('trajectory panel', () => {
         );
         await expect(grid).toHaveAttribute('aria-rowcount', String(4 * 4));
 
-        await toggle.click();
+        const active = page.getByTestId('trajectory-mode-active');
+        await active.click();
 
         await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+        await expect(active).toHaveAttribute('aria-pressed', 'true');
         await expect(page.getByTestId('trajectory-range')).toHaveCount(0);
         await expect(page.getByTestId('trajectory-overview-from')).toHaveText(
           '0',

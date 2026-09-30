@@ -183,7 +183,10 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目標',
   'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
+  'toolDisplayName.ManageMemory': '管理記憶',
+  'toolDisplayName.SearchMemory': '搜尋記憶',
   'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': '審查模型',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.RecordSource': '記錄來源',
@@ -222,6 +225,12 @@ export default {
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
   'toolDisplayName.ImageGen': '圖像生成',
+  'toolDisplayName.ThreadPost': '發文到討論串',
+  'toolDisplayName.ThreadWait': '等待協作方',
+  'toolDisplayName.ThreadBlock': '提出阻塞問題',
+  'toolDisplayName.ThreadReview': '提交待審閱',
+  'toolDisplayName.ThreadCreate': '建立子討論串',
+  'toolDisplayName.ThreadRead': '讀取討論串',
   'toolDisplayName.DownsampleImage': '降採樣圖像',
   'toolDisplayName.DownscaleVideo': '降採樣影片',
   'toolDisplayName.DownsampleAudio': '降採樣音訊',
@@ -405,6 +414,8 @@ export default {
     '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '無法將對話回退到該輪次：它已無法與模型歷史對應（例如經過重試）。請嘗試更近一些的輪次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -1979,6 +1990,9 @@ export default {
     '上下文超出限制！請使用 /compress 或 /clear 來減少上下文。',
   'No API response yet. Send a message to see actual usage.':
     '暫無 API 響應。發送消息以查看實際使用情況。',
+  'Estimated usage, including the conversation': '估算用量（含對話）',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    '尚未收到 provider 用量，以下為本地估算，包含對話。',
   'Estimated pre-conversation overhead': '預估對話前開銷',
   'Context window': '上下文窗口',
   tokens: 'tokens',
@@ -2129,6 +2143,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
@@ -2495,4 +2516,6 @@ export default {
   'Kept model as {{model}}': '模型保持為 {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
+  'Create a git commit with an AI-drafted message':
+    '使用 AI 起草的提交訊息建立 git 提交',
 };

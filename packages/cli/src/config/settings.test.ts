@@ -659,6 +659,30 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it.each([-1, 1.5, '5'])(
+      'warns that an invalid advisorMaxUses %s is ignored',
+      (advisorMaxUses) => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            p === USER_SETTINGS_PATH
+              ? JSON.stringify({
+                  [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                  advisorMaxUses,
+                })
+              : '{}',
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(getSettingsWarnings(settings)).toEqual([
+          expect.stringContaining('advisorMaxUses must be a non-negative'),
+        ]);
+      },
+    );
+
     it('should silently ignore unknown top-level keys in a v2 settings file', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
@@ -3658,7 +3682,133 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('advisorModel scope handling', () => {
+    it('ignores workspace values and preserves the user selection', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              advisorModel: 'user-advisor',
+              advisorMaxUses: 2,
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              advisorModel: 'workspace-advisor',
+              advisorMaxUses: 0,
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.advisorModel).toBe('user-advisor');
+      expect(settings.merged.advisorMaxUses).toBe(2);
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('advisorModel'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it('selects the complete highest-priority operator Mem0 config', () => {
+      const mem0 = { baseUrl: 'https://system.example', protocol: 'mem0-v3' };
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              memory: {
+                mem0: { baseUrl: 'https://user.example', enableWrites: true },
+              },
+            });
+          if (p === getSystemSettingsPath())
+            return JSON.stringify({ memory: { mem0 } });
+          return '{}';
+        },
+      );
+      expect(loadSettings(MOCK_WORKSPACE_DIR).merged.memory?.mem0).toEqual(
+        mem0,
+      );
+    });
+
+    it.each([{ mem0: null }, null])(
+      'does not restore lower-priority Mem0 when system memory is %j',
+      (memory) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                memory: { mem0: { baseUrl: 'https://user.example' } },
+              });
+            if (p === getSystemSettingsPath())
+              return JSON.stringify({ memory });
+            return '{}';
+          },
+        );
+        expect(
+          loadSettings(MOCK_WORKSPACE_DIR).merged.memory?.mem0,
+        ).toBeUndefined();
+      },
+    );
+
+    it('preserves an operator MCP conflict hidden by workspace settings', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              memory: { mem0: { baseUrl: 'https://operator.example' } },
+              mcpServers: { 'external-context': { command: 'operator-mcp' } },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              mcpServers: { 'external-context': { command: 'workspace-mcp' } },
+            });
+          return '{}';
+        },
+      );
+      expect(
+        loadSettings(MOCK_WORKSPACE_DIR).merged.mcpServers?.[
+          'external-context'
+        ],
+      ).toEqual({ command: 'operator-mcp' });
+    });
+
+    it.each([null, { mem0: { baseUrl: 'https://attacker.invalid' } }])(
+      'preserves operator Mem0 even when workspace memory is %j',
+      (memory) => {
+        const mem0 = {
+          baseUrl: 'https://operator.example',
+          enableWrites: false,
+        };
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                memory: {
+                  mem0,
+                  enableManagedAutoMemory: false,
+                  enableManagedAutoDream: false,
+                },
+              });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({ memory });
+            return '{}';
+          },
+        );
+        expect(loadSettings(MOCK_WORKSPACE_DIR).merged.memory).toMatchObject({
+          mem0,
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        });
+      },
+    );
     // R4-3: the strip, the warning and the dialog filter all derive from this
     // list. A key present here but unstripped would be honored from a repo's
     // settings while the warning claimed it was ignored — the exact drift the

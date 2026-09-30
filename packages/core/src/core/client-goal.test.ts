@@ -250,7 +250,11 @@ function setupGoalClient() {
     getStopHookBlockingCap: vi.fn(() => 8),
     isManagedMemoryAvailable: vi.fn(() => false),
     getManagedAutoMemoryEnabled: vi.fn(() => false),
-    getMemoryManager: vi.fn(() => ({})),
+    getMemoryManager: vi.fn(() => ({
+      resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      reconcileMemoryBodiesPresentInHistory: vi.fn(),
+      restoreMemoryBodiesPresentInHistory: vi.fn(),
+    })),
     getAutoSkillEnabled: vi.fn(() => false),
     getSessionId: vi.fn(() => 'goal-test-session'),
     getProjectRoot: vi.fn(() => '/tmp'),
@@ -1440,6 +1444,8 @@ describe('LlmClient Goal admission', () => {
     expect(recorder.recordUserMessage).toHaveBeenCalledWith(
       [{ text: 'user correction' }],
       permit,
+      undefined,
+      'real-user-key',
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(turnMocks.constructors[0]?.[2]).toEqual(permit);
