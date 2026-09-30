@@ -128,8 +128,12 @@ export class OverlayFs {
     }
 
     if (failed.length > 0) {
+      // The denominator is the number of files actually attempted, not the number
+      // registered: an entry with no overlay file behind it was skipped above, so
+      // counting it here would report "1 of 2" next to a single path.
+      const attempted = applied.length + failed.length;
       throw new Error(
-        `Could not apply ${failed.length} of ${this.writtenFiles.size} file(s) to disk: ${failed.join(', ')}`,
+        `Could not apply ${failed.length} of ${attempted} file(s) to disk: ${failed.join(', ')}`,
         { cause: firstError },
       );
     }
