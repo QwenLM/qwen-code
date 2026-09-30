@@ -31,6 +31,7 @@ import {
   isDangerousAllowRule,
 } from './dangerousRules.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -149,6 +150,7 @@ function splitCommandForRules(command: string, toolName: string): string[] {
  */
 export interface PermissionManagerConfig {
   getShellExecutionSandbox?(): unknown;
+  getToolMode?(): ToolMode;
   /** Merged allow-rules (settings + coreTools + allowedTools). */
   getPermissionsAllow(): string[] | undefined;
   /** Merged ask-rules (settings only). */
@@ -769,6 +771,8 @@ export class PermissionManager {
     'web_search',
     'todo_write',
     'save_memory',
+    'manage_memory',
+    'search_memory',
     'lsp',
     'cron_create',
     'cron_list',
@@ -956,6 +960,16 @@ export class PermissionManager {
       !this.eagerToolAllowList.some((eagerName) =>
         toolMatchesRuleToolName(eagerName, canonicalName),
       )
+    ) {
+      return 'deferred';
+    }
+
+    // Review can enable workflow mid-session. Defer its Code Mode description
+    // to keep the cached declaration stable unless an eager list was supplied.
+    if (
+      canonicalName === ToolNames.WORKFLOW &&
+      this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+      this.eagerToolAllowList === null
     ) {
       return 'deferred';
     }
