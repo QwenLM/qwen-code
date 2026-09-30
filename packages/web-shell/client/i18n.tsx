@@ -128,6 +128,8 @@ const EN: Messages = {
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
     'The approval answer could not be sent. Try again.',
+  'managed.approval.loadFailed': 'Pending approvals could not be loaded.',
+  'managed.approval.retry': 'Retry',
   'managed.phase.created': 'Created',
   'managed.workspaceCreateTitle': 'Create a Workspace session',
   'managed.workspaceLabel': 'Workspace',
@@ -4294,6 +4296,8 @@ const ZH: Messages = {
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
   'managed.approval.failed': '审批回答未能发送，请重试。',
+  'managed.approval.loadFailed': '待审批请求加载失败。',
+  'managed.approval.retry': '重试',
   'managed.phase.created': '已创建',
   'managed.workspaceCreateTitle': '创建工作区会话',
   'managed.workspaceLabel': '工作区',

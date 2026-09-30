@@ -511,7 +511,18 @@ function ManagedSessionsContent({
               />
             </div>
           )}
-          {approvals.error !== undefined && (
+          {approvals.loadError !== undefined && (
+            <div
+              role="alert"
+              className="flex items-center gap-2 text-sm text-destructive"
+            >
+              <span>{t('managed.approval.loadFailed')}</span>
+              <Button variant="outline" size="sm" onClick={approvals.retry}>
+                {t('managed.approval.retry')}
+              </Button>
+            </div>
+          )}
+          {approvals.answerError !== undefined && (
             <p role="alert" className="text-sm text-destructive">
               {t('managed.approval.failed')}
             </p>

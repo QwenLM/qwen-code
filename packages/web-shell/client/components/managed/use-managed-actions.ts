@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ManagedAgentPendingAction,
   ManagedAgentProvider,
@@ -8,12 +8,20 @@ import type {
 // Re-reads shortly after the earliest expiry so an unanswered approval leaves
 // the page once the Harness has ended it.
 const EXPIRY_GRACE_MS = 1_000;
+// A failed read of the pending approvals is retried a few times, so one
+// transient failure does not hide an approval until it expires.
+const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 
 export interface ManagedActionsState {
   /** The approval to show; answered ones stay hidden while they settle. */
   action?: ManagedAgentPendingAction;
-  error?: unknown;
+  /** Reading the pending approvals failed; retries run in the background. */
+  loadError?: unknown;
+  /** Sending an answer failed; the approval is shown again. */
+  answerError?: unknown;
   respond(actionId: string, optionId: string): Promise<void>;
+  /** Reads the pending approvals again now. */
+  retry(): void;
 }
 
 /**
@@ -34,8 +42,10 @@ export function useManagedActions(
     actions: ManagedAgentPendingAction[];
   }>({ actions: [] });
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
-  const [error, setError] = useState<unknown>();
+  const [loadError, setLoadError] = useState<unknown>();
+  const [answerError, setAnswerError] = useState<unknown>();
   const [revision, setRevision] = useState(0);
+  const loadFailures = useRef(0);
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -48,7 +58,9 @@ export function useManagedActions(
 
   useEffect(() => {
     setAnswered(new Set());
-    setError(undefined);
+    setLoadError(undefined);
+    setAnswerError(undefined);
+    loadFailures.current = 0;
   }, [sessionId]);
 
   useEffect(() => {
@@ -57,17 +69,31 @@ export function useManagedActions(
       return undefined;
     }
     const abort = new AbortController();
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
       .listPending(sessionId, { clientId, signal: abort.signal })
       .then((actions) => {
         if (abort.signal.aborted) return;
+        loadFailures.current = 0;
         setPending({ sessionId, actions });
-        setError(undefined);
+        setLoadError(undefined);
       })
       .catch((failure: unknown) => {
-        if (!abort.signal.aborted) setError(failure);
+        if (abort.signal.aborted) return;
+        setLoadError(failure);
+        const delay = LOAD_RETRY_DELAYS_MS[loadFailures.current];
+        loadFailures.current += 1;
+        if (delay !== undefined) {
+          retryTimer = setTimeout(
+            () => setRevision((value) => value + 1),
+            delay,
+          );
+        }
       });
-    return () => abort.abort();
+    return () => {
+      abort.abort();
+      clearTimeout(retryTimer);
+    };
   }, [reader, sessionId, clientId, trigger, revision]);
 
   useEffect(() => {
@@ -100,6 +126,7 @@ export function useManagedActions(
           clientId,
           idempotencyKey: `${target.actionId}:${optionId}`,
         });
+        setAnswerError(undefined);
         setRevision((value) => value + 1);
       } catch (failure) {
         setAnswered((current) => {
@@ -107,11 +134,16 @@ export function useManagedActions(
           next.delete(actionId);
           return next;
         });
-        setError(failure);
+        setAnswerError(failure);
       }
     },
     [actions, reader, clientId],
   );
 
-  return { action, error, respond };
+  const retry = useCallback(() => {
+    loadFailures.current = 0;
+    setRevision((value) => value + 1);
+  }, []);
+
+  return { action, loadError, answerError, respond, retry };
 }
