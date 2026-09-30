@@ -237,7 +237,7 @@ A `monitor_run` record body, kind `managed-monitor_run` and schema version 1, ho
 
 - The domain index, limits, kinds, state lines, delivery targets, reasons and Monitor stop reasons, as constants.
 - A canonical grant, pin, run block and monitor run.
-- 558 cases: grants (135, one valid grant per domain among them), grant replacements (21), pins (25), pin pairs (7), run blocks (151), run revisions (61), monitor runs (115) and monitor revisions (43). Each invalid case is aimed at one rule.
+- 568 cases: grants (140, one valid grant per domain among them), grant replacements (22), pins (25), pin pairs (7), run blocks (152), run revisions (61), monitor runs (118) and monitor revisions (43). Each invalid case is aimed at one rule.
 
 The schema fixes each record's shape and every rule it can state readably, including all the state, reason and stop-reason rules. It cannot state UTF-8 byte limits, NFC, well-formed UTF-16, the 2^63−1 bound readably, a record kind derived from another field, or a bound that depends on another field; the TypeScript test lists the cases on which the schema and the module disagree. Its patterns follow ECMA-262, as draft 2020-12 specifies; a validator with other regular expression semantics, such as Java's default, may accept a trailing newline that both modules refuse. A Python implementation written from this document, independent of both languages and kept outside the repository as for `managed-tool-result/1`, labeled every case, and the generator stops when it disagrees with a label.
 
