@@ -321,11 +321,26 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String runtimeSessionId, ToolExecutionRecord record) {
         // A lost dispatch is asked of the original Runtime when it can answer;
         // a tool v2 reference keeps its UNKNOWN.
-        return record.getState() == ToolExecutionRecord.State.UNKNOWN
-                && record.observableAfterLoss()
-                ? service.reconcileExecution(harnessSessionId, runtimeSessionId, record.getExecutionCallId())
-                : CompletableFuture.completedFuture(new ExecutionReconciliation(record,
-                        ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        if (record.getState() != ToolExecutionRecord.State.UNKNOWN
+                || !record.observableAfterLoss()) {
+            return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        }
+        // The ask is best-effort: when the original Runtime cannot be asked
+        // or cannot answer, whatever the reason, the record's own UNKNOWN
+        // stands rather than the error of the attempt.
+        return service.reconcileExecution(harnessSessionId, runtimeSessionId,
+                record.getExecutionCallId()).handle((reconciled, error) -> {
+                    if (error == null) {
+                        return reconciled;
+                    }
+                    Throwable cause = unwrap(error);
+                    if (cause instanceof Error) {
+                        throw new CompletionException(cause);
+                    }
+                    return new ExecutionReconciliation(record,
+                            ExecutionReconciliation.Outcome.IN_FLIGHT, null);
+                });
     }
 
     private static Map<String, Object> observedExecutionEnvelope(String harnessSessionId,
