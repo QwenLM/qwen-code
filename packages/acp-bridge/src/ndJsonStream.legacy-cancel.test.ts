@@ -63,12 +63,18 @@ describe('legacy NDJSON cancellation', () => {
       cancel,
     });
     const { readable } = ndJsonStream(new WritableStream<Uint8Array>(), input);
+    const enqueue = vi.spyOn(
+      ReadableStreamDefaultController.prototype,
+      'enqueue',
+    );
     try {
       await readable.cancel('stop');
       expect(cancel).toHaveBeenCalledExactlyOnceWith('stop');
       expect(input.locked).toBe(false);
+      expect(enqueue).not.toHaveBeenCalled();
       expect(error).not.toHaveBeenCalled();
     } finally {
+      enqueue.mockRestore();
       error.mockRestore();
     }
   });
@@ -104,12 +110,12 @@ describe('legacy NDJSON cancellation', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(cancel).toHaveBeenCalledExactlyOnceWith('stop');
       expect(resolved).toBe(false);
+      expect(input.locked).toBe(false);
     } finally {
       finishCancel();
       await cancellation;
     }
     expect(resolved).toBe(true);
-    expect(input.locked).toBe(false);
   });
 
   it('forwards reader cancellation after a complete message', async () => {

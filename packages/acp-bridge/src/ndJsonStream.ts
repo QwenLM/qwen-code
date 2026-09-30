@@ -244,6 +244,9 @@ function createLegacyReadable(
         if (!canceled) controller.close();
       }
     },
+    // Defensive parity with bounded cancellation; current in-tree callers do
+    // not cancel this legacy readable. A connection holding its reader must
+    // cancel through that reader, since readable.cancel() rejects while locked.
     async cancel(reason) {
       canceled = true;
       if (reader) await cancelReader(reader, reason);
