@@ -33,7 +33,6 @@ public final class ManagedHookProtocol {
                 || !(operation.get("operationId") instanceof String id) || id.isBlank() || id.length() > 512) {
             throw invalid("Hook operation does not belong to the acquired Session.");
         }
-
     }
 
     static Map<String, Object> response(byte[] bytes, RuntimeSession session, Map<String, Object> request) {
