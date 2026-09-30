@@ -106,6 +106,14 @@ export class OverlayFs {
 
     for (const [rel, overlayPath] of this.writtenFiles) {
       const realPath = join(this.realCwd, rel);
+      // A registered entry is not proof that anything was written. `redirectWrite`
+      // registers the path up front and, for a file that does not exist yet, only
+      // creates the directory -- so a redirected write that then failed leaves an
+      // entry with no overlay file behind it. There is no edit to land and no false
+      // success to prevent, so counting it would reject edits that did land.
+      if (!existsSync(overlayPath)) {
+        continue;
+      }
       try {
         await mkdir(dirname(realPath), { recursive: true });
         await copyFile(overlayPath, realPath);
