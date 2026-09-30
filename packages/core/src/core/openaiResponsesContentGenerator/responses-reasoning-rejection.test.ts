@@ -640,6 +640,35 @@ describe('downgradeRejectedReasoningItems', () => {
     ]);
   });
 
+  it('cascades the sweep through a chain of summary-less episodes', () => {
+    // rs_x80's unit drop removes the only call group. rs_b loses its
+    // successor to that drop, and rs_a in turn loses rs_b; without the
+    // sweep recording each summary-less removal, rs_a survives bare.
+    const keep = userItem('hi');
+    const after = userItem('bye');
+    const items = Object.freeze([
+      keep,
+      reasoningItem('rs_a', []),
+      reasoningItem('rs_b', []),
+      reasoningItem(`rs_${'x'.repeat(80)}`, []),
+      Object.freeze({
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'f',
+        arguments: '{}',
+      }),
+      Object.freeze({
+        type: 'function_call_output',
+        call_id: 'c1',
+        output: 'ok',
+      }),
+      after,
+    ]) as ResponsesApiInputItem[];
+    expect(
+      downgradeRejectedReasoningItems(items, { namedIndex: 3, maxLength: 64 }),
+    ).toEqual([keep, after]);
+  });
+
   it('scopes the unit drop to the rejected reasoning group only', () => {
     // A second call group later in the turn must survive the first group's
     // drop intact.
