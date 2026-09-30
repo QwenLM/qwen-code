@@ -876,7 +876,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     super(
       AgentTool.Name,
       ToolDisplayNames.AGENT,
-      'Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
+      'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
       Kind.Agent,
       initialSchema,
       true, // isOutputMarkdown
@@ -958,7 +958,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const delegationSection = buildAgentDelegationSection(
       this.delegationSurface,
     );
-    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
+    const baseDescription = `Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:

@@ -165,6 +165,13 @@ describe('AgentTool per-turn size budgets', () => {
     expect(tool.alwaysLoad).toBe(false);
   });
 
+  it('keeps the deferred summary specific enough to discover Agent', async () => {
+    const tool = await buildTool();
+    expect(tool.description.split('\n')[0]).toBe(
+      'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.',
+    );
+  });
+
   it('keeps the description within its budget in the default shape', async () => {
     // Two subagents, team off, todo on, a pointer at the delegation
     // reference. The catalogue itself is covered by the proportional-growth
