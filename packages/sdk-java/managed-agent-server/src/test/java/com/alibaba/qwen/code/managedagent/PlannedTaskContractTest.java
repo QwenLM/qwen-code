@@ -65,6 +65,12 @@ class PlannedTaskContractTest {
         reject("pending with started_at", task("pending", 2L, null));
         reject("duplicate capability",
                 task("running", 2L, null, "cancel", "cancel"));
+        ObjectNode atBound = task("running", 2L, null);
+        ArrayNode boundRefs = atBound.putArray("artifact_refs");
+        for (int i = 0; i < 100; i++) {
+            boundRefs.add("artifact-" + i);
+        }
+        accept("artifact_refs at the bound", atBound);
         ObjectNode overBound = task("running", 2L, null);
         ArrayNode refs = overBound.putArray("artifact_refs");
         for (int i = 0; i < 101; i++) {
@@ -109,18 +115,10 @@ class PlannedTaskContractTest {
                 event("state_changed"), false);
         check("PublicTaskEvent", "artifact without artifact_id",
                 event("artifact"), false);
-        check("PublicTaskEvent", "state_changed with text",
-                event("state_changed").put("state", "running")
-                        .put("text", "x"), false);
         check("PublicTaskEvent", "output without text", event("output"),
                 false);
         check("PublicTaskEvent", "empty output", event("output")
                 .put("text", ""), false);
-        check("PublicTaskEvent", "output with state", event("output")
-                .put("text", "x").put("state", "running"), false);
-        check("PublicTaskEvent", "artifact with truncated", event("artifact")
-                .put("artifact_id", "artifact-1").put("truncated", true),
-                false);
         for (String field : List.of("cursor", "schema_version",
                 "projection_version")) {
             ObjectNode partial = event("output").put("text", "x");
@@ -295,53 +293,55 @@ class PlannedTaskContractTest {
     /**
      * Every optional event property must be required or forbidden by each
      * known type's conditional, apart from the type's own optional
-     * companions (design 4.3), so a property added without conditional
-     * updates fails here instead of silently widening every known type.
+     * companions (design 4.3). The pins are validator probes on the minimal
+     * valid event of each type, so they hold however a prohibition is
+     * spelled, and a property added without conditional updates fails here
+     * instead of silently widening every known type.
      */
     private void pinEventFieldTotality() {
         Map<String, Set<String>> companions = Map.of("state_changed",
                 Set.of("runtime_state"), "output", Set.of("truncated"),
                 "artifact", Set.of());
-        for (String schema : List.of("PublicTaskEvent",
-                MIRRORS.get("PublicTaskEvent"))) {
-            boolean mirror = !schema.equals("PublicTaskEvent");
-            JsonNode node = CONTRACT.node("/components/schemas/" + schema);
-            Set<String> required = new HashSet<>();
-            node.path("required")
-                    .forEach(field -> required.add(field.asText()));
-            List<String> optional = new ArrayList<>();
-            for (Map.Entry<String, JsonNode> field
-                    : node.path("properties").properties()) {
-                if (!required.contains(field.getKey())) {
-                    optional.add(field.getKey());
-                }
+        Map<String, ObjectNode> minimal = Map.of("state_changed",
+                event("state_changed").put("state", "running"), "output",
+                event("output").put("text", "x"), "artifact",
+                event("artifact").put("artifact_id", "artifact-1"));
+        Map<String, Object> values = Map.of("state", "running",
+                "runtime_state", "ready", "text", "x", "truncated", false,
+                "artifact_id", "artifact-1");
+        JsonNode node = CONTRACT.node("/components/schemas/PublicTaskEvent");
+        Set<String> required = new HashSet<>();
+        node.path("required")
+                .forEach(field -> required.add(field.asText()));
+        List<String> optional = new ArrayList<>();
+        for (Map.Entry<String, JsonNode> field
+                : node.path("properties").properties()) {
+            if (!required.contains(field.getKey())) {
+                optional.add(field.getKey());
             }
-            for (JsonNode conditional : node.path("allOf")) {
-                String type = conditional.path("if").path("properties")
-                        .path("type").path("const").asText();
-                if (!companions.containsKey(type)) {
-                    failures.add(schema + " has an unlisted conditional for "
-                            + type);
+        }
+        for (JsonNode conditional : node.path("allOf")) {
+            String type = conditional.path("if").path("properties")
+                    .path("type").path("const").asText();
+            if (!companions.containsKey(type)) {
+                failures.add("PublicTaskEvent has an unlisted conditional for "
+                        + type);
+                continue;
+            }
+            ObjectNode base = minimal.get(type);
+            for (String field : optional) {
+                if (base.has(field)) {
                     continue;
                 }
-                Set<String> covered = new HashSet<>();
-                JsonNode then = conditional.path("then");
-                then.path("required")
-                        .forEach(field -> covered.add(field.asText()));
-                for (JsonNode entry : then.path("not").path("anyOf")) {
-                    entry.path("required")
-                            .forEach(field -> covered.add(field.asText()));
+                if (!values.containsKey(field)) {
+                    failures.add("PublicTaskEvent has no known valid value "
+                            + "for " + field);
+                    continue;
                 }
-                Set<String> allowed = new HashSet<>();
-                companions.get(type).forEach(field -> allowed
-                        .add(mirror ? camelCase(field) : field));
-                for (String field : optional) {
-                    if (!covered.contains(field)
-                            && !allowed.contains(field)) {
-                        failures.add(schema + " " + type + " leaves " + field
-                                + " neither required nor forbidden");
-                    }
-                }
+                ObjectNode probe = base.deepCopy();
+                probe.set(field, JSON.valueToTree(values.get(field)));
+                check("PublicTaskEvent", type + " with " + field, probe,
+                        companions.get(type).contains(field));
             }
         }
     }
