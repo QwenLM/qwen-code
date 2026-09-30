@@ -97,6 +97,8 @@ export class HostedMcpSession {
   readonly broker: HostedWorkspaceBroker;
   private ready?: Promise<void>;
   private initializing = false;
+  private refreshing = 0;
+  private readonly configuring = new Set<string>();
   private acquired = false;
   private ownerReady = false;
   private grantsRenewed = false;
@@ -137,6 +139,8 @@ export class HostedMcpSession {
 
   async ensureReady(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
+    if (this.configuring.size)
+      throw new HostedMcpConflictError('MCP configuration is in progress.');
     this.ready ??= this.initialize(signal).catch((cause: unknown) => {
       this.ready = undefined;
       throw cause;
@@ -145,49 +149,67 @@ export class HostedMcpSession {
   }
 
   async refresh(signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted();
-    await this.ensureReady(signal);
-    signal?.throwIfAborted();
-    await this.acquireOwner();
-    for (const { configuration, catalog } of this.catalogs.values()) {
+    this.refreshing++;
+    try {
       signal?.throwIfAborted();
-      const response = await this.dispatch(
-        {
-          kind: 'mcp-discover',
-          sessionKey: this.key,
-          operationId: randomUUID(),
-          serverId: catalog.serverId,
-          serverRevision: catalog.serverRevision,
-          connectionGeneration: catalog.connectionGeneration,
-          grant: this.grant('mcp_configuration', configuration.configurationId),
-        },
-        signal,
-      );
+      await this.ensureReady(signal);
       signal?.throwIfAborted();
-      if (response.state !== 'settled')
-        throw new Error('Runtime MCP discovery failed.');
-      if (response.catalog && digest(response.catalog) === digest(catalog))
-        continue;
-      if (
-        response.error &&
-        !['managed_mcp_retiring', 'managed_mcp_binding_conflict'].includes(
-          response.error.code,
+      await this.acquireOwner();
+      for (const { configuration, catalog } of this.catalogs.values()) {
+        signal?.throwIfAborted();
+        if (this.configuring.has(catalog.serverId))
+          throw new Error('Runtime MCP configuration is in progress.');
+        const response = await this.dispatch(
+          {
+            kind: 'mcp-discover',
+            sessionKey: this.key,
+            operationId: randomUUID(),
+            serverId: catalog.serverId,
+            serverRevision: catalog.serverRevision,
+            connectionGeneration: catalog.connectionGeneration,
+            grant: this.grant(
+              'mcp_configuration',
+              configuration.configurationId,
+            ),
+          },
+          signal,
+        );
+        signal?.throwIfAborted();
+        if (this.configuring.has(catalog.serverId))
+          throw new Error('Runtime MCP configuration is in progress.');
+        if (
+          this.catalogs.get(catalog.serverId)?.configuration.configurationId !==
+          configuration.configurationId
         )
-      )
-        throw new Error('Runtime MCP discovery failed.');
-      await this.configure(
-        randomUUID(),
-        {
-          serverId: catalog.serverId,
-          serverRevision: catalog.serverRevision,
-          definitionDigest: catalog.definitionDigest,
-        },
-        Math.max(
-          ...this.configurations()
-            .filter((entry) => entry.serverId === catalog.serverId)
-            .map((entry) => entry.configRevision),
-        ),
-      );
+          continue;
+        if (response.state !== 'settled')
+          throw new Error('Runtime MCP discovery failed.');
+        if (response.catalog && digest(response.catalog) === digest(catalog))
+          continue;
+        if (
+          response.error &&
+          !['managed_mcp_retiring', 'managed_mcp_binding_conflict'].includes(
+            response.error.code,
+          )
+        )
+          throw new Error('Runtime MCP discovery failed.');
+        await this.configure(
+          randomUUID(),
+          {
+            serverId: catalog.serverId,
+            serverRevision: catalog.serverRevision,
+            definitionDigest: catalog.definitionDigest,
+          },
+          Math.max(
+            ...this.configurations()
+              .filter((entry) => entry.serverId === catalog.serverId)
+              .map((entry) => entry.configRevision),
+          ),
+          signal,
+        );
+      }
+    } finally {
+      this.refreshing--;
     }
   }
 
@@ -230,48 +252,65 @@ export class HostedMcpSession {
     operationId: string,
     pin: HostedMcpServerPin,
     expectedRevision: number,
+    signal?: AbortSignal,
   ): Promise<void> {
-    if (!this.servers.some((server) => server.serverId === pin.serverId))
-      throw new Error('MCP server is not allowed by this Session.');
-    const previous = this.session.authority.extensionRecord(
-      'mcp_configuration',
-      operationId,
-    );
-    if (previous) {
-      const saved = parseMcpConfiguration(previous.record);
-      if (
-        saved.serverId !== pin.serverId ||
-        saved.serverRevision !== pin.serverRevision ||
-        saved.run.definition?.definitionDigest !== pin.definitionDigest ||
-        saved.configRevision !== expectedRevision + 1
-      )
-        throw new HostedMcpConflictError(
-          'MCP configuration identity conflicts.',
-        );
-      await this.install(pin, saved);
-      return;
-    }
-    const currentRevision = Math.max(
-      0,
-      ...this.configurations()
-        .filter((entry) => entry.serverId === pin.serverId)
-        .map((entry) => entry.configRevision),
-    );
-    if (currentRevision !== expectedRevision)
-      throw new HostedMcpConflictError('MCP configuration revision conflicts.');
-    if (
-      this.configurations().some(
-        (entry) =>
-          entry.serverId === pin.serverId &&
-          !['settled', 'failed', 'cancelled'].includes(entry.run.state),
-      )
-    )
-      throw new HostedMcpRecoveryRequiredError();
+    signal?.throwIfAborted();
+    if (this.initializing || this.configuring.has(pin.serverId))
+      throw new HostedMcpConflictError('MCP configuration is in progress.');
+    this.configuring.add(pin.serverId);
     try {
-      await this.install(pin, undefined, operationId, expectedRevision + 1);
-    } catch (cause) {
-      this.ready = undefined;
-      throw cause;
+      if (!this.servers.some((server) => server.serverId === pin.serverId))
+        throw new Error('MCP server is not allowed by this Session.');
+      const previous = this.session.authority.extensionRecord(
+        'mcp_configuration',
+        operationId,
+      );
+      if (previous) {
+        const saved = parseMcpConfiguration(previous.record);
+        if (
+          saved.serverId !== pin.serverId ||
+          saved.serverRevision !== pin.serverRevision ||
+          saved.run.definition?.definitionDigest !== pin.definitionDigest ||
+          saved.configRevision !== expectedRevision + 1
+        )
+          throw new HostedMcpConflictError(
+            'MCP configuration identity conflicts.',
+          );
+        await this.install(pin, saved, undefined, undefined, signal);
+        return;
+      }
+      const currentRevision = Math.max(
+        0,
+        ...this.configurations()
+          .filter((entry) => entry.serverId === pin.serverId)
+          .map((entry) => entry.configRevision),
+      );
+      if (currentRevision !== expectedRevision)
+        throw new HostedMcpConflictError(
+          'MCP configuration revision conflicts.',
+        );
+      if (
+        this.configurations().some(
+          (entry) =>
+            entry.serverId === pin.serverId &&
+            !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+        )
+      )
+        throw new HostedMcpRecoveryRequiredError();
+      try {
+        await this.install(
+          pin,
+          undefined,
+          operationId,
+          expectedRevision + 1,
+          signal,
+        );
+      } catch (cause) {
+        this.ready = undefined;
+        throw cause;
+      }
+    } finally {
+      this.configuring.delete(pin.serverId);
     }
   }
 
@@ -688,7 +727,8 @@ export class HostedMcpSession {
   }
 
   async close(): Promise<void> {
-    if (this.initializing) throw new HostedMcpRecoveryRequiredError();
+    if (this.initializing || this.refreshing || this.configuring.size)
+      throw new HostedMcpRecoveryRequiredError();
     for (const entry of this.session.authority.extensionRecordsInDomain(
       'mcp_operation',
     )) {
@@ -782,12 +822,15 @@ export class HostedMcpSession {
       )
         throw new HostedMcpRecoveryRequiredError();
       const operationId = `${configuration.configurationId}:release`;
-      let response: ManagedMcpOperationView;
+      let response: ManagedMcpOperationView | undefined;
       if (configuration.releaseState === 'releasing') {
         response = await this.lookup(operationId);
       } else {
         configuration = { ...configuration, releaseState: 'releasing' };
         await this.commitConfiguration(configuration);
+      }
+      if (!response || response.state === 'outcome_unknown') {
+        await this.acquireOwner(true);
         response = await this.dispatch({
           kind: 'mcp-release',
           sessionKey: this.key,

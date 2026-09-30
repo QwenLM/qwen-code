@@ -314,6 +314,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
+    {
+      reason:
+        'A daemon-wide ambient usage-statistics opt-out is a process-scoped ' +
+        'operator decision that must close the gate for every hosted ' +
+        'workspace; an ambient opt-in belongs to another hosted repository.',
+      accesses: { 'key:QWEN_USAGE_STATISTICS_ENABLED': 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/routes/workspace-git-branches.ts',
     {
       reason:

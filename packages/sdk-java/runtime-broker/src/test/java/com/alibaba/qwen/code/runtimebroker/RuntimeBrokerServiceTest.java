@@ -95,6 +95,28 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void failedAdoptedReleaseLeavesReclamationReachable() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            assertEquals(RuntimeSessionRecord.State.ACQUIRING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.provisioner.usable = false;
+            RuntimeBrokerException releaseFailure = failure(fixture.service.release("blocked", "blocked"));
+            assertEquals("runtime_reconciliation_required", releaseFailure.getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST, fixture.bindingRepository.findById("binding-1").getState());
+            fixture.provisioner.usable = true;
+            fixture.transport.acquireResult = CompletableFuture.completedFuture(null);
+            RuntimeBrokerException acquireFailure = failure(fixture.service.acquire("blocked", "blocked", "bootstrap"));
+            assertEquals("runtime_broker_runtime_lost", acquireFailure.getCode(),
+                    "missing durable stop proof must fail at reclamation, not a stale session admission guard");
+            assertEquals(1, fixture.provisioner.calls.get(), "without writer-stop proof no new Runtime may be provisioned");
+        }
+    }
+
+    @Test
     void releasesAnIncompleteAcquisitionOnlyAfterOriginalTransportConfirmation() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("holder", "holder", "bootstrap"));

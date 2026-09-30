@@ -613,8 +613,14 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             ManagedMcpProtocol.validateSession(session, immutable);
             Map<String, Object> body = Map.of("protocolVersion", 1,
                     "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
-            return post(lease, ManagedMcpProtocol.PATH,
-                    encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES), TOOL_RESULT_LIMIT_BYTES)
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime MCP operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedMcpProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                     .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, immutable));
         }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());

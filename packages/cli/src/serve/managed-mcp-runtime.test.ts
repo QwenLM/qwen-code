@@ -9,6 +9,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { OperationGrant } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import type {
@@ -63,6 +64,7 @@ createInterface({input:process.stdin}).on('line', line => {
    if(request.params.arguments.strayAfter) setTimeout(()=>send(999999,{}),100);
    if(request.params.arguments.duplicateId) send(request.params.arguments.duplicateId,{content:[{type:'text',text:'duplicate'}]});
    if(request.params.arguments.notify) process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/tools/list_changed'})+'\n');
+   if(request.params.arguments.notifyMethod) process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:request.params.arguments.notifyMethod})+'\n');
    const respond=()=>send(request.id,{content:[{type:'text',text:request.params.arguments.large?'x'.repeat(61*1024):JSON.stringify({args:request.params.arguments,hasScopedSecret:process.env.MCP_SECRET==='runtime-only-secret',ambient:process.env.MCP_AMBIENT_SECRET??null,logname:process.env.LOGNAME??null,cwd:process.cwd(),systemRoot:process.env.SYSTEMROOT??null})}]});
    if (request.params.arguments.releaseFile) {
      const timer=setInterval(()=>{if(existsSync(request.params.arguments.releaseFile)){clearInterval(timer);respond();}},10);
@@ -209,6 +211,87 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it.each(['toString', 'constructor', '__proto__'])(
+    'ignores inherited notification names without changing the catalog: %s',
+    async (method) => {
+      const instance = runtime();
+      const catalog = (await settled(instance, configure())).catalog!;
+      const result = await instance.invokeTool(
+        runtimeSessionId,
+        invoke(catalog, 'notify', {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: { notifyMethod: method },
+        }),
+      );
+      expect(result.error).toBeUndefined();
+      const discovery = await settled(instance, {
+        kind: 'mcp-discover',
+        sessionKey,
+        operationId: 'discover',
+        serverId: catalog.serverId,
+        serverRevision: catalog.serverRevision,
+        connectionGeneration: catalog.connectionGeneration,
+        grant: grant('configuration-1'),
+      });
+      expect(discovery.catalog).toEqual(catalog);
+    },
+  );
+
+  it('keeps a healthy replacement while retaining the undrained predecessor hold', async () => {
+    const instance = runtime([stdioDefinition(), stdioDefinition(2)]);
+    const original = (await settled(instance, configure())).catalog!;
+    const close = vi
+      .spyOn(Client.prototype, 'close')
+      .mockRejectedValueOnce(new Error('drain unconfirmed'));
+    try {
+      const replacement = await settled(instance, configure(2));
+      expect(replacement.error).toBeUndefined();
+      expect(replacement.catalog?.serverRevision).toBe(2);
+      const result = await instance.invokeTool(
+        runtimeSessionId,
+        invoke(replacement.catalog!, 'echo-new', {
+          kind: 'tool_call',
+          name: 'echo',
+          arguments: {},
+        }),
+      );
+      expect(result.error).toBeUndefined();
+      await settled(instance, {
+        kind: 'mcp-release',
+        sessionKey,
+        operationId: 'release-new',
+        serverId: 'fixture',
+        serverRevision: 2,
+        connectionGeneration: replacement.catalog!.connectionGeneration,
+        grant: grant('configuration-2'),
+      });
+      expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+      const retired = await settled(instance, {
+        kind: 'mcp-discover',
+        sessionKey,
+        operationId: 'discover-old',
+        serverId: 'fixture',
+        serverRevision: 1,
+        connectionGeneration: original.connectionGeneration,
+        grant: grant('configuration-1'),
+      });
+      expect(retired.error?.code).toBe('managed_mcp_retiring');
+      await settled(instance, {
+        kind: 'mcp-release',
+        sessionKey,
+        operationId: 'release-old',
+        serverId: 'fixture',
+        serverRevision: 1,
+        connectionGeneration: original.connectionGeneration,
+        grant: grant('configuration-1'),
+      });
+      expect(instance.hasHolds(runtimeSessionId)).toBe(false);
+    } finally {
+      close.mockRestore();
+    }
+  });
+
   it('refuses an MCP tool when a provider claims its Session during context lookup', async () => {
     const instance = runtime();
     const catalog = (await settled(instance, configure())).catalog!;

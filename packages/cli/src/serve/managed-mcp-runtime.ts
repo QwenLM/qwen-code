@@ -693,7 +693,9 @@ export class ManagedMcpRuntime {
               'notifications/resources/list_changed': 'resources',
               'notifications/prompts/list_changed': 'prompts',
             } as const;
-            const kind = changed[message.method as keyof typeof changed];
+            const kind = Object.hasOwn(changed, message.method)
+              ? changed[message.method as keyof typeof changed]
+              : undefined;
             if (kind) {
               connection.catalogChanges[kind]++;
               if (connection.catalog)
@@ -721,7 +723,8 @@ export class ManagedMcpRuntime {
         await this.discover(connection);
         for (const sibling of siblings) {
           sibling.retiring = true;
-          if (sibling.pending.size === 0) await this.closeConnection(sibling);
+          if (sibling.pending.size === 0)
+            await this.closeConnection(sibling).catch(() => undefined);
         }
         this.settled(operation, { catalog: connection.catalog! });
       } catch {

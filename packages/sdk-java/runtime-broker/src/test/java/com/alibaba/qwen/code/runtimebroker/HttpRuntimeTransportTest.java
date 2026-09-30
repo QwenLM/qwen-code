@@ -890,6 +890,48 @@ class HttpRuntimeTransportTest {
     }
 
     @Test
+    void oversizedMcpRequestHasDefinitiveClassification() {
+        RuntimeSession session = toolSession();
+        Map<String, Object> operation = new LinkedHashMap<>(mcpOperation(session, "mcp-invoke"));
+        operation.put("request", Map.of("kind", "prompt_get", "name", "large",
+                "arguments", Map.of("value", "x".repeat(HttpRuntimeTransport.TOOL_REQUEST_LIMIT_BYTES + 1))));
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> transport.control(toolLease(server.getAddress().getPort()), session, operation));
+        assertNull(captured.get(), "oversized request must never reach the Runtime");
+        RuntimeBrokerException classified = assertInstanceOf(RuntimeBrokerException.class, failure);
+        assertEquals(413, classified.getStatusCode());
+        assertEquals("runtime_control_operation_too_large", classified.getCode());
+        assertFalse(classified.isRetryable());
+    }
+
+    @Test
+    void oversizedMcpRequestKeepsClassificationThroughBrokerService() {
+        RuntimeSession session = toolSession();
+        RuntimeScope scope = session.getScope();
+        RuntimeLease lease = toolLease(server.getAddress().getPort());
+        var clock = java.time.Clock.systemUTC();
+        var bindings = new InMemoryRuntimeBindingRepository(clock, () -> "size-probe-binding");
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        RuntimeProvisioner provisioner = request -> CompletableFuture.completedFuture(lease);
+        try (var service = new RuntimeBrokerService(harness -> CompletableFuture.completedFuture(scope),
+                provisioner, transport, bindings, sessions, executions, "size-probe",
+                Duration.ofMinutes(1), Duration.ofMinutes(1), clock, () -> "size-probe-execution")) {
+            service.acquire(session.getHarnessSessionId(), session.getRuntimeSessionId(), "bootstrap").toCompletableFuture().join();
+            Map<String, Object> operation = new LinkedHashMap<>(mcpOperation(session, "mcp-invoke"));
+            operation.put("request", Map.of("kind", "prompt_get", "name", "large",
+                    "arguments", Map.of("value", "x".repeat(HttpRuntimeTransport.TOOL_REQUEST_LIMIT_BYTES + 1))));
+            CompletionException failure = assertThrows(CompletionException.class, () -> service.control(
+                    session.getHarnessSessionId(), session.getRuntimeSessionId(), operation).toCompletableFuture().join());
+            RuntimeBrokerException classified = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertNull(captured.get(), "oversized request must never reach the Runtime");
+            assertEquals(413, classified.getStatusCode());
+            assertEquals("runtime_control_operation_too_large", classified.getCode());
+            assertFalse(classified.isRetryable());
+        }
+    }
+
+    @Test
     void forwardsMcpDataWithoutInventingAToolResult() throws Exception {
         RuntimeSession session = toolSession();
         Map<String, Object> operation = mcpOperation(session, "mcp-invoke");

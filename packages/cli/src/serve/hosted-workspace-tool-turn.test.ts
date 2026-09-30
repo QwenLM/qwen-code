@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,6 +17,7 @@ import {
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import { HostedWorkspaceBrokerRejection } from './hosted-workspace-broker.js';
@@ -24,6 +25,14 @@ import {
   HostedWorkspaceToolTurn,
   HostedToolRecoveryRequiredError,
 } from './hosted-workspace-tool-turn.js';
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import {
+  HOSTED_TOOL_APPROVAL_POLICY,
+  HostedApprovalWaiters,
+  hostedActionAllowed,
+  resolveHostedAction,
+  type HostedApprovalMode,
+} from './hosted-tool-approval.js';
 
 const broker = vi.hoisted(() => ({
   warm: vi.fn(),
@@ -55,7 +64,11 @@ let harness: ReturnType<typeof createManagedHarnessHandle>;
 let turn: HostedWorkspaceToolTurn;
 let commit: ConstructorParameters<typeof HostedWorkspaceToolTurn>[4];
 const messageFitsInline = vi.fn(() => true);
-function createTurn(shell = false) {
+let waiters: HostedApprovalWaiters;
+function createTurn(
+  shell = false,
+  approval?: { mode: HostedApprovalMode; timeoutMs?: number },
+) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -66,6 +79,13 @@ function createTurn(shell = false) {
     shell
       ? { resources: session.resources, assertWritable: async () => undefined }
       : undefined,
+    approval && {
+      settings: {
+        mode: approval.mode,
+        timeoutMs: approval.timeoutMs ?? 60_000,
+      },
+      waiters,
+    },
   );
 }
 const calls = ['read_file', 'edit'].map((name, index) => ({
@@ -148,12 +168,16 @@ beforeEach(async () => {
   messageFitsInline.mockReturnValue(true);
   broker.registerPublisher.mockResolvedValue('1');
   broker.acknowledge.mockResolvedValue(undefined);
+  waiters = new HostedApprovalWaiters();
   turn = createTurn();
 });
 afterEach(async () => {
   await turn?.close();
   vi.restoreAllMocks();
-  await session?.close();
+  // A Session whose writes stopped cannot record its own close.
+  if (session?.authority.writesStopped)
+    await expect(session.close()).rejects.toThrow(/writes stopped/);
+  else await session?.close();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -627,6 +651,7 @@ it.each(['refresh', 'warmup'] as const)(
       async () => randomUUID(),
       () => true,
       undefined,
+      undefined,
       mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
     );
     const abort = new AbortController();
@@ -662,6 +687,7 @@ it('executes against the declarations actually advertised before a catalog repla
     'prompt',
     async () => randomUUID(),
     () => true,
+    undefined,
     undefined,
     mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
   );
@@ -1021,3 +1047,1039 @@ it.each([false, true])(
     ).toBe(false);
   },
 );
+
+const answer = (optionId: string, extra: Record<string, unknown> = {}) => ({
+  optionId,
+  inputRevision: 1,
+  policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+  ...extra,
+});
+
+function actionIds(): string[] {
+  return [
+    ...new Set(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'action.changed')
+        .map((event) => event.payload['requestId'] as string),
+    ),
+  ];
+}
+
+async function requested(count = 1): Promise<string> {
+  let requestId = '';
+  await vi.waitFor(async () => {
+    const ids = actionIds();
+    expect(ids).toHaveLength(count);
+    requestId = ids.at(-1)!;
+    expect(session.authority.action(requestId)?.state).toBe('requested');
+    expect((await checkpoint()).continuation.phase).toBe('await_action');
+  });
+  return requestId;
+}
+
+async function checkpoint() {
+  const authorization = await session.authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable') throw new Error('No checkpoint');
+  return authorization.checkpoint;
+}
+
+async function toolResults() {
+  return (await session.sink.project())
+    .filter((record) => record.type === 'tool_result')
+    .map((record) =>
+      record.message?.parts?.map((part) => part.functionResponse?.id),
+    );
+}
+
+async function toolResultErrors() {
+  return (await session.sink.project())
+    .filter((record) => record.type === 'tool_result')
+    .flatMap((record) => record.message?.parts ?? [])
+    .map((part) => part.functionResponse?.response?.['error']);
+}
+
+it('asks before an edit in default mode and runs the batch once the owner allows', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const started = Date.now();
+  const running = turn.execute(
+    calls,
+    parts,
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  expect(requestId).toMatch(/^tool_approval_[0-9a-f]{32}$/u);
+  expect((await checkpoint()).identity).toMatchObject({
+    turnId: 'prompt',
+    promptId: 'prompt',
+  });
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect((await session.sink.project()).map((record) => record.type)).toEqual([
+    'assistant',
+  ]);
+  const action = session.authority.action(requestId)!;
+  expect(action).toMatchObject({
+    kind: 'permission',
+    source: 'tool_call',
+    inputRevision: 1,
+  });
+  const options = JSON.parse(
+    (await session.resources.read(action.optionsRef!)).toString(),
+  );
+  expect(options).toMatchObject({
+    v: 1,
+    requestId,
+    turnId: 'prompt',
+    functionCallId: 'call-1',
+    toolName: 'edit',
+    policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+    inputRevision: 1,
+    options: [
+      { id: 'allow', label: 'Allow' },
+      { id: 'deny', label: 'Deny' },
+    ],
+  });
+  expect(options.createdAt).toBeGreaterThanOrEqual(started);
+  expect(options.expiresAt - options.createdAt).toBe(60_000);
+  const invocationRef = (await checkpoint()).approval?.invocationRef;
+
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
+  const responses = await running;
+  expect(
+    responses.map((part) => part.functionResponse?.response?.['error']),
+  ).toEqual([undefined, undefined]);
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  expect(actionIds()).toEqual([requestId]);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.intent')
+      .map((event) => event.payload['argsRef']),
+  ).toContainEqual(invocationRef);
+  expect((await checkpoint()).continuation.phase).toBe('results_ready');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('deny')),
+  ).resolves.toEqual({ status: 409, code: 'action_already_resolved' });
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('refuses a denied call in the model order and still runs the rest', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1], calls[0]],
+    [parts[1], parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('deny')),
+  ).resolves.toMatchObject({ status: 200 });
+  const responses = await running;
+  expect(broker.prepare).toHaveBeenCalledOnce();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+    'call-1',
+    'call-0',
+  ]);
+  expect(responses[0].functionResponse?.response).toEqual({
+    error: 'The Session owner denied this tool call, so it was not run.',
+  });
+  expect(responses[1].functionResponse?.response?.['executionStatus']).toBe(
+    'success',
+  );
+  expect(await toolResults()).toEqual([['call-1'], ['call-0']]);
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('deny')),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'deny' },
+  });
+  expect(
+    (await checkpoint()).tools?.items.map((item) => item.functionCallId),
+  ).toEqual(['call-0']);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.intent'),
+  ).toHaveLength(1);
+});
+
+it('commits only refusals when every asked call is denied', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  const responses = await running;
+  expect(responses).toHaveLength(1);
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    'denied',
+  );
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(await toolResults()).toEqual([['call-1']]);
+  expect((await checkpoint()).continuation.phase).toBe(
+    'model_output_committed',
+  );
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it.each(['allow', 'deny'])(
+  'honors %s approval for an MCP call while retaining its shared owner',
+  async (optionId) => {
+    const input = {
+      toolName: 'managed_mcp_call',
+      input: { pinned: 'original' },
+    };
+    let expiresAt = 1;
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [
+        { name: 'mcp_echo', parametersJsonSchema: { type: 'object' } },
+      ],
+      toolInput: () => ({
+        ...input,
+        input: { ...input.input, grant: { expiresAt } },
+      }),
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    );
+    const call = { ...calls[0], name: 'mcp_echo', args: { text: 'hello' } };
+    const running = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const approvedRef = (await checkpoint()).approval!.invocationRef!;
+    const approved = (await session.resources.read(approvedRef)).toString();
+    expiresAt = 2;
+    await resolveHostedAction(session, waiters, requestId, answer(optionId));
+    const result = await running;
+    expect(broker.prepare).toHaveBeenCalledTimes(optionId === 'allow' ? 1 : 0);
+    expect(broker.execute).toHaveBeenCalledTimes(optionId === 'allow' ? 1 : 0);
+    if (optionId === 'allow') {
+      const payload = broker.execute.mock.calls[0][1];
+      expect(JSON.parse(payload)).toEqual({
+        ...input,
+        input: { ...input.input, grant: { expiresAt: 2 } },
+      });
+      expect(broker.prepare.mock.calls[0][1]).toBe(
+        `sha256:${createHash('sha256').update(payload).digest('hex')}`,
+      );
+      const intent = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .find((event) => event.kind === 'tool.intent')!;
+      const routed = JSON.parse(
+        (
+          await session.resources.read(
+            intent.payload['argsRef'] as unknown as ManagedSessionDurableRef,
+          )
+        ).toString(),
+      );
+      expect(routed.payloadJson).toBe(payload);
+      expect((await session.resources.read(approvedRef)).toString()).toBe(
+        approved,
+      );
+    } else
+      expect(result[0].functionResponse?.response?.['error']).toContain(
+        'denied',
+      );
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).not.toHaveBeenCalled();
+  },
+);
+
+it('asks one call at a time in the model order', async () => {
+  const batch = [
+    {
+      ...calls[1],
+      name: 'write_file',
+      callId: 'call-0',
+      args: { file_path: 'new.txt', content: 'new' },
+    },
+    calls[1],
+  ];
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  const first = await requested(1);
+  expect(actionIds()).toEqual([first]);
+  await resolveHostedAction(session, waiters, first, answer('allow'));
+  const second = await requested(2);
+  const options = JSON.parse(
+    (
+      await session.resources.read(
+        session.authority.action(second)!.optionsRef!,
+      )
+    ).toString(),
+  );
+  expect(options).toMatchObject({ functionCallId: 'call-1', toolName: 'edit' });
+  await resolveHostedAction(session, waiters, second, answer('deny'));
+  const responses = await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(
+    responses.map((part) => !!part.functionResponse?.response?.['error']),
+  ).toEqual([false, true]);
+});
+
+it.each(['yolo', 'auto-edit'] as const)(
+  'does not ask before file calls in %s mode',
+  async (mode) => {
+    turn = createTurn(false, { mode });
+    await turn.execute(calls, parts, 'model', new AbortController().signal);
+    expect(actionIds()).toEqual([]);
+    expect(broker.execute).toHaveBeenCalledTimes(2);
+  },
+);
+
+it('refuses a call whose approval expires unanswered', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 1_000 });
+  const responses = await turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const [requestId] = actionIds();
+  expect(session.authority.action(requestId)?.state).toBe('expired');
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    'expired',
+  );
+  expect(broker.prepare).not.toHaveBeenCalled();
+  const publish = vi.spyOn(session.resources, 'publish');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'action_expired' });
+  expect(publish).not.toHaveBeenCalled();
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => true,
+    ),
+  ).resolves.toEqual({ status: 409, code: 'action_expired' });
+});
+
+it('expires an approval that is answered after its expiry', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const late = Date.now() + 60_000;
+  const now = vi.spyOn(Date, 'now').mockReturnValue(late);
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'action_expired' });
+  now.mockRestore();
+  const responses = await running;
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    'expired',
+  );
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('cancels a waiting approval and refuses every call when the turn aborts', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const controller = new AbortController();
+  const running = turn.execute(calls, parts, 'model', controller.signal);
+  const requestId = await requested();
+  controller.abort(new Error('turn cancelled'));
+  await expect(running).rejects.toThrow('turn cancelled');
+  expect(session.authority.action(requestId)?.state).toBe('cancelled');
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(await toolResults()).toEqual([['call-0', 'call-1']]);
+  expect((await checkpoint()).continuation.phase).toBe(
+    'model_output_committed',
+  );
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'action_cancelled' });
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => true,
+    ),
+  ).resolves.toEqual({ status: 409, code: 'action_cancelled' });
+});
+
+it('refuses an Action response that does not match the request', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  for (const id of ['tool_approval_' + '0'.repeat(32), 'call-1'])
+    await expect(
+      resolveHostedAction(session, waiters, id, answer('allow')),
+    ).resolves.toEqual({ status: 404, code: 'action_not_found' });
+  for (const body of [
+    answer('maybe'),
+    answer('allow', { inputRevision: 2 }),
+    answer('allow', { policyRevision: 'preapproved-workspace-tools/1' }),
+    answer('allow', { note: 'extra' }),
+    { optionId: 'allow' },
+    null,
+    ['allow'],
+  ])
+    await expect(
+      resolveHostedAction(session, waiters, requestId, body),
+    ).resolves.toEqual({ status: 400, code: 'invalid_action_response' });
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('keeps an answer retryable when it fails before any write', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+  vi.spyOn(session.resources, 'read').mockRejectedValueOnce(
+    new Error('store unavailable'),
+  );
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).rejects.toThrow('store unavailable');
+  now.mockRestore();
+  expect(session.authority.writesStopped).toBe(false);
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toMatchObject({ status: 200 });
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('stops the Turn when a late answer cannot record the expiry', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+  vi.spyOn(
+    LocalJsonlManagedSessionJournalHandle.prototype,
+    'appendTransaction',
+  ).mockRejectedValueOnce(new Error('journal down'));
+  const notify = vi.spyOn(waiters, 'notify');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  expect(notify).toHaveBeenCalledWith(requestId);
+  expect(session.authority.writesStopped).toBe(true);
+  await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  // Still late and still requested: the answer must not try to write.
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  now.mockRestore();
+});
+
+it('stops a waiting Turn soon after another write stops the Session', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  await requested();
+  vi.spyOn(
+    LocalJsonlManagedSessionJournalHandle.prototype,
+    'appendTransaction',
+  ).mockRejectedValueOnce(new Error('journal down'));
+  await expect(
+    commit('assistant', [{ text: 'title' }], 'model'),
+  ).rejects.toThrow('journal down');
+  const started = Date.now();
+  await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(Date.now() - started).toBeLessThan(5_000);
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('answers what a blocked Session already recorded but writes nothing', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const batch = [
+    {
+      ...calls[1],
+      name: 'write_file',
+      callId: 'call-0',
+      args: { file_path: 'new.txt', content: 'new' },
+    },
+    calls[1],
+  ];
+  const running = turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  const decided = await requested(1);
+  await resolveHostedAction(session, waiters, decided, answer('allow'));
+  const waiting = await requested(2);
+  await expect(
+    resolveHostedAction(session, waiters, decided, answer('allow'), () => true),
+  ).resolves.toMatchObject({ status: 200 });
+  await expect(
+    resolveHostedAction(session, waiters, decided, answer('deny'), () => true),
+  ).resolves.toEqual({ status: 409, code: 'action_already_resolved' });
+  const publish = vi.spyOn(session.resources, 'publish');
+  await expect(
+    resolveHostedAction(session, waiters, waiting, answer('allow'), () => true),
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  expect(publish).not.toHaveBeenCalled();
+  expect(session.authority.action(waiting)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, waiting, answer('deny'));
+  await running;
+});
+
+it('stops asking once an approval in the Turn has expired', async () => {
+  const batch = [
+    {
+      ...calls[1],
+      name: 'write_file',
+      callId: 'call-0',
+      args: { file_path: 'new.txt', content: 'new' },
+    },
+    calls[1],
+  ];
+  const batchParts = batch.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  turn = createTurn(false, { mode: 'default', timeoutMs: 1_000 });
+  const responses = await turn.execute(
+    batch,
+    batchParts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(actionIds()).toHaveLength(1);
+  expect(
+    responses.map((part) => part.functionResponse?.response?.['error']),
+  ).toEqual([
+    'Nobody answered the approval request before it expired, so this tool call was not run.',
+    'An earlier approval request in this turn expired unanswered, so this tool call was not asked about or run.',
+  ]);
+  const next = await turn.execute(
+    [calls[0], calls[1]],
+    [parts[0], parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(actionIds()).toHaveLength(1);
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(next[1].functionResponse?.response?.['error']).toContain(
+    'expired unanswered',
+  );
+});
+
+it('keeps a decision that lands just before the waiter ends the Action', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const controller = new AbortController();
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    controller.signal,
+  );
+  const requestId = await requested();
+  const original = session.authority.resolveAction.bind(session.authority);
+  vi.spyOn(session.authority, 'resolveAction').mockImplementationOnce(
+    async (command, request) => {
+      // The owner's answer is recorded between the waiter's check and its
+      // own attempt to end the Action.
+      await resolveHostedAction(session, waiters, requestId, answer('allow'));
+      return original(command, request);
+    },
+  );
+  controller.abort(new Error('turn cancelled'));
+  await expect(running).rejects.toThrow('turn cancelled');
+  expect(session.authority.action(requestId)?.state).toBe('decided');
+  expect(broker.prepare).not.toHaveBeenCalled();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('reports an answer that loses the race to the expiry as expired', async () => {
+  turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const original = session.authority.resolveAction.bind(session.authority);
+  vi.spyOn(session.authority, 'resolveAction').mockImplementationOnce(
+    async (command, request) => {
+      await original(
+        { ...command, commandId: `${command.commandId}:race` },
+        { requestId, state: 'expired', decisionRef: null },
+      );
+      return original(command, request);
+    },
+  );
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({ status: 409, code: 'action_expired' });
+  waiters.notify(requestId);
+  const responses = await running;
+  expect(responses[0].functionResponse?.response?.['error']).toContain(
+    'expired',
+  );
+  expect(broker.prepare).not.toHaveBeenCalled();
+});
+
+it('blocks recovery when the refusals do not fit durably', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  messageFitsInline.mockImplementation(
+    (...args: unknown[]) => args[0] !== 'tool_result',
+  );
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  await resolveHostedAction(
+    session,
+    waiters,
+    await requested(),
+    answer('deny'),
+  );
+  await expect(running).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(await toolResults()).toEqual([]);
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+});
+
+it('does not ask about later calls once the turn is cancelled', async () => {
+  const batch = [
+    {
+      ...calls[1],
+      name: 'write_file',
+      callId: 'call-0',
+      args: { file_path: 'new.txt', content: 'new' },
+    },
+    calls[1],
+  ];
+  turn = createTurn(false, { mode: 'default' });
+  const controller = new AbortController();
+  const publish = vi.spyOn(session.resources, 'publish');
+  const running = turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    controller.signal,
+  );
+  const first = await requested();
+  controller.abort(new Error('turn cancelled'));
+  await expect(running).rejects.toThrow('turn cancelled');
+  expect(actionIds()).toEqual([first]);
+  expect(
+    publish.mock.calls.filter(([kind]) => kind === 'managed-action-options'),
+  ).toHaveLength(1);
+  expect(session.authority.action(first)?.state).toBe('cancelled');
+  expect(await toolResults()).toEqual([['call-0', 'call-1']]);
+  expect(await toolResultErrors()).toEqual([
+    'The turn was cancelled before this tool call ran.',
+    'The turn was cancelled before this tool call ran.',
+  ]);
+});
+
+it('opens no Action when the turn is cancelled while one is prepared', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const controller = new AbortController();
+  const publish = session.resources.publish.bind(session.resources);
+  vi.spyOn(session.resources, 'publish').mockImplementation(
+    async (kind, bytes) => {
+      if (kind === 'managed-action-options')
+        controller.abort(new Error('turn cancelled'));
+      return publish(kind, bytes);
+    },
+  );
+  await expect(
+    turn.execute(calls, parts, 'model', controller.signal),
+  ).rejects.toThrow('turn cancelled');
+  expect(actionIds()).toEqual([]);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(await toolResults()).toEqual([['call-0', 'call-1']]);
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('asks before Shell in auto-edit mode and runs the edit when Shell is denied', async () => {
+  turn = createTurn(true, { mode: 'auto-edit' });
+  const register = vi.spyOn(HostedShellPublisher.prototype, 'register');
+  const shell = {
+    ...calls[0],
+    name: 'run_shell_command',
+    callId: 'call-1',
+    args: { command: 'rm -rf build' },
+  };
+  const batch = [calls[1], shell].map((call, index) => ({
+    ...call,
+    callId: `call-${index}`,
+  }));
+  const running = turn.execute(
+    batch,
+    batch.map((call) => ({
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    })),
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const action = session.authority.action(requestId)!;
+  expect(
+    JSON.parse((await session.resources.read(action.optionsRef!)).toString()),
+  ).toMatchObject({ functionCallId: 'call-1', toolName: 'run_shell_command' });
+  expect(broker.registerPublisher).toHaveBeenCalledOnce();
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  const responses = await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(register).not.toHaveBeenCalled();
+  expect(
+    responses.map((part) => part.functionResponse?.response?.['error']),
+  ).toEqual([
+    undefined,
+    'The Session owner denied this tool call, so it was not run.',
+  ]);
+});
+
+it('writes nothing once the Turn blocks during an answer', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  let blocked = false;
+  const read = session.resources.read.bind(session.resources);
+  vi.spyOn(session.resources, 'read').mockImplementationOnce(async (ref) => {
+    blocked = true;
+    return read(ref);
+  });
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    ),
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+});
+
+it('replays a decision recorded while the answer was being read', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const read = session.resources.read.bind(session.resources);
+  vi.spyOn(session.resources, 'read').mockImplementationOnce(async (ref) => {
+    const bytes = await read(ref);
+    await resolveHostedAction(session, waiters, requestId, answer('allow'));
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+    return bytes;
+  });
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => true,
+    ),
+  ).resolves.toMatchObject({ status: 200 });
+  vi.mocked(Date.now).mockRestore();
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('answers two identical concurrent decisions alike', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const decided = {
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  };
+  await expect(
+    Promise.all([
+      resolveHostedAction(session, waiters, requestId, answer('allow')),
+      resolveHostedAction(session, waiters, requestId, answer('allow')),
+    ]),
+  ).resolves.toEqual([decided, decided]);
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('answers the same decision that won a race while it was being written', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const original = session.authority.resolveAction.bind(session.authority);
+  vi.spyOn(session.authority, 'resolveAction').mockImplementationOnce(
+    async (command, request) => {
+      // The same decision is recorded first, and this write then conflicts.
+      await original(command, request);
+      throw new ManagedSessionConflictError('action already decided.');
+    },
+  );
+  const notify = vi.spyOn(waiters, 'notify');
+  await expect(
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
+  expect(notify).toHaveBeenCalledWith(requestId);
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('answers the loser of two different concurrent decisions with a conflict', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  const results = await Promise.all([
+    resolveHostedAction(session, waiters, requestId, answer('allow')),
+    resolveHostedAction(session, waiters, requestId, answer('deny')),
+  ]);
+  const recorded = hostedActionAllowed(
+    session.authority.action(requestId)!,
+    HOSTED_TOOL_APPROVAL_POLICY,
+  )
+    ? 'allow'
+    : 'deny';
+  expect(results).toContainEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: recorded },
+  });
+  expect(results).toContainEqual({
+    status: 409,
+    code: 'action_already_resolved',
+  });
+  await running;
+  expect(broker.execute).toHaveBeenCalledTimes(recorded === 'allow' ? 1 : 0);
+});
+
+it('writes nothing once the Turn blocks while the decision is published', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  let blocked = false;
+  const publish = session.resources.publish.bind(session.resources);
+  vi.spyOn(session.resources, 'publish').mockImplementationOnce(
+    async (kind, bytes) => {
+      blocked = true;
+      return publish(kind, bytes);
+    },
+  );
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    ),
+  ).resolves.toEqual({ status: 409, code: 'hosted_turn_recovery_required' });
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  await running;
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('answers what landed while the decision was published, even once blocked', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  let blocked = false;
+  const publish = session.resources.publish.bind(session.resources);
+  vi.spyOn(session.resources, 'publish').mockImplementationOnce(
+    async (kind, bytes) => {
+      // Another answer records allow, then the Session blocks.
+      await resolveHostedAction(session, waiters, requestId, answer('allow'));
+      blocked = true;
+      return publish(kind, bytes);
+    },
+  );
+  await expect(
+    resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    ),
+  ).resolves.toEqual({
+    status: 200,
+    body: { requestId, state: 'decided', optionId: 'allow' },
+  });
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it('writes nothing when the Session blocks while the decision waits in the queue', async () => {
+  turn = createTurn(false, { mode: 'default' });
+  const running = turn.execute(
+    [calls[1]],
+    [parts[1]],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  // Hold another write inside the authority's queue.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const inQueue = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const append =
+    LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+  vi.spyOn(
+    LocalJsonlManagedSessionJournalHandle.prototype,
+    'appendTransaction',
+  ).mockImplementationOnce(async function (
+    this: LocalJsonlManagedSessionJournalHandle,
+    records,
+  ) {
+    entered();
+    await gate;
+    return append.call(this, records);
+  });
+  const held = commit('assistant', [{ text: 'held' }], 'model');
+  await inQueue;
+  const queued = vi.spyOn(session.authority, 'resolveAction');
+  let blocked = false;
+  const answering = resolveHostedAction(
+    session,
+    waiters,
+    requestId,
+    answer('allow'),
+    () => blocked,
+  );
+  await vi.waitFor(() => expect(queued).toHaveBeenCalled());
+  blocked = true;
+  release();
+  await held;
+  await expect(answering).resolves.toEqual({
+    status: 409,
+    code: 'hosted_turn_recovery_required',
+  });
+  expect(session.authority.action(requestId)?.state).toBe('requested');
+  await resolveHostedAction(session, waiters, requestId, answer('deny'));
+  await running;
+  expect(broker.execute).not.toHaveBeenCalled();
+});

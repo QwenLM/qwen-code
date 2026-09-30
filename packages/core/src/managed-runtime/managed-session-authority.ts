@@ -396,6 +396,14 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * True after an append failed. Its records may already be on disk, so this
+   * authority accepts no further writes and the Session needs recovery.
+   */
+  get writesStopped(): boolean {
+    return this.writeFailure !== undefined;
+  }
+
+  /**
    * Whether the log records anything beyond activation bookkeeping, which is
    * all a Session that never received input ever writes.
    */
@@ -793,7 +801,10 @@ export class LocalManagedSessionAuthority {
 
   /**
    * Arbiter-only final decision. A later conflicting outcome is rejected; the
-   * same outcome is idempotent so a duplicate client response is safe.
+   * same outcome is idempotent so a duplicate client response is safe. When
+   * given, `admit` is asked inside the serial section just before a new
+   * outcome is written, so a caller's own precondition cannot change while the
+   * write waits its turn; refusing writes nothing.
    */
   resolveAction(
     command: ManagedSessionCommand,
@@ -802,6 +813,7 @@ export class LocalManagedSessionAuthority {
       readonly state: Exclude<ManagedSessionActionState, 'requested'>;
       readonly decisionRef: ManagedSessionDurableRef | null;
     },
+    admit?: () => boolean,
   ): Promise<ManagedSessionAction> {
     return this.runSerial(async () => {
       const existing = this.actions.get(request.requestId);
@@ -816,6 +828,11 @@ export class LocalManagedSessionAuthority {
         }
         throw new ManagedSessionConflictError(
           `action ${request.requestId} already ${existing.state}.`,
+        );
+      }
+      if (admit && !admit()) {
+        throw new ManagedSessionConflictError(
+          `action ${request.requestId} was not admitted.`,
         );
       }
       await this.commit(

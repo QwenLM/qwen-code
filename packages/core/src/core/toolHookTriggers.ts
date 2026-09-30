@@ -176,6 +176,8 @@ export async function firePreToolUseHook(
       'PreToolUse',
       response.output,
     ) as PreToolUseHookOutput;
+    // Read once so every decision branch carries the same sanitized value.
+    const additionalContext = preToolOutput.getAdditionalContext();
 
     // Check if execution was denied
     if (preToolOutput.isDenied()) {
@@ -185,6 +187,7 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           preToolOutput.getEffectiveReason(),
         blockType: 'denied',
+        additionalContext,
       };
     }
 
@@ -196,6 +199,7 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           'User confirmation required',
         blockType: 'ask',
+        additionalContext,
       };
     }
 
@@ -205,11 +209,9 @@ export async function firePreToolUseHook(
         shouldProceed: false,
         blockReason: preToolOutput.getEffectiveReason(),
         blockType: 'stop',
+        additionalContext,
       };
     }
-
-    // Get additional context
-    const additionalContext = preToolOutput.getAdditionalContext();
 
     return {
       shouldProceed: true,

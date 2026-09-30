@@ -48,6 +48,14 @@ import {
   parseHostedMcpServers,
   type HostedMcpServerPin,
 } from './hosted-mcp-session.js';
+import {
+  HostedApprovalWaiters,
+  hostedApprovalDefinition,
+  parseHostedApprovalSettings,
+  readHostedApprovalDefinition,
+  resolveHostedAction,
+  type HostedApprovalSettings,
+} from './hosted-tool-approval.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -68,6 +76,8 @@ interface HostedSession {
   mcpBusy?: boolean;
   mcpClosing?: boolean;
   mcpRecovering?: boolean;
+  approval?: HostedApprovalSettings;
+  waiters: HostedApprovalWaiters;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -281,6 +291,19 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 400, 'invalid_hosted_mcp_servers');
       return;
     }
+    // The mode is pinned at creation, so a deployment's later mode affects
+    // only new Sessions; a load uses the saved one.
+    const approval =
+      create && toolProfile !== undefined
+        ? parseHostedApprovalSettings(
+            body?.['approvalMode'],
+            body?.['approvalTimeoutMs'],
+          )
+        : undefined;
+    if (create && toolProfile !== undefined && !approval) {
+      error(res, 400, 'invalid_hosted_approval');
+      return;
+    }
     if (
       typeof sessionId !== 'string' ||
       !UUID.test(sessionId) ||
@@ -328,6 +351,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
+                  ...(approval ? hostedApprovalDefinition(approval) : {}),
                 }),
               ),
             ),
@@ -358,6 +382,7 @@ export function registerHostedHarnessSessionRoutes(
         streams: new Set(),
         admissions: new Map(),
         blocked: false,
+        waiters: new HostedApprovalWaiters(),
         ...(toolProfile ? { toolProfile } : {}),
         ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
           ? {
@@ -377,10 +402,14 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
+      const pinned = toolProfile
+        ? readHostedApprovalDefinition(definition)
+        : undefined;
       if (
         definition?.['toolProfile'] !== toolProfile ||
         JSON.stringify(definition?.['mcpServers']) !==
-          JSON.stringify(mcpServers)
+          JSON.stringify(mcpServers) ||
+        (toolProfile && !pinned)
       ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
@@ -388,6 +417,7 @@ export function registerHostedHarnessSessionRoutes(
       }
       if (mcpServers && brokerOptions)
         session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
+      if (pinned) session.approval = pinned;
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok' || hasUnsettledInput(session)) {
         await managed.close();
@@ -401,6 +431,8 @@ export function registerHostedHarnessSessionRoutes(
         workspaceCwd: cwd,
         lastEventId: managed.authority.committedSequence,
         eventEpoch: epoch,
+        // A Harness older than approvals omits this, so a caller can tell.
+        ...(pinned ? { approvalMode: pinned.mode } : {}),
       });
     } catch (cause) {
       await managed?.close().catch(() => undefined);
@@ -601,6 +633,10 @@ export function registerHostedHarnessSessionRoutes(
                     ) <=
                     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
                   session.shell,
+                  session.approval && {
+                    settings: session.approval,
+                    waiters: session.waiters,
+                  },
                   session.mcp,
                 )
               : undefined;
@@ -786,6 +822,12 @@ export function registerHostedHarnessSessionRoutes(
         arguments: request['arguments'] as Record<string, string>,
       };
     } else return error(res, 400, 'invalid_mcp_operation');
+    const strings =
+      invocation.kind === 'resource_read'
+        ? [invocation.uri]
+        : [invocation.name, ...Object.entries(invocation.arguments).flat()];
+    if (strings.some((value) => /\p{Cs}/u.test(value)))
+      return error(res, 400, 'invalid_mcp_operation');
     if (
       (session.blocked || session.mcp.hasPendingOperations()) &&
       !session.managed.authority.extensionRecord('mcp_operation', operationId)
@@ -979,6 +1021,30 @@ export function registerHostedHarnessSessionRoutes(
     if (!session) return error(res, 404, 'hosted_session_not_found');
     session.active?.abort.abort();
     res.sendStatus(204);
+  });
+  app.post('/session/:id/actions/:requestId/resolve', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const requestId = req.params['requestId'];
+    void resolveHostedAction(
+      session.managed,
+      session.waiters,
+      requestId,
+      req.body,
+      () => session.blocked,
+    ).then(
+      (result) =>
+        result.status === 200
+          ? res.json(result.body)
+          : error(res, result.status, result.code),
+      (cause) => {
+        // This answer recorded nothing, so a retry is safe.
+        writeStderrLineSafe(
+          `qwen serve: Hosted Action ${requestId} could not be resolved: ${String(cause)}`,
+        );
+        error(res, 503, 'action_resolution_failed');
+      },
+    );
   });
   app.post('/session/:id/title', (req, res) => {
     const session = identity(req, sessions);

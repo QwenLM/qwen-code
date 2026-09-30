@@ -974,6 +974,166 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   await mcp.close();
 });
 
+it('retries an undelivered release with the original immutable identity', async () => {
+  await mcp.ensureReady();
+  const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+  const physical = control.getMockImplementation()!;
+  const releases: ManagedMcpControl[] = [];
+  let delivered = false;
+  control.mockImplementation(async (operation) => {
+    if (operation.kind === 'mcp-release') {
+      releases.push(operation);
+      if (releases.length === 1) throw new Error('failed before delivery');
+      delivered = true;
+    }
+    return physical(operation);
+  });
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockImplementation(async () => {
+    if (!delivered) throw new Error('connection still holds its owner');
+  });
+  await expect(mcp.close()).rejects.toBeInstanceOf(
+    HostedMcpRecoveryRequiredError,
+  );
+  expect(release).not.toHaveBeenCalled();
+  await mcp.close();
+  expect(releases).toHaveLength(2);
+  const identities = releases.map((operation) => {
+    if (!('grant' in operation)) throw new Error('missing grant');
+    const { grant: _grant, ...identity } = operation;
+    return identity;
+  });
+  expect(identities[1]).toEqual(identities[0]);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .every(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState === 'released',
+      ),
+  ).toBe(true);
+});
+
+it('discards discovery from a configuration superseded while the request was pending', async () => {
+  await mcp.ensureReady();
+  const original = mcp.getCatalogs()[0];
+  const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+  const physical = control.getMockImplementation()!;
+  let reply!: (view: ManagedMcpOperationView) => void;
+  const pending = new Promise<ManagedMcpOperationView>((resolve) => {
+    reply = resolve;
+  });
+  let operationId: string | undefined;
+  control.mockImplementation(async (operation) => {
+    if (operation.kind === 'mcp-discover') {
+      operationId = operation.operationId;
+      return pending;
+    }
+    return physical(operation);
+  });
+  const refreshing = mcp.refresh();
+  await vi.waitFor(() => expect(operationId).toBeDefined());
+  try {
+    await mcp.configure(randomUUID(), { ...pin, serverRevision: 2 }, 1);
+    reply({
+      operationId: operationId!,
+      state: 'settled',
+      catalog: { ...original, catalogRevision: 2 },
+    });
+    await refreshing;
+    expect(mcp.getCatalogs()[0]).toMatchObject({
+      serverRevision: 2,
+      configRevision: 2,
+    });
+    expect(
+      requests.filter((entry) => entry.kind === 'mcp-configure'),
+    ).toHaveLength(2);
+    await mcp.close();
+  } finally {
+    reply({ operationId: operationId!, state: 'outcome_unknown' });
+    await refreshing;
+  }
+});
+
+it.each(['intent', 'acquire', 'dispatch_started'] as const)(
+  'stops a refresh replacement cancelled during %s and fences close until it drains',
+  async (phase) => {
+    await mcp.ensureReady();
+    const catalog = mcp.getCatalogs()[0];
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const physical = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) =>
+      operation.kind === 'mcp-discover'
+        ? {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: { ...catalog, catalogRevision: 2 },
+          }
+        : physical(operation),
+    );
+    let resume!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let entered = false;
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const originalAcquire = acquire.getMockImplementation()!;
+    let acquisitions = 0;
+    if (phase === 'acquire') {
+      acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+        if (++acquisitions === 2) {
+          entered = true;
+          await barrier;
+        }
+        await originalAcquire.call(this);
+      });
+    } else {
+      const commit = session.authority.commitExtensionRecord.bind(
+        session.authority,
+      );
+      vi.spyOn(session.authority, 'commitExtensionRecord').mockImplementation(
+        async (...args) => {
+          const result = await commit(...args);
+          if (
+            args[1].domain === 'mcp_configuration' &&
+            parseMcpConfiguration(args[1].record).configRevision === 2 &&
+            parseMcpConfiguration(args[1].record).run.execution === phase
+          ) {
+            entered = true;
+            await barrier;
+          }
+          return result;
+        },
+      );
+    }
+    const abort = new AbortController();
+    const reason = new Error('cancel replacement');
+    const refreshing = mcp
+      .refresh(abort.signal)
+      .catch((cause: unknown) => cause);
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      abort.abort(reason);
+      await expect(mcp.close()).rejects.toBeInstanceOf(
+        HostedMcpRecoveryRequiredError,
+      );
+      expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+      resume();
+      expect(await refreshing).toBe(reason);
+      expect(
+        requests.filter((entry) => entry.kind === 'mcp-configure'),
+      ).toHaveLength(phase === 'dispatch_started' ? 2 : 1);
+      await mcp.close();
+      expect(
+        requests.filter((entry) => entry.kind === 'mcp-configure'),
+      ).toHaveLength(phase === 'dispatch_started' ? 2 : 1);
+    } finally {
+      resume();
+      await refreshing;
+    }
+  },
+);
+
 it.each(['intent', 'acquire', 'dispatch_started'] as const)(
   'preserves the original configuration when initialization aborts during %s',
   async (phase) => {

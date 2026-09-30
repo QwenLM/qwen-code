@@ -838,9 +838,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             || record.getState() == RuntimeSessionRecord.State.RELEASING)
                             && binding != null && binding.getGeneration() == record.getRuntimeGeneration()
                             && matchingLiveBinding(binding) != null) {
-                        sessions.putIfAbsent(runtimeSessionId, CompletableFuture.completedFuture(
-                                new SessionContext(record.getSession(), binding, requireLiveBinding(binding).lease())));
-                        return release(harnessSessionId, runtimeSessionId);
+                        CompletableFuture<SessionContext> adopted = CompletableFuture.completedFuture(
+                                new SessionContext(record.getSession(), binding, requireLiveBinding(binding).lease()));
+                        boolean inserted = sessions.putIfAbsent(runtimeSessionId, adopted) == null;
+                        return release(harnessSessionId, runtimeSessionId).whenComplete((released, error) -> {
+                            if (inserted && (error != null || !Boolean.TRUE.equals(released))) {
+                                sessions.remove(runtimeSessionId, adopted);
+                            }
+                        });
                     }
                     // A Broker that died mid-acquire or mid-release leaves the
                     // Session ACQUIRING or RELEASING; both pin a LOST
