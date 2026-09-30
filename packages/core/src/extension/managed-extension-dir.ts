@@ -32,13 +32,10 @@ export function resolveManagedExtensionsDir(
   // ExtensionManager construction would hard-fail every new session and
   // extension route of a healthy process when a deployment-owned root
   // flickers, so construction degrades to "no managed packages" instead —
-  // loadExtensionsFromExtensionsDir lists an unreadable root as empty.
+  // loadManagedExtensions verifies the pinned root before loading any package.
   if (options?.alreadyResolved) {
     try {
-      if (!fs.statSync(directory).isDirectory()) {
-        throw new Error('not a directory');
-      }
-      fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
+      assertReadablePinnedDirectory(directory);
     } catch (error) {
       const message = `Managed extensions root "${directory}" is unavailable: ${
         error instanceof Error ? error.message : String(error)
@@ -96,21 +93,26 @@ export function resolveManagedExtensionsDir(
   );
 }
 
+function assertReadablePinnedDirectory(directory: string): void {
+  if (!fs.lstatSync(directory).isDirectory()) {
+    throw new Error('not a real directory');
+  }
+  if (fs.realpathSync.native(directory) !== directory) {
+    throw new Error('no longer matches the pinned canonical path');
+  }
+  fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
+  fs.readdirSync(directory);
+}
+
 // Configuration survives an unavailable deployment so policy and state
-// separation guards still apply. Only a live, pinned root grants local reads.
+// separation guards still apply. Only a live, pinned root grants managed
+// loading or local reads.
 export function getVerifiedManagedExtensionsDir(
   directory: string | undefined,
 ): string | undefined {
   if (directory === undefined) return undefined;
   try {
-    if (
-      !fs.lstatSync(directory).isDirectory() ||
-      fs.realpathSync.native(directory) !== directory
-    ) {
-      return undefined;
-    }
-    fs.accessSync(directory, fs.constants.R_OK | fs.constants.X_OK);
-    fs.readdirSync(directory);
+    assertReadablePinnedDirectory(directory);
     return directory;
   } catch {
     return undefined;

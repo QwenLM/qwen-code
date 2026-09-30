@@ -788,6 +788,57 @@ describe('managed extensions', () => {
     expect(subject.getLoadedExtensions()).toEqual([]);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'invalidates a relinked managed root even when manifest stamps match',
+    async () => {
+      fs.mkdirSync(user, { recursive: true });
+      const originalPackage = writeExtension(managed, 'portable', {
+        version: '1.0.0',
+      });
+      const replacement = path.join(temporary, 'replacement');
+      const replacementPackage = writeExtension(replacement, 'portable', {
+        version: '2.0.0',
+      });
+      const stamp = new Date('2020-01-01T00:00:00Z');
+      const originalManifest = path.join(
+        originalPackage,
+        EXTENSIONS_CONFIG_FILENAME,
+      );
+      const replacementManifest = path.join(
+        replacementPackage,
+        EXTENSIONS_CONFIG_FILENAME,
+      );
+      fs.utimesSync(originalManifest, stamp, stamp);
+      fs.utimesSync(replacementManifest, stamp, stamp);
+      expect(fs.statSync(replacementManifest).size).toBe(
+        fs.statSync(originalManifest).size,
+      );
+      expect(fs.statSync(replacementManifest).mtimeMs).toBe(
+        fs.statSync(originalManifest).mtimeMs,
+      );
+      const subject = manager();
+      await subject.refreshCache();
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+      const before = await subject.getExtensionStoreSnapshot();
+      const retired = path.join(temporary, 'retired-managed');
+      fs.renameSync(managed, retired);
+      fs.symlinkSync(replacement, managed, 'dir');
+
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(subject.getLoadedExtensions()).toEqual([]);
+      expect(await subject.getExtensionStoreSnapshot()).toEqual(before);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+
+      fs.unlinkSync(managed);
+      fs.renameSync(retired, managed);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(subject.getLoadedExtensions()).toEqual([
+        expect.objectContaining({ source: 'managed', version: '1.0.0' }),
+      ]);
+      expect(await subject.refreshCacheIfSourcesChanged()).toBe(false);
+    },
+  );
+
   it('re-reads managed skill content and removes deleted contributions during explicit refresh', async () => {
     const extensionPath = writeExtension(managed, 'portable');
     const skillDirectory = path.join(extensionPath, 'skills', 'test');

@@ -97,7 +97,7 @@ const RESERVED_KEYS = new Set(
   ),
 );
 
-// Canonicalize the way yargs binds a token before the lookup:
+// Conservatively recognize reserved yargs keys before spawning the CLI:
 // - `--flag=value` carries the value in the same token, and an inline value
 //   disables boolean negation (`--no-sandbox=true` binds `noSandbox`, not
 //   `sandbox`), so the `no-` fold applies only without `=`.
@@ -107,8 +107,9 @@ const RESERVED_KEYS = new Set(
 // - dot-notation nests under the first segment (`--m.x` binds `m`, which
 //   alias-propagates to `--model`), so the top-level key is the segment
 //   before the first dot.
-// - a single-dash group binds every character (`-dm value` binds `-m`), so
-//   any reserved short flag anywhere in the group is a match.
+// - a single-dash group can bind a reserved short flag (`-dm value` binds
+//   `-m`), including after a leading `=`; that first `=` is not an inline
+//   value separator.
 const isReservedArg = (arg: string): boolean => {
   if (arg.startsWith('--')) {
     const eq = arg.indexOf('=');
@@ -120,10 +121,12 @@ const isReservedArg = (arg: string): boolean => {
     if (RESERVED_KEYS.has(topLevel)) return true;
     return key.includes('-') && RESERVED_KEYS.has(yargsCamelCase(topLevel));
   }
-  const flag = arg.split('=')[0] ?? '';
-  if (flag.startsWith('-') && flag.length > 1) {
-    return [...flag.slice(1)].some((char) =>
-      RESERVED_CLI_FLAGS.has(`-${char.toLowerCase()}`),
+  if (arg.startsWith('-') && arg.length > 1) {
+    const eq = arg.indexOf('=', 2);
+    const letters = eq === -1 ? arg.slice(1) : arg.slice(1, eq);
+    return [...letters].some(
+      (char) =>
+        char !== '=' && RESERVED_CLI_FLAGS.has(`-${char.toLowerCase()}`),
     );
   }
   return false;

@@ -31,7 +31,7 @@ Managed describes package ownership, not Qwen authorship or execution isolation.
 The CLI resolves the root against its startup cwd once. A missing, non-directory,
 unreadable, or symbolic-link explicit root is a configuration error; an empty root
 is valid. The accepted root is pinned to its canonical path at startup so later
-relinking cannot move the boundary consumers validated. A root that later becomes unavailable remains configured for ownership and state-separation checks, but grants no read-permission exemption until its pinned directory is verified as accessible again.
+relinking cannot move the boundary consumers validated. A root that later becomes unavailable or is redirected remains configured for ownership and state-separation checks. Both managed discovery and read-permission exemptions require the pinned directory to pass verification again; failed verification is not proof of withdrawal. Source revalidation invalidates the managed cache when the root loses verification, including a relink to packages with unchanged manifest metadata.
 ExtensionManager receives `managedExtensionsDir` separately from the writable
 ExtensionStore. A container sandbox (docker/podman) mounts the resolved root
 read-only at its translated container path and forwards the flag unchanged —
@@ -60,6 +60,8 @@ cannot silently override the action. Exact workspace overrides retain their
 existing precedence. A stored default makes a user's explicit choice apply
 consistently to deployment-managed packages across workspaces. User-installed
 packages keep their legacy home-path scope behavior for compatibility.
+
+Managed scope and default-activation changes preserve late-imported legacy path rules when no earlier stash exists. An existing pre-managed activation snapshot remains authoritative at hand-back; managed-era writes do not replace it.
 
 Discovery passes each extension's source to the state store. An optional `managed: true` marker in the existing V2 policy distinguishes externally discovered packages from installer-owned artifacts without relocating state or changing its version. Existing activation preferences and inherited artifact bookkeeping remain intact. Batch activation checks for missing user artifacts only for non-managed policies; normal runtime rediscovery after proven withdrawal or an eligible install/update clears the marker. Promoting a managed preference-only declaration does not manufacture an installer generation. This keeps batch and single activation consistent even after an old user copy is removed, without relying on a later refresh to repair state.
 

@@ -112,6 +112,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
 import {
   assertManagedExtensionStateSeparation,
+  getVerifiedManagedExtensionsDir,
   resolveManagedExtensionsDir,
 } from './managed-extension-dir.js';
 import {
@@ -1695,9 +1696,11 @@ export class ExtensionManager {
     directory: string,
     source: 'managed' | 'user',
   ): string {
-    // The managed root was validated at construction; re-validating here would
-    // throw out of a path that is written to degrade to 'dir:-' when the root
-    // becomes unreadable afterwards.
+    // A relink must invalidate the cache even when its target copied the
+    // original manifests' sizes and modification times.
+    if (source === 'managed' && !getVerifiedManagedExtensionsDir(directory)) {
+      return 'dir:-';
+    }
     let entries: string[];
     try {
       entries = fs.readdirSync(directory);
@@ -1861,8 +1864,20 @@ export class ExtensionManager {
     ) => void,
   ): Promise<Extension[]> {
     if (!this.managedExtensionsDir) return [];
-    const extensions = await this.loadExtensionsFromExtensionsDir(
+    const managedDirectory = getVerifiedManagedExtensionsDir(
       this.managedExtensionsDir,
+    );
+    if (!managedDirectory) {
+      options.onListFailure?.(
+        this.managedExtensionsDir,
+        new Error(
+          'Managed extensions root is unavailable or no longer matches its pinned path.',
+        ),
+      );
+      return [];
+    }
+    const extensions = await this.loadExtensionsFromExtensionsDir(
+      managedDirectory,
       workspaceDir,
       { ...options, source: 'managed', onLoadFailure },
     );
@@ -2076,8 +2091,8 @@ export class ExtensionManager {
     } = {},
   ): Promise<Extension[]> {
     const source = options.source ?? 'user';
-    // See fingerprintExtensionsDir: the managed root was validated at
-    // construction, and an unreadable root degrades to an empty listing.
+    // A root that becomes unreadable after verification still degrades to
+    // an empty listing and must not prove that managed packages were withdrawn.
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);

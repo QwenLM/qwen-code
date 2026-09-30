@@ -118,7 +118,7 @@ _RESERVED_KEYS = frozenset(
 
 
 def _is_reserved_arg(arg: str) -> bool:
-    """Canonicalize the way yargs binds a token before the lookup:
+    """Conservatively recognize reserved yargs keys before spawning the CLI:
     - ``--flag=value`` carries the value in the same token, and an inline
       value disables boolean negation (``--no-sandbox=true`` binds
       ``noSandbox``, not ``sandbox``), so the ``no-`` fold applies only
@@ -129,8 +129,9 @@ def _is_reserved_arg(arg: str) -> bool:
     - dot-notation nests under the first segment (``--m.x`` binds ``m``,
       which alias-propagates to ``--model``), so the top-level key is the
       segment before the first dot.
-    - a single-dash group binds every character (``-dm value`` binds
-      ``-m``), so any reserved short flag anywhere in the group is a match.
+    - a single-dash group can bind a reserved short flag (``-dm value`` binds
+      ``-m``), including after a leading ``=``; that first ``=`` is not an inline
+      value separator.
     """
     if arg.startswith("--"):
         eq = arg.find("=")
@@ -141,9 +142,13 @@ def _is_reserved_arg(arg: str) -> bool:
         if top_level in _RESERVED_KEYS:
             return True
         return "-" in key and _yargs_camel_case(top_level) in _RESERVED_KEYS
-    flag = arg.split("=")[0]
-    if flag.startswith("-") and len(flag) > 1:
-        return any(f"-{char.lower()}" in _RESERVED_CLI_FLAGS for char in flag[1:])
+    if arg.startswith("-") and len(arg) > 1:
+        eq = arg.find("=", 2)
+        letters = arg[1:] if eq == -1 else arg[1:eq]
+        return any(
+            char != "=" and f"-{char.lower()}" in _RESERVED_CLI_FLAGS
+            for char in letters
+        )
     return False
 
 

@@ -1742,6 +1742,7 @@ export class ExtensionStore {
       // A scope change made *while managed* re-bases only the managed-era
       // surface — the stash is the user package's pre-claim baseline, and
       // the hand-back (its only consumer) must still find it intact.
+      stashLegacyPathRulesForManaged(policy);
       delete policy.legacyPathRules;
       if (!policy.managed) {
         delete policy.preservedLegacyPathRules;

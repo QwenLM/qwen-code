@@ -107,6 +107,9 @@ describe('QueryOptionsSchema', () => {
     '--managedExtensions',
     '--managed--extensions',
     '-e/tmp/attached-value',
+    '-=y',
+    '-=s=v',
+    '-=e',
     '--allowedMcpServerNames',
     '--sandbox',
     '-s',
@@ -130,6 +133,35 @@ describe('QueryOptionsSchema', () => {
     if (!result.success) {
       expect(result.error.issues[0]?.message).toContain('reserved flag');
     }
+  });
+
+  it.each(
+    [...'ceimoprsy'].flatMap((alias) => [
+      `-=${alias}`,
+      `-=${alias}=value`,
+      `-=d${alias}`,
+    ]),
+  )('rejects reserved short aliases in leading-equals groups: %s', (flag) => {
+    const result = QueryOptionsSchema.safeParse({ extraArgs: [flag, 'value'] });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toContain('reserved flag');
+    }
+  });
+
+  it.each([
+    '--verbose',
+    '-x',
+    '-x=s',
+    '--some-flag=value',
+    '-dl',
+    '-=x=s',
+    '-==y',
+    '-=d',
+  ])('preserves permitted extraArgs spellings: %s', (flag) => {
+    expect(QueryOptionsSchema.safeParse({ extraArgs: [flag] }).success).toBe(
+      true,
+    );
   });
 
   it('accepts all new option fields together', () => {
