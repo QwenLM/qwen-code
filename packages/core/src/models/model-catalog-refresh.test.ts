@@ -324,7 +324,10 @@ describe('refreshModelCatalog', () => {
     body: unknown,
     headers: Record<string, string> = {},
   ): Response {
-    return new Response(JSON.stringify(body), { status: 200, headers });
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json', ...headers },
+    });
   }
 
   function readJson(filePath: string): {
@@ -356,6 +359,7 @@ describe('refreshModelCatalog', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     for (const name of ENV_NAMES) {
       const value = previousEnv[name];
@@ -370,6 +374,11 @@ describe('refreshModelCatalog', () => {
   });
 
   it('writes the trimmed catalog to the cache and serves it immediately', async () => {
+    // Pin the clock just ahead of the bundled snapshot's committed stamp: the
+    // fresh cache must win loadModelCatalog's `fetchedAt` compare no matter
+    // what the runner's wall clock says about a file generated on another host.
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse(bundled.fetchedAt) + 60_000);
     fetchMock.mockResolvedValue(jsonResponse(api, { etag: '"abc"' }));
 
     await refreshModelCatalog();
@@ -381,6 +390,53 @@ describe('refreshModelCatalog', () => {
     expect(cache.etag).toBe('"abc"');
     expect(cache.models).toEqual(trimmed);
     expect(lookupModelCatalog('qwen-x')).toEqual(trimmed['qwen-x']);
+  });
+
+  it('refetches a cache whose stamp is ahead of the local clock', async () => {
+    // A stamp written by a faster clock must not serve indefinitely: the age
+    // is negative, which the freshness check treats as "refetch", and the
+    // re-stamp uses the local clock so the skew heals on this fetch.
+    writeJson(getModelCatalogCachePath(), {
+      source: MODELS_DEV_URL,
+      fetchedAt: new Date(Date.now() + 60_000).toISOString(),
+      models: { kept: { context: 7 } },
+    });
+    fetchMock.mockResolvedValue(jsonResponse(api));
+
+    await refreshModelCatalog();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a catalog body over the byte budget', async () => {
+    // Valid JSON that would project fine, but larger than the budget: the
+    // refresh must refuse it before buffering unboundedly.
+    const oversized = {
+      ...api,
+      pad: {
+        models: {
+          big: { id: 'big', tool_call: false, note: 'x'.repeat(210 * 1024) },
+        },
+      },
+    } as ModelsDevApi;
+    fetchMock.mockResolvedValue(jsonResponse(oversized));
+
+    await expect(refreshModelCatalog()).resolves.toBeUndefined();
+
+    expect(fs.existsSync(getModelCatalogCachePath())).toBe(false);
+  });
+
+  it('rejects a present-but-non-JSON content type', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify(api), {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+
+    await expect(refreshModelCatalog()).resolves.toBeUndefined();
+
+    expect(fs.existsSync(getModelCatalogCachePath())).toBe(false);
   });
 
   it('skips the network while the cache is fresh', async () => {

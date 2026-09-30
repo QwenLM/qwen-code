@@ -13,6 +13,7 @@ import {
 } from '../core/tokenLimits.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage } from '../utils/errors.js';
 import {
   getModelCatalogCachePath,
   invalidateModelCatalog,
@@ -244,6 +245,45 @@ async function readCacheFile(
   }
 }
 
+const MAX_CATALOG_BYTES = 200 * 1024;
+
+/**
+ * Reads a 200 body with a hard size ceiling, so a hostile or broken endpoint
+ * cannot make the once-a-day refresh buffer an unbounded payload. A present
+ * but non-JSON Content-Type is a gateway error page and fails here, one step
+ * earlier than JSON.parse; a missing one is tolerated for bare mirrors.
+ */
+async function readBoundedCatalogJson(
+  response: Response,
+): Promise<ModelsDevApi> {
+  const contentType = response.headers.get('content-type');
+  if (contentType && !contentType.toLowerCase().includes('json')) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`unexpected catalog content type: ${contentType}`);
+  }
+  if (!response.body) {
+    throw new Error('catalog response has no body');
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > MAX_CATALOG_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw new Error(
+        `catalog response exceeds the ${MAX_CATALOG_BYTES}-byte budget`,
+      );
+    }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as ModelsDevApi;
+}
+
 async function refreshRemote(url: string, cachePath: string): Promise<void> {
   const cached = await readCacheFile(cachePath);
   // A cache with no models is a poisoned write from before the empty-
@@ -253,11 +293,14 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
     cached?.source === url && Object.keys(cached.models).length > 0
       ? cached
       : undefined;
-  if (
-    reusable &&
-    Date.now() - Date.parse(reusable.fetchedAt) < REFRESH_INTERVAL_MS
-  ) {
-    return;
+  if (reusable) {
+    const ageMs = Date.now() - Date.parse(reusable.fetchedAt);
+    // A negative or unreadable age means the stamp came from a different
+    // clock; refetch — the re-stamp below uses the local clock, so a skewed
+    // cache self-heals here instead of serving indefinitely.
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < REFRESH_INTERVAL_MS) {
+      return;
+    }
   }
   const headers: Record<string, string> = {};
   if (reusable?.etag) {
@@ -272,7 +315,7 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
   if (response.status === 304 && reusable) {
     next = { ...reusable, fetchedAt };
   } else if (response.ok) {
-    const api = (await response.json()) as ModelsDevApi;
+    const api = await readBoundedCatalogJson(response);
     const missingProvider = MODELS_DEV_PROVIDERS.find(
       (provider) => Object.keys(api[provider]?.models ?? {}).length === 0,
     );
@@ -291,6 +334,8 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
       next.etag = etag;
     }
   } else {
+    // Release the socket: an unconsumed error body pins the connection.
+    await response.body?.cancel().catch(() => {});
     throw new Error(`HTTP ${response.status}`);
   }
   await fs.promises.mkdir(path.dirname(cachePath), { recursive: true });
@@ -299,10 +344,6 @@ async function refreshRemote(url: string, cachePath: string): Promise<void> {
   debugLogger.debug(
     `Model catalog refreshed from ${url}: ${Object.keys(next.models).length} models`,
   );
-}
-
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 let inFlight: Promise<void> | undefined;
@@ -321,7 +362,9 @@ export function refreshModelCatalog(): Promise<void> {
   const url = process.env[MODEL_CATALOG_URL_ENV] || MODELS_DEV_URL;
   inFlight ??= refreshRemote(url, getModelCatalogCachePath())
     .catch((error: unknown) => {
-      debugLogger.debug(`Model catalog refresh skipped: ${describe(error)}`);
+      debugLogger.debug(
+        `Model catalog refresh skipped: ${getErrorMessage(error)}`,
+      );
     })
     .finally(() => {
       inFlight = undefined;

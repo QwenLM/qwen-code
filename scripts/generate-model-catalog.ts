@@ -28,11 +28,29 @@ import {
 const MAX_BYTES = 200 * 1024;
 
 const source = process.argv[2] ?? MODELS_DEV_URL;
+
+async function fetchApi(url: string): Promise<ModelsDevApi> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    // Release the socket before throwing so the process exits cleanly.
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`fetching ${url}: HTTP ${response.status}`);
+  }
+  return (await response.json()) as ModelsDevApi;
+}
+
 const api: ModelsDevApi = /^https?:\/\//.test(source)
-  ? await (await fetch(source)).json()
+  ? await fetchApi(source)
   : JSON.parse(fs.readFileSync(source, 'utf8'));
 
 const catalog = trimModelsDevCatalog(api, new Date().toISOString(), source);
+// A 200 that projects to nothing is not a catalog (a renamed upstream field
+// or a gateway error body); never overwrite the committed snapshot with it.
+if (Object.keys(catalog.models).length === 0) {
+  throw new Error(
+    `no catalog entries projected from ${source}; leaving the committed snapshot untouched`,
+  );
+}
 const json = JSON.stringify(catalog, null, 2) + '\n';
 const bytes = Buffer.byteLength(json);
 if (bytes > MAX_BYTES) {
