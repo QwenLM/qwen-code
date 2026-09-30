@@ -480,4 +480,30 @@ describe('createJavaManagedAgentProvider', () => {
       (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
     ).toEqual({ canSend: false, canCancel: false });
   });
+
+  it('lets the allowed caller cancel a running Turn of a bound Session', async () => {
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          sessionId: 'bound-1',
+          status: 'ACTIVE',
+          createdAt: 1,
+          updatedAt: 2,
+          lastSequence: 5,
+          workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+          activeTurn: {
+            turnId: 'turn-2',
+            sessionId: 'bound-1',
+            status: 'RUNNING',
+            submittedAt: 2,
+          },
+          capabilities: { tasks: true, workspaceTurns: true },
+        }),
+      ),
+    });
+    expect(
+      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
+  });
 });

@@ -137,10 +137,47 @@ class HarnessCoordinatorTest {
     }
 
     @Test
-    void boundCancellationNeverCallsTheLegacyHarness() {
-        AgentStateStore store = mock(AgentStateStore.class);
+    void boundCancellationWaitsForTheWorkspaceOptIn() {
+        AgentStateStore store = boundCancellingStore();
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer warmer = mock(RuntimeWarmer.class);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), warmer, directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            verify(store).requireSession("tenant", "session");
+            verify(harness).isWorkspaceFilesAvailable();
+            verifyNoMoreInteractions(harness);
+            verifyNoInteractions(warmer);
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
+    void cancelsABoundTurnThroughTheHarnessWithTheWorkspaceOptIn() {
+        AgentStateStore store = boundCancellingStore();
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.createOrLoad("tenant", "session", true))
+                .thenReturn(new Attachment("boot", null, null, null));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            verify(harness).cancel("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    private static AgentStateStore boundCancellingStore() {
+        AgentStateStore store = mock(AgentStateStore.class);
         when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(
                 turn("tenant", "session", "turn", "prompt", "epoch", 1,
                         "CANCELLING")));
@@ -149,16 +186,7 @@ class HarnessCoordinatorTest {
                         null, "ACTIVE", "boot", "epoch", 1, 1, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
                                 "storage-a", ".", "config-a", 1)));
-        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
-                new HarnessEventProjector(), warmer, directExecutor(),
-                Clock.systemUTC(), new ManagedAgentProperties());
-        try {
-            coordinator.cancel("tenant", "session", "turn");
-            verify(store).requireSession("tenant", "session");
-            verifyNoInteractions(harness, warmer);
-        } finally {
-            coordinator.close();
-        }
+        return store;
     }
 
     @Test

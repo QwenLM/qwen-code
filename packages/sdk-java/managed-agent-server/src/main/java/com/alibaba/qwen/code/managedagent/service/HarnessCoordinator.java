@@ -542,7 +542,12 @@ public class HarnessCoordinator {
             }
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
-            if (session.workspace() != null) {
+            // A bound Session's Turn is cancelled like any other once
+            // Workspace files are enabled: the Hosted Harness aborts the
+            // Turn and settles its Runtime calls through their original
+            // identities. Without the opt-in nothing may reach it.
+            if (session.workspace() != null
+                    && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
             Attachment attachment = harness.createOrLoad(

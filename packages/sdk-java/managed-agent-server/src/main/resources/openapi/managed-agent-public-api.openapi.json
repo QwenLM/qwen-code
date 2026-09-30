@@ -3873,7 +3873,7 @@
           "workspaceTurns": {
             "type": "boolean",
             "default": false,
-            "description": "True when the caller may submit later Turns to this Workspace-bound Session: the deployment enables Workspace files and the caller created the Session. False for every other caller and for unbound Sessions, which do not use it."
+            "description": "True when the caller may submit and cancel later Turns of this Workspace-bound Session: the deployment enables Workspace files and the caller created the Session. False for every other caller and for unbound Sessions, which do not use it."
           },
           "tasks": {
             "type": "boolean"
@@ -4285,7 +4285,7 @@
               },
               "workspace_binding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit later Turns under the same opt-in, while cancel and lifecycle operations remain gated."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while lifecycle operations remain gated."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -4518,7 +4518,7 @@
               },
               "workspaceBinding": {
                 "type": "boolean",
-                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit later Turns under the same opt-in, while cancel and lifecycle operations remain gated."
+                "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while lifecycle operations remain gated."
               }
             },
             "x-qwen-implementation-status": "partial"

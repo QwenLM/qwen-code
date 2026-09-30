@@ -444,7 +444,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
-        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null) {
+        if (requireSessionForUpdate(tenantId, sessionId).workspace() != null
+                && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);

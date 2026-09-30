@@ -18,11 +18,12 @@ service. Later submit, cancel, rename, lifecycle and cwd operations retain their
 existing Workspace gates. Discovery continues to advertise only Workspace
 binding, not complete Workspace execution support. No UI changes are required.
 
-A follow-up admits later Turns for the Session's creator under the same opt-in.
-Execution authorizes every Turn against the creator's Workspace grants, so any
-other actor, and every deployment without the opt-in, keeps the existing
-`workspace_unavailable` refusal. Cancel, rename, lifecycle and cwd operations
-remain gated.
+A follow-up admits later Turns for the Session's creator under the same opt-in,
+and lets the creator cancel a running Turn, which the Hosted Harness aborts and
+settles through the original Runtime identities. Execution authorizes every
+Turn against the creator's Workspace grants, so any other actor, and every
+deployment without the opt-in, keeps the existing `workspace_unavailable`
+refusal. Rename, lifecycle and cwd operations remain gated.
 
 ## Decisions
 

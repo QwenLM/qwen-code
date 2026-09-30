@@ -227,7 +227,7 @@ function toSessionSummary(
         sessionActive &&
         active &&
         turnStatus !== 'cancelling' &&
-        !session.workspace,
+        (!session.workspace || workspaceTurns),
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),

@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -50,6 +51,8 @@ class HostedPublicWorkspaceIT {
     private final String tenant = "g0-" + UUID.randomUUID();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
+    // Holds the model reply to a G0_CANCEL prompt so the test can cancel a running Turn.
+    private volatile CountDownLatch heldReply = new CountDownLatch(1);
     @TempDir(cleanup = CleanupMode.ON_SUCCESS)
     private Path temporary;
     private ServletWebServerApplicationContext spring;
@@ -179,8 +182,30 @@ class HostedPublicWorkspaceIT {
             assertThat(modelRequests).hasSize(requests + 4);
             assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(decoy.resolve("proof.txt")).doesNotExist();
+
+            // The creator can cancel a running later Turn; the Hosted Harness aborts it before
+            // any tool runs. Another reader keeps the refusal.
+            int beforeCancel = modelRequests.size();
+            Map<String, Object> hold = Map.of("type", "agent.session.input.message", "input",
+                    List.of(Map.of("type", "input_text", "text", "G0_CANCEL")));
+            String heldTurn = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "hold-" + workspace, "actor", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeCancel);
+            Map<String, Object> cancel = Map.of("type", "agent.session.cancel", "turn_id", heldTurn);
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "reader-cancel-" + workspace, "reader", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            request("POST", "/v1/agents/sessions/" + session + "/events", cancel, "cancel-" + workspace,
+                    "actor", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, heldTurn)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 2);
         }
-        assertThat(modelRequests).hasSize(16);
+        assertThat(modelRequests).hasSize(18);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -213,7 +238,7 @@ class HostedPublicWorkspaceIT {
         request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(16);
+        assertThat(modelRequests).hasSize(18);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -326,14 +351,22 @@ class HostedPublicWorkspaceIT {
             // Turn in the same Session runs the same write, edit and read sequence. Other user
             // messages the Harness may add do not restart the count.
             List<JsonNode> results = new ArrayList<>();
+            AtomicReference<String> prompt = new AtomicReference<>("");
             body.path("messages").forEach(message -> {
                 String role = message.path("role").asText();
                 if ("user".equals(role) && message.path("content").toString().contains("G0_")) {
                     results.clear();
+                    prompt.set(message.path("content").toString());
                 } else if ("tool".equals(role)) {
                     results.add(message);
                 }
             });
+            if (prompt.get().contains("G0_CANCEL")) {
+                // Reply with nothing until the test has cancelled the Turn; the Harness has
+                // aborted this request by then, so there is no response to write.
+                heldReply.await(60, TimeUnit.SECONDS);
+                return;
+            }
             int step = results.size();
             if (step == 3) assertThat(results.get(2).toString()).contains("after");
             var chunk = json.createObjectNode().put("id", "g0").put("object", "chat.completion.chunk")

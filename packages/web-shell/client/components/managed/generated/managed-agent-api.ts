@@ -355,7 +355,7 @@ export interface components {
         };
         WebShellSessionCapabilities: {
             /**
-             * @description True when the caller may submit later Turns to this Workspace-bound Session: the deployment enables Workspace files and the caller created the Session. False for every other caller and for unbound Sessions, which do not use it.
+             * @description True when the caller may submit and cancel later Turns of this Workspace-bound Session: the deployment enables Workspace files and the caller created the Session. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
             workspaceTurns: boolean;
@@ -489,7 +489,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit later Turns under the same opt-in, while cancel and lifecycle operations remain gated. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while lifecycle operations remain gated. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
