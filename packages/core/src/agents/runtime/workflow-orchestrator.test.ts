@@ -1212,6 +1212,26 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
+  it('refuses a nested script with a dynamic import before its body runs', async () => {
+    const dispatch = vi.fn(async (prompt: string) => `agent:${prompt}`);
+    const outcome = await new WorkflowOrchestrator(dispatch).run({
+      script: `const before = await agent('parent-first');
+        try { await workflow('child'); return 'resolved'; }
+        catch (e) { return [before, e.message]; }`,
+      args: undefined,
+      resolveSavedWorkflow: async () => ({
+        script: `await agent('child-must-not-run');\nawait import('node:fs');`,
+        name: 'child',
+      }),
+    });
+    const [before, message] = outcome.result as [string, string];
+    expect(before).toBe('agent:parent-first');
+    expect(message).toMatch(/line 2: dynamic import\(\) is not supported/);
+    expect(dispatch.mock.calls.map(([prompt]) => prompt)).toEqual([
+      'parent-first',
+    ]);
+  });
+
   it('does not mirror an unconsumed agent failure after it settles to null', async () => {
     const orchestrator = new WorkflowOrchestrator(() =>
       Promise.reject(new Error('nested-boom')),
@@ -3336,6 +3356,202 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         else process.env['QWEN_CODE_MAX_WORKFLOW_CONCURRENCY'] = envPrev;
       }
     }, 10_000);
+  });
+
+  describe('batch limit', () => {
+    const run = (script: string, dispatch = vi.fn(async () => 'ok')) =>
+      new WorkflowOrchestrator(dispatch).run({ script, args: undefined });
+
+    it.each([0, 1, 4096])('parallel() accepts %i thunks', async (n) => {
+      const outcome = await run(`
+        const r = await parallel(Array.from({ length: ${n} }, (_, i) => () => i));
+        return [r.length, r[0], r[r.length - 1]];`);
+      expect(outcome.result).toEqual(
+        n === 0 ? [0, undefined, undefined] : [n, 0, n - 1],
+      );
+    });
+
+    it('parallel() refuses 4097 thunks without running any of them', async () => {
+      const dispatch = vi.fn(async () => 'ok');
+      const outcome = await run(
+        `let ran = 0;
+        const thunks = Array.from({ length: 4097 }, (_, i) =>
+          () => { ran++; return i === 0 ? agent('x') : i; });
+        try { await parallel(thunks); return 'resolved'; }
+        catch (e) { return [ran, e.message]; }`,
+        dispatch,
+      );
+      const [ran, message] = outcome.result as [number, string];
+      expect(ran).toBe(0);
+      expect(message).toContain('parallel() thunks: 4097 entries');
+      expect(message).toContain('limit of 4096 per call');
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 1, 4096])('pipeline() accepts %i items', async (n) => {
+      const outcome = await run(`
+        const r = await pipeline(Array.from({ length: ${n} }, (_, i) => i), (x) => x * 2);
+        return [r.length, r[r.length - 1]];`);
+      expect(outcome.result).toEqual(
+        n === 0 ? [0, undefined] : [n, (n - 1) * 2],
+      );
+    });
+
+    it('pipeline() refuses 4097 items without running a stage', async () => {
+      const outcome = await run(`
+        let ran = 0;
+        try {
+          await pipeline(Array.from({ length: 4097 }, (_, i) => i), (x) => { ran++; return x; });
+          return 'resolved';
+        } catch (e) { return [ran, e.message]; }`);
+      const [ran, message] = outcome.result as [number, string];
+      expect(ran).toBe(0);
+      expect(message).toContain('pipeline() items: 4097 entries');
+    });
+
+    it.each([0, 1, 4096])('pipeline() accepts %i stages', async (n) => {
+      const outcome = await run(`
+        const stages = Array.from({ length: ${n} }, () => (x) => x + 1);
+        return await pipeline([0], ...stages);`);
+      expect(outcome.result).toEqual([n]);
+    });
+
+    it.each([
+      ['with an item', '[0]'],
+      ['with no items', '[]'],
+    ])(
+      'pipeline() refuses 4097 stages %s without running one',
+      async (_name, items) => {
+        const outcome = await run(`
+        let ran = 0;
+        const stages = Array.from({ length: 4097 }, () => (x) => { ran++; return x; });
+        try { await pipeline(${items}, ...stages); return 'resolved'; }
+        catch (e) { return [ran, e.message]; }`);
+        const [ran, message] = outcome.result as [number, string];
+        expect(ran).toBe(0);
+        expect(message).toContain('pipeline() stages: 4097 entries');
+      },
+    );
+
+    it('counts a sparse list by its length', async () => {
+      const outcome = await run(`
+        const thunks = []; thunks[5000] = () => 1;
+        const items = []; items[5000] = 1;
+        const out = [];
+        try { await parallel(thunks); } catch (e) { out.push(e.message); }
+        try { await pipeline(items, (x) => x); } catch (e) { out.push(e.message); }
+        return out;`);
+      const [p, q] = outcome.result as string[];
+      expect(p).toContain('parallel() thunks: 5001 entries');
+      expect(q).toContain('pipeline() items: 5001 entries');
+    });
+
+    it('keeps the existing handling of short sparse lists', async () => {
+      const outcome = await run(`
+        const out = [];
+        try { await parallel([() => 1, , () => 3]); }
+        catch (e) { out.push(e.message); }
+        out.push(await pipeline([1, , 3], (x) => x * 10));
+        return out;`);
+      const [p, q] = outcome.result as [string, unknown[]];
+      expect(p).toMatch(/array of functions/);
+      expect(q).toEqual([10, null, 30]);
+    });
+
+    it('reports a non-function thunk only after the length passes', async () => {
+      const outcome = await run(`
+        try { await parallel(Array.from({ length: 4097 }, () => 1)); }
+        catch (e) { return e.message; }`);
+      expect(outcome.result).toContain('parallel() thunks: 4097 entries');
+    });
+
+    it('uses one bounded copy, not the input iterator, map or a later length', async () => {
+      const outcome = await run(`
+        let ran = 0;
+        const thunks = [() => { ran++; return 1; }, () => { ran++; return 2; }];
+        thunks[Symbol.iterator] = function* () { for (let i = 0; i < 5000; i++) yield () => i; };
+        thunks.map = () => { throw new Error('map was used'); };
+        const a = await parallel(thunks);
+
+        let reads = 0;
+        const growing = new Proxy([() => 1], {
+          get(target, key) {
+            if (key === 'length') return reads++ === 0 ? 1 : 5000;
+            return target[key];
+          },
+        });
+        const b = await parallel(growing);
+
+        const bad = [];
+        for (const len of [-1, 1.5, 2 ** 53, 'x']) {
+          const p = new Proxy([], { get: (t, k) => (k === 'length' ? len : t[k]) });
+          try { await parallel(p); } catch (e) { bad.push(e.message); }
+        }
+        const throwing = new Proxy([], {
+          get(t, k) { if (k === 'length') throw new Error('boom'); return t[k]; },
+        });
+        try { await pipeline(throwing, (x) => x); } catch (e) { bad.push(e.message); }
+        return { a, b, ran, bad };`);
+      const { a, b, ran, bad } = outcome.result as {
+        a: unknown[];
+        b: unknown[];
+        ran: number;
+        bad: string[];
+      };
+      expect(a).toEqual([1, 2]);
+      expect(ran).toBe(2);
+      expect(b).toEqual([1]);
+      expect(bad).toHaveLength(5);
+      expect(bad.slice(0, 4)).toEqual(
+        Array(4).fill(
+          'parallel() thunks must be an array with a readable length.',
+        ),
+      );
+      expect(bad[4]).toBe(
+        'pipeline() items must be an array with a readable length.',
+      );
+    });
+
+    it('does not limit the total across calls', async () => {
+      const outcome = await run(`
+        const first = await parallel(Array.from({ length: 4096 }, (_, i) => () => i));
+        const second = await pipeline(Array.from({ length: 4096 }, (_, i) => 4096 + i), (x) => x);
+        const all = first.concat(second);
+        return [all.length, all[0], all[4095], all[4096], all[8191]];`);
+      expect(outcome.result).toEqual([8192, 0, 4095, 4096, 8191]);
+    });
+
+    it('is an ordinary rejection: an outer parallel() maps it to null', async () => {
+      const dispatch = vi.fn(async () => 'ok');
+      const outcome = await run(
+        `let inner = 0;
+        return await parallel([
+          () => agent('sibling'),
+          () => parallel(Array.from({ length: 4097 }, () => () => { inner++; return agent('x'); })),
+          () => pipeline([1], ...Array.from({ length: 4097 }, () => (x) => { inner++; return x; })),
+          () => inner,
+        ]);`,
+        dispatch,
+      );
+      expect(outcome.result).toEqual(['ok', null, null, 0]);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not stop a run-level failure from propagating', async () => {
+      const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+      const budget = new WorkflowBudgetImpl(1);
+      budget.recordSpent(1);
+      await expect(
+        new WorkflowOrchestrator(async () => 'unused').run({
+          script: `return await parallel([
+            () => parallel(Array.from({ length: 4097 }, () => () => 1)),
+            () => agent('x'),
+          ]);`,
+          args: undefined,
+          budget,
+        }),
+      ).rejects.toThrow(/token budget exceeded/);
+    });
   });
 
   describe('1000-agent cap', () => {
