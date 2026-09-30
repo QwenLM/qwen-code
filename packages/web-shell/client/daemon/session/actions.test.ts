@@ -6026,14 +6026,19 @@ describe('createDaemonSessionActions', () => {
           session,
           manualSessionClearRef,
         });
-      const clearing = actions.clearSession({
-        requireDetachSessionId: session.sessionId,
-      });
-      const rejected = await expect(clearing).rejects.toThrow('detach failed');
+      const rejected = vi.fn();
+      const clearing = actions
+        .clearSession({
+          requireDetachSessionId: session.sessionId,
+        })
+        .catch(rejected);
       sessionRef.current = undefined;
       if (connectionCleared) replaceConnection({ status: 'error' });
       detach.reject(new Error('detach failed'));
-      await rejected;
+      await clearing;
+      expect(rejected).toHaveBeenCalledExactlyOnceWith(
+        new Error('detach failed'),
+      );
 
       expect(manualSessionClearRef.current).toBe(false);
       expect(store.reset).not.toHaveBeenCalled();
@@ -6054,14 +6059,19 @@ describe('createDaemonSessionActions', () => {
       session,
       manualSessionClearRef,
     });
-    const clearing = actions.clearSession({
-      requireDetachSessionId: session.sessionId,
-    });
-    const rejected = await expect(clearing).rejects.toThrow('detach failed');
+    const rejected = vi.fn();
+    const clearing = actions
+      .clearSession({
+        requireDetachSessionId: session.sessionId,
+      })
+      .catch(rejected);
     sessionRef.current = undefined;
     await actions.clearSession();
     detach.reject(new Error('detach failed'));
-    await rejected;
+    await clearing;
+    expect(rejected).toHaveBeenCalledExactlyOnceWith(
+      new Error('detach failed'),
+    );
 
     expect(manualSessionClearRef.current).toBe(true);
     expect(getConnection().sessionId).toBeUndefined();
