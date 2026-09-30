@@ -2047,6 +2047,14 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
       args: { file_path: 'a.txt', content: 'half-written' },
     };
     markToolCallArgumentsIncomplete([{ functionCall }]);
+    // Negative control: an unmarked sibling must reach the scheduler WITHOUT
+    // hadIncompleteArguments, or over-application of the marker (which would
+    // reject every subagent Edit call) is undetectable.
+    const cleanFunctionCall = {
+      id: 'call-clean',
+      name: 'write_file',
+      args: { file_path: 'b.txt', content: 'complete' },
+    };
 
     const scheduleSpy = vi
       .spyOn(CoreToolScheduler.prototype, 'schedule')
@@ -2054,7 +2062,7 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
     const abortController = new AbortController();
 
     const processing = core.processFunctionCalls(
-      [functionCall],
+      [functionCall, cleanFunctionCall],
       abortController,
       'prompt-incomplete',
       1,
@@ -2068,14 +2076,24 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
     );
     try {
       await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
-      expect(scheduleSpy.mock.calls[0]?.[0]).toEqual([
+      const scheduledRequests = scheduleSpy.mock.calls[0]?.[0];
+      expect(scheduledRequests).toEqual([
         expect.objectContaining({
           callId: 'call-incomplete',
           name: 'write_file',
           wasOutputTruncated: false,
           hadIncompleteArguments: true,
         }),
+        expect.objectContaining({
+          callId: 'call-clean',
+          name: 'write_file',
+          wasOutputTruncated: false,
+        }),
       ]);
+      expect(Array.isArray(scheduledRequests)).toBe(true);
+      expect((scheduledRequests as unknown[])[1]).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
     } finally {
       abortController.abort();
       await processing;

@@ -11416,6 +11416,64 @@ describe('CoreToolScheduler truncated output protection', () => {
     }
   });
 
+  // The non-Edit half of #12970 — and the wording the issue actually asks
+  // for: a non-Edit tool whose schema validation fails lands past the Edit
+  // guard, so its guidance must name malformed generation rather than a
+  // max_tokens cut the response's own usage disproved. The witness tool must
+  // not be Kind.Edit: Edit calls are rejected before validation and can never
+  // reach the paramGuidance branch.
+  it('attaches malformed-generation guidance to validation errors of incomplete non-Edit calls', async () => {
+    const readTool = new MockTool({
+      name: 'mockReadWithRequiredParam',
+      kind: Kind.Read,
+      params: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      readTool,
+      ['mockReadWithRequiredParam'],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockReadWithRequiredParam',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-malformed-nonedit',
+          hadIncompleteArguments: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message ?? '';
+      // Reached validation (not the pre-validation Edit rejection)...
+      expect(errorMessage).toContain("required property 'path'");
+      // ...and the attached guidance matches the actual cause.
+      expect(errorMessage).toContain('malformed generation');
+      expect(errorMessage).not.toContain('truncated due to max_tokens limit');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
+  });
+
   it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
     const declarativeTool = new TestApprovalTool({
       getApprovalMode: () => ApprovalMode.AUTO_EDIT,

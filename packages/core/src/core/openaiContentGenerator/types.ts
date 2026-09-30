@@ -65,8 +65,13 @@ export interface RequestContext {
    * there, before yielding, and restores the provider's own reason when the
    * merged totals disprove truncation (QwenLM/qwen-code#12970).
    *
-   * Per-stream and one-shot — the pipeline clears it when a stream starts and
-   * again when it settles it, so it must NOT be read as attempt-scoped state.
+   * One-shot: set on this stream's own finish chunk and consumed by
+   * `settleParkedTruncationOverride` before that response is yielded. Nothing
+   * clears it at stream start — a stale park is unreachable only because a
+   * RequestContext is fresh per `executeWithErrorHandling` call and the
+   * streaming executor returns a lazy generator, so no `executeAttempt` retry
+   * can run after the converter has parked one. If that ever changes, this
+   * field needs an explicit per-attempt reset.
    */
   pendingTruncationOverride?: { finishReason: FinishReason };
   toolCallParser?: StreamingToolCallParser;
