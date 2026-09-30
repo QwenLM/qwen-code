@@ -42,8 +42,8 @@ export function createJavaManagedAgentProvider(
     acceptsWorkspaceCwd: false,
     actions: {
       async listPending(sessionId, request) {
-        // The service allows at most one requested approval per Turn, so the
-        // first page holds every pending one in practice.
+        // The service lists only requested Actions, newest first, so one page
+        // holds every pending one unless more than 20 wait at once.
         const page = await client.queryActions(
           { sessionId, limit: 20 },
           request.signal,
@@ -66,9 +66,15 @@ export function createJavaManagedAgentProvider(
           },
           command.signal,
         );
-        if (result.status === 'failed') {
+        // A cancelled or recovery-blocked operation did not apply the answer,
+        // so the card must stay rather than hide as if it had.
+        if (
+          result.status === 'failed' ||
+          result.status === 'cancelled' ||
+          result.status === 'recovery_blocked'
+        ) {
           throw new Error(
-            `Managed Agent approval answer failed (${result.failureCode ?? 'unknown'})`,
+            `Managed Agent approval answer ${result.status} (${result.failureCode ?? 'unknown'})`,
           );
         }
       },

@@ -554,6 +554,29 @@ describe('createJavaManagedAgentProvider', () => {
         idempotencyKey: 'tool_approval_1:deny',
       }),
     ).rejects.toThrow('action_delivery_failed');
+
+    for (const status of ['cancelled', 'recovery_blocked'] as const) {
+      fetchImpl.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            operationId: `op-${status}`,
+            sessionId: 'session-1',
+            type: 'action_response',
+            status,
+            admissionStage: 'java_durable',
+            deliveryState: 'blocked',
+            replayed: true,
+          }),
+          { status: 202, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+      await expect(
+        provider.actions!.respond(pending[0], 'deny', {
+          clientId: 'client-1',
+          idempotencyKey: 'tool_approval_1:deny',
+        }),
+      ).rejects.toThrow(`approval answer ${status}`);
+    }
   });
 
   it('reports the actions capability only when the Session has it', async () => {
