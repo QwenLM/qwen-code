@@ -1,6 +1,6 @@
 {
-  "source": "/tmp/11959-models-dev.json",
-  "fetchedAt": "2026-09-30T08:20:49.890Z",
+  "source": "https://models.dev/api.json",
+  "fetchedAt": "2026-09-30T18:38:13.405Z",
   "projection": 1,
   "models": {
     "claude-fable-5": {

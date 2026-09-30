@@ -486,4 +486,11 @@ describe('model catalog', () => {
       200 * 1024,
     );
   });
+
+  it('stamps the committed snapshot with the canonical catalog URL', () => {
+    // Provenance must name where the data comes from, not the local path a
+    // maintainer happened to generate from (scripts/generate-model-catalog.ts
+    // stamps MODELS_DEV_URL for local-path inputs).
+    expect(bundled.source).toBe(MODELS_DEV_URL);
+  });
 });

@@ -27,7 +27,12 @@ import {
 
 const MAX_BYTES = 200 * 1024;
 
-const source = process.argv[2] ?? MODELS_DEV_URL;
+const input = process.argv[2] ?? MODELS_DEV_URL;
+// The provenance stamped into the committed snapshot must stay meaningful to
+// its readers: a local input path is machine-specific, so stamp the
+// canonical catalog URL instead — the payload is models.dev data regardless
+// of where this machine happened to store it.
+const source = /^https?:\/\//.test(input) ? input : MODELS_DEV_URL;
 
 async function fetchApi(url: string): Promise<ModelsDevApi> {
   const response = await fetch(url);
@@ -39,16 +44,16 @@ async function fetchApi(url: string): Promise<ModelsDevApi> {
   return (await response.json()) as ModelsDevApi;
 }
 
-const api: ModelsDevApi = /^https?:\/\//.test(source)
-  ? await fetchApi(source)
-  : JSON.parse(fs.readFileSync(source, 'utf8'));
+const api: ModelsDevApi = /^https?:\/\//.test(input)
+  ? await fetchApi(input)
+  : JSON.parse(fs.readFileSync(input, 'utf8'));
 
 const catalog = trimModelsDevCatalog(api, new Date().toISOString(), source);
 // A 200 that projects to nothing is not a catalog (a renamed upstream field
 // or a gateway error body); never overwrite the committed snapshot with it.
 if (Object.keys(catalog.models).length === 0) {
   throw new Error(
-    `no catalog entries projected from ${source}; leaving the committed snapshot untouched`,
+    `no catalog entries projected from ${input}; leaving the committed snapshot untouched`,
   );
 }
 const json = JSON.stringify(catalog, null, 2) + '\n';
