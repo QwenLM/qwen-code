@@ -281,6 +281,12 @@ public final class ToolPublicationDataStore {
         return finishedInternal(key, publicationId);
     }
 
+    JsonNode verifyFinished(JsonNode key, String publicationId, String writerToken) {
+        JsonNode finished = finished(key, publicationId, writerToken);
+        validateFinished(key, publicationId, finished.path("binding"), finished.path("result"), () -> {});
+        return finished;
+    }
+
     /** Broker-only lookup of the immutable terminal envelope after FINISHED. */
     public JsonNode finishedForBroker(
             com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord execution) {

@@ -75,6 +75,48 @@ describe('HTTP Managed Session store', () => {
     );
   });
 
+  it('verifies committed publication receipts with the scoped Session writer', async () => {
+    const server = new FakeManagedSessionStore();
+    const request = { executionCallId: 'execution-1', historyRevision: 7 };
+    const verified = vi.fn();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const url = new URL(requestUrl(input));
+        if (!url.pathname.endsWith('/receipts/verify'))
+          return server.fetch(input, init);
+        verified();
+        expect(url.pathname).toBe(
+          `/internal/managed-tool-publications/v1/sessions/${SESSION_KEY.sessionId}/receipts/verify`,
+        );
+        expect(url.searchParams.get('workspaceId')).toBe(
+          SESSION_KEY.workspaceId,
+        );
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
+        expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual(request);
+        return jsonResponse(request);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(
+        stores.publication.request('/receipts/verify', request),
+      ).resolves.toEqual(request);
+      expect(verified).toHaveBeenCalledOnce();
+      await expect(
+        stores.publication.request('/receipts/other', request),
+      ).rejects.toThrow('owner path is invalid');
+    } finally {
+      await stores.close();
+    }
+  });
+
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
     let publication: Record<string, unknown> | undefined;
