@@ -66,10 +66,6 @@ public class ManagedAgentService {
     private static final Pattern TURN_CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):([A-Za-z0-9_-]{1,64})$");
     private static final int TURN_ID_MAX_LENGTH = 64;
-    // Every Session serves its task list and detail; the tasks come from the
-    // Stage H records its Session store holds (H0c).
-    private static final WebShellSessionCapabilities WEB_SHELL_CAPABILITIES =
-            new WebShellSessionCapabilities(true);
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // A context stays ready until cwd changes arrive (W2).
@@ -302,7 +298,7 @@ public class ManagedAgentService {
     public WebShellSession getWebShellSession(String tenantId, String actorId,
             String sessionId) {
         return webShellSession(requireReadableSession(tenantId, actorId,
-                sessionId));
+                sessionId), actorId);
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
@@ -327,8 +323,8 @@ public class ManagedAgentService {
                 decoded == null ? null : decoded.updatedAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
         return new WebShellPage<>(page.sessions().stream()
-                .map(this::webShellSession).toList(), nextCursor(page),
-                page.hasMore());
+                .map(session -> webShellSession(session, actorId)).toList(),
+                nextCursor(page), page.hasMore());
     }
 
     /**
@@ -483,7 +479,8 @@ public class ManagedAgentService {
                 publicWorkspace(session));
     }
 
-    private WebShellSession webShellSession(SessionRecord session) {
+    private WebShellSession webShellSession(SessionRecord session,
+            String actorId) {
         TurnRecord latestTurn = store.findLatestTurn(session.tenantId(),
                 session.sessionId()).orElse(null);
         EventRecord environmentEvent = store.findLatestEnvironmentEvent(
@@ -494,7 +491,10 @@ public class ManagedAgentService {
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
                 session.lastSequence(), webShellWorkspace(session),
-                WEB_SHELL_CAPABILITIES);
+                // Every Session serves its task list and detail; the tasks
+                // come from the Stage H records its Session store holds (H0c).
+                new WebShellSessionCapabilities(true,
+                        maySubmitWorkspaceTurn(session, actorId)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -643,15 +643,20 @@ public class ManagedAgentService {
     // Everyone else keeps the existing refusal.
     private void requireSubmitter(String tenantId, String actorId,
             String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
-        if (session.workspace() != null
-                && harness.isWorkspaceFilesAvailable()
-                && workspaces.canRead(tenantId, actorId,
-                        session.workspace().getWorkspaceId())
-                && workspaces.createdSession(tenantId, actorId, sessionId)) {
-            return;
+        if (!maySubmitWorkspaceTurn(store.requireSession(tenantId, sessionId),
+                actorId)) {
+            requireLegacyWorkspace(tenantId, actorId, sessionId);
         }
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
+    }
+
+    private boolean maySubmitWorkspaceTurn(SessionRecord session,
+            String actorId) {
+        return session.workspace() != null
+                && harness.isWorkspaceFilesAvailable()
+                && workspaces.canRead(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                && workspaces.createdSession(session.tenantId(), actorId,
+                        session.sessionId());
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

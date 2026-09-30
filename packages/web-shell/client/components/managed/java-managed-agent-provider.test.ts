@@ -445,4 +445,39 @@ describe('createJavaManagedAgentProvider', () => {
     expect(transcript.olderCursor).toBeUndefined();
     expect(transcript.lastEventId).toBe(4);
   });
+
+  it('lets a bound Session send only when the service allows its caller', async () => {
+    const bound = {
+      sessionId: 'bound-1',
+      status: 'ACTIVE',
+      createdAt: 1,
+      updatedAt: 1,
+      lastSequence: 3,
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    };
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...bound,
+            capabilities: { tasks: true, workspaceTurns: true },
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...bound,
+            capabilities: { tasks: true, workspaceTurns: false },
+          }),
+        ),
+    });
+
+    expect(
+      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: true, canCancel: false, workspaceTurns: true });
+    expect(
+      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+    ).toEqual({ canSend: false, canCancel: false });
+  });
 });

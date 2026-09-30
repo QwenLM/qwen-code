@@ -152,6 +152,12 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "reader-later-" + workspace, "reader", 409).path("error").path("code").asText())
                     .isEqualTo("workspace_unavailable");
+            // WebShell advertises the same rule, per caller.
+            for (String caller : List.of("actor", "reader")) {
+                assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
+                        null, caller, 200).path("capabilities").path("workspaceTurns").asBoolean())
+                        .as(caller).isEqualTo("actor".equals(caller));
+            }
             String laterTurn = request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "later-" + workspace, "actor", 202).path("turn_id").asText();
             assertThat(laterTurn).isNotBlank();

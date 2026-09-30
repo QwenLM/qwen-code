@@ -73,7 +73,8 @@ public final class ApiModels {
             boolean tasks) {
     }
 
-    public record WebShellSessionCapabilities(boolean tasks) {
+    public record WebShellSessionCapabilities(boolean tasks,
+            boolean workspaceTurns) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

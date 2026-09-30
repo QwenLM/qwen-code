@@ -1176,8 +1176,8 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("lastSequence").asLong())
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
-                assertThat(other.get("capabilities"))
-                        .isEqualTo(json("{\"tasks\":true}"));
+                assertThat(other.get("capabilities")).isEqualTo(json(
+                        "{\"tasks\":true,\"workspaceTurns\":false}"));
             }
         }
 

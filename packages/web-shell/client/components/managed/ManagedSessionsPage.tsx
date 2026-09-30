@@ -489,7 +489,7 @@ function ManagedSessionsContent({
             }
             loading={detail.loading}
           />
-          {!summary?.workspace &&
+          {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <form
               className="flex shrink-0 flex-col gap-2"

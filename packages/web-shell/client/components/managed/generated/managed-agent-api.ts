@@ -354,6 +354,11 @@ export interface components {
             capabilities?: components["schemas"]["WebShellSessionCapabilities"];
         };
         WebShellSessionCapabilities: {
+            /**
+             * @description True when the caller may submit later Turns to this Workspace-bound Session: the deployment enables Workspace files and the caller created the Session. False for every other caller and for unbound Sessions, which do not use it.
+             * @default false
+             */
+            workspaceTurns: boolean;
             tasks: boolean;
         };
         WebShellSessionPage: {

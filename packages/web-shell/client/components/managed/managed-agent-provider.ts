@@ -28,7 +28,12 @@ export interface ManagedAgentSessionSummary {
   phase: ManagedAgentSessionPhase;
   runtimeReady: boolean;
   runtimeState: ManagedAgentRuntimeState;
-  capabilities: { canSend: boolean; canCancel: boolean };
+  capabilities: {
+    canSend: boolean;
+    canCancel: boolean;
+    /** The caller may submit later Turns to this Workspace-bound Session. */
+    workspaceTurns?: boolean;
+  };
   failure?: { code: string; message: string };
 }
 
