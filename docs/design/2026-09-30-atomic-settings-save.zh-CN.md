@@ -123,6 +123,23 @@ MOVEFILE_REPLACE_EXISTING。这些来源支持机制选择，但不是 Windows �
 禁止替换句柄时的行为。模拟 EPERM 只能验证本方控制流。本机没有真实
 Windows 验证，因此该验收要求仍然待完成。
 
+已评估现有 core `atomicWriteFileSync` 作为替代方案。它提供唯一暂存文件、
+文件 flush、权限保留、符号链接处理和 EPERM/EACCES rename 重试。这些
+共享能力有用，但其失败契约与本次设置变更不同：EXDEV 时降级为直接写入
+正在使用的目标；`noFollow: true` 时先 unlink 目标再重新创建。因此，兜底
+失败可能留下不完整字节或目标缺失。目前没有受支持的选项可拒绝该兜底。
+保留 uid 的原地写入分支属于异步 `atomicWriteFile`，不属于建议用于这些
+设置调用方的同步版本。
+
+直接把这些调用方改为共享 helper 会削弱“发布被拒绝时已提交设置不变”的
+要求，也会移除既有人工恢复副本，并把默认符号链接行为从替换链接改为
+写入链接目标。因此，本次仍保留较小的 CLI writer，采用严格的替换失败
+语义和私有恢复文件。修改 core 的兜底策略或新增严格模式会涉及其他调用方，
+超出本次修复范围。该选择不继承 core 的权限保留或重试行为；继续沿用
+现有设置权限语义，真实 Windows 验证仍然必需。单凭 rename 重试不能证明
+Windows 上的替换与拒绝行为。如果共享 helper 以后能提供等价的严格发布
+契约且不改动这些调用方，可以重新考虑复用。
+
 完全移除备份可以简化发布，但会丢掉 helper 已有的人工恢复契约。保留共享
 暂存路径则让两个 writer 进程可以消费彼此的临时文件。给 reader 增加重试
 只会掩盖 writer 制造的文件缺失，其他 reader 仍然暴露。本方案不需要平台
@@ -196,7 +213,14 @@ CLI 验证前构建 bundle。详细计划位于
 份完整已知文档并调用真实操作者 reader，未出现文件缺失、解析失败或
 策略丢失。barrier 确认两个 writer 在备份后暂停期间有 100 次采样，
 释放后、任一 writer 完成前又有 2100 次采样。观察到全部五种旧/新文档
-标记，成功结束后只留下目标文件。原始证据保存在
+标记，成功结束后只留下目标文件。这些次数来自初次独立复验。
+随后在提交 PR 前，针对 `3923fd845` 的同一份生产代码再次完成 600 次保存，
+独立读取 2700 次：两 writer 都暂停时 100 次，释放后、第一个 writer 完成前
+2300 次。读取采样次数随进程调度变化；这是两次分别成功的运行，而非同一次
+运行的矛盾记录。PR 的 E2E 评论报告后一次，其原始结果位于
+.qwen/e2e-tests/issue-12417-pr-settings-gap-verify.json 和
+.qwen/e2e-tests/issue-12417-pr-concurrent-save-verify.json。
+初次原始证据保存在
 .qwen/e2e-tests/issue-12417-settings-gap-verify.json 和
 .qwen/e2e-tests/issue-12417-concurrent-save-verify.json，对应脚本位于
 .qwen/scripts/。

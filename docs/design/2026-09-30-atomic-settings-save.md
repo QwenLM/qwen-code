@@ -150,6 +150,29 @@ denies replacement, using the supported Node release. Mocked EPERM tests verify
 our control flow only. This host has no native Windows verification, so that
 acceptance requirement remains open.
 
+The existing core `atomicWriteFileSync` was considered as a replacement. It
+provides unique staging, file flush, permission preservation, symlink handling,
+and EPERM/EACCES rename retries. Those are useful shared capabilities, but its
+failure contract differs from this settings change: on EXDEV it falls back to
+writing the live target directly; with `noFollow: true` it unlinks the target
+before recreating it. A failed fallback can therefore leave partial bytes or
+an absent target. There is no supported option to refuse that fallback. The
+uid-preserving in-place branch belongs to the async `atomicWriteFile`, not the
+synchronous variant proposed for these settings callers.
+
+Routing these callers directly through the shared helper would weaken the
+requirement that rejected publication leaves committed settings untouched.
+It would also remove the existing manual recovery copy and change default
+symlink behavior from replacing the link to writing through it. This slice
+therefore retains the smaller CLI writer with strict replacement failure and
+private recovery artifacts. Changing core's fallback policy or adding a new
+strict mode would involve its other consumers and is outside this fix. This
+choice does not inherit core's mode preservation or retry behavior; existing
+settings permission semantics are retained, and native Windows validation is
+still required. Rename retries alone do not establish replacement/refusal
+behavior on Windows. The shared helper can be reconsidered if it gains an
+equivalent strict-publication contract without changing those consumers.
+
 Removing backups entirely would simplify publication but discard the helper's
 existing manual recovery contract. Keeping shared staging paths would leave
 two writer processes able to consume each other's temporary files. Adding
@@ -235,7 +258,15 @@ reader. There are no missing-file, parse or policy-loss failures. Barriers
 confirm 100 samples while both writers are paused after backup and 2,100
 samples after release before either finishes. All five old/new document
 markers are observed, and successful completion leaves only the target.
-Raw evidence is retained in .qwen/e2e-tests/issue-12417-settings-gap-verify.json
+These counts describe the initial independent verification run. A subsequent
+PR-submission run of the same production code at `3923fd845` again completes
+600 saves, with 2,700 reader samples: 100 while both writers are paused and
+2,300 after release before the first writer completes. Reader sample counts
+vary with process scheduling; these are two separate successful runs, not
+conflicting measurements of one run. The PR E2E comment reports the latter.
+Its raw results are .qwen/e2e-tests/issue-12417-pr-settings-gap-verify.json and
+.qwen/e2e-tests/issue-12417-pr-concurrent-save-verify.json.
+Initial raw evidence is retained in .qwen/e2e-tests/issue-12417-settings-gap-verify.json
 and .qwen/e2e-tests/issue-12417-concurrent-save-verify.json; the corresponding
 scripts are in .qwen/scripts/.
 
