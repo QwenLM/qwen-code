@@ -203,8 +203,7 @@ function toSessionSummary(
   // A bound Session takes later Turns only from the caller the service
   // allows; everything else about a bound Session stays read-only.
   const workspaceTurns =
-    Boolean(session.workspace) &&
-    session.capabilities?.workspaceTurns === true;
+    Boolean(session.workspace) && session.capabilities?.workspaceTurns === true;
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
