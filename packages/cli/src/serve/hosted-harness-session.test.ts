@@ -6,7 +6,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { ServerResponse } from 'node:http';
+import { createServer, type Server, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import express from 'express';
@@ -52,6 +52,11 @@ import {
   HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 import * as stdio from '../utils/stdioHelpers.js';
+import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
+import type {
+  ManagedHookCatalog,
+  ManagedHookControl,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 
 const state = vi.hoisted(() => ({
   root: '',
@@ -112,7 +117,22 @@ const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
-function app(withBroker = false) {
+const listeners = new Set<Server>();
+
+afterEach(async () => {
+  await Promise.all(
+    [...listeners].map(
+      (listener) =>
+        new Promise<void>((resolve) => {
+          listener.close(() => resolve());
+          listener.closeAllConnections();
+        }),
+    ),
+  );
+  listeners.clear();
+});
+
+async function app(withBroker = false) {
   const result = express();
   result.use(express.json());
   const contract = createHostedHarnessContract(
@@ -126,7 +146,13 @@ function app(withBroker = false) {
     state.root,
     withBroker ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
   );
-  return result;
+  const listener = createServer(result);
+  listeners.add(listener);
+  // Match supertest's IPv4 URL; wildcard IPv6 can share an unrelated IPv4 port.
+  await new Promise<void>((resolve) =>
+    listener.listen(0, '127.0.0.1', resolve),
+  );
+  return listener;
 }
 
 function headers<T extends supertest.Test>(request: T): T {
@@ -212,7 +238,7 @@ async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
       );
     },
   );
-  const server = app(true);
+  const server = await app(true);
   const created = await headers(supertest(server).post('/session')).send({
     sessionId: SESSION_ID,
     sessionScope: 'thread',
@@ -228,6 +254,81 @@ async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
   const authorize = (request: supertest.Test) =>
     headers(request).set('X-Qwen-Client-Id', created.body.clientId as string);
   return { server, authorize, requests, replies, brokerOwners };
+}
+
+const hookPin = {
+  catalogId: 'test',
+  catalogRevision: 1,
+  definitionDigest: 'b'.repeat(64),
+};
+async function hookApp() {
+  const requests: ManagedHookControl[] = [];
+  const catalog: ManagedHookCatalog = {
+    ...hookPin,
+    hooks: [
+      HookEventName.Notification,
+      HookEventName.SessionEnd,
+      HookEventName.SessionDelete,
+    ].map((eventName) => ({
+      hookId: eventName,
+      eventName,
+      sequential: false,
+      async: false,
+      failClosed: true,
+      onceKey: null,
+      config: { type: 'command' as const },
+    })),
+  };
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      this.runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+    },
+  );
+  const release = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'release')
+    .mockResolvedValue();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+    async (operation) => {
+      requests.push(operation);
+      if (operation.kind === 'hook-catalog')
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          catalog: { ...catalog, ...operation.pin },
+        };
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        result: {
+          success: true,
+          outcome: 'success',
+          duration: 0,
+          output: { hookSpecificOutput: { additionalContext: 'checked' } },
+        },
+      };
+    },
+  );
+  const server = await app(true);
+  const definition = {
+    sessionId: SESSION_ID,
+    sessionScope: 'thread',
+    managedSessionStore: store(),
+    toolProfile: 'hosted-workspace-files/1',
+    approvalMode: 'yolo',
+    hookCatalog: hookPin,
+  };
+  const created = await headers(supertest(server).post('/session')).send(
+    definition,
+  );
+  expect(created.status).toBe(200);
+  const authorize = (request: supertest.Test) =>
+    headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+  return { server, authorize, definition, catalog, requests, release };
 }
 
 describe('Hosted Harness no-tool session', () => {
@@ -247,6 +348,416 @@ describe('Hosted Harness no-tool session', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
+  });
+
+  it('runs and queries a Hook-only operation without opening a user turn', async () => {
+    const { server, authorize, requests } = await hookApp();
+    const operationId = randomUUID();
+    const operation = {
+      operationId,
+      event: 'Notification',
+      input: { message: 'ready', notification_type: 'test' },
+    };
+    const response = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    ).send(operation);
+    expect(response.status).toBe(200);
+    expect(state.model).not.toHaveBeenCalled();
+    expect(
+      (
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+        ).send(operation)
+      ).status,
+    ).toBe(200);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+    const status = await authorize(
+      supertest(server).get(
+        `/session/${SESSION_ID}/hooks/operations/${operationId}`,
+      ),
+    );
+    expect(status.status).toBe(200);
+    expect(status.body.state).toBe('settled');
+    expect(
+      (await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`)))
+        .status,
+    ).toBe(204);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    undefined,
+    'managed-hook-message-chunks',
+    'managed-hook-message-part',
+  ])(
+    'restores the saved Hook pin and verifies its message closure (missing: %s)',
+    async (missingKind) => {
+      const { server, authorize, catalog, requests } = await hookApp();
+      Object.assign(catalog, {
+        hooks: [{ ...catalog.hooks[0], config: { type: 'function' } }],
+      });
+      for (let index = 0; index < 2; index++) {
+        const prompt = [{ type: 'text', text: 'x'.repeat(40 * 1024) }];
+        await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .send({
+            prompt,
+            promptId: randomUUID(),
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        });
+      }
+      const operation = {
+        operationId: randomUUID(),
+        event: 'Notification',
+        input: { message: 'ready', notification_type: 'test' },
+      };
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+      )
+        .send(operation)
+        .expect(200);
+      expect(
+        requests.filter((request) => request.kind === 'hook-execute'),
+      ).toHaveLength(1);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/hooks/registrations`),
+      )
+        .send({
+          operationId: randomUUID(),
+          expectedRevision: 1,
+          catalog: { ...hookPin, catalogRevision: 2 },
+        })
+        .expect(200);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+      const replacement = await app(true);
+      await headers(supertest(replacement).post(`/session/${SESSION_ID}/load`))
+        .send({
+          managedSessionStore: store(),
+          hookCatalog: { ...hookPin, catalogRevision: 2 },
+        })
+        .expect(409);
+      if (missingKind) {
+        const read = LocalManagedSessionResourceStore.prototype.read;
+        const damaged = vi
+          .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+          .mockImplementation(function (
+            this: LocalManagedSessionResourceStore,
+            ref,
+          ) {
+            return ref.kind === missingKind
+              ? Promise.reject(new Error('missing Hook snapshot resource'))
+              : read.call(this, ref);
+          });
+        const refused = await headers(
+          supertest(replacement).post(`/session/${SESSION_ID}/load`),
+        ).send({ managedSessionStore: store() });
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('hosted_turn_recovery_required');
+        damaged.mockRestore();
+      }
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      const restored = (request: supertest.Test) =>
+        headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
+      await restored(
+        supertest(replacement).post(`/session/${SESSION_ID}/hooks/operations`),
+      )
+        .send(operation)
+        .expect(200);
+      const current = await restored(
+        supertest(replacement).get(`/session/${SESSION_ID}/hooks`),
+      );
+      expect(current.body.catalog.catalogRevision).toBe(2);
+      expect(
+        requests.filter((request) => request.kind === 'hook-execute'),
+      ).toHaveLength(1);
+      expect(state.model).toHaveBeenCalledTimes(2);
+      await restored(
+        supertest(replacement).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
+
+  it('finishes a stopped Hook turn after its final settlement write is lost', async () => {
+    const { server, authorize, definition, catalog, requests } =
+      await hookApp();
+    Object.assign(catalog, {
+      hooks: [
+        {
+          ...catalog.hooks[0],
+          hookId: 'stop-after-tools',
+          eventName: HookEventName.PostToolBatch,
+        },
+      ],
+    });
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const originalControl = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      const response = await originalControl(operation);
+      return operation.kind === 'hook-execute'
+        ? {
+            ...response,
+            result: {
+              success: true,
+              outcome: 'success' as const,
+              duration: 0,
+              output: { continue: false, stopReason: 'Stopped after tools.' },
+            },
+          }
+        : response;
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      '55555555-5555-4555-8555-555555555555',
+    );
+    const execute = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+      .mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'original result' }],
+      });
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let failFinalSettlement = true;
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      function (this: ManagedSessionRecordSink, record) {
+        if (record.subtype === 'turn_result' && failFinalSettlement)
+          throw new Error('lost final settlement');
+        return originalWrite.call(this, record);
+      },
+    );
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'read_file',
+        callId: 'stopped-call',
+        args: { file_path: 'a' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      expect(toolTurn!.hookStopReason).toBe('Stopped after tools.');
+      return { text: toolTurn!.hookStopReason!, model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'read a' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const saved = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      key,
+    );
+    const checkpoint = saved.events.findLast(
+      (event) => event.kind === 'checkpoint.committed',
+    )!;
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const savedState = JSON.parse(
+      (
+        await resources.read(
+          assertManagedSessionDurableRef(
+            checkpoint.payload['stateRef'],
+            'checkpoint',
+          ),
+        )
+      ).toString(),
+    );
+    expect(savedState.continuation.phase).toBe('turn_settled');
+    expect(savedState.tools.items).toEqual([
+      expect.objectContaining({ state: 'settled', consumed: false }),
+    ]);
+    expect(saved.events.some((event) => event.kind === 'turn.settled')).toBe(
+      false,
+    );
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+    failFinalSettlement = false;
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    ).send(definition);
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).not.toBe(true);
+    const restored = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
+    await vi.waitFor(
+      async () => {
+        const status = await restored(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await restored(
+      supertest(replacement).get(`/session/${SESSION_ID}/transcript`),
+    );
+    expect(
+      transcript.body.events.filter(
+        (event: { type: string }) => event.type === 'turn_complete',
+      ),
+    ).toHaveLength(1);
+    expect(state.model).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(
+      requests.filter((operation) => operation.kind === 'hook-execute'),
+    ).toHaveLength(1);
+    await restored(supertest(replacement).post(`/session/${SESSION_ID}/prompt`))
+      .send({ prompt, promptId: randomUUID(), payloadDigest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await restored(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    await restored(
+      supertest(replacement).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+  });
+
+  it('refuses new Hook operations while an original effect is unknown', async () => {
+    const { server, authorize, requests } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-catalog') return original(operation);
+      requests.push(operation);
+      return {
+        operationId:
+          operation.kind === 'hook-status' || operation.kind === 'hook-cancel'
+            ? operation.targetOperationId
+            : operation.operationId,
+        state: 'outcome_unknown',
+      };
+    });
+    const operationId = randomUUID();
+    const send = (id: string) =>
+      authorize(
+        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+      ).send({
+        operationId: id,
+        event: 'Notification',
+        input: { message: 'effect', notification_type: 'test' },
+      });
+    expect((await send(operationId)).status).toBe(503);
+    expect((await send(randomUUID())).status).toBe(409);
+    expect((await send(operationId)).status).toBe(503);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
+  it('settles End and Delete before releasing the Hook Runtime', async () => {
+    const { server, authorize, requests, release } = await hookApp();
+    const order: string[] = [];
+    release.mockImplementation(async () => {
+      order.push('release');
+    });
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-execute')
+        order.push(operation.input.hook_event_name);
+      return original(operation);
+    });
+    expect(
+      (await authorize(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    expect(order).toEqual(['SessionEnd', 'SessionDelete', 'release']);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(2);
+  });
+
+  it('pins dynamic Hook revisions and rejects unscoped operations', async () => {
+    const { server, authorize } = await hookApp();
+    const operationId = randomUUID();
+    const route = `/session/${SESSION_ID}/hooks/registrations`;
+    const catalog = { ...hookPin, catalogRevision: 2 };
+    expect(
+      (
+        await headers(supertest(server).post(route)).send({
+          operationId,
+          expectedRevision: 0,
+          catalog,
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await authorize(supertest(server).post(route)).send({
+          operationId,
+          expectedRevision: 0,
+          catalog,
+        })
+      ).status,
+    ).toBe(200);
+    const current = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/hooks`),
+    );
+    expect(current.body.catalog.catalogRevision).toBe(2);
+    expect(JSON.stringify(current.body)).not.toContain('"config"');
+    expect(
+      (
+        await authorize(supertest(server).post(route)).send({
+          operationId: randomUUID(),
+          expectedRevision: 0,
+          catalog,
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`)))
+        .status,
+    ).toBe(204);
   });
 
   it.each([false, true])(
@@ -1044,7 +1555,7 @@ describe('Hosted Harness no-tool session', () => {
   ])(
     'checks the MCP pin limit at creation (%i pins)',
     async (count, status) => {
-      const server = app(true);
+      const server = await app(true);
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
@@ -1118,7 +1629,7 @@ describe('Hosted Harness no-tool session', () => {
         },
       });
       await previous.close();
-      const server = app(true);
+      const server = await app(true);
       const loaded = await headers(
         supertest(server).post(`/session/${SESSION_ID}/load`),
       ).send({
@@ -1283,13 +1794,14 @@ describe('Hosted Harness no-tool session', () => {
       toolProfile: 'hosted-workspace-shell/1',
     };
     expect(
-      (await headers(supertest(app()).post('/session')).send(body)).status,
+      (await headers(supertest(await app()).post('/session')).send(body))
+        .status,
     ).toBe(400);
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     const acquire = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
       .mockResolvedValue();
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send(
       body,
     );
@@ -1405,7 +1917,7 @@ describe('Hosted Harness no-tool session', () => {
       });
       const close = vi.spyOn(HostedShellPublisher.prototype, 'close');
       const start = vi.spyOn(HostedShellPublisher.prototype, 'start');
-      const server = app(true);
+      const server = await app(true);
       const created = await headers(supertest(server).post('/session'))
         .send({
           sessionId: SESSION_ID,
@@ -1485,7 +1997,7 @@ describe('Hosted Harness no-tool session', () => {
   );
 
   it('distinguishes strict create and load outcomes', async () => {
-    const server = app();
+    const server = await app();
     const missing = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store() });
@@ -1516,7 +2028,7 @@ describe('Hosted Harness no-tool session', () => {
 
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
-    const server = app(true);
+    const server = await app(true);
     const body = {
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -1589,7 +2101,7 @@ describe('Hosted Harness no-tool session', () => {
       responseParts: [{ text: 'file contents' }],
     });
     vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
-    const server = app(true);
+    const server = await app(true);
     const body = {
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -1675,7 +2187,7 @@ describe('Hosted Harness no-tool session', () => {
 
   it('refuses a cold load when a complete empty Shell stream loses its seal', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
-    const server = app(true);
+    const server = await app(true);
     const body = {
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -1810,7 +2322,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('keeps one restore cut while activation renewal advances the log', async () => {
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -1876,7 +2388,7 @@ describe('Hosted Harness no-tool session', () => {
   it.each(['conflicting-ref', 'extension-domain'])(
     'refuses a cold load with %s in retained history',
     async (fault) => {
-      const server = app(true);
+      const server = await app(true);
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
@@ -1936,7 +2448,7 @@ describe('Hosted Harness no-tool session', () => {
   it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
     'loads a renamed %s Session and verifies its retained title resources',
     async (toolProfile) => {
-      const server = app(true);
+      const server = await app(true);
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
@@ -1992,7 +2504,7 @@ describe('Hosted Harness no-tool session', () => {
   );
 
   it('refuses attachment if writer ownership is lost during restore validation', async () => {
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2021,7 +2533,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('allows only one concurrent attachment for a session ID', async () => {
-    const server = app();
+    const server = await app();
     const create = () =>
       headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
@@ -2034,7 +2546,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('keeps the caller session ID, commits a text turn, and refuses duplicate inference', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2083,7 +2595,7 @@ describe('Hosted Harness no-tool session', () => {
         (_, index) => index + 1,
       ),
     );
-    const listener = server.listen(0);
+    const listener = server;
     const address = listener.address();
     expect(address && typeof address !== 'string').toBe(true);
     const controller = new AbortController();
@@ -2122,7 +2634,7 @@ describe('Hosted Harness no-tool session', () => {
       expect(frames).toContain(`"promptId":"${PROMPT_ID}"`);
     } finally {
       controller.abort();
-      listener.close();
+      listener.closeAllConnections();
     }
     const repeated = await send();
     expect(repeated.status).toBe(202);
@@ -2148,7 +2660,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('rejects unsupported prompt content before model or tool execution', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2171,7 +2683,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('rejects prompts whose durable user record would exceed the store limit', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2201,7 +2713,7 @@ describe('Hosted Harness no-tool session', () => {
     const acquire = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
       .mockResolvedValue();
-    const server = app(true);
+    const server = await app(true);
     const toolProfile = 'hosted-workspace-files/1';
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
@@ -2292,7 +2804,7 @@ describe('Hosted Harness no-tool session', () => {
       LocalManagedSessionResourceStore.prototype,
       'publish',
     );
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2500,7 +3012,7 @@ describe('Hosted Harness no-tool session', () => {
           return { text: 'resumed after Shell', model: 'test-model' };
         },
       );
-      const first = app(true);
+      const first = await app(true);
       const created = await headers(supertest(first).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
@@ -2528,7 +3040,7 @@ describe('Hosted Harness no-tool session', () => {
       await headers(supertest(first).delete('/session/' + SESSION_ID)).expect(
         204,
       );
-      const second = app(true);
+      const second = await app(true);
       const checkpointBefore = await LocalJsonlManagedSessionJournalStore.read(
         path.join(state.root, `${SESSION_ID}.jsonl`),
         key,
@@ -2688,7 +3200,7 @@ describe('Hosted Harness no-tool session', () => {
         204,
       );
       failFinalSettlement = false;
-      const third = app(true);
+      const third = await app(true);
       const reopened = await headers(
         supertest(third).post('/session/' + SESSION_ID + '/load'),
       ).send({
@@ -2719,7 +3231,7 @@ describe('Hosted Harness no-tool session', () => {
         204,
       );
       const project = vi.spyOn(ManagedSessionRecordSink.prototype, 'project');
-      const fourth = app(true);
+      const fourth = await app(true);
       const settled = await headers(
         supertest(fourth).post('/session/' + SESSION_ID + '/load'),
       ).send({
@@ -2801,7 +3313,7 @@ describe('Hosted Harness no-tool session', () => {
         return { text: 'resumed after unstarted Shell', model: 'test-model' };
       },
     );
-    const first = app(true);
+    const first = await app(true);
     const created = await headers(supertest(first).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2829,7 +3341,7 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(first).delete('/session/' + SESSION_ID)).expect(
       204,
     );
-    const second = app(true);
+    const second = await app(true);
     const loaded = await headers(
       supertest(second).post('/session/' + SESSION_ID + '/load'),
     ).send({
@@ -2853,13 +3365,13 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('ends an event stream when its attachment closes', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
       managedSessionStore: store(),
     });
-    const listener = server.listen(0);
+    const listener = server;
     try {
       const address = listener.address();
       if (!address || typeof address === 'string') throw new Error('No port');
@@ -2884,12 +3396,12 @@ describe('Hosted Harness no-tool session', () => {
       while (!done) ({ done } = await reader.read());
       expect(done).toBe(true);
     } finally {
-      listener.close();
+      listener.closeAllConnections();
     }
   });
 
   it('stops writing an event stream after backpressure ends it', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -2933,7 +3445,7 @@ describe('Hosted Harness no-tool session', () => {
         ends++;
         return this;
       });
-    const listener = server.listen(0);
+    const listener = server;
     const abort = new AbortController();
     try {
       const address = listener.address();
@@ -2958,7 +3470,6 @@ describe('Hosted Harness no-tool session', () => {
       end.mockRestore();
       abort.abort();
       listener.closeAllConnections();
-      listener.close();
       await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
         'X-Qwen-Client-Id',
         clientId,
@@ -2971,7 +3482,7 @@ describe('Hosted Harness no-tool session', () => {
       .spyOn(stdio, 'writeStderrLineSafe')
       .mockImplementation(() => {});
     state.model.mockRejectedValueOnce(new Error('model initialization failed'));
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -3021,7 +3532,7 @@ describe('Hosted Harness no-tool session', () => {
   ])(
     'settles a turn after one %s failure',
     async (failedKind, terminalType, modelCalls) => {
-      const server = app();
+      const server = await app();
       const created = await headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
@@ -3145,7 +3656,7 @@ describe('Hosted Harness no-tool session', () => {
     state.model.mockRejectedValueOnce(
       new HostedToolRecoveryRequiredError(new Error('original result unknown')),
     );
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -3181,7 +3692,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('blocks new prompts when terminal settlement keeps failing', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -3246,7 +3757,7 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it('settles a cancelled turn when writing its user record fails once', async () => {
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -3320,7 +3831,7 @@ describe('Hosted Harness no-tool session', () => {
           );
         }),
     );
-    const server = app();
+    const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -3401,7 +3912,7 @@ describe('Hosted Harness tool approvals', () => {
   }
 
   it('pins a mode that can ask at creation and refuses other modes', async () => {
-    const server = app(true);
+    const server = await app(true);
     const create = (extra: Record<string, unknown>) =>
       headers(supertest(server).post('/session')).send({
         sessionId: SESSION_ID,
@@ -3486,7 +3997,7 @@ describe('Hosted Harness tool approvals', () => {
       });
       await managed.close();
       const loaded = await headers(
-        supertest(app(true)).post(`/session/${SESSION_ID}/load`),
+        supertest(await app(true)).post(`/session/${SESSION_ID}/load`),
       ).send({ managedSessionStore: store(), toolProfile: files });
       expect(loaded.status).toBe(409);
       expect(loaded.body.code).toBe('hosted_tool_profile_conflict');
@@ -3494,7 +4005,9 @@ describe('Hosted Harness tool approvals', () => {
   );
 
   it('keeps a yolo tool Session definition unchanged', async () => {
-    const created = await headers(supertest(app(true)).post('/session')).send({
+    const created = await headers(
+      supertest(await app(true)).post('/session'),
+    ).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
       managedSessionStore: store(),
@@ -3539,7 +4052,7 @@ describe('Hosted Harness tool approvals', () => {
       await toolTurn!.consumeResults();
       return { text: 'done', model: 'test-model' };
     });
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
@@ -3698,7 +4211,7 @@ describe('Hosted Harness tool approvals', () => {
       await toolTurn!.consumeResults();
       return { text: 'done', model: 'test-model' };
     });
-    const server = app(true);
+    const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',

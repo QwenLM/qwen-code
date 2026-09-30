@@ -209,6 +209,7 @@ import {
   createInstructionsLoadedCallback,
 } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
+import type { ManagedHookDispatcher } from '../hooks/hookEventHandler.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -2218,6 +2219,7 @@ export interface ConfigInitializeOptions {
    * helpers use this to avoid loading or subscribing user/workspace hooks.
    */
   skipHooks?: boolean;
+  managedHookDispatcher?: ManagedHookDispatcher;
   /**
    * Skip SkillManager creation and file watching. Read-only replay helpers do
    * not need skill discovery and must not start long-lived watchers.
@@ -4096,8 +4098,12 @@ export class Config {
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
     recordStartupEvent('config_initialize_hooks_start');
-    if (!options?.skipHooks && !this.getDisableAllHooks()) {
-      this.hookSystem = new HookSystem(this);
+    if (
+      !this.shellExecutionSandbox &&
+      (options?.managedHookDispatcher ||
+        (!options?.skipHooks && !this.getDisableAllHooks()))
+    ) {
+      this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
 
@@ -10603,6 +10609,7 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     if (this.shellExecutionSandbox) return true;
+    if (this.hookSystem?.isManaged()) return false;
     return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 

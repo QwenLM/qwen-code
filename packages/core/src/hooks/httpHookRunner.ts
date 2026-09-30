@@ -120,6 +120,34 @@ export class HttpHookRunner {
     eventName: HookEventName,
     input: HookInput,
     signal?: AbortSignal,
+    trackRequest = false,
+  ): Promise<HookExecutionResult> {
+    let requestState: NonNullable<HookExecutionResult['httpRequestState']> =
+      'not_started';
+    const result = await this.executeRequest(
+      hookConfig,
+      eventName,
+      input,
+      signal,
+      trackRequest
+        ? (state) => {
+            requestState = state;
+          }
+        : undefined,
+    );
+    return trackRequest
+      ? { ...result, httpRequestState: requestState }
+      : result;
+  }
+
+  private async executeRequest(
+    hookConfig: HttpHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+    onRequestState?: (
+      state: NonNullable<HookExecutionResult['httpRequestState']>,
+    ) => void,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
     const hookId = hookConfig.name || hookConfig.url;
@@ -219,6 +247,8 @@ export class HttpHookRunner {
       try {
         debugLogger.debug(`Executing HTTP hook: ${hookId} -> ${url}`);
 
+        combinedSignal.throwIfAborted();
+        onRequestState?.('outcome_unknown');
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -233,14 +263,10 @@ export class HttpHookRunner {
           // non-2xx branch below (non-blocking error).
           redirect: 'manual',
         });
-
-        cleanup();
-
-        const duration = Date.now() - startTime;
-
         // Per Qwen Code spec: Non-2xx status is a non-blocking error
         // Execution continues, but we log a warning
         if (!response.ok) {
+          onRequestState?.('response_received');
           debugLogger.warn(
             `HTTP hook ${hookId} returned non-2xx status ${response.status} (non-blocking)`,
           );
@@ -253,12 +279,17 @@ export class HttpHookRunner {
             outcome: 'non_blocking_error',
             error: new Error(`HTTP hook returned ${response.status}`),
             output: { continue: true },
-            duration,
+            duration: Date.now() - startTime,
           };
         }
 
         // Parse response
-        const output = await this.parseResponse(response, eventName);
+        const output = await this.parseResponse(
+          response,
+          eventName,
+          onRequestState && (() => onRequestState('response_received')),
+        );
+        const duration = Date.now() - startTime;
 
         debugLogger.debug(
           `HTTP hook ${hookId} completed successfully in ${duration}ms`,
@@ -277,8 +308,6 @@ export class HttpHookRunner {
           duration,
         };
       } catch (fetchError) {
-        cleanup();
-
         const duration = Date.now() - startTime;
 
         if (
@@ -321,6 +350,8 @@ export class HttpHookRunner {
           output: { continue: true },
           duration,
         };
+      } finally {
+        cleanup();
       }
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -346,13 +377,19 @@ export class HttpHookRunner {
   private async parseResponse(
     response: Response,
     eventName: HookEventName,
+    onBodyReceived?: () => void,
   ): Promise<HookOutput> {
     const contentType = response.headers.get('content-type') || '';
+    // Managed receipts require the body, not just headers. Keep transport
+    // failures outside the native malformed-JSON fallback.
+    const body = onBodyReceived ? await response.text() : undefined;
+    onBodyReceived?.();
 
     // Try to parse as JSON
     if (contentType.includes('application/json')) {
       try {
-        const json = await response.json();
+        const json =
+          body === undefined ? await response.json() : JSON.parse(body);
         return this.normalizeOutput(json, eventName);
       } catch {
         debugLogger.warn('Failed to parse JSON response, using empty output');
@@ -361,7 +398,7 @@ export class HttpHookRunner {
     }
 
     // For plain text responses, add as context (truncated if needed)
-    const text = await response.text();
+    const text = body ?? (await response.text());
     if (text.trim()) {
       return {
         continue: true,

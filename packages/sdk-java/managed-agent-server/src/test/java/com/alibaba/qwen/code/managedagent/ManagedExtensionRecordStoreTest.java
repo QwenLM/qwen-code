@@ -20,8 +20,11 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -458,10 +461,10 @@ class ManagedExtensionRecordStoreTest {
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode fixtures = ManagedMcpRecordContractTest.fixtures();
         JsonNode configuration = fixtures.get("templates").get("mcp_configuration");
-        commitMcp(journal, "configure-1", "mcp_configuration", configuration, List.of());
+        commitDomain(journal, "configure-1", "mcp_configuration", configuration, List.of());
         JsonNode dispatched = ManagedMcpRecordContractTest.merge(configuration,
                 fixtures.get("successors").get(0).get("after"));
-        commitMcp(journal, "configure-dispatch", "mcp_configuration", dispatched, List.of());
+        commitDomain(journal, "configure-dispatch", "mcp_configuration", dispatched, List.of());
         ObjectNode configured = (ObjectNode) ManagedMcpRecordContractTest.merge(configuration,
                 fixtures.get("cases").get(3).get("patch"));
         CommitResource data = new CommitResource("mcp-data", "mcp-data", 1,
@@ -473,7 +476,7 @@ class ManagedExtensionRecordStoreTest {
                 "mcp_configuration", configured, List.of(), 1000);
         assertThatThrownBy(() -> journal.commit(missing)).isInstanceOf(ApiException.class);
         assertThat(revisions(sessionId)).isEqualTo(2);
-        commitMcp(journal, "configure-result", "mcp_configuration", configured, List.of(data));
+        commitDomain(journal, "configure-result", "mcp_configuration", configured, List.of(data));
         assertThat(records.listRecords(TENANT, sessionId, "mcp_configuration"))
                 .containsExactly(configured);
         assertThat(records.readRecordResource(TENANT, sessionId, ref).isEmpty()).isTrue();
@@ -493,7 +496,7 @@ class ManagedExtensionRecordStoreTest {
         wrong.put("catalogRevision", 2);
         assertThatThrownBy(() -> journal.commit(journal.requestDomain("wrong-binding",
                 "mcp_operation", wrong, List.of(), 1000))).hasMessageContaining("active committed configuration");
-        commitMcp(journal, "operation-1", "mcp_operation", operation, List.of());
+        commitDomain(journal, "operation-1", "mcp_operation", operation, List.of());
         assertThat(records.listTasks(TENANT, sessionId, null, null, 10).tasks()).isEmpty();
         String fakeTask = ManagedExtensionProjection.taskId(ManagedExtensionProjection.recordKey(
                 sessionId, "mcp_operation", "operation-1"));
@@ -504,11 +507,216 @@ class ManagedExtensionRecordStoreTest {
                 .listRecords(TENANT, sessionId, "mcp_operation")).containsExactly(operation);
     }
 
-    private static void commitMcp(ExtensionRecordJournal journal, String commandId,
+    @Test
+    void materializesHookChainsAndAtomicallyConsumesOnceIntentsWithoutTasks() throws Exception {
+        String sessionId = agents.createSession(TENANT, "hook-" + UUID.randomUUID(),
+                "qwen-code", null, "hook", Map.of(), List.of()).sessionId();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode fixtures = ManagedHookRecordContractTest.fixtures();
+        ObjectNode registration = fixtures.get("templates").get("hook_registration").deepCopy();
+        CommitResource data = new CommitResource("hook-data", "hook-data", 1,
+                2, ExtensionRecordJournal.sha256("{}"), "e30=");
+        ObjectNode ref = registration.withObject("/catalogRef");
+        ref.put("digest", data.digest());
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("missing-catalog",
+                "hook_registration", registration, List.of(), 1000))).isInstanceOf(ApiException.class);
+        commitDomain(journal, "register-admitted", "hook_registration", registration, List.of(data));
+        ObjectNode execution = fixtures.get("templates").get("hook_execution").deepCopy();
+        execution.set("planRef", ref.deepCopy());
+        execution.set("inputRef", ref.deepCopy());
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("unsettled-registration",
+                "hook_execution", execution, List.of(), 1000))).hasMessageContaining("settled committed registration");
+        for (String status : List.of("running", "settled")) {
+            registration.withObject("/run").put("state", status);
+            commitDomain(journal, "register-" + status, "hook_registration", registration, List.of());
+        }
+        ObjectNode otherRegistration = registration.deepCopy();
+        otherRegistration.put("registrationId", "registration-other");
+        otherRegistration.withObject("/run").put("effectId", "registration-other").put("state", "admitted");
+        otherRegistration.withObject("/run/definition").put("definitionDigest", "c".repeat(64));
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("conflicting-pin",
+                "hook_registration", otherRegistration, List.of(), 1000))).hasMessageContaining("two definition digests");
+        for (String field : List.of("planRef", "inputRef")) {
+            ObjectNode missing = execution.deepCopy();
+            missing.withObject("/" + field).put("resourceId", "missing");
+            assertThatThrownBy(() -> journal.commit(journal.requestDomain("missing-" + field,
+                    "hook_execution", missing, List.of(), 1000))).isInstanceOf(ApiException.class);
+        }
+        commitDomain(journal, "execute-intent", "hook_execution", execution, List.of());
+        ObjectNode another = execution.deepCopy();
+        another.put("hookExecutionId", "execution-2").put("occurrenceId", "occurrence-2");
+        another.withObject("/run").put("effectId", "execution-2");
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("consumed-once",
+                "hook_execution", another, List.of(), 1000))).hasMessageContaining("onceKey");
+        assertThat(revisions(sessionId)).isEqualTo(4);
+        another.putNull("onceKey").put("occurrenceId", "occurrence-1");
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("duplicate-ordinal",
+                "hook_execution", another, List.of(), 1000))).hasMessageContaining("unique ordinals");
+        another.put("ordinal", 1).put("eventName", "AfterTool");
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("changed-event",
+                "hook_execution", another, List.of(), 1000))).hasMessageContaining("unique ordinals");
+        execution.withObject("/run").put("state", "running").put("execution", "dispatch_started");
+        commitDomain(journal, "execute-dispatch", "hook_execution", execution, List.of());
+        execution.withObject("/run").put("state", "recovery_blocked").put("execution", "outcome_unknown")
+                .put("reason", "outcome_unknown");
+        commitDomain(journal, "execute-unknown", "hook_execution", execution, List.of());
+        assertThat(new ManagedExtensionRecordStore(jdbc, state).listRecords(TENANT, sessionId, "hook_execution"))
+                .containsExactly(execution);
+        execution.withObject("/run").put("state", "settled").put("execution", "settled").putNull("reason");
+        execution.set("resultRef", ref.deepCopy());
+        commitDomain(journal, "execute-late-result", "hook_execution", execution, List.of());
+        execution.put("cancelRequested", true);
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("rewrite-terminal",
+                "hook_execution", execution, List.of(), 1000))).hasMessageContaining("cannot follow");
+        assertThat(records.latestHookRegistration(TENANT, sessionId)).contains(registration);
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("repeat-terminal-registration",
+                "hook_registration", registration, List.of(), 1000))).hasMessageContaining("cannot follow");
+        ObjectNode replacement = registration.deepCopy();
+        replacement.put("registrationId", "replacement").put("catalogId", "catalog-2");
+        replacement.withObject("/run").put("effectId", "replacement");
+        replacement.withObject("/run/definition").put("definitionId", "catalog-2");
+        for (String status : List.of("admitted", "running", "settled")) {
+            replacement.withObject("/run").put("state", status);
+            CommitTransactionRequest request = journal.requestDomain("replacement-" + status,
+                    "hook_registration", replacement, List.of(), 500);
+            journal.commit(request);
+            journal.committed(request);
+            assertThat(records.latestHookRegistration(TENANT, sessionId))
+                    .contains("settled".equals(status) ? replacement : registration);
+        }
+        assertThat(records.listTasks(TENANT, sessionId, null, null, 10).tasks()).isEmpty();
+        assertThat(state.findEvents(TENANT, sessionId, 0, 100)).extracting(EventRecord::type)
+                .doesNotContain("task.updated");
+    }
+
+    @Test
+    void keepsLatestCatalogWhenAnOlderRegistrationSettlesLater() throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        CommitResource data = hookResource("hook-data", "hook-data", "{}".getBytes(StandardCharsets.UTF_8));
+        ObjectNode older = ManagedHookRecordContractTest.fixtures()
+                .get("templates").get("hook_registration").deepCopy();
+        older.withObject("/catalogRef").put("digest", data.digest());
+        commitDomain(journal, "older-admitted", "hook_registration", older, List.of(data));
+        assertThat(records.latestHookRegistration(TENANT, sessionId)).isEmpty();
+
+        ObjectNode newer = older.deepCopy();
+        newer.put("registrationId", "registration-2").put("catalogRevision", 2);
+        newer.withObject("/run").put("effectId", "registration-2");
+        newer.withObject("/run/definition").put("definitionRevision", 2)
+                .put("definitionDigest", "c".repeat(64));
+        for (String status : List.of("admitted", "running", "settled")) {
+            newer.withObject("/run").put("state", status);
+            commitDomain(journal, "newer-" + status, "hook_registration", newer, List.of());
+            if ("settled".equals(status)) {
+                assertThat(records.latestHookRegistration(TENANT, sessionId)).contains(newer);
+            } else {
+                assertThat(records.latestHookRegistration(TENANT, sessionId)).isEmpty();
+            }
+        }
+        for (String status : List.of("running", "settled")) {
+            older.withObject("/run").put("state", status);
+            commitDomain(journal, "older-" + status, "hook_registration", older, List.of());
+            assertThat(new ManagedExtensionRecordStore(jdbc, state)
+                    .latestHookRegistration(TENANT, sessionId)).contains(newer);
+        }
+    }
+
+    private static void commitDomain(ExtensionRecordJournal journal, String commandId,
             String domain, JsonNode record, List<CommitResource> resources) {
         CommitTransactionRequest request = journal.requestDomain(commandId, domain, record, resources, 1000);
         journal.commit(request);
         journal.committed(request);
+    }
+
+    @Test
+    void commitsHookMessageSnapshotsAndRejectsIncompleteOrMismatchedClosures() throws Exception {
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode templates = ManagedHookRecordContractTest.fixtures().get("templates");
+        CommitResource data = hookResource("hook-data", "hook-data", "{}".getBytes(StandardCharsets.UTF_8));
+        ObjectNode registration = templates.get("hook_registration").deepCopy();
+        registration.set("catalogRef", hookRef(data));
+        for (String status : List.of("admitted", "running", "settled")) {
+            registration.withObject("/run").put("state", status);
+            commitDomain(journal, "register-" + status, "hook_registration", registration, List.of(data));
+        }
+        long resourcesBefore = rows("qwen_managed_session_resource", sessionId);
+        byte[] messages = ("[{\"role\":\"user\",\"content\":\"" + "😀".repeat(20_000) + "\"}]")
+                .getBytes(StandardCharsets.UTF_8);
+        CommitResource first = hookResource("messages-part-1", "managed-hook-message-part",
+                Arrays.copyOfRange(messages, 0, 60 * 1024));
+        CommitResource second = hookResource("messages-part-2", "managed-hook-message-part",
+                Arrays.copyOfRange(messages, 60 * 1024, messages.length));
+        ObjectNode manifestBody = JsonNodeFactory.instance.objectNode();
+        manifestBody.putArray("parts").add(hookRef(first)).add(hookRef(second));
+        CommitResource manifest = hookResource("messages", "managed-hook-message-chunks",
+                ExtensionRecordJournal.bytes(manifestBody));
+        ObjectNode planBody = JsonNodeFactory.instance.objectNode();
+        planBody.set("messagesRef", hookRef(manifest));
+        planBody.putObject("input").set("userObject", hookRef(hookResource("not-a-dependency", "user-data", messages)));
+        CommitResource plan = hookResource("plan", "managed-hook-plan", ExtensionRecordJournal.bytes(planBody));
+        ObjectNode execution = templates.get("hook_execution").deepCopy();
+        execution.set("planRef", hookRef(plan));
+        execution.set("inputRef", hookRef(data));
+        execution.putNull("onceKey");
+        for (List<CommitResource> incomplete : List.of(List.of(plan, first, second), List.of(plan, manifest, first))) {
+            assertThatThrownBy(() -> journal.commit(journal.requestDomain("missing-messages", "hook_execution",
+                    execution, incomplete, 1000))).isInstanceOf(ApiException.class);
+            assertThat(revisions(sessionId)).isEqualTo(3);
+            assertThat(rows("qwen_managed_session_resource", sessionId)).isEqualTo(resourcesBefore);
+        }
+        for (boolean mismatchPart : List.of(false, true)) {
+            ObjectNode badPlanBody = planBody.deepCopy();
+            ObjectNode badManifestBody = manifestBody.deepCopy();
+            if (mismatchPart)
+                ((ObjectNode) badManifestBody.get("parts").get(1)).put("digest", "c".repeat(64));
+            CommitResource badManifest = hookResource("messages", "managed-hook-message-chunks",
+                    ExtensionRecordJournal.bytes(badManifestBody));
+            badPlanBody.set("messagesRef", hookRef(badManifest));
+            if (!mismatchPart) badPlanBody.withObject("/messagesRef").put("digest", "c".repeat(64));
+            CommitResource badPlan = hookResource("plan", "managed-hook-plan", ExtensionRecordJournal.bytes(badPlanBody));
+            ObjectNode invalid = execution.deepCopy();
+            invalid.set("planRef", hookRef(badPlan));
+            assertThatThrownBy(() -> journal.commit(journal.requestDomain("mismatched-messages", "hook_execution",
+                    invalid, List.of(badPlan, badManifest, first, second), 1000)))
+                    .isInstanceOf(ApiException.class).hasMessageContaining("does not match");
+            assertThat(revisions(sessionId)).isEqualTo(3);
+            assertThat(rows("qwen_managed_session_resource", sessionId)).isEqualTo(resourcesBefore);
+        }
+        commitDomain(journal, "messages-valid", "hook_execution", execution, List.of(plan, manifest, first, second));
+        assertThat(new ManagedExtensionRecordStore(jdbc, state).listRecords(TENANT, sessionId, "hook_execution"))
+                .extracting(JsonNode::toString).containsExactly(execution.toString());
+        assertThat(sessionStore.readResource(TENANT, WORKSPACE, sessionId, manifest.resourceId(),
+                "extension-writer-token-0123456789").bytes()).isEqualTo(ExtensionRecordJournal.bytes(manifestBody));
+        ByteArrayOutputStream restored = new ByteArrayOutputStream();
+        for (CommitResource part : List.of(first, second))
+            restored.write(sessionStore.readResource(TENANT, WORKSPACE, sessionId, part.resourceId(),
+                    "extension-writer-token-0123456789").bytes());
+        assertThat(restored.toByteArray()).isEqualTo(messages);
+
+        CommitResource small = hookResource("small-messages", "managed-hook-messages", "[]".getBytes(StandardCharsets.UTF_8));
+        planBody.set("messagesRef", hookRef(small));
+        CommitResource smallPlan = hookResource("small-plan", "managed-hook-plan", ExtensionRecordJournal.bytes(planBody));
+        ObjectNode smallExecution = execution.deepCopy();
+        smallExecution.put("hookExecutionId", "small").put("occurrenceId", "small");
+        smallExecution.withObject("/run").put("effectId", "small");
+        smallExecution.set("planRef", hookRef(smallPlan));
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("small-missing", "hook_execution",
+                smallExecution, List.of(smallPlan), 1000))).isInstanceOf(ApiException.class);
+        commitDomain(journal, "small-valid", "hook_execution", smallExecution, List.of(smallPlan, small));
+        assertThat(sessionStore.readResource(TENANT, WORKSPACE, sessionId, small.resourceId(),
+                "extension-writer-token-0123456789").bytes()).isEqualTo("[]".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static CommitResource hookResource(String id, String kind, byte[] bytes) {
+        return new CommitResource(id, kind, 1, bytes.length, ExtensionRecordJournal.sha256(bytes),
+                Base64.getEncoder().encodeToString(bytes));
+    }
+
+    private static ObjectNode hookRef(CommitResource resource) {
+        return JsonNodeFactory.instance.objectNode().put("resourceId", resource.resourceId()).put("kind", resource.kind())
+                .put("schemaVersion", resource.schemaVersion()).put("byteLength", resource.byteLength()).put("digest", resource.digest());
     }
 
     private ExtensionRecordJournal journal(String sessionId) {

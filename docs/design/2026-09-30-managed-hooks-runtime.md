@@ -1,0 +1,203 @@
+# Managed Hooks runtime (H2)
+
+[English](2026-09-30-managed-hooks-runtime.md) | [简体中文](2026-09-30-managed-hooks-runtime.zh-CN.md)
+
+Status: implemented and locally validated; Linux cgroup execution validation
+remains pending. This implements H2 of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), following H1.
+The references are section 5 of the
+[extension runtime design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)
+and section 6 of the
+[configuration design](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-config-extensions.md).
+
+## Problem and scope
+
+Hosted Sessions disable ambient Hooks. Legacy runners keep local processes,
+callbacks and once state in memory, which cannot prove what happened after a
+Harness replacement. H2 commits plans and execution identities before effects,
+then reconciles the original owner after uncertainty. An after Hook failure
+must not change a successful tool's receipt.
+
+The implementation extends the existing private Hosted Workspace profiles and
+adds the public read-only Hook catalog. Production AgentBundle enablement remains
+separate, as in H1. It does not enable unrelated H3/H4 capabilities or start a
+second main Agent loop. The native Hook dispatcher accepts every existing event;
+producer availability continues to follow the selected profile.
+
+## Records and planning
+
+`hook_registration` pins a deployment catalog and immutable resource.
+`hook_execution` records occurrence, ordinal, registration, plan, effective input,
+original Runtime Session, cancellation intent, physical state and result reference.
+Both use the existing `ExtensionRun` validator and `domain.committed` journal.
+They do not create user task entries. TypeScript and Java consume shared positive
+and negative fixtures and enforce resource closure, stable pins, unique ordinals,
+and atomic consumption of once keys at intent.
+
+Each occurrence fixes its catalog and plan. Occurrences are admitted serially
+within a Session so concurrent events cannot reserve the same once Hook; execution
+inside each plan retains native parallel/sequential behavior. Repeated IDs with different semantic
+input are rejected. Sequential execution persists each effective input and reuses
+native prompt-context and tool-input accumulation. Parallel results aggregate in
+plan order. Fail-open/fail-closed policy is applied before saving the result, also
+when status reconciliation supplies the receipt. Failed or unknown once attempts
+do not become eligible again.
+
+Catalog replacement is an idempotent registration operation with an expected
+registration count. Revisions increase within each catalog namespace. Retrying an
+older operation acknowledges it without restoring an older effective catalog.
+Removing a Hook from a new revision affects future occurrences only. Deployed
+Session/agent entries carry explicit owner metadata; filtering precedes native
+configuration deduplication so one agent cannot inherit another agent's handlers.
+
+## Runtime ownership
+
+Set `QWEN_MANAGED_HOOK_CONFIG` on the Tool Runtime process to a deployment-owned
+JSON manifest. Its version is `1`; each catalog has `tenantId`, `workspaceId`,
+`catalogId`, `catalogRevision`, a 64-character hexadecimal `definitionDigest`, and
+`hooks`. Each Hook specifies its ID, event, matcher, execution policy and recipe.
+Command/HTTP recipes and trusted function module paths stay at the Runtime;
+the Harness receives planning metadata and prompt definitions. Function modules
+export a versioned object with `callback` and optional `onHookSuccess`.
+Unavailable handlers block accurately instead of evaluating serialized closures.
+Function context uses the live Session history, with a durable snapshot for replay.
+Only matching function plans store messages; large snapshots use immutable
+60 KiB parts. The full control envelope is bounded at 8 MiB and checked before
+network dispatch, without truncating messages or inventing an unknown outcome.
+Snapshots, plans and reference metadata also share the Session Store’s existing
+8 MiB transaction budget. Snapshot admission reserves 256 KiB for the plan, input,
+chunk manifest and record closure; oversized snapshots become bounded stops before
+publication. The commit includes the entire snapshot reference
+closure; the Store rejects a missing manifest or part atomically.
+
+The manifest is an explicit deployment catalog. It does not import the Harness
+host's ambient user/project settings or arbitrary client callbacks. Source
+metadata is sorted using the native registry; Session registrations retain their
+native append behavior. Migrating Legacy settings into a deployment catalog must
+preserve its already-resolved user/project merged fallback and trust decisions.
+
+All worker Hook routes are **live-session-owner scoped**. Broker forwarding
+validates tenant, workspace and Session, resolves the saved Runtime, and checks
+workspace generation and the operation grant before new effects. Status and
+cancel only inspect the original execution. Missing or replaced owners remain
+unknown; no status request dispatches a replacement effect.
+
+Commands reuse native output, timeout and TERM/KILL handling. Managed execution
+requires Linux cgroup v2 delegation: set `QWEN_MANAGED_HOOK_CGROUP_ROOT` to a
+writable domain with `cgroup.kill`. A clean launcher enters a fresh unit before
+starting the command. Membership survives `setsid` and detached descendants;
+completion requires `cgroup.events` to report no remaining processes. Cancellation
+sends TERM, then uses `cgroup.kill` if needed, and retains the owner when emptiness
+cannot be proved. This is lifecycle isolation for deployment-owned trusted Hooks,
+not a sandbox against scripts deliberately modifying the cgroup control plane.
+
+Missing isolation, including macOS and Windows, returns
+`managed_hook_command_isolation_unavailable` before command execution. The ledger
+records `not_started_proven` with `handler_unavailable`, and cancellation can close
+the blocked occurrence. A process group alone is never accepted as proof.
+Environment inheritance is restricted to execution necessities and explicit
+recipe entries. Async admission waits for the Runtime acknowledgement; it is not
+a completion receipt. Normal acknowledged async work may coexist with later
+turns; unknown work blocks new admission and retains its Runtime hold.
+
+HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
+refused. A received failure response can settle; a lost response after sending
+remains unknown and cannot be retried automatically. Hook outputs are bounded.
+Individual receipts and aggregate outputs use a 60 KiB bound. An oversized
+initial plan (including event input, descriptors and snapshot references) saves a
+bounded blocking receipt and a digest of the original semantic input. Recovery
+returns that refusal without dispatch or once consumption, including when no
+handlers matched; changed input for the same occurrence remains a conflict.
+An oversized
+individual receipt becomes a bounded failure under its saved fail-open/fail-closed
+policy. An oversized aggregate or next sequential input instead stops the
+occurrence with a durable blocking result, preserving completed child receipts;
+later undispatched Hooks do not consume once keys. Recovery derives the same
+result from the saved receipts without repeating effects.
+Combined tool Hook context is checked against the existing history record limit;
+if it cannot fit, orchestration stops with the original tool and Hook receipts
+preserved, without writing or retrying an oversized history record.
+Runtime concurrency is limited to 16 active operations and catalogs to 128 Hooks.
+Concurrency refusals retain bounded failure receipts under the saved fail policy.
+Runtime keeps at most 4096 operation receipts, including these refusals, without
+eviction or replay. Once full, it refuses new executions before installing grants;
+an unrecorded refusal whose response is lost remains unknown on lookup.
+
+## Model activation
+
+Only the Harness runs prompt Hooks. In-turn Hooks use the turn's exclusive model
+scope. Notification, expansion and closing events can acquire a `hook_operation`
+activation without creating a user turn, task completion, tool loop or startup
+Hook. Both subjects use the Session's monotonically increasing activation epoch.
+The scope remains held until the provider call actually settles, even if the
+provider ignores timeout cancellation.
+
+Model attempts and usage are associated with the original Hook operation and
+originating turn when present. Budget accounting follows the existing Session
+and turn budget semantics; Hook operations must not reset the original budget.
+There is no new monetary-budget policy or independent Hook token pool.
+
+## Event integration
+
+| Events                                                      | Producer and ordering                                                                                                                                                                                                             |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SessionStart, UserPromptSubmit                              | Hosted startup occurs once; original submit and effective model input remain distinct. A blocking before Hook prevents the model request.                                                                                         |
+| UserPromptExpansion, Notification                           | Authenticated private operation route with stable caller occurrence. Expansion output is returned to its caller for submission.                                                                                                   |
+| PermissionRequest, PreToolUse                               | Permission comes first. Modified arguments are validated again and require a new Action when the policy asks. No physical after event is fabricated for a refused call.                                                           |
+| PostToolUse, PostToolUseFailure, PostToolBatch              | Native receipts are committed first. Physical success/error/cancel selects the event; batch waits for all results. Recovery adds Hook context without repeating tools or history.                                                 |
+| MessageDisplay, Stop, StopFailure                           | Final display has its own stable occurrence; suppression affects returned parts. Stop may continue inference. Actual model API failure emits StopFailure.                                                                         |
+| InstructionsLoaded, PreCompact, PostCompact                 | Existing native producers delegate to the durable dispatcher. Initial instruction events wait for model authentication; Hook recovery errors propagate through compaction.                                                        |
+| PermissionDenied, SubagentStart/Stop, TodoCreated/Completed | The complete native event bridge preserves producer payloads, owner identities and Todo phases. These are emitted when their native capability runs; Hosted file/shell/MCP profiles do not fabricate AUTO, child or Todo actions. |
+| SessionEnd, SessionDelete                                   | Explicit deletion drains prior operations, runs lifecycle Hooks, then releases Runtime/provider/writer ownership. Detach emits neither event.                                                                                     |
+
+The dispatcher avoids loading or executing ambient Legacy Hooks in a Managed
+Config. Explicit Hosted producers are excluded from duplicate native emission.
+A reconstructed activation is not a new startup or user resume. Stop occurrences
+use durable model attempt IDs. Only a blocking Stop activates the continuation
+flag; an ordinary tool round does not. An explicit after/batch Hook stop ends
+orchestration while preserving physical receipts and their unconsumed status,
+and leaves the Session ready for another turn.
+
+## Interfaces and compatibility
+
+Session creation/load accepts `hookCatalog: {catalogId, catalogRevision,
+definitionDigest}` with a Hosted Workspace tool profile and Broker. The saved
+initial pin is restored when omitted on load and must match when supplied; later
+committed registrations remain authoritative. Workspace cold load verifies Hook
+record resources and the complete function-message snapshot closure before
+attachment, while retaining original-owner recovery barriers.
+
+Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
+updates, Notification/expansion operations, and operation status/cancel. Mutations
+cannot overlap a turn or another control operation. The public tenant/actor-scoped
+`GET /v1/agents/sessions/{sessionId}/hook-catalog` projects only display metadata;
+it exposes no recipes, credentials, module paths or handler references. Existing
+Sessions without a Hook pin retain their current behavior.
+
+Changed areas are Core Hook dispatch/activation/record validation, CLI Hosted
+orchestration and Runtime execution, Java Broker transport and Session Store
+projection, and their collocated tests. Migration V26 records the first admission
+journal sequence as `first_sequence`, which later revisions preserve. The latest
+settled catalog is chosen by this sequence, matching native registration order
+even when an older registration settles later, independently of clocks or UUIDs.
+
+## Validation and acceptance
+
+The ignored working plan is `.qwen/e2e-tests/12827-h2.md`. Baseline uses global
+`qwen`; verification uses the local bundle, deterministic model responses, real
+processes and side-effect counters. Production transport coverage connects Hosted,
+Java Session Store, Embedded Broker and a spawned Tool Runtime. Local SQL coverage
+uses H2; it is not a claim of a MySQL deployment test. The current validation host
+is macOS without a Linux container runtime. Linux cgroup descendant, cancellation
+and async drain tests are conditional and have not been executed here; their setup
+is recorded in `.qwen/e2e-tests/12827-h2-cgroup-validation.md`. Local transport E2E
+uses trusted function handlers for side effects and separately verifies command
+refusal before execution. It does not claim to verify Linux command drain.
+
+Acceptance includes all four runners, ordered aggregation, once failure, async
+admission/cancellation/drain, input reapproval, cold reconstruction, lost execute
+and HTTP responses without duplicate effects, catalog replacement, owner isolation,
+prompt activation and unchanged no-Hook behavior. Run `npm run build`,
+`npm run typecheck`, `npm run bundle`, focused package tests and Java contract tests.
+Two clean self-audit passes and independent review follow integration verification.
+Unknown physical or model outcomes remain blocked with their original evidence;
+passing a mocked event test alone does not establish a missing producer's support.

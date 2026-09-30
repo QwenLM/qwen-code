@@ -1899,4 +1899,22 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     service.resetSession('session-a');
     expect(service.getTotalOutputTokens('session-a')).toBe(0);
   });
+
+  it('restores a durable Session model ledger once without resetting warm usage or charging process totals', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('main', 120), 'session-a');
+    service.addEvent(response('hook', 30), 'session-a');
+    const saved = structuredClone(
+      service.getMetricsForSession('session-a').models,
+    );
+    service.reset();
+    service.addEvent(response('other', 9), 'session-b');
+    service.restoreSessionModelMetrics('session-a', saved);
+    expect(service.getTotalOutputTokens('session-a')).toBe(150);
+    expect(Object.keys(service.getMetrics().models)).toEqual(['other']);
+    service.addEvent(response('hook', 20), 'session-a');
+    service.restoreSessionModelMetrics('session-a', saved);
+    expect(service.getTotalOutputTokens('session-a')).toBe(170);
+    expect(service.getTotalOutputTokens('session-b')).toBe(9);
+  });
 });

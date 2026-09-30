@@ -17,6 +17,7 @@ import {
 import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
+import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
@@ -949,6 +950,96 @@ describe('HTTP Managed Session store', () => {
         }),
       ]),
     );
+    const hookTemplates = JSON.parse(
+      readFileSync(
+        new URL(
+          './contracts/managed-hook-record-v1.fixtures.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ).templates as {
+      hook_registration: HookRegistration;
+      hook_execution: HookExecution;
+    };
+    const registration = { ...hookTemplates.hook_registration, catalogRef };
+    const commitHook = (
+      commandId: string,
+      domain: 'hook_registration' | 'hook_execution',
+      record: unknown,
+    ) =>
+      first.authority.commitExtensionRecord(
+        {
+          operation: 'commitHookRecord',
+          commandId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'b'.repeat(64),
+        },
+        { domain, record },
+        { class: 'trusted_entry' },
+      );
+    for (const state of ['admitted', 'running', 'settled'] as const)
+      await commitHook(`register-${state}`, 'hook_registration', {
+        ...registration,
+        run: { ...registration.run, state },
+      });
+    const orphanRef = await first.resources.publish(
+      'untrusted-user-object',
+      Buffer.from('{}'),
+    );
+    const messageCases = [
+      [{ role: 'user', content: 'small snapshot' }],
+      [{ role: 'user', content: '😀'.repeat(40_000) }],
+    ];
+    for (const [index, messages] of messageCases.entries()) {
+      const bytes = Buffer.from(JSON.stringify(messages));
+      const parts: ManagedSessionDurableRef[] = [];
+      if (bytes.length > 60 * 1024) {
+        for (let offset = 0; offset < bytes.length; offset += 60 * 1024)
+          parts.push(
+            await first.resources.publish(
+              'managed-hook-message-part',
+              bytes.subarray(offset, offset + 60 * 1024),
+            ),
+          );
+      }
+      const messagesRef = await first.resources.publish(
+        parts.length ? 'managed-hook-message-chunks' : 'managed-hook-messages',
+        parts.length ? Buffer.from(JSON.stringify({ parts })) : bytes,
+      );
+      const planRef = await first.resources.publish(
+        'managed-hook-plan',
+        Buffer.from(
+          JSON.stringify({
+            input: { userObject: orphanRef },
+            messagesRef,
+          }),
+        ),
+      );
+      const executionId = `messages-${index}`;
+      await commitHook(executionId, 'hook_execution', {
+        ...hookTemplates.hook_execution,
+        hookExecutionId: executionId,
+        occurrenceId: executionId,
+        planRef,
+        inputRef: catalogRef,
+        onceKey: null,
+        run: { ...hookTemplates.hook_execution.run, effectId: executionId },
+      });
+      const uploaded = server.commits.at(-1)!['resources'] as Array<{
+        resourceId: string;
+      }>;
+      expect(uploaded.map((ref) => ref.resourceId)).toEqual(
+        expect.arrayContaining([
+          planRef.resourceId,
+          messagesRef.resourceId,
+          ...parts.map((ref) => ref.resourceId),
+        ]),
+      );
+      expect(uploaded.map((ref) => ref.resourceId)).not.toContain(
+        orphanRef.resourceId,
+      );
+    }
     const views = first.authority.taskViews();
     expect(views).toHaveLength(1);
     await first.close();
@@ -967,6 +1058,30 @@ describe('HTTP Managed Session store', () => {
     expect(
       restored.authority.extensionRecord('monitor_run', 'monitor-1'),
     ).toMatchObject({ revision: 1, recordRef: committed.recordRef });
+    for (const [index, messages] of messageCases.entries()) {
+      const execution = restored.authority.extensionRecord(
+        'hook_execution',
+        `messages-${index}`,
+      )!.record as HookExecution;
+      const plan = JSON.parse(
+        (await restored.resources.read(execution.planRef)).toString(),
+      ) as { messagesRef: ManagedSessionDurableRef };
+      let bytes = await restored.resources.read(plan.messagesRef);
+      if (plan.messagesRef.kind === 'managed-hook-message-chunks') {
+        const manifest = JSON.parse(bytes.toString()) as {
+          parts: ManagedSessionDurableRef[];
+        };
+        bytes = Buffer.concat(
+          await Promise.all(
+            manifest.parts.map((ref) => restored.resources.read(ref)),
+          ),
+        );
+      }
+      expect(JSON.parse(bytes.toString('utf8'))).toEqual(messages);
+    }
+    await expect(restored.resources.read(orphanRef)).rejects.toMatchObject({
+      status: 404,
+    });
     await restored.close();
   });
 

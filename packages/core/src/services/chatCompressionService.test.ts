@@ -57,7 +57,7 @@ describe('ChatCompressionService', () => {
       ),
       appendSystemInstruction: vi.fn(),
     } as unknown as LlmChat;
-    mockGetHookSystem = vi.fn().mockReturnValue({});
+    mockGetHookSystem = vi.fn().mockReturnValue({ isManaged: () => false });
     mockConfig = {
       getChatCompression: vi.fn(),
       getAutoCompactThreshold: vi.fn(),
@@ -1774,6 +1774,7 @@ describe('ChatCompressionService', () => {
       mockFirePreCompactEvent = vi.fn().mockResolvedValue(undefined);
       mockFirePostCompactEvent = vi.fn().mockResolvedValue(undefined);
       mockGetHookSystem.mockReturnValue({
+        isManaged: () => false,
         firePreCompactEvent: mockFirePreCompactEvent,
         firePostCompactEvent: mockFirePostCompactEvent,
       });
@@ -1948,6 +1949,49 @@ describe('ChatCompressionService', () => {
       expect(mockFirePreCompactEvent).toHaveBeenCalled();
     });
 
+    it.each(['PreCompact', 'PostCompact'])(
+      'propagates managed %s recovery failures',
+      async (event) => {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: 'message one' }] },
+          { role: 'model', parts: [{ text: 'answer one' }] },
+          { role: 'user', parts: [{ text: 'message two' }] },
+          { role: 'model', parts: [{ text: 'answer two' }] },
+        ]);
+        const generateText = vi.fn().mockResolvedValue({
+          text: 'Summary',
+          usage: {
+            promptTokenCount: 1600,
+            candidatesTokenCount: 50,
+            totalTokenCount: 1650,
+          },
+        });
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          generateText,
+        } as unknown as BaseLlmClient);
+        mockGetHookSystem.mockReturnValue({
+          isManaged: () => true,
+          firePreCompactEvent: mockFirePreCompactEvent,
+          firePostCompactEvent: mockFirePostCompactEvent,
+        });
+        const failing =
+          event === 'PreCompact'
+            ? mockFirePreCompactEvent
+            : mockFirePostCompactEvent;
+        failing.mockRejectedValue(new Error('Hook recovery required'));
+        await expect(
+          service.compress(mockChat, {
+            promptId: mockPromptId,
+            force: true,
+            config: mockConfig,
+            consecutiveFailures: 0,
+            originalTokenCount: 1000,
+          }),
+        ).rejects.toThrow('Hook recovery required');
+        if (event === 'PreCompact') expect(generateText).not.toHaveBeenCalled();
+      },
+    );
+
     it('should fire PreCompact hook before compression', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'msg1' }] },
@@ -2046,6 +2090,7 @@ describe('ChatCompressionService', () => {
       mockFirePreCompactEvent = vi.fn().mockResolvedValue(undefined);
       mockFirePostCompactEvent = vi.fn().mockResolvedValue(undefined);
       mockGetHookSystem.mockReturnValue({
+        isManaged: () => false,
         firePreCompactEvent: mockFirePreCompactEvent,
         firePostCompactEvent: mockFirePostCompactEvent,
       });

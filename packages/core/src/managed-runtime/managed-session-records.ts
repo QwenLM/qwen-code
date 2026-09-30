@@ -120,6 +120,8 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'session_source',
     'mcp_configuration',
     'mcp_operation',
+    'hook_registration',
+    'hook_execution',
   ];
 
 export function assertManagedSessionDomainEnabled(

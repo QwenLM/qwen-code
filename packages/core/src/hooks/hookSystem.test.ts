@@ -135,6 +135,7 @@ describe('HookSystem', () => {
         expect.any(SessionHooksManager),
         undefined,
         hookSystem.runtimeId,
+        undefined,
       );
     });
   });

@@ -76,6 +76,117 @@ describe('HttpHookRunner', () => {
     ...overrides,
   });
 
+  describe('managed request evidence', () => {
+    it('proves cancellation during DNS validation did not send a request', async () => {
+      const abort = new AbortController();
+      const pending = httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        abort.signal,
+        true,
+      );
+      abort.abort();
+      expect(await pending).toMatchObject({
+        outcome: 'cancelled',
+        httpRequestState: 'not_started',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('keeps a partially received JSON response unknown', async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"continue":false'));
+        },
+        pull(controller) {
+          controller.error(new TypeError('response body disconnected'));
+        },
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+      const result = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(result).toMatchObject({
+        outcome: 'non_blocking_error',
+        httpRequestState: 'outcome_unknown',
+      });
+    });
+
+    it('keeps timeout active while waiting for the response body', async () => {
+      mockFetch.mockImplementationOnce(async (_url, options) => {
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            options.signal.addEventListener('abort', () =>
+              controller.error(options.signal.reason),
+            );
+          },
+        });
+        return new Response(stream, {
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      const result = await httpRunner.execute(
+        createMockConfig({ timeout: 0.01 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(result).toMatchObject({
+        outcome: 'timeout',
+        httpRequestState: 'outcome_unknown',
+      });
+    });
+
+    it('proves a blocked destination was not sent', async () => {
+      const result = await httpRunner.execute(
+        createMockConfig({ url: 'https://other.example/hook' }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(result.httpRequestState).toBe('not_started');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+    it('distinguishes a received failure response from a lost reply', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 503 });
+      const received = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(received).toMatchObject({
+        outcome: 'non_blocking_error',
+        httpRequestState: 'response_received',
+      });
+      mockFetch.mockRejectedValueOnce(new Error('reply lost'));
+      const lost = await httpRunner.execute(
+        createMockConfig(),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        undefined,
+        true,
+      );
+      expect(lost).toMatchObject({
+        outcome: 'non_blocking_error',
+        httpRequestState: 'outcome_unknown',
+      });
+    });
+  });
+
   describe('execute', () => {
     it('should fail for URL not in whitelist', async () => {
       const config = createMockConfig({

@@ -382,6 +382,24 @@ export class UiTelemetryService extends EventEmitter {
     return total;
   }
 
+  restoreSessionModelMetrics(
+    sessionId: string,
+    models: SessionMetrics['models'],
+  ): void {
+    const restoredTotal = Object.values(models).reduce(
+      (total, model) => total + model.tokens.candidates,
+      0,
+    );
+    // A warm owner already includes these requests. A cold owner restores
+    // the Session ledger without charging historical requests to this process.
+    if (this.getTotalOutputTokens(sessionId) >= restoredTotal) return;
+    const metrics =
+      this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
+    metrics.models = structuredClone(models);
+    this.#sessionMetrics.set(sessionId, metrics);
+    this.#closedSessions.delete(sessionId);
+  }
+
   recordSkillInvocation(
     skillName: string,
     success: boolean,

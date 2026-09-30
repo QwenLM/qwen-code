@@ -278,6 +278,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         } else if (EXTENSION_RECORD_KINDS.has(ref.kind)) {
           // A Stage H record commits the resources its closed body names.
           pending.push(...collectRefs([JSON.parse(staged.bytes.toString())]));
+        } else if (ref.kind === 'managed-hook-plan') {
+          const plan = JSON.parse(staged.bytes.toString()) as {
+            messagesRef?: ManagedSessionDurableRef;
+          };
+          pending.push(...collectRefs([plan.messagesRef]));
+        } else if (ref.kind === 'managed-hook-message-chunks') {
+          const manifest = JSON.parse(staged.bytes.toString()) as {
+            parts: ManagedSessionDurableRef[];
+          };
+          pending.push(...collectRefs(manifest.parts));
         }
       }
     }

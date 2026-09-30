@@ -2244,16 +2244,26 @@
       "get": {
         "tags": ["Public Resources"],
         "operationId": "getSessionHookCatalog",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
-            "description": "Planned name only: the sources of the effective hook plan of this Session; hook decisions use the Action API. Stage H2 defines the response."
+            "description": "Sanitized planning summary of the latest settled Hook registration in this Session. A pending or failed replacement preserves the previous catalog. Hook recipes, prompts, credentials and handler implementations are never returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicHookCatalog"
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           }
         }
       }
@@ -7157,6 +7167,82 @@
           }
         },
         "x-qwen-implementation-status": "planned"
+      },
+      "PublicHookCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["object", "session_id", "catalogs"],
+        "properties": {
+          "object": {
+            "type": "string",
+            "const": "agent.hook_catalog"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "catalogs": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["catalog_id", "catalog_revision", "hooks"],
+              "properties": {
+                "catalog_id": {
+                  "type": "string"
+                },
+                "catalog_revision": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "hooks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "hook_id",
+                      "event_name",
+                      "type",
+                      "sequential",
+                      "async",
+                      "fail_closed",
+                      "once"
+                    ],
+                    "properties": {
+                      "hook_id": {
+                        "type": "string"
+                      },
+                      "event_name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": ["command", "http", "prompt", "function"]
+                      },
+                      "sequential": {
+                        "type": "boolean"
+                      },
+                      "async": {
+                        "type": "boolean"
+                      },
+                      "fail_closed": {
+                        "type": "boolean"
+                      },
+                      "once": {
+                        "type": "boolean"
+                      },
+                      "matcher": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

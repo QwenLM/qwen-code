@@ -20,6 +20,11 @@ import type {
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 
+import type {
+  ManagedHookControl,
+  ManagedHookOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
@@ -405,6 +410,27 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime MCP response identity is invalid.');
     return result as unknown as ManagedMcpOperationView;
+  }
+
+  async hookControl(
+    operation: ManagedHookControl,
+  ): Promise<ManagedHookOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'hook-status' || operation.kind === 'hook-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime Hook response identity is invalid.');
+    return result as unknown as ManagedHookOperationView;
   }
 
   async acknowledgeV3(

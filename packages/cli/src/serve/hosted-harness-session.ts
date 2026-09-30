@@ -44,6 +44,20 @@ import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordin
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
+  HostedHookSession,
+  HostedHookRecoveryRequiredError,
+  parseHostedHookPin,
+  hostedHookOccurrenceId,
+} from './hosted-hook-session.js';
+import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import {
+  parseHookRegistration,
+  parseHookExecution,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import { runHostedHookOperation } from './hosted-hook-model.js';
+import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
+import {
   HostedWorkspaceBroker,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
@@ -92,11 +106,49 @@ interface HostedSession {
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
   mcp?: HostedMcpSession;
+  hooks?: HostedHookSession;
+  hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+}
+
+async function runHostedLifecycleHook(
+  session: HostedSession,
+  event: HookEventName,
+  operationId: string,
+  fields: Record<string, unknown>,
+): Promise<unknown> {
+  if (!session.hooks) return undefined;
+  await session.hooks.ensureReady();
+  const signal = new AbortController().signal;
+  const controller = new ManagedHookActivationController(session.managed);
+  return controller.runHookOperation(
+    {
+      operationId,
+      occurrenceId: hostedHookOccurrenceId(event, operationId),
+      originTurnId: null,
+    },
+    async (scope) => {
+      const run = (
+        runner?: import('./hosted-hook-session.js').HostedPromptHookRunner,
+      ) => session.hooks!.fire(event, operationId, fields, signal, runner);
+      if (!(await session.hooks!.needsPromptRunner(event, operationId)))
+        return run();
+      return runHostedHookOperation(
+        {
+          sessionId:
+            session.managed.authority.sessionHeader.sessionKey.sessionId,
+          cwd: session.cwd,
+          signal,
+          scope,
+        },
+        run,
+      );
+    },
+  );
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -301,6 +353,36 @@ async function verifyWorkspaceRestore(
         if (nested) await readRef(nested);
       }
     }
+    if (ref.kind === 'managed-hook_registration') {
+      const registration = parseHookRegistration(JSON.parse(bytes.toString()));
+      await readRef(registration.catalogRef);
+    }
+    if (ref.kind === 'managed-hook_execution') {
+      const execution = parseHookExecution(JSON.parse(bytes.toString()));
+      await readRef(execution.planRef);
+      await readRef(execution.inputRef);
+      if (execution.resultRef) await readRef(execution.resultRef);
+    }
+    if (ref.kind === 'managed-hook-plan') {
+      const plan = object(JSON.parse(bytes.toString()));
+      if (!plan) throw new Error('Hosted Hook plan is invalid.');
+      if (plan['messagesRef'] !== undefined)
+        await readRef(
+          assertManagedSessionDurableRef(
+            plan['messagesRef'] as ManagedSessionJsonValue,
+            'Hook messages',
+          ),
+        );
+    }
+    if (ref.kind === 'managed-hook-message-chunks') {
+      const parts = object(JSON.parse(bytes.toString()))?.['parts'];
+      if (!Array.isArray(parts))
+        throw new Error('Hosted Hook message manifest is invalid.');
+      for (const part of parts)
+        await readRef(
+          assertManagedSessionDurableRef(part, 'Hook message part'),
+        );
+    }
   }
   const header = authority.sessionHeader;
   await readRef(header.definitionRef);
@@ -309,7 +391,9 @@ async function verifyWorkspaceRestore(
   for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
     if (
       event.kind === 'domain.committed' &&
-      event.payload['domain'] !== 'session_metadata'
+      !['session_metadata', 'hook_registration', 'hook_execution'].includes(
+        event.payload['domain'] as string,
+      )
     )
       throw new Error('Hosted recovery domain is unsupported.');
     for (const [field, value] of Object.entries(event.payload)) {
@@ -612,128 +696,139 @@ async function executeHostedTurn(
   const harness = createManagedHarnessHandle(session.managed);
   let turnResult: ChatRecord | undefined;
   let toolTurn: HostedWorkspaceToolTurn | undefined;
-  const running = harness.run(async () => {
-    const projected = await session.managed.sink.project();
-    const settledPrompts = new Set(
-      authority
-        .eventsInSequenceRange(1, authority.committedSequence)
-        .filter((event) => event.kind === 'turn.settled')
-        .map((event) => event.payload['turnId']),
-    );
-    const history = session.toolProfile
-      ? projected.filter(
-          (entry) =>
-            settledPrompts.has(entry.daemonPromptId) ||
-            (resumeFromToolResults && entry.daemonPromptId === promptId),
-        )
-      : projected;
-    let parentUuid = projected.at(-1)?.uuid ?? null;
-    if (!resumeFromToolResults) {
-      const user = record(session, sessionId, 'user', parentUuid, {
-        daemonPromptId: promptId,
-        message: { role: 'user', parts: [{ text }] },
-      });
-      await session.managed.sink.write(user);
-      parentUuid = user.uuid;
-    }
-    const messageRecord = (
-      type: 'assistant' | 'tool_result',
-      parts: Part[],
-      model: string,
-      identity?: { uuid: string; timestamp: string },
-    ) =>
-      record(session, sessionId, type, parentUuid, {
-        daemonPromptId: promptId,
-        model,
-        message: { role: type === 'assistant' ? 'model' : 'user', parts },
-        ...identity,
-      });
-    const commit = async (
-      type: 'assistant' | 'tool_result',
-      parts: Part[],
-      model: string,
-      identity?: { uuid: string; timestamp: string },
-    ) => {
-      const message = messageRecord(type, parts, model, identity);
-      await session.managed.sink.write(message);
-      parentUuid = message.uuid;
-      return message.uuid;
-    };
-    toolTurn =
-      session.toolProfile && brokerOptions
-        ? new HostedWorkspaceToolTurn(
-            brokerOptions,
-            session.managed,
-            harness,
-            promptId,
-            commit,
-            (type, parts, model) =>
-              Buffer.byteLength(
-                JSON.stringify(messageRecord(type, parts, model)),
-              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
-            session.publication,
-            session.shell,
-            session.approval && {
-              settings: session.approval,
-              waiters: session.waiters,
-            },
-            session.mcp,
-          )
-        : undefined;
-    if (resumeFromToolResults) {
-      if (!toolTurn)
-        throw new HostedToolRecoveryRequiredError('Tool turn is unavailable.');
-      try {
-        await toolTurn.resumeCommittedResults();
-      } catch (cause) {
-        if (isRetryableWorkspaceAcquisition(cause)) throw cause;
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
-      onResumeReady?.();
-    }
-    let state: 'completed' | 'cancelled' | 'error' = 'completed';
-    let stopReason = 'end_turn';
-    try {
-      const result = await runHostedHarnessTextTurn({
-        sessionId,
-        cwd,
-        history,
-        prompt: text,
-        promptId,
-        signal: abort.signal,
-        ...(toolTurn ? { toolTurn } : {}),
-        ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
-      });
-      await commit(
-        'assistant',
-        result.parts ?? [{ text: result.text }],
-        result.model,
-      );
-    } catch (cause) {
-      if (
-        cause instanceof HostedToolRecoveryRequiredError ||
-        cause instanceof HostedMcpRecoveryRequiredError
-      )
-        throw cause;
-      state = abort.signal.aborted ? 'cancelled' : 'error';
-      stopReason = state;
-      if (state === 'error') {
-        writeStderrLineSafe(
-          'qwen serve: Hosted Harness turn ' +
-            promptId +
-            ' failed: ' +
-            String(cause),
+  const running = new ManagedHookActivationController(session.managed).runTurn(
+    promptId,
+    async (modelScope) =>
+      harness.run(async () => {
+        const projected = await session.managed.sink.project();
+        const settledPrompts = new Set(
+          authority
+            .eventsInSequenceRange(1, authority.committedSequence)
+            .filter((event) => event.kind === 'turn.settled')
+            .map((event) => event.payload['turnId']),
         );
-      }
-    }
-    await toolTurn?.finish();
-    turnResult = record(session, sessionId, 'system', null, {
-      subtype: 'turn_result',
-      systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
-    });
-    onTurnResult?.(turnResult);
-    await session.managed.sink.write(turnResult);
-  });
+        const history = session.toolProfile
+          ? projected.filter(
+              (entry) =>
+                settledPrompts.has(entry.daemonPromptId) ||
+                (resumeFromToolResults && entry.daemonPromptId === promptId),
+            )
+          : projected;
+        let parentUuid = projected.at(-1)?.uuid ?? null;
+        if (!resumeFromToolResults) {
+          const user = record(session, sessionId, 'user', parentUuid, {
+            daemonPromptId: promptId,
+            message: { role: 'user', parts: [{ text }] },
+          });
+          await session.managed.sink.write(user);
+          parentUuid = user.uuid;
+        }
+        const messageRecord = (
+          type: 'assistant' | 'tool_result',
+          parts: Part[],
+          model: string,
+          identity?: { uuid: string; timestamp: string },
+        ) =>
+          record(session, sessionId, type, parentUuid, {
+            daemonPromptId: promptId,
+            model,
+            message: { role: type === 'assistant' ? 'model' : 'user', parts },
+            ...identity,
+          });
+        const commit = async (
+          type: 'assistant' | 'tool_result',
+          parts: Part[],
+          model: string,
+          identity?: { uuid: string; timestamp: string },
+        ) => {
+          const message = messageRecord(type, parts, model, identity);
+          await session.managed.sink.write(message);
+          parentUuid = message.uuid;
+          return message.uuid;
+        };
+        toolTurn =
+          session.toolProfile && brokerOptions
+            ? new HostedWorkspaceToolTurn(
+                brokerOptions,
+                session.managed,
+                harness,
+                promptId,
+                commit,
+                (type, parts, model) =>
+                  Buffer.byteLength(
+                    JSON.stringify(messageRecord(type, parts, model)),
+                  ) <=
+                  HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
+                session.publication,
+                session.shell,
+                session.approval && {
+                  settings: session.approval,
+                  waiters: session.waiters,
+                },
+                session.mcp,
+                session.hooks,
+              )
+            : undefined;
+        if (resumeFromToolResults) {
+          if (!toolTurn)
+            throw new HostedToolRecoveryRequiredError(
+              'Tool turn is unavailable.',
+            );
+          try {
+            await toolTurn.resumeCommittedResults();
+          } catch (cause) {
+            if (isRetryableWorkspaceAcquisition(cause)) throw cause;
+            throw new HostedToolRecoveryRequiredError(cause);
+          }
+          onResumeReady?.();
+        }
+        let state: 'completed' | 'cancelled' | 'error' = 'completed';
+        let stopReason = 'end_turn';
+        try {
+          const result = await runHostedHarnessTextTurn({
+            sessionId,
+            cwd,
+            history,
+            prompt: text,
+            promptId,
+            signal: abort.signal,
+            modelScope,
+            ...(session.hooks ? { hooks: session.hooks } : {}),
+            ...(toolTurn ? { toolTurn } : {}),
+            ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+          });
+          await commit(
+            'assistant',
+            result.parts ?? [{ text: result.text }],
+            result.model,
+          );
+        } catch (cause) {
+          if (
+            cause instanceof HostedToolRecoveryRequiredError ||
+            cause instanceof HostedMcpRecoveryRequiredError ||
+            cause instanceof HostedHookRecoveryRequiredError
+          )
+            throw cause;
+          state = abort.signal.aborted ? 'cancelled' : 'error';
+          stopReason = state;
+          if (state === 'error') {
+            writeStderrLineSafe(
+              'qwen serve: Hosted Harness turn ' +
+                promptId +
+                ' failed: ' +
+                String(cause),
+            );
+          }
+        }
+        await toolTurn?.finish();
+        turnResult = record(session, sessionId, 'system', null, {
+          subtype: 'turn_result',
+          systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
+        });
+        onTurnResult?.(turnResult);
+        await session.managed.sink.write(turnResult);
+      }),
+  );
   await running.finally(() =>
     toolTurn?.close().catch((cause: unknown) => {
       session.blocked = true;
@@ -776,6 +871,17 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     let mcpServers: readonly HostedMcpServerPin[] | undefined;
+    let hookCatalog: ManagedHookCatalogPin | undefined;
+    try {
+      if (body?.['hookCatalog'] !== undefined) {
+        if (!brokerOptions || (create && !toolProfile))
+          throw new Error('Hooks require a Hosted Workspace profile.');
+        hookCatalog = parseHostedHookPin(body['hookCatalog']);
+      }
+    } catch {
+      error(res, 400, 'invalid_hosted_hook_catalog');
+      return;
+    }
     try {
       if (toolProfile === HOSTED_MCP_PROFILE)
         mcpServers = parseHostedMcpServers(body?.['mcpServers']);
@@ -861,6 +967,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
+                  ...(hookCatalog ? { hookCatalog } : {}),
                   ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
                     ? { captureBytes }
                     : {}),
@@ -905,6 +1012,15 @@ export function registerHostedHarnessSessionRoutes(
           savedProfile === HOSTED_WORKSPACE_SHELL_PROFILE)
       )
         toolProfile = savedProfile;
+      if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
+        try {
+          hookCatalog = parseHostedHookPin(definition['hookCatalog']);
+        } catch {
+          await managed.close();
+          error(res, 409, 'hosted_tool_profile_conflict');
+          return;
+        }
+      }
       if (
         !create &&
         toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
@@ -915,11 +1031,12 @@ export function registerHostedHarnessSessionRoutes(
         toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
         toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE;
       if (
-        toolProfile !== undefined &&
-        ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
-          toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
-          toolProfile !== HOSTED_MCP_PROFILE) ||
-          !brokerOptions)
+        (hookCatalog !== undefined && (!toolProfile || !brokerOptions)) ||
+        (toolProfile !== undefined &&
+          ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+            toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+            toolProfile !== HOSTED_MCP_PROFILE) ||
+            !brokerOptions))
       ) {
         await managed.close();
         error(res, 409, 'hosted_tool_profile_conflict');
@@ -971,6 +1088,7 @@ export function registerHostedHarnessSessionRoutes(
         definition?.['toolProfile'] !== toolProfile ||
         JSON.stringify(definition?.['mcpServers']) !==
           JSON.stringify(mcpServers) ||
+        !isDeepStrictEqual(definition?.['hookCatalog'], hookCatalog) ||
         (toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
           definition?.['captureBytes'] !== captureBytes) ||
         (toolProfile && !pinned)
@@ -981,6 +1099,13 @@ export function registerHostedHarnessSessionRoutes(
       }
       if (mcpServers && brokerOptions)
         session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
+      if (hookCatalog && brokerOptions)
+        session.hooks = new HostedHookSession(
+          brokerOptions,
+          managed,
+          hookCatalog,
+          session.mcp?.broker,
+        );
       if (pinned) session.approval = pinned;
       const restore = await managed.authority.restoreBundle();
       if (restore.recoveryStatus !== 'ok') {
@@ -1007,14 +1132,28 @@ export function registerHostedHarnessSessionRoutes(
       let settlePromptId: string | undefined;
       if (
         restore.recoveryStatus === 'ok' &&
-        session.publication &&
+        (session.publication || session.hooks) &&
         brokerOptions
       ) {
-        const promptId = await recoverShellReceipts(
-          session,
-          brokerOptions,
+        const pendingInputs = new Set<string>();
+        for (const event of managed.authority.eventsInSequenceRange(
+          1,
           restore.throughSequence,
-        );
+        )) {
+          if (event.kind === 'input.accepted')
+            pendingInputs.add(event.payload['turnId'] as string);
+          if (event.kind === 'turn.settled')
+            pendingInputs.delete(event.payload['turnId'] as string);
+        }
+        const promptId = session.publication
+          ? await recoverShellReceipts(
+              session,
+              brokerOptions,
+              restore.throughSequence,
+            )
+          : pendingInputs.size === 1
+            ? [...pendingInputs][0]
+            : null;
         const authorization = await managed.authority.harnessRunAuthorization();
         const projected = await managed.sink.project();
         const current = projected.filter(
@@ -1052,7 +1191,10 @@ export function registerHostedHarnessSessionRoutes(
             authorization.checkpoint.continuation.phase,
           ) &&
           authorization.checkpoint.tools?.items.every(
-            (item) => item.state === 'settled' && item.consumed,
+            (item) =>
+              item.state === 'settled' &&
+              (authorization.checkpoint.continuation.phase === 'turn_settled' ||
+                item.consumed),
           ) &&
           lastAssistant >= 0 &&
           tail.length === 0 &&
@@ -1071,7 +1213,8 @@ export function registerHostedHarnessSessionRoutes(
             : managed.authority.committedSequence,
         ) &&
           !resume &&
-          !settlePromptId)
+          !settlePromptId &&
+          !session.hooks)
       ) {
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
@@ -1086,6 +1229,12 @@ export function registerHostedHarnessSessionRoutes(
           return;
         }
       }
+      if (
+        hasUnsettledInput(session, restore.throughSequence) &&
+        !resume &&
+        !settlePromptId
+      )
+        session.blocked = true;
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -1136,6 +1285,7 @@ export function registerHostedHarnessSessionRoutes(
         eventEpoch: epoch,
         // A Harness older than approvals omits this, so a caller can tell.
         ...(pinned ? { approvalMode: pinned.mode } : {}),
+        ...(session.blocked ? { recoveryRequired: true } : {}),
       });
       if (settlePromptId) {
         const originalPromptId = settlePromptId;
@@ -1145,11 +1295,12 @@ export function registerHostedHarnessSessionRoutes(
           const harness = createManagedHarnessHandle(session.managed);
           await harness.run(async () => {
             await harness.settleConsumedRuntimeContinuation();
-            await new HostedWorkspaceBroker(
-              brokerOptions!,
-              session.managed.authority.sessionHeader.sessionKey,
-              originalPromptId,
-            ).release();
+            if (!session.hooks && !session.mcp)
+              await new HostedWorkspaceBroker(
+                brokerOptions!,
+                session.managed.authority.sessionHeader.sessionKey,
+                originalPromptId,
+              ).release();
             await session.managed.sink.write(
               record(session, sessionId, 'system', null, {
                 subtype: 'turn_result',
@@ -1201,7 +1352,7 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.mcpBusy || session.mcpRecovering)
+    if (session.mcpBusy || session.mcpRecovering || session.hooksBusy)
       return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
@@ -1259,7 +1410,11 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (session.blocked || session.mcp?.hasPendingOperations())
+    if (
+      session.blocked ||
+      session.mcp?.hasPendingOperations() ||
+      session.hooks?.hasPendingOperations
+    )
       return error(res, 409, 'hosted_turn_recovery_required');
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
@@ -1287,6 +1442,7 @@ export function registerHostedHarnessSessionRoutes(
         });
       try {
         await session.mcp?.ensureReady(abort.signal);
+        await session.hooks?.ensureReady(abort.signal);
         abort.signal.throwIfAborted();
         const authority = session.managed.authority;
         const contentRef = await session.managed.resources.publish(
@@ -1336,7 +1492,8 @@ export function registerHostedHarnessSessionRoutes(
       } catch (cause) {
         if (
           cause instanceof HostedToolRecoveryRequiredError ||
-          cause instanceof HostedMcpRecoveryRequiredError
+          cause instanceof HostedMcpRecoveryRequiredError ||
+          cause instanceof HostedHookRecoveryRequiredError
         ) {
           if (admitted) session.blocked = true;
           else if (!res.headersSent)
@@ -1375,6 +1532,150 @@ export function registerHostedHarnessSessionRoutes(
         session.active = undefined;
       }
     })();
+  });
+
+  app.get('/session/:id/hooks', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
+    const catalog = session.hooks.getCatalog();
+    res.json({
+      catalog: catalog
+        ? {
+            ...catalog,
+            hooks: catalog.hooks.map(
+              ({ config, handler: _handler, ...hook }) => ({
+                ...hook,
+                type: config.type,
+              }),
+            ),
+          }
+        : null,
+    });
+  });
+
+  app.post('/session/:id/hooks/operations', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.blocked
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const event = body?.['event'];
+    const fields = object(body?.['input']);
+    if (
+      typeof operationId !== 'string' ||
+      !UUID.test(operationId) ||
+      (event !== HookEventName.Notification &&
+        event !== HookEventName.UserPromptExpansion) ||
+      !fields
+    )
+      return error(res, 400, 'invalid_hook_operation');
+    if (
+      (event === HookEventName.Notification &&
+        (typeof fields['message'] !== 'string' ||
+          typeof fields['notification_type'] !== 'string')) ||
+      (event === HookEventName.UserPromptExpansion &&
+        (typeof fields['command_name'] !== 'string' ||
+          typeof fields['command_args'] !== 'string' ||
+          typeof fields['prompt'] !== 'string'))
+    )
+      return error(res, 400, 'invalid_hook_input');
+    if (
+      session.hooks.hasPendingOperations &&
+      !session.managed.authority.extensionRecord(
+        'hook_execution',
+        hostedHookOccurrenceId(event, operationId),
+      )
+    )
+      return error(res, 409, 'hosted_hook_recovery_required');
+    session.hooksBusy = true;
+    const input =
+      event === HookEventName.Notification
+        ? {
+            message: fields['message'],
+            notification_type: fields['notification_type'],
+          }
+        : {
+            command_name: fields['command_name'],
+            command_args: fields['command_args'],
+            prompt: fields['prompt'],
+          };
+    void runHostedLifecycleHook(session, event, operationId, input)
+      .then(
+        (output) => res.json({ operationId, output: output ?? null }),
+        () => error(res, 503, 'hosted_hook_operation_failed'),
+      )
+      .finally(() => {
+        session.hooksBusy = false;
+      });
+  });
+
+  const hookStatus = (cancel: boolean) => (req: Request, res: Response) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
+    void session.hooks.status(req.params['operationId'], cancel).then(
+      (execution) =>
+        res.json({
+          operationId: execution.hookExecutionId,
+          state: execution.run.state,
+          execution: execution.run.execution,
+          cancelRequested: execution.cancelRequested,
+        }),
+      () => error(res, 409, 'hosted_hook_recovery_required'),
+    );
+  };
+  app.get('/session/:id/hooks/operations/:operationId', hookStatus(false));
+  app.post(
+    '/session/:id/hooks/operations/:operationId/cancel',
+    hookStatus(true),
+  );
+
+  app.post('/session/:id/hooks/registrations', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const expectedRevision = body?.['expectedRevision'];
+    let pin: ManagedHookCatalogPin;
+    try {
+      if (
+        typeof operationId !== 'string' ||
+        !UUID.test(operationId) ||
+        !Number.isSafeInteger(expectedRevision) ||
+        (expectedRevision as number) < 0
+      )
+        throw new Error('Invalid registration.');
+      pin = parseHostedHookPin(body?.['catalog']);
+    } catch {
+      return error(res, 400, 'invalid_hook_registration');
+    }
+    session.hooksBusy = true;
+    void session.hooks
+      .configure(operationId as string, pin, expectedRevision as number)
+      .then(
+        () => res.json({ operationId, registered: true }),
+        () => error(res, 409, 'hook_registration_failed'),
+      )
+      .finally(() => {
+        session.hooksBusy = false;
+      });
   });
 
   app.get('/session/:id/mcp-catalog', (req, res) => {
@@ -1434,7 +1735,12 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
-    if (session.active || session.mcpBusy || session.mcpRecovering)
+    if (
+      session.active ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.hooksBusy
+    )
       return error(res, 409, 'hosted_turn_active');
     const body = object(req.body);
     const operationId = body?.['operationId'];
@@ -1720,11 +2026,32 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const session = identity(req, sessions, allowMissingClientId);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.active || session.mcpBusy || session.mcpRecovering)
+    if (
+      session.active ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.hooksBusy
+    )
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
+      if (req.method === 'DELETE') {
+        await session.hooks?.drain();
+        await runHostedLifecycleHook(
+          session,
+          HookEventName.SessionEnd,
+          `session-end:${req.params['id']}`,
+          { reason: 'other' },
+        );
+        await runHostedLifecycleHook(
+          session,
+          HookEventName.SessionDelete,
+          `session-delete:${req.params['id']}`,
+          {},
+        );
+      }
+      await session.hooks?.close();
       await session.mcp?.close();
       await session.managed.close();
       for (const stop of session.streams) stop();

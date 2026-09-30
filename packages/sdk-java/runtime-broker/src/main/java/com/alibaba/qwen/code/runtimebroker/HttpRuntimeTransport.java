@@ -664,6 +664,20 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             return post(lease, ManagedMcpProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
                     .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, immutable));
         }
+        if (ManagedHookProtocol.isOperation(immutable)) {
+            ManagedHookProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, 8 * 1024 * 1024);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime Hook operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedHookProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedHookProtocol.response(bytes, session, immutable));
+        }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
         if ("history".equals(immutable.get("kind"))) {
             return provider(lease, session, immutable);
