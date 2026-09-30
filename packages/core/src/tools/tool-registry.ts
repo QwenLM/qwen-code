@@ -1032,11 +1032,14 @@ export class ToolRegistry {
   }
 
   /**
-   * Forgets every recorded review. Call it wherever the FileReadCache is
-   * cleared because history was replaced (compaction, `/clear`, rewind,
-   * restore, session reset): the tool_search results those reviews stand for
-   * may no longer be in context. A new history-replacement site must clear
-   * both.
+   * Forgets every recorded review. Call it wherever history is replaced
+   * wholesale (`LlmChat.setHistory` / `truncateHistory` /
+   * `stripOrphanedUserEntries`, `/clear`, `/compress`, a session transition):
+   * the tool_search results those reviews stand for may no longer be in
+   * context, and a new replacement site must call it too. The FileReadCache
+   * is also cleared in places that never drop a tool_search result —
+   * microcompaction's COMPACTABLE_TOOLS does not include tool_search, and a
+   * workspace relocation keeps the chat — and those need no call here.
    */
   clearReviewedDeclarations(): void {
     this.reviewedDeferredDeclarations.clear();

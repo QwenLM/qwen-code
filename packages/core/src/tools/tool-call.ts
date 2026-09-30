@@ -217,8 +217,11 @@ export async function resolveDeferredToolCall(
   // A review is recorded when tool_search returns the schema and cleared
   // whenever history is replaced (see `clearReviewedDeclarations`), so a tool
   // never reviewed here, or whose review left context with a compaction,
-  // clear or rewind, is refused rather than run by name (#12569). Registries
-  // without the optional lookup (test stubs) keep the ungated behaviour.
+  // clear or rewind, is refused rather than run by name (#12569). A registry
+  // that does not define the lookup at all is deliberately not gated: both
+  // production callers (coreToolScheduler, the ACP Session) pass a
+  // ToolRegistry, which always defines it, so only partial test registries
+  // reach that branch.
   const reviewed = registry.getReviewedDeclaration?.(target.name);
   if (
     typeof registry.getReviewedDeclaration === 'function' &&
