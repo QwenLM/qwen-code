@@ -296,6 +296,12 @@
   line-height: 1.35;
   color: var(--foreground);
 }
+/* Portal target for the Live voice trigger when the sidebar's own slot is
+   hidden (collapsed rail, closed compact drawer): keeps call controls
+   reachable from the Live page header. */
+.liveVoicePageSlot {
+  margin-left: auto;
+}
 .fullPageBody {
   flex: 1 1 auto;
   min-height: 0;

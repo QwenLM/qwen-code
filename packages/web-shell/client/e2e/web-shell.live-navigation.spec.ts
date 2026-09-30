@@ -135,6 +135,11 @@ test('Live combines existing settings, voice entry and history without starting 
   await keyDraft.fill('unsaved-fixture-key');
   await rail.getByRole('button', { name: 'Collapse', exact: true }).click();
   await expect(column).toBeHidden();
+  // The sidebar's voice slot hides with the column; the trigger must stay
+  // reachable from the Live page header.
+  await expect(
+    panel.getByRole('button', { name: 'Open Live Voice' }),
+  ).toBeVisible();
   await expect(panel.getByRole('heading', { name: 'Settings' })).toBeVisible();
   await expect(page).toHaveURL(/\/live$/);
   await expect(keyDraft).toHaveValue('unsaved-fixture-key');

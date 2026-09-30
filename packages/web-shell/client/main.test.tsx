@@ -98,6 +98,14 @@ describe('StandaloneApp', () => {
     expect(testState.props?.webShellProps.showToolCalls).toBe(true);
   });
 
+  it('offers the sidebar defaults, including Agents, in the standalone shell', () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    const sidebar = testState.props?.webShellProps.sidebar;
+    const items =
+      sidebar && typeof sidebar === 'object' ? sidebar.primaryNav?.items : [];
+    expect(items).toContain('agents');
+  });
+
   it('reloads the page when the root error fallback retry is clicked', () => {
     testState.throwOnRender = true;
     const reload = vi.fn();

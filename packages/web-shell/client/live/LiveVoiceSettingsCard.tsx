@@ -138,20 +138,45 @@ export function LiveVoiceSettingsCard({
   ) => {
     if (draft[key] === undefined)
       draftBaseline.current.set(key, savedValue(key));
+    // Route status does not expose the saved independent endpoint. An
+    // explicitly cleared endpoint must still be sent when leaving a route.
+    const settles =
+      value === undefined ||
+      (key !== 'apiKey' &&
+        !(key === 'endpoint' && status?.keySource === 'route') &&
+        value === (key === 'endpoint' ? savedEndpoint : savedValue(key)));
+    // The edit settled back onto the saved value: forget the baseline so a
+    // later refresh cannot compare against a value the user never saw.
+    if (settles) draftBaseline.current.delete(key);
     setDraft((current) => {
       const next = { ...current, [key]: value };
-      // Route status does not expose the saved independent endpoint. An
-      // explicitly cleared endpoint must still be sent when leaving a route.
-      if (
-        value === undefined ||
-        (key !== 'apiKey' &&
-          !(key === 'endpoint' && status?.keySource === 'route') &&
-          value === (key === 'endpoint' ? savedEndpoint : savedValue(key)))
-      )
-        delete next[key];
+      if (settles) delete next[key];
       return next;
     });
   };
+
+  // A draft field the latest status now saves verbatim is settled — drop it
+  // and its conflict baseline. Otherwise the stale baseline survives a
+  // refresh that converged onto the staged value, and the next edit of that
+  // field is blocked by a conflict the user never saw.
+  useEffect(() => {
+    if (!status) return;
+    const settled = (
+      ['enabled', 'model', 'voice', 'endpoint', 'shortcut'] as const
+    ).filter(
+      (key) =>
+        draft[key] !== undefined &&
+        !(key === 'endpoint' && status.keySource === 'route') &&
+        draft[key] === status[key],
+    );
+    if (settled.length === 0) return;
+    for (const key of settled) draftBaseline.current.delete(key);
+    setDraft((current) => {
+      const next = { ...current };
+      for (const key of settled) delete next[key];
+      return next;
+    });
+  }, [status, draft]);
 
   useEffect(() => {
     if (!status) {

@@ -135,6 +135,7 @@ function activeGoalSnapshot(
 type ChatEditorTestProps = {
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
+  liveVoicePortalContainer?: HTMLElement | null;
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -1557,6 +1558,8 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
     DEFAULT_SESSION_ACTION_ITEMS: actual.DEFAULT_SESSION_ACTION_ITEMS,
     WebShellSidebar: (props: {
       collapsed?: boolean;
+      activePage?: string;
+      onOpenHome?: () => void;
       onOpenSettings?: () => void;
       onOpenAgents?: (view?: 'agents' | 'tasks') => void;
       onOpenPlugins?: () => void;
@@ -1596,6 +1599,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
+          'data-active-page': props.activePage,
           'data-show-session-source-switch': String(
             props.showSessionSourceSwitch,
           ),
@@ -1617,6 +1621,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: props.onOpenSettings,
           },
           'settings',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-home',
+            type: 'button',
+            onClick: props.onOpenHome,
+          },
+          'home',
         ),
         React.createElement(
           'button',
@@ -36770,6 +36783,172 @@ describe('App session callbacks', () => {
     );
     await act(async () => window.dispatchEvent(new Event('focus')));
     expect(mockWorkspace.client.liveSetupStatus).toHaveBeenCalledOnce();
+  });
+
+  it('returns the sidebar page to Home when the Live settings panel closes', async () => {
+    testState.settings = [
+      {
+        ...sessionWorkflowSetting(),
+        key: 'experimental.liveVoice.enabled',
+        values: { effective: false },
+      },
+    ];
+    mockWorkspace.client.liveSetupStatus.mockResolvedValueOnce({
+      v: 1,
+      enabled: false,
+      keyConfigured: false,
+      model: 'qwen3.5-omni-plus-realtime',
+      shortcut: '',
+      install: { state: 'not-installed' },
+      live: { v: 1, available: false, state: 'unavailable', shortcut: '' },
+    });
+    const { container, rerender } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+    expect(sidebarPage()).toBe('home');
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+    expect(sidebarPage()).toBe('live');
+
+    // An approval surfacing force-closes the panel; the sidebar section must
+    // follow back to the session instead of pinning the closed panel's column.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(sidebarPage()).toBe('home');
+  });
+
+  it('keeps the sidebar on the Home page in split view', async () => {
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    const sidebarPage = () =>
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page');
+    expect(sidebarPage()).toBe('home');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    // 'split' must not leak as a sidebar page: a wide split keeps the home
+    // column (the folded-rail path is driven by the collapsed prop instead).
+    expect(sidebarPage()).toBe('home');
+  });
+
+  it('closes the compact drawer when the rail Home entry is opened', async () => {
+    const observers = new Map<Element, ResizeObserverCallback>();
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        observers.set(element, this.callback);
+      }
+      unobserve(element: Element) {
+        observers.delete(element);
+      }
+      disconnect() {}
+    } as typeof ResizeObserver;
+    try {
+      const shellRef = createRef<WebShellApi>();
+      const { container } = renderApp({
+        sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+        shellRef,
+      });
+      await flush();
+      const layout = container.querySelector(
+        '[data-sidebar-shell]',
+      )!.parentElement!;
+      const resize = observers.get(layout)!;
+      Object.defineProperty(layout, 'clientWidth', {
+        configurable: true,
+        value: 560,
+      });
+      await act(async () => {
+        resize([], {} as ResizeObserver);
+      });
+      expect(layout.hasAttribute('data-compact-sidebar')).toBe(true);
+      await act(async () => {
+        shellRef.current?.openSessionDrawer();
+      });
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).not.toBeNull();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-home"]')!
+          .click();
+        await Promise.resolve();
+      });
+
+      expect(
+        container.querySelector('[data-sidebar-shell][role="dialog"]'),
+      ).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
+  it('keeps the Live voice trigger reachable when the Live page hides the chat', async () => {
+    testState.settings = [
+      {
+        ...sessionWorkflowSetting(),
+        key: 'experimental.liveVoice.enabled',
+        values: { effective: false },
+      },
+    ];
+    mockWorkspace.client.liveSetupStatus.mockResolvedValueOnce({
+      v: 1,
+      enabled: false,
+      keyConfigured: false,
+      model: 'qwen3.5-omni-plus-realtime',
+      shortcut: '',
+      install: { state: 'not-installed' },
+      live: { v: 1, available: false, state: 'unavailable', shortcut: '' },
+    });
+    const { container } = renderApp({
+      sidebar: { showLive: true, primaryNav: { items: ['live'] } },
+    });
+    await flush();
+    // The mocked sidebar never registers its slot, so the composer's voice
+    // button has no portal target until the Live page header offers one.
+    expect(
+      testState.latestChatEditorProps?.liveVoicePortalContainer ?? null,
+    ).toBeNull();
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-live"]')!
+        .click(),
+    );
+    await flush();
+
+    const slot = container.querySelector('[data-live-voice-page-slot]');
+    expect(slot).not.toBeNull();
+    expect(testState.latestChatEditorProps?.liveVoicePortalContainer).toBe(
+      slot,
+    );
   });
 
   it('enables providers only while Settings is open', async () => {

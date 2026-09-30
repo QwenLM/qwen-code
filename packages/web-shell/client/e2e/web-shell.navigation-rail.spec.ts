@@ -77,10 +77,12 @@ test('click opens Home and functional pages while collapse retains the draft @sm
     'aria-label',
     'Settings',
   );
+  // Opening Settings must not have rewritten the persisted collapse, so this
+  // toggles it off; the column stays hidden because a page is open.
   await page.keyboard.press('ControlOrMeta+b');
   await expect(page.getByTestId('inline-panel')).toBeVisible();
   await expect(
-    rail.getByRole('button', { name: 'Expand', exact: true }),
+    rail.getByRole('button', { name: 'Collapse', exact: true }),
   ).toBeVisible();
   await expect(page.locator(homeColumn)).toBeHidden();
   await home.click();
@@ -245,6 +247,49 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await expect(
     page.getByRole('button', { name: 'Split View', exact: true }),
   ).toBeVisible();
+});
+
+test('split view keeps the home column and a working collapse control', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
+  await page.goto('/?language=en-US');
+  const rail = page.locator(railSelector);
+  await expect(page.locator(homeColumn)).toBeVisible();
+  await rail.getByRole('button', { name: 'More', exact: true }).click();
+  await page
+    .locator('[data-web-shell-sidebar-more]')
+    .getByRole('button', { name: 'Split View', exact: true })
+    .click();
+  await expect(page.getByTestId('split-view-page')).toBeVisible();
+  // A wide split keeps the full sidebar: the home column stays visible and
+  // the rail collapse control keeps working.
+  await expect(page.locator(homeColumn)).toBeVisible();
+  await rail.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await expect(page.locator(homeColumn)).toBeHidden();
+  await rail.getByRole('button', { name: 'Expand', exact: true }).click();
+  await expect(page.locator(homeColumn)).toBeVisible();
+});
+
+test('a very narrow host still contains the compact drawer', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
+  await page.goto('/e2e/navigation-rail-harness.html?narrow');
+  await page.getByTestId('host-shell').evaluate((element) => {
+    element.style.width = '250px';
+  });
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  const drawer = page.getByRole('dialog', { name: 'Workspace sidebar' });
+  await expect(drawer).toBeVisible();
+  const host = await page.getByTestId('host-shell').boundingBox();
+  const bounds = await drawer.boundingBox();
+  expect(bounds!.x).toBeGreaterThanOrEqual(host!.x);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(host!.x + host!.width);
 });
 
 test('local management commands keep Home visible and selected', async ({

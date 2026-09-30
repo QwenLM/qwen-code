@@ -34,13 +34,15 @@
 }
 
 .sidebar.mobileOpen {
+  /* The floor is container-capped: a rail layout's 276px minimum would
+     otherwise overflow a host narrower than that (e.g. a 250px embed). */
   width: clamp(
-    var(--web-shell-sidebar-min-width, 220px),
+    min(var(--web-shell-sidebar-min-width, 220px), 100%),
     calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
     var(--web-shell-sidebar-max-width, 420px)
   );
   min-width: clamp(
-    var(--web-shell-sidebar-min-width, 220px),
+    min(var(--web-shell-sidebar-min-width, 220px), 100%),
     calc(var(--web-shell-sidebar-container-width, 100vw) * 0.7),
     var(--web-shell-sidebar-max-width, 420px)
   );

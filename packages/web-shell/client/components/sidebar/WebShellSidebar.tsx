@@ -298,7 +298,7 @@ export interface WebShellSidebarFooterOptions {
   render?: () => ReactNode;
 }
 
-const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
+export const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
   'update',
   'version',
@@ -315,22 +315,23 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
 // already reach the local disk and desktop, so neither bridge has anything to
 // add there — and on WebKit webviews the local-files one could only ever render
 // a dead entry. An explicit `footer.items` still wins, so both stay reachable.
-const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
+export const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
   DEFAULT_FOOTER_ITEMS.filter(
     (item) => item !== 'localFiles' && item !== 'desktopRelay',
   );
 
-const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
-  'newTask',
-  'agents',
-  'plugins',
-  'channels',
-  'live',
-  'scheduledTasks',
-  'workflows',
-  'goals',
-  'managed',
-];
+export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] =
+  [
+    'newTask',
+    'agents',
+    'plugins',
+    'channels',
+    'live',
+    'scheduledTasks',
+    'workflows',
+    'goals',
+    'managed',
+  ];
 
 export type WebShellSidebarSessionActionItem =
   | 'details'
@@ -647,10 +648,30 @@ function clampSidebarWidth(width: number, minWidth: number): number {
   return Math.min(getSidebarMaxWidth(), Math.max(minWidth, width));
 }
 
-function clampSidebarVisualWidth(width: number): number {
+// The sidebar never renders wider than half its container (the CSS width
+// cap), so the drag paths clamp to the container-aware cap: persisting a width
+// beyond it would store a value the user never saw. The stored preference
+// keeps the window-derived cap (`clampSidebarWidth`), so a temporarily narrow
+// host cannot shrink it.
+function getSidebarDragMaxWidth(containerWidth?: number): number {
+  const windowMax = getSidebarMaxWidth();
+  if (typeof window === 'undefined') return windowMax;
   return Math.min(
-    getSidebarMaxWidth(),
-    Math.max(SIDEBAR_DRAG_VISUAL_MIN_WIDTH, width),
+    windowMax,
+    Math.floor(
+      Math.min(window.innerWidth, containerWidth ?? window.innerWidth) / 2,
+    ),
+  );
+}
+
+function clampSidebarVisualWidth(
+  width: number,
+  minWidth: number,
+  containerWidth?: number,
+): number {
+  return Math.min(
+    getSidebarDragMaxWidth(containerWidth),
+    Math.max(minWidth, width),
   );
 }
 
@@ -1048,10 +1069,17 @@ export function WebShellSidebar({
   const railLayout = layout === 'rail';
   const [navigationHint, setNavigationHint] =
     useState<HTMLButtonElement | null>(null);
-  const openNavigation = (open: (() => void) | undefined) => {
+  // Column-restoring entries (Home, Channels, Live) must leave the collapsed
+  // state behind or a collapsed user's click appears to do nothing; full-page
+  // entries keep the column hidden regardless, so they leave the persisted
+  // collapse preference untouched.
+  const openNavigation = (
+    open: (() => void) | undefined,
+    restoresColumn = false,
+  ) => {
     if (railLayout) {
       setMoreOpen(false);
-      onCollapsedChange(false);
+      if (restoresColumn) onCollapsedChange(false);
     }
     open?.();
   };
@@ -4264,10 +4292,16 @@ export function WebShellSidebar({
       if (collapsed || mobileOpen) return;
       event.preventDefault();
       resizeTeardownRef.current?.(true);
+      // Suppress the width transition before measuring so a drag started
+      // mid-animation measures the settled width, not an intermediate one.
+      sidebarRef.current?.classList.add(styles.resizing);
       setIsResizing(true);
       const startX = event.clientX;
       const startWidth =
         sidebarRef.current?.getBoundingClientRect().width || sidebarWidth;
+      // Collapse-by-drag restores the state width, never the measured one:
+      // the rect can lag a running transition or sit under the container cap.
+      const startStateWidth = sidebarWidth;
       const previousCursor = document.body.style.cursor;
       const previousUserSelect = document.body.style.userSelect;
       let collapsedByDrag = false;
@@ -4283,7 +4317,10 @@ export function WebShellSidebar({
         return startWidth + clientX - startX;
       }
       function restoreExpandedWidth() {
-        const restoredWidth = clampSidebarWidth(startWidth, sidebarMinWidth);
+        const restoredWidth = clampSidebarWidth(
+          startStateWidth,
+          sidebarMinWidth,
+        );
         setSidebarWidth(restoredWidth);
         writeSidebarWidth(restoredWidth);
       }
@@ -4300,7 +4337,9 @@ export function WebShellSidebar({
           collapseFromDrag();
           return;
         }
-        setSidebarWidth(clampSidebarVisualWidth(rawWidth));
+        setSidebarWidth(
+          clampSidebarVisualWidth(rawWidth, sidebarMinWidth, containerWidth),
+        );
       }
       teardown = function resizeTeardown(updateState: boolean) {
         document.body.style.cursor = previousCursor;
@@ -4319,7 +4358,11 @@ export function WebShellSidebar({
           collapseFromDrag();
           return;
         }
-        const nextWidth = clampSidebarWidth(rawWidth, sidebarMinWidth);
+        const nextWidth = clampSidebarVisualWidth(
+          rawWidth,
+          sidebarMinWidth,
+          containerWidth,
+        );
         setSidebarWidth(nextWidth);
         writeSidebarWidth(nextWidth);
         teardown(true);
@@ -4334,7 +4377,14 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, mobileOpen, onCollapsedChange, sidebarWidth, sidebarMinWidth],
+    [
+      collapsed,
+      mobileOpen,
+      onCollapsedChange,
+      sidebarWidth,
+      sidebarMinWidth,
+      containerWidth,
+    ],
   );
 
   const deleteCandidateLabel = deleteCandidate
@@ -5517,7 +5567,7 @@ export function WebShellSidebar({
           aria-current={
             railLayout && activePage === 'channels' ? 'page' : undefined
           }
-          onClick={() => openNavigation(onOpenChannels)}
+          onClick={() => openNavigation(onOpenChannels, true)}
         >
           <span className={styles.navIcon}>
             <MessagesSquareIcon size={16} strokeWidth={1.2} />
@@ -5531,7 +5581,7 @@ export function WebShellSidebar({
           type="button"
           aria-label={t('sidebar.live')}
           aria-current={activePage === 'live' ? 'page' : undefined}
-          onClick={() => openNavigation(onOpenLive)}
+          onClick={() => openNavigation(onOpenLive, true)}
         >
           <span className={styles.navIcon}>
             <AudioLinesIcon size={17} strokeWidth={1.8} />
@@ -6216,7 +6266,7 @@ export function WebShellSidebar({
                   }
                   aria-current={activePage === 'home' ? 'page' : undefined}
                   aria-expanded={!homeHidden}
-                  onClick={() => openNavigation(onOpenHome)}
+                  onClick={() => openNavigation(onOpenHome, true)}
                   data-web-shell-home-trigger
                 >
                   <span className={styles.navIcon}>

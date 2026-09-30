@@ -472,6 +472,37 @@ describe('LiveVoiceSettingsCard', () => {
     },
   );
 
+  it('does not block an edit made after the saved value converges onto the draft', async () => {
+    const setup = setupResult({ voice: 'Tina', nativeHost: false });
+    const container = mount(setup);
+    const voice = () =>
+      container.querySelector<HTMLInputElement>('#live-realtime-voice')!;
+    const save = () =>
+      container.querySelector<HTMLButtonElement>('[data-live-settings-save]')!;
+    act(() => setInputValue(voice(), 'Ethan'));
+
+    // The refresh converges onto the staged value: the edit is settled, so the
+    // draft field and its conflict baseline must be forgotten.
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceSettingsCard
+            setup={{ ...setup, status: { ...setup.status!, voice: 'Ethan' } }}
+          />,
+        ),
+    );
+    expect(save().disabled).toBe(true);
+
+    // The next edit compares against the converged value — never against the
+    // stale baseline from before the refresh.
+    act(() => setInputValue(voice(), 'Carol'));
+    expect(container.textContent).not.toContain('settings.liveSetup.conflict');
+    expect(save().disabled).toBe(false);
+    await act(async () => save().click());
+    expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Carol' });
+  });
+
   it('does not block a dirty voice when an unrelated field refreshes', async () => {
     const setup = setupResult({
       voice: 'Tina',

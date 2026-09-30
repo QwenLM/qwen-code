@@ -3366,6 +3366,12 @@ export function App({
   const [liveVoiceSlot, setLiveVoiceSlot] = useState<HTMLDivElement | null>(
     null,
   );
+  // Fallback portal target in the Live page header: the sidebar's slot
+  // unmounts when the column is hidden (collapsed rail, closed compact
+  // drawer), and the chat composer is display:none on the Live page, so
+  // without it an ongoing call loses every visible control.
+  const [liveVoicePageSlot, setLiveVoicePageSlot] =
+    useState<HTMLDivElement | null>(null);
   const [sidebarSection, setSidebarSection] = useState<
     'home' | 'channels' | 'live'
   >('home');
@@ -9455,8 +9461,18 @@ export function App({
   useEffect(() => {
     if (activePanel === 'channels' || activePanel === 'live') {
       setSidebarSection(activePanel);
+      return;
     }
-  }, [activePanel]);
+    // Closing a panel returns to the chat, so the section follows the session
+    // context again instead of pinning the closed panel's column.
+    if (activePanel === null) {
+      setSidebarSection(
+        liveSidebarEnabled && connection.sessionContext?.kind === 'live'
+          ? 'live'
+          : 'home',
+      );
+    }
+  }, [activePanel, connection.sessionContext?.kind, liveSidebarEnabled]);
   const appliedHistoryRevision = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (navigation?.historyRevision === appliedHistoryRevision.current) return;
@@ -9476,7 +9492,7 @@ export function App({
     activePanel === 'extensions'
       ? 'home'
       : activePanel) ??
-    (mainView === 'chat' || mainView === 'cockpit'
+    (mainView === 'chat' || mainView === 'cockpit' || mainView === 'split'
       ? (sidebarSection === 'channels' && channelSidebarEnabled) ||
         (sidebarSection === 'live' && liveSidebarEnabled)
         ? sidebarSection
@@ -20043,6 +20059,7 @@ export function App({
                   containerWidth={sidebarLayoutWidth}
                   activePage={sidebarPage}
                   onOpenHome={() => {
+                    closeMobileDrawer();
                     setSidebarSection('home');
                     splitFoldedByShrinkRef.current = false;
                     returnToChat();
@@ -20802,6 +20819,11 @@ export function App({
                           >
                             {t('sidebar.liveSettings')}
                           </h1>
+                          <div
+                            ref={setLiveVoicePageSlot}
+                            className={styles.liveVoicePageSlot}
+                            data-live-voice-page-slot
+                          />
                         </div>
                         {liveSetup.supported ? (
                           <LiveVoiceSettingsCard setup={liveSetup} />
@@ -21952,7 +21974,9 @@ export function App({
                         />
                         <ChatEditor
                           ref={setEditorHandle}
-                          liveVoicePortalContainer={liveVoiceSlot}
+                          liveVoicePortalContainer={
+                            liveVoiceSlot ?? liveVoicePageSlot
+                          }
                           compactOverlays={compactComposerOverlays}
                           onSubmit={
                             collaborationAvailable
