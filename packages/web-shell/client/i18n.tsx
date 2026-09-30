@@ -7,6 +7,10 @@ import {
 
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_ZH,
+} from './components/workspace-agents/messages.js';
+import {
   SETTINGS_MESSAGES_EN,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
@@ -4200,6 +4204,7 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...LIVE_MESSAGES_EN,
+  ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
 };
 
@@ -8140,6 +8145,7 @@ const ZH: Messages = {
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...LIVE_MESSAGES_ZH,
+  ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
 };
 

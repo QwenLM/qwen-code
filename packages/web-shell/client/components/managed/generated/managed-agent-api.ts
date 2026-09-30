@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description W0 maps workspaceId/cwdRelative to the public selection without using environmentId or absolute cwd. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Later Workspace submit, cancel and lifecycle operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -484,7 +484,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; later submit, cancel and lifecycle operations remain gated. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */

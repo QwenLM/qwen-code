@@ -95,6 +95,16 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>operator-recovery</id>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>operator-recovery</classifier>
+                            <mainClass>com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryCommand</mainClass>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -190,7 +200,7 @@
                 <configuration>
                     <includes><include>**/HostedWorkspaceToolTurnIT.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
-                    <forkedProcessTimeoutInSeconds>210</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>300</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

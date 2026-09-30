@@ -961,6 +961,57 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
+    // installProxyDispatcher: false keeps this test from pinning a
+    // process-global undici dispatcher; the wiring under test (the two
+    // constructor options reaching ExtensionManager) is unaffected.
+    const config = new Config({
+      ...baseParams,
+      usageStatisticsEnabled: false,
+      proxy: 'http://127.0.0.1:8080',
+      installProxyDispatcher: false,
+    });
+
+    const manager = config.getExtensionManager() as unknown as {
+      usageStatisticsEnabled?: boolean;
+      proxy?: string;
+    };
+    expect(manager.usageStatisticsEnabled).toBe(false);
+    expect(manager.proxy).toBe('http://127.0.0.1:8080');
+  });
+
+  it('installs the proxy dispatcher by default when a proxy resolves', async () => {
+    // Every pre-existing session Config takes this arm: it passes no
+    // `installProxyDispatcher`, so the default is what honours `settings.proxy`
+    // for LLM and MCP traffic. Both callers that pass the flag pass `false`
+    // (the telemetry-only Config), so without this case inverting the default
+    // to `false` leaves the suite green while session traffic silently goes
+    // direct (#12770 follow-up).
+    const { getGlobalDispatcher, setGlobalDispatcher, EnvHttpProxyAgent } =
+      await import('undici');
+    const { resetDispatcherCache } = await import(
+      '../utils/runtimeFetchOptions.js'
+    );
+    const originalDispatcher = getGlobalDispatcher();
+    try {
+      const config = new Config({
+        ...baseParams,
+        proxy: 'http://127.0.0.1:8080',
+      });
+      // undici loads behind a dynamic import, so the install settles
+      // asynchronously; `initialize()` awaits this same promise.
+      await (config as unknown as { proxyDispatcherReady?: Promise<void> })
+        .proxyDispatcherReady;
+
+      const installed = getGlobalDispatcher();
+      expect(installed).not.toBe(originalDispatcher);
+      expect(installed).toBeInstanceOf(EnvHttpProxyAgent);
+    } finally {
+      setGlobalDispatcher(originalDispatcher);
+      resetDispatcherCache();
+    }
+  });
+
   describe('setHooksFromSettings', () => {
     const systemHooks = {
       SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
@@ -16883,5 +16934,138 @@ describe('Model Switching and Config Updates', () => {
       'prompt-auto',
     );
     expect(config.takeActiveTodoReminder('prompt-user', true)).toBeUndefined();
+  });
+});
+
+describe('applyWorkspaceAgentPersona', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+    chatRecording: false,
+  };
+
+  const agentSession = () => {
+    // The opt-in as well as the source type. Collaboration is off by default,
+    // and `sourceType: 'agent'` alone deliberately does not open the surface —
+    // these cases are about what an opted-in agent session gets, so they have
+    // to say so.
+    const config = new Config({
+      ...baseParams,
+      agentCollaborationEnabled: true,
+    });
+    config.setSessionSource('agent', 'ag_alice');
+    return config;
+  };
+
+  it('puts the persona where the main session prompt is read from', () => {
+    // The whole reason no new machinery was needed: the prompt path already
+    // prefers an override over the core prompt.
+    const config = agentSession();
+
+    config.applyWorkspaceAgentPersona('You are alice.', 'alice');
+
+    expect(config.getSystemPrompt()).toBe('You are alice.');
+    expect(config.getWorkspaceAgentName()).toBe('alice');
+  });
+
+  it('is a workspace-agent session only with the opt-in and the agent source', () => {
+    expect(agentSession().isWorkspaceAgentSession()).toBe(true);
+    const optedOut = new Config(baseParams);
+    optedOut.setSessionSource('agent', 'ag_alice');
+    expect(optedOut.isWorkspaceAgentSession()).toBe(false);
+    expect(new Config(baseParams).isWorkspaceAgentSession()).toBe(false);
+  });
+
+  it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
+    // `registerFactory` is a single mock on the prototype, so every registry
+    // shares one call log. Snapshot and clear between the two, or the ordinary
+    // session inherits the agent's registrations and the negative half of this
+    // test can never fail.
+    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
+    factory.mockClear();
+    await agentSession().createToolRegistry(undefined, { skipDiscovery: true });
+    const agentTools = factory.mock.calls.map(([name]) => name as string);
+
+    factory.mockClear();
+    await new Config(baseParams).createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    const ordinaryTools = factory.mock.calls.map(([name]) => name as string);
+    // Asserted against the recorded registrations, not `getAllToolNames`:
+    // that method is stubbed to `[]` at module scope, so the positive half
+    // could never pass and the negative half could never fail.
+    for (const name of [
+      'thread_post',
+      'thread_read',
+      'thread_create',
+      'thread_wait',
+      'thread_block',
+      'thread_review',
+    ]) {
+      expect(agentTools).toContain(name);
+      expect(ordinaryTools).not.toContain(name);
+    }
+  });
+
+  it('refuses on a session that is not an agent', () => {
+    // Otherwise any session could be handed a persona and post under a name
+    // that is not its own.
+    expect(() =>
+      new Config(baseParams).applyWorkspaceAgentPersona('x', 'alice'),
+    ).toThrow(/only be applied to an agent session/);
+  });
+
+  it('enforces the persona tool subset without widening the read-only ceiling', async () => {
+    const config = agentSession();
+    config.applyWorkspaceAgentPersona('Read only', 'alice', [
+      'read_file',
+      'thread_review',
+      'write_file',
+    ]);
+    const guard = config.getToolInvocationGuard()!;
+    for (const toolName of [
+      'read_file',
+      'thread_review',
+      'write_file',
+      'glob',
+    ]) {
+      const result = await guard({
+        callId: 'guard-check',
+        toolName,
+        args: {},
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(
+        toolName === 'read_file' || toolName === 'thread_review',
+      );
+    }
+  });
+
+  it('refuses on a session belonging to another source', () => {
+    const config = new Config(baseParams);
+    config.setSessionSource('agent-host', 'ws_1');
+
+    expect(() => config.applyWorkspaceAgentPersona('x', 'alice')).toThrow(
+      /only be applied to an agent session/,
+    );
+  });
+
+  it('refuses a second persona rather than changing one in place', () => {
+    // A session's prompt is part of what its transcript means; swapping it
+    // under a running conversation would make the record a lie.
+    const config = agentSession();
+    config.applyWorkspaceAgentPersona('You are alice.', 'alice');
+
+    expect(() =>
+      config.applyWorkspaceAgentPersona('You are bob.', 'bob'),
+    ).toThrow(/already has a persona/);
+    expect(config.getSystemPrompt()).toBe('You are alice.');
+    expect(config.getWorkspaceAgentName()).toBe('alice');
+  });
+
+  it('names no agent on a session that never had a persona applied', () => {
+    expect(new Config(baseParams).getWorkspaceAgentName()).toBeUndefined();
   });
 });

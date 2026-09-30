@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -18,6 +20,31 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class BrokerValuesTest {
+    @Test
+    void wellFormedJsonFindsALoneSurrogateInAnyStringOrKey() {
+        for (String lone : List.of("\ud800", "\udbff", "\udc00", "\udfff", "a\udc00\ud800b")) {
+            for (Object value : List.of(lone, Map.of("k", lone), Map.of(lone, "v"),
+                    List.of("ok", lone), Map.of("k", List.of(Map.of("n", lone))))) {
+                assertFalse(BrokerValues.isWellFormedJson(value), value::toString);
+                // The writer the Broker uses changes each of them.
+                assertNotEquals(value instanceof String ? lone : value,
+                        JSON.parse(JSON.toJSONBytes(value, JSONWriter.Feature.WriteNulls)));
+            }
+        }
+        java.util.Map<String, Object> nulls = new java.util.HashMap<>();
+        nulls.put("n", null);
+        for (Object value : java.util.Arrays.asList(null, "𝄞", "é", nulls,
+                Map.of("键-𝄞", List.of("😀", 1, true, 2.5, new BigDecimal("1.5"))))) {
+            assertTrue(BrokerValues.isWellFormedJson(value), String.valueOf(value));
+        }
+        // The writer serializes these too, and would change "\ud800" in them
+        // to '?', but they are not JSON values, so they fail closed.
+        for (Object value : List.of(new String[] {"a"}, java.util.Set.of("a"), 'a',
+                Map.of(1, "v"), new StringBuilder("a"), new Object())) {
+            assertFalse(BrokerValues.isWellFormedJson(value), value::toString);
+        }
+    }
+
     @Test
     void exactLongReadsOnlyTheIntegerAJsonNumberDenotes() {
         for (String literal : List.of("4", "4.0", "4E0", "4L")) {
