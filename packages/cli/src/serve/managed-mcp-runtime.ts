@@ -762,6 +762,9 @@ export class ManagedMcpRuntime {
         await this.closeConnection(connection);
       } catch {
         this.unknown(operation, 'managed_mcp_drain_unknown');
+        void connection.closeDone.then(() =>
+          this.settled(operation, { response: { released: true } }),
+        );
         return;
       }
       this.settled(operation, { response: { released: true } });

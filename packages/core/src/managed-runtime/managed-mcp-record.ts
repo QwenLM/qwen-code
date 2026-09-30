@@ -28,7 +28,7 @@ export interface McpConfiguration {
   readonly catalogRevision: number | null;
   readonly connectionGeneration: number | null;
   readonly catalogRef: ManagedSessionDurableRef | null;
-  readonly releaseState: 'active' | 'releasing' | 'released';
+  readonly releaseState: 'active' | 'releasing' | 'drained' | 'released';
   readonly run: ExtensionRun;
 }
 
@@ -142,9 +142,10 @@ export function parseMcpConfiguration(value: unknown): McpConfiguration {
   if (
     body.releaseState !== 'active' &&
     body.releaseState !== 'releasing' &&
+    body.releaseState !== 'drained' &&
     body.releaseState !== 'released'
   ) {
-    fail('MCP releaseState must be active, releasing or released.');
+    fail('MCP releaseState must be active, releasing, drained or released.');
   }
   const parsed: McpConfiguration = {
     configurationId: assertManagedSessionStableId(
@@ -289,6 +290,10 @@ export function isMcpConfigurationSuccessor(
         (canRelease(before.run) &&
           before.releaseState === 'active' &&
           after.releaseState === 'releasing') ||
+        (before.releaseState === 'releasing' &&
+          after.releaseState === 'drained') ||
+        (before.releaseState === 'drained' &&
+          after.releaseState === 'released') ||
         (before.releaseState === 'releasing' &&
           after.releaseState === 'released')) &&
       (before.catalogRef === null ||
