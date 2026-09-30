@@ -52,6 +52,7 @@ import {
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  managedRuntimeProviderLimit,
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
 import { MANAGED_CONTEXT_PROTOCOL } from './managed-context-envelope.js';
@@ -63,6 +64,27 @@ import {
   WORKSPACE_CONTEXT_CONFIG_REF,
   WORKSPACE_EXECUTION_PROFILE,
 } from './managed-workspace-activation.js';
+
+const retirementWarning = vi.hoisted(() => vi.fn());
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) => {
+        const logger = actual.createDebugLogger(tag);
+        return tag === 'MANAGED_RUNTIME_PROVIDER'
+          ? { ...logger, warn: retirementWarning }
+          : logger;
+      },
+    };
+  },
+);
 
 const SESSION: ManagedRuntimeProviderSession = {
   harnessSessionId: '550e8400-e29b-41d4-a716-446655440001',
@@ -125,6 +147,7 @@ describe('Managed Runtime provider worker', () => {
   const holds: Array<() => void> = [];
 
   beforeEach(async () => {
+    retirementWarning.mockClear();
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-')),
     );
@@ -580,6 +603,7 @@ describe('Managed Runtime provider worker', () => {
     for (const directory of [
       storage,
       `${path.join(workspace, 'link')}${path.sep}..`,
+      path.join(workspace, 'missing-directory'),
     ]) {
       const outside = await post({
         kind: 'prepare',
@@ -971,6 +995,135 @@ describe('Managed Runtime provider worker', () => {
     ).toMatchObject({ revision: expect.any(Number) });
   });
 
+  it('returns only progress after a nonzero status cursor', async () => {
+    await begin();
+    const gate = path.join(workspace, 'second-output');
+    const script = path.join(workspace, 'progress.cjs');
+    fs.writeFileSync(
+      script,
+      `const fs = require('node:fs');
+process.stdout.write('first');
+const timer = setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(gate)})) {
+    clearInterval(timer);
+    process.stdout.write('second');
+  }
+}, 20);`,
+    );
+    const ref = reference(
+      await prepare('run_shell_command', {
+        command: `"${process.execPath}" "${script}"`,
+      }),
+    );
+    const executing = execute(ref);
+    try {
+      await vi.waitFor(
+        async () => {
+          const status = await control<ManagedToolInvocationStatus>({
+            kind: 'status',
+            reference: ref,
+          });
+          expect(status.progress.length).toBeGreaterThan(0);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      fs.writeFileSync(gate, '');
+      await executing;
+    }
+    const full = await control<ManagedToolInvocationStatus>({
+      kind: 'status',
+      reference: ref,
+    });
+    expect(full.progress.length).toBeGreaterThan(1);
+    const cursor = full.progress[0].seq;
+    expect(cursor).toBeGreaterThan(0);
+    const after = await control<ManagedToolInvocationStatus>({
+      kind: 'status',
+      reference: ref,
+      afterSequence: cursor,
+    });
+    expect(after.lastSeq).toBe(full.lastSeq);
+    expect(after.progress).toEqual(
+      full.progress.filter((event) => event.seq > cursor),
+    );
+  });
+
+  it('refuses an unfitted manifest whose envelope exceeds the wire limit', async () => {
+    await acquire();
+    const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({
+      kind: 'manifest',
+    });
+    const limit = managedRuntimeProviderLimit('manifest');
+    manifest.tools[0] = { ...manifest.tools[0], description: '' };
+    const padding = limit - Buffer.byteLength(JSON.stringify(manifest));
+    manifest.tools[0] = {
+      ...manifest.tools[0],
+      description: 'x'.repeat(padding),
+    };
+    manifest.capabilityDigest = managedToolDigest(manifest.tools, limit);
+    expect(Buffer.byteLength(JSON.stringify(manifest))).toBe(limit);
+    vi.spyOn(ManagedToolRuntime.prototype, 'manifest').mockReturnValue(
+      manifest,
+    );
+    const response = await post({ kind: 'manifest' });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      code: 'managed_runtime_provider_too_large',
+      error: 'Managed Runtime provider response exceeds its body size limit.',
+    });
+  });
+
+  it('preserves a prepared invocation when release is refused over a pending history read', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    const drain = hold(ManagedToolFileHistory.prototype, 'drain');
+    const observed = control({ kind: 'history' });
+    await drain.entered();
+    const refused = await post({ kind: 'release' });
+    expect(refused.status).toBe(409);
+    expect(await control({ kind: 'status', reference: ref })).toMatchObject({
+      state: 'prepared',
+    });
+    expect(await refused.json()).toEqual({
+      code: 'managed_runtime_provider_operation_failed',
+      error: 'Managed Runtime Session still owns unfinished work.',
+    });
+    drain.release();
+    await observed;
+    expect(await execute(ref)).toMatchObject({ executionStatus: 'success' });
+  });
+
+  it('rechecks pending controls that arrive while release preparation is waiting', async () => {
+    await begin();
+    const preparedRelease = hold(
+      ManagedToolRuntime.prototype,
+      'releasePrepared',
+    );
+    const releasing = post({ kind: 'release' });
+    await preparedRelease.entered();
+    const drain = hold(ManagedToolFileHistory.prototype, 'drain');
+    const observed = control({ kind: 'history' });
+    await drain.entered();
+    preparedRelease.release();
+    const refused = await releasing;
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_runtime_identity_conflict',
+      error: 'Managed Runtime Session still owns unfinished work.',
+    });
+    drain.release();
+    await observed;
+    expect(await control({ kind: 'manifest' })).toMatchObject({
+      tools: expect.any(Array),
+    });
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
   it('keeps an oversized shell result observable instead of failing the wire contract', async () => {
     await begin();
     const ref = reference(
@@ -1266,6 +1419,12 @@ describe('Managed Runtime provider worker', () => {
       expect(await control({ kind: 'acquire' }, session)).toBe(true);
       expect(await control({ kind: 'release' }, session)).toBe(true);
     }
+    expect(retirementWarning).toHaveBeenCalledExactlyOnceWith(
+      'Retiring a released Session failed:',
+      expect.objectContaining({
+        errors: [expect.objectContaining({ message: 'dispose failed' })],
+      }),
+    );
     // The later steps still ran, and the Session is a tombstone.
     expect(
       shutdown.mock.contexts.map((config) => (config as Config).getSessionId()),
