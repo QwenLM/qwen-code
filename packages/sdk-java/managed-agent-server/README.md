@@ -432,7 +432,7 @@ for the exact boundary.
 
 ### Verified original-mount recovery (W1a)
 
-W1a is opt-in for process restart in a trusted, single-host Linux `local-process` deployment. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
+W1a's physical mount guard is opt-in for process restart in a trusted, single-host Linux `local-process` deployment. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
 V21 adds a persistent storage registration and mount fence. Leave
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
 upgrading every Broker and Harness instance. An unregistered mount is refused
@@ -472,7 +472,7 @@ storage blocks new work; original execution status/cancel and authorized
 history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
-Hosted cold load reads the saved tool profile when Java omits it. It checks retained history and resources through one committed sequence, verifies complete Shell output including empty-stream seals, and rechecks writer ownership before publishing an attachment. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
+Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. It reads the saved tool profile when Java omits it; an explicitly supplied profile must match the saved one. Saved approval settings remain pinned. It checks retained history and resources through one committed sequence, verifies complete Shell output including empty-stream seals, and rechecks writer ownership before publishing an attachment. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
 Workspace resume/next-turn admission still requires product-route integration; this
 internal guard is not a public resume capability yet.
 

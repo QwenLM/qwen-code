@@ -1953,7 +1953,7 @@ describe('Hosted Harness tool approvals', () => {
     );
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store(), toolProfile: files });
+    ).send({ managedSessionStore: store() });
     expect(loaded.status).toBe(200);
     expect(loaded.body.approvalMode).toBe('default');
     clientId = loaded.body.clientId as string;

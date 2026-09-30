@@ -35,6 +35,7 @@ public class WorkspaceExecutionStore {
             PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
+        // Offline saved-owner cleanup must not require the current mount.
         this.storageGuard = null;
     }
 
