@@ -925,7 +925,7 @@ class ToolPublicationStoreTest {
     @Test
     void sealUsesCatalogBytesToFinishBeyondTheBaseDeadline() {
         reserve();
-        byte[] segment = "z".repeat(512).getBytes(StandardCharsets.UTF_8);
+        byte[] segment = "z".repeat(1024).getBytes(StandardCharsets.UTF_8);
         boolean[] slow = {false};
         long[] verificationTime = {0};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
@@ -940,8 +940,8 @@ class ToolPublicationStoreTest {
                         if (available() == 0) return -1;
                         if (slow[0]) {
                             try {
-                                Thread.sleep(150);
-                                verificationTime[0] += 150;
+                                Thread.sleep(250);
+                                verificationTime[0] += 250;
                             } catch (InterruptedException error) {
                                 Thread.currentThread().interrupt();
                                 throw new IllegalStateException(error);
@@ -960,7 +960,8 @@ class ToolPublicationStoreTest {
         JsonNode key = binding.get("sessionKey");
         String digest = ToolPublicationContract.sha256(segment);
         publisher.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment", "stdout", 0, segment, digest);
-        verificationTime[0] = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).getTime();
+        verificationTime[0] = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class)
+                .getTime() / 1000 * 1000;
         // Advance verification time with fixture reads, excluding JDBC latency.
         JdbcTemplate verificationJdbc = new JdbcTemplate(jdbc.getDataSource()) {
             @Override
@@ -971,9 +972,10 @@ class ToolPublicationStoreTest {
                 return super.queryForObject(sql, type);
             }
         };
+        // Keep renewal margin when a JDBC driver truncates fractional timestamps.
         var data = new ToolPublicationDataStore(verificationJdbc, manager, store, sessions, bucket,
-                Duration.ofSeconds(1), Duration.ofMillis(500),
-                new ToolPublicationDataStore.VerificationBudget(256, Duration.ofSeconds(5)));
+                Duration.ofSeconds(3), Duration.ofSeconds(2),
+                new ToolPublicationDataStore.VerificationBudget(256, Duration.ofSeconds(10)));
         slow[0] = true;
         assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, segment.length, digest)
                 .path("digest").asText()).isEqualTo(digest);
@@ -981,8 +983,8 @@ class ToolPublicationStoreTest {
                 + " WHERE operation_id = 'seal'", java.sql.Timestamp.class);
         var created = jdbc.queryForObject("SELECT created_at FROM qwen_tool_publication_operation"
                 + " WHERE operation_id = 'seal'", java.sql.Timestamp.class);
-        assertThat(verificationTime[0] - created.getTime()).isEqualTo(1200);
-        assertThat(deadline.getTime() - created.getTime()).isEqualTo(3000);
+        assertThat(verificationTime[0] - created.getTime()).isEqualTo(4000);
+        assertThat(deadline.getTime() - created.getTime()).isEqualTo(7000);
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "seal").path("state").asText())
                 .isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation"
