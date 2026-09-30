@@ -66,6 +66,8 @@ async function mount(row: TrajectoryRow, language: 'en' | 'zh-CN' = 'en') {
           <TrajectoryInspector
             row={next}
             title="Record"
+            hiddenByCollapse={false}
+            onReveal={() => {}}
             hiddenByRange={false}
             onClearRange={() => {}}
             onClose={() => {}}

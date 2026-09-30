@@ -318,6 +318,59 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it.each([
+      [
+        'denied',
+        {
+          hookSpecificOutput: {
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Tool not allowed',
+            additionalContext: 'deny <note>',
+          },
+        },
+      ],
+      [
+        'ask',
+        {
+          hookSpecificOutput: {
+            permissionDecision: 'ask',
+            additionalContext: 'ask <note>',
+          },
+        },
+      ],
+      [
+        'stop',
+        {
+          continue: false,
+          reason: 'halt',
+          hookSpecificOutput: { additionalContext: 'stop <note>' },
+        },
+      ],
+    ] as const)(
+      'keeps sanitized additional context on the %s branch',
+      async (blockType, output) => {
+        const mockMessageBus = createMockMessageBus();
+        (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+          success: true,
+          output,
+        });
+
+        const result = await firePreToolUseHook(
+          mockMessageBus,
+          'test-tool',
+          {},
+          'test-id',
+          'auto',
+        );
+
+        expect(result.shouldProceed).toBe(false);
+        expect(result.blockType).toBe(blockType);
+        expect(result.additionalContext).toBe(
+          `${blockType === 'denied' ? 'deny' : blockType} &lt;note&gt;`,
+        );
+      },
+    );
+
     it('should handle hook execution errors gracefully', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(

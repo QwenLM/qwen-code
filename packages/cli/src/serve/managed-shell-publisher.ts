@@ -299,6 +299,10 @@ export class ManagedShellPublisherRegistry
   private readonly sessions = new Map<string, ShellPublisherDescriptor>();
   private readonly executions = new Map<string, ShellPublisherDescriptor>();
 
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
   register(
     app: Application,
     identity: ManagedRuntimeRequestIdentity,
