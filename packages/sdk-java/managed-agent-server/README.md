@@ -458,11 +458,18 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes copied full-chain scripts for a future integration.
-Their expected `dist/managed-runtime-worker.js` artifact is not built, so the
-commands below describe intended verification, not passing evidence for this
-integration. The G0 integration test instead starts the supported Hosted Harness
-and worker modes through the packaged `dist/cli.js`.
+The full-chain script starts Spring with its embedded Runtime Broker and runs
+both the Hosted Harness and the worker from the packaged `dist/cli.js`: the
+Harness as `node dist/cli.js serve --profile hosted-harness`, and each worker,
+launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
+separate worker bundle exists. The G0 integration test
+(`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
+
+The real-model run below has not been executed as evidence for this
+integration, so treat it as intended verification, not passing evidence. The
+script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
+starts its own temporary MySQL server and exits before starting anything else
+when a command or a required file is missing.
 
 Build the required artifacts first, then run:
 
