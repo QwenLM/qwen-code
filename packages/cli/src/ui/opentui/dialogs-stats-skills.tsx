@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
+import type { ScrollBoxRenderable } from '@opentui/core';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { computeSessionStats } from '../utils/computeStats.js';
@@ -35,6 +36,7 @@ import { fmtTokens, getSeriesColors } from '../components/stats-helpers.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
+import { HELP_LAYOUT_RESERVED_ROWS } from './help-content.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
 function useEscToClose(onClose: () => void, enabled: boolean) {
@@ -102,13 +104,39 @@ const TABS: Array<{ name: StatsTabName; label: string }> = [
   { name: 'efficiency', label: 'Efficiency' },
 ];
 
+/**
+ * The Stats dialog's own chrome around the scrolled body: top margin (1),
+ * borders (2), vertical padding (2), tab bar (1), spacer (1) and the footer
+ * hint with its margin (2).
+ */
+export const STATS_FIXED_ROWS = 9;
+const STATS_MIN_BODY_ROWS = 3;
+
+/**
+ * Body rows that fit a standalone /stats dialog on a terminal of the given
+ * height, after the surrounding app chrome and the dialog's own chrome.
+ */
+export function computeStatsBodyRows(terminalHeight: number): number {
+  return Math.max(
+    STATS_MIN_BODY_ROWS,
+    terminalHeight - HELP_LAYOUT_RESERVED_ROWS - STATS_FIXED_ROWS,
+  );
+}
+
 export function OpenTuiStatsDialog(props: {
   config: Config | null | undefined;
   onClose: () => void;
   /** Embedded hosts pass false while their own focus zone owns the keys. */
   isFocused?: boolean;
+  /**
+   * Row budget for the tab body. When set, the body scrolls inside it with
+   * up/down/pageup/pagedown; embedded hosts leave it unset because they use
+   * the up key to return to their own tab bar.
+   */
+  bodyRows?: number;
 }) {
-  const { config, onClose, isFocused = true } = props;
+  const { config, onClose, isFocused = true, bodyRows } = props;
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const [tab, setTabState] = useState<StatsTabName>('session');
   // A held Tab hands the whole burst to the handler from the last render, so
   // the cycle must read where the previous key of the burst landed.
@@ -117,6 +145,7 @@ export function OpenTuiStatsDialog(props: {
   const setTab = (next: StatsTabName) => {
     tabRef.current = next;
     setTabState(next);
+    scrollRef.current?.scrollTo(0);
   };
   // Re-render on every telemetry update so stats stay live while the dialog
   // is open (ink re-renders via SessionStatsProvider's update event).
@@ -138,6 +167,27 @@ export function OpenTuiStatsDialog(props: {
       setTab(
         order[(idx + (original.shift ? -1 : 1) + order.length) % order.length],
       );
+      return;
+    }
+    if (bodyRows === undefined) return;
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const page = Math.max(1, bodyRows - 1);
+    switch (original.name) {
+      case 'up':
+        scroller.scrollBy(-1);
+        break;
+      case 'down':
+        scroller.scrollBy(1);
+        break;
+      case 'pageup':
+        scroller.scrollBy(-page);
+        break;
+      case 'pagedown':
+        scroller.scrollBy(page);
+        break;
+      default:
+        break;
     }
   });
 
@@ -181,6 +231,177 @@ export function OpenTuiStatsDialog(props: {
   });
   const SERIES_COLORS = getSeriesColors();
 
+  const body =
+    tab !== 'session' ? (
+      <box flexDirection="column">
+        <SectionTitle>
+          {tab === 'activity'
+            ? 'Activity (this session)'
+            : 'Efficiency (this session)'}
+        </SectionTitle>
+        <Row label="Requests:">
+          <text fg={C.text}>
+            {Object.values(metrics.models)
+              .reduce((s, m) => s + m.api.totalRequests, 0)
+              .toLocaleString()}
+          </text>
+        </Row>
+        <Row label="Input:">
+          <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
+        </Row>
+        <Row label="Output:">
+          <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
+        </Row>
+        {totalCached > 0 && (
+          <Row label="Cached:">
+            <text fg={C.green}>
+              {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
+            </text>
+          </Row>
+        )}
+        <SectionTitle>Models</SectionTitle>
+        {Object.entries(metrics.models).map(([name, m], i) => (
+          <box key={name} flexDirection="row">
+            <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
+              {`${ICON.CIRCLE_FILLED} `}
+            </text>
+            <text fg={C.text}>{`${name} `}</text>
+            <text fg={C.dim}>
+              {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
+            </text>
+          </box>
+        ))}
+      </box>
+    ) : (
+      <box flexDirection="column">
+        <Row label="Session ID:">
+          <text fg={C.text}>{sessionId ?? 'n/a'}</text>
+        </Row>
+
+        <SectionTitle>Interaction Summary</SectionTitle>
+        <Row label="Tool Calls:">
+          <box flexDirection="row">
+            <text fg={C.text}>{`${metrics.tools.totalCalls} ( `}</text>
+            <text fg={C.green}>{`✓ ${metrics.tools.totalSuccess}`}</text>
+            <text fg={C.text}> </text>
+            <text fg={C.red}>{`✗ ${metrics.tools.totalFail}`}</text>
+            <text fg={C.text}>{' )'}</text>
+          </box>
+        </Row>
+        <Row label="Success Rate:">
+          <text fg={successColor}>{`${computed.successRate.toFixed(1)}%`}</text>
+        </Row>
+        {(metrics.files.totalLinesAdded > 0 ||
+          metrics.files.totalLinesRemoved > 0) && (
+          <Row label="Code Changes:">
+            <box flexDirection="row">
+              <text fg={C.green}>{`+${metrics.files.totalLinesAdded}`}</text>
+              <text fg={C.text}> </text>
+              <text fg={C.red}>{`-${metrics.files.totalLinesRemoved}`}</text>
+            </box>
+          </Row>
+        )}
+
+        <SectionTitle>Performance</SectionTitle>
+        <Row label="Wall Time:">
+          <text fg={C.text}>{formatDuration(wallDuration)}</text>
+        </Row>
+        <Row label="Agent Active:">
+          <text fg={C.text}>{formatDuration(computed.agentActiveTime)}</text>
+        </Row>
+        <SubRow label="API Time:">
+          <box flexDirection="row">
+            <text fg={C.text}>{formatDuration(computed.totalApiTime)}</text>
+            <text
+              fg={C.dim}
+            >{` (${computed.apiTimePercent.toFixed(1)}%)`}</text>
+          </box>
+        </SubRow>
+        <SubRow label="Tool Time:">
+          <box flexDirection="row">
+            <text fg={C.text}>{formatDuration(computed.totalToolTime)}</text>
+            <text
+              fg={C.dim}
+            >{` (${computed.toolTimePercent.toFixed(1)}%)`}</text>
+          </box>
+        </SubRow>
+
+        {lastGeneration && (
+          <box flexDirection="column">
+            <SectionTitle>{`Generation Metrics (Latest Request)`}</SectionTitle>
+            <Row label="Model:">
+              <text fg={C.text}>{lastGeneration.model}</text>
+            </Row>
+            <Row label="TTFT:">
+              <text fg={C.text}>{formatDuration(lastGeneration.ttftMs)}</text>
+            </Row>
+            <Row label="Generation Time:">
+              <text fg={C.text}>
+                {formatDuration(lastGeneration.generationDurationMs)}
+              </text>
+            </Row>
+            <Row label="Output Tokens:">
+              <text fg={C.text}>
+                {lastGeneration.outputTokens.toLocaleString()}
+              </text>
+            </Row>
+            <Row label="TPS:">
+              <text fg={C.text}>
+                {lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}
+              </text>
+            </Row>
+            <SubRow label="Requests:">
+              <text fg={C.text}>{generation?.timedRequests}</text>
+            </SubRow>
+            <SubRow label="Average TTFT:">
+              <text fg={C.text}>
+                {averageTtft === undefined ? '—' : formatDuration(averageTtft)}
+              </text>
+            </SubRow>
+            <SubRow label="Session TPS:">
+              <text fg={C.text}>
+                {sessionTps === undefined
+                  ? '—'
+                  : `${sessionTps.toFixed(1)} tok/s`}
+              </text>
+            </SubRow>
+          </box>
+        )}
+
+        <SectionTitle>Tokens</SectionTitle>
+        <Row label="Input:">
+          <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
+        </Row>
+        <Row label="Output:">
+          <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
+        </Row>
+        {totalCached > 0 && (
+          <Row label="Cached:">
+            <text fg={C.green}>
+              {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
+            </text>
+          </Row>
+        )}
+
+        {Object.keys(metrics.models).length > 0 && (
+          <box flexDirection="column">
+            <SectionTitle>Models</SectionTitle>
+            {Object.entries(metrics.models).map(([name, m], i) => (
+              <box key={name} flexDirection="row">
+                <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
+                  {`${ICON.CIRCLE_FILLED} `}
+                </text>
+                <text fg={C.text}>{`${name} `}</text>
+                <text fg={C.dim}>
+                  {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
+                </text>
+              </box>
+            ))}
+          </box>
+        )}
+      </box>
+    );
+
   return (
     <box
       flexDirection="column"
@@ -211,184 +432,18 @@ export function OpenTuiStatsDialog(props: {
       </box>
       <box height={1} />
 
-      {tab !== 'session' ? (
-        <box flexDirection="column">
-          <SectionTitle>
-            {tab === 'activity'
-              ? 'Activity (this session)'
-              : 'Efficiency (this session)'}
-          </SectionTitle>
-          <Row label="Requests:">
-            <text fg={C.text}>
-              {Object.values(metrics.models)
-                .reduce((s, m) => s + m.api.totalRequests, 0)
-                .toLocaleString()}
-            </text>
-          </Row>
-          <Row label="Input:">
-            <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
-          </Row>
-          <Row label="Output:">
-            <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
-          </Row>
-          {totalCached > 0 && (
-            <Row label="Cached:">
-              <text fg={C.green}>
-                {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
-              </text>
-            </Row>
-          )}
-          <SectionTitle>Models</SectionTitle>
-          {Object.entries(metrics.models).map(([name, m], i) => (
-            <box key={name} flexDirection="row">
-              <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
-                {`${ICON.CIRCLE_FILLED} `}
-              </text>
-              <text fg={C.text}>{`${name} `}</text>
-              <text fg={C.dim}>
-                {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
-              </text>
-            </box>
-          ))}
-        </box>
+      {bodyRows === undefined ? (
+        body
       ) : (
-        <box flexDirection="column">
-          <Row label="Session ID:">
-            <text fg={C.text}>{sessionId ?? 'n/a'}</text>
-          </Row>
-
-          <SectionTitle>Interaction Summary</SectionTitle>
-          <Row label="Tool Calls:">
-            <box flexDirection="row">
-              <text fg={C.text}>{`${metrics.tools.totalCalls} ( `}</text>
-              <text fg={C.green}>{`✓ ${metrics.tools.totalSuccess}`}</text>
-              <text fg={C.text}> </text>
-              <text fg={C.red}>{`✗ ${metrics.tools.totalFail}`}</text>
-              <text fg={C.text}>{' )'}</text>
-            </box>
-          </Row>
-          <Row label="Success Rate:">
-            <text
-              fg={successColor}
-            >{`${computed.successRate.toFixed(1)}%`}</text>
-          </Row>
-          {(metrics.files.totalLinesAdded > 0 ||
-            metrics.files.totalLinesRemoved > 0) && (
-            <Row label="Code Changes:">
-              <box flexDirection="row">
-                <text fg={C.green}>{`+${metrics.files.totalLinesAdded}`}</text>
-                <text fg={C.text}> </text>
-                <text fg={C.red}>{`-${metrics.files.totalLinesRemoved}`}</text>
-              </box>
-            </Row>
-          )}
-
-          <SectionTitle>Performance</SectionTitle>
-          <Row label="Wall Time:">
-            <text fg={C.text}>{formatDuration(wallDuration)}</text>
-          </Row>
-          <Row label="Agent Active:">
-            <text fg={C.text}>{formatDuration(computed.agentActiveTime)}</text>
-          </Row>
-          <SubRow label="API Time:">
-            <box flexDirection="row">
-              <text fg={C.text}>{formatDuration(computed.totalApiTime)}</text>
-              <text
-                fg={C.dim}
-              >{` (${computed.apiTimePercent.toFixed(1)}%)`}</text>
-            </box>
-          </SubRow>
-          <SubRow label="Tool Time:">
-            <box flexDirection="row">
-              <text fg={C.text}>{formatDuration(computed.totalToolTime)}</text>
-              <text
-                fg={C.dim}
-              >{` (${computed.toolTimePercent.toFixed(1)}%)`}</text>
-            </box>
-          </SubRow>
-
-          {lastGeneration && (
-            <box flexDirection="column">
-              <SectionTitle>
-                {`Generation Metrics (Latest Request)`}
-              </SectionTitle>
-              <Row label="Model:">
-                <text fg={C.text}>{lastGeneration.model}</text>
-              </Row>
-              <Row label="TTFT:">
-                <text fg={C.text}>{formatDuration(lastGeneration.ttftMs)}</text>
-              </Row>
-              <Row label="Generation Time:">
-                <text fg={C.text}>
-                  {formatDuration(lastGeneration.generationDurationMs)}
-                </text>
-              </Row>
-              <Row label="Output Tokens:">
-                <text fg={C.text}>
-                  {lastGeneration.outputTokens.toLocaleString()}
-                </text>
-              </Row>
-              <Row label="TPS:">
-                <text fg={C.text}>
-                  {lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}
-                </text>
-              </Row>
-              <SubRow label="Requests:">
-                <text fg={C.text}>{generation?.timedRequests}</text>
-              </SubRow>
-              <SubRow label="Average TTFT:">
-                <text fg={C.text}>
-                  {averageTtft === undefined
-                    ? '—'
-                    : formatDuration(averageTtft)}
-                </text>
-              </SubRow>
-              <SubRow label="Session TPS:">
-                <text fg={C.text}>
-                  {sessionTps === undefined
-                    ? '—'
-                    : `${sessionTps.toFixed(1)} tok/s`}
-                </text>
-              </SubRow>
-            </box>
-          )}
-
-          <SectionTitle>Tokens</SectionTitle>
-          <Row label="Input:">
-            <text fg={C.yellow}>{totalInput.toLocaleString()}</text>
-          </Row>
-          <Row label="Output:">
-            <text fg={C.yellow}>{totalOutput.toLocaleString()}</text>
-          </Row>
-          {totalCached > 0 && (
-            <Row label="Cached:">
-              <text fg={C.green}>
-                {`${totalCached.toLocaleString()} (${cacheRate.toFixed(1)}%)`}
-              </text>
-            </Row>
-          )}
-
-          {Object.keys(metrics.models).length > 0 && (
-            <box flexDirection="column">
-              <SectionTitle>Models</SectionTitle>
-              {Object.entries(metrics.models).map(([name, m], i) => (
-                <box key={name} flexDirection="row">
-                  <text fg={SERIES_COLORS[i % SERIES_COLORS.length]}>
-                    {`${ICON.CIRCLE_FILLED} `}
-                  </text>
-                  <text fg={C.text}>{`${name} `}</text>
-                  <text fg={C.dim}>
-                    {`${m.api.totalRequests} reqs · in=${fmtTokens(m.tokens.prompt)} · out=${fmtTokens(m.tokens.candidates)}`}
-                  </text>
-                </box>
-              ))}
-            </box>
-          )}
-        </box>
+        <scrollbox ref={scrollRef} height={bodyRows} stickyScroll={false}>
+          {body}
+        </scrollbox>
       )}
 
       <box marginTop={1}>
-        <text fg={C.dim}>{'tab · esc'}</text>
+        <text fg={C.dim}>
+          {bodyRows === undefined ? 'tab · esc' : 'tab · ↑↓ scroll · esc'}
+        </text>
       </box>
     </box>
   );

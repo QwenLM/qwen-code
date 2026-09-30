@@ -196,6 +196,7 @@ vi.mock('./dialogs-modes.js', () => ({
   OpenTuiOutputStyleDialog: mocks.stub('output-style'),
 }));
 vi.mock('./dialogs-stats-skills.js', () => ({
+  computeStatsBodyRows: (height: number) => Math.max(3, height - 19),
   OpenTuiStatsDialog: mocks.stub('stats'),
   OpenTuiSkillsDialog: mocks.stub('skills_manage'),
 }));
@@ -458,6 +459,12 @@ describe('OpenTuiDialogMount routing', () => {
     expect(helpOverlay().scroll).toBe(9);
     send('pageup');
     expect(helpOverlay().scroll).toBe(0);
+  });
+
+  it('gives standalone /stats a scroll budget from the terminal height', () => {
+    mocks.state.terminalHeight = 30;
+    mount({ dialog: 'stats' });
+    expect(mocks.state.dialogProps['stats']?.['bodyRows']).toBe(11);
   });
 
   it('closes the help overlay on escape', () => {

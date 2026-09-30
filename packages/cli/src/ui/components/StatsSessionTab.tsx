@@ -5,7 +5,9 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { useLayoutEffect, useRef, useState } from 'react';
+import { Box, Text, measureElement, type DOMElement } from 'ink';
+import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { fmtTokens, getSeriesColors } from './stats-helpers.js';
@@ -21,7 +23,18 @@ import {
 } from '../utils/displayUtils.js';
 import { t } from '../../i18n/index.js';
 
-export const SessionTab: React.FC = () => {
+interface SessionTabProps {
+  /**
+   * Rows available for the tab. When set and the content is taller, the tab
+   * scrolls with up/down/pageup/pagedown instead of being clipped by the host.
+   */
+  height?: number;
+}
+
+export const SessionTab: React.FC<SessionTabProps> = ({ height }) => {
+  const contentRef = useRef<DOMElement>(null);
+  const [contentHeight, setContentHeight] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
   const SERIES_COLORS = getSeriesColors();
   const { stats } = useSessionStats();
   const { metrics } = stats;
@@ -68,7 +81,47 @@ export const SessionTab: React.FC = () => {
 
   const labelWidth = 28;
 
-  return (
+  // Re-measure after every render: the content height depends on metrics that
+  // change independently of `height`. The state update is skipped when equal.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (height === undefined || !contentRef.current) return;
+    const measured = measureElement(contentRef.current).height;
+    setContentHeight((prev) => (prev === measured ? prev : measured));
+  });
+
+  // One row of the budget is reserved for the scroll hint when it overflows.
+  const overflowing = height !== undefined && contentHeight > height;
+  const viewportHeight =
+    height === undefined
+      ? undefined
+      : Math.max(1, height - (overflowing ? 1 : 0));
+  const maxScroll =
+    viewportHeight === undefined
+      ? 0
+      : Math.max(0, contentHeight - viewportHeight);
+  const offset = Math.min(scrollOffset, maxScroll);
+
+  useKeypress(
+    (key) => {
+      if (viewportHeight === undefined) return;
+      // Functional updaters so several keys handled before a re-render compose.
+      if (key.name === 'up') {
+        setScrollOffset((prev) => Math.max(0, Math.min(prev, maxScroll) - 1));
+      } else if (key.name === 'down') {
+        setScrollOffset((prev) => Math.min(maxScroll, prev + 1));
+      } else if (key.name === 'pageup') {
+        setScrollOffset((prev) =>
+          Math.max(0, Math.min(prev, maxScroll) - viewportHeight),
+        );
+      } else if (key.name === 'pagedown') {
+        setScrollOffset((prev) => Math.min(maxScroll, prev + viewportHeight));
+      }
+    },
+    { isActive: height !== undefined },
+  );
+
+  const content = (
     <Box flexDirection="column">
       {/* Session ID */}
       <Box>
@@ -298,6 +351,26 @@ export const SessionTab: React.FC = () => {
             </Box>
           ))}
         </Box>
+      )}
+    </Box>
+  );
+
+  if (height === undefined) return content;
+
+  return (
+    <Box flexDirection="column">
+      <Box height={viewportHeight} overflowY="hidden" flexDirection="column">
+        <Box
+          ref={contentRef}
+          flexShrink={0}
+          flexDirection="column"
+          marginTop={-offset}
+        >
+          {content}
+        </Box>
+      </Box>
+      {overflowing && (
+        <Text color={theme.text.secondary}>{t('Use ↑/↓ to scroll')}</Text>
       )}
     </Box>
   );
