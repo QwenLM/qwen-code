@@ -59,6 +59,11 @@ const SENSITIVE_ATTRIBUTE_KEYS = new Set([
   'error',
   'error.message',
   'error_message',
+  // Kept in step with ERROR_TEXT_PROPERTY_KEYS in qwen-logger.ts: a tool-error
+  // excerpt leads with the command line and working directory. No producer
+  // emits this key today, but log records reach `onEmit` via an `...event`
+  // spread, so the name is scrubbed here rather than trusted to stay unused.
+  'error_excerpt',
   'prompt',
   'function_args',
   'request_text',

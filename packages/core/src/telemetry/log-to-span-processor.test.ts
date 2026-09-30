@@ -171,6 +171,7 @@ describe('LogToSpanProcessor', () => {
         error: 'secret error',
         ['error.message']: 'secret error message',
         error_message: 'secret upstream error',
+        error_excerpt: 'secret error excerpt',
         prompt: 'secret prompt',
         function_args: '{"token":"secret"}',
         request_text: 'secret request',
@@ -187,6 +188,10 @@ describe('LogToSpanProcessor', () => {
     expect(attrs).not.toHaveProperty('error');
     expect(attrs).not.toHaveProperty('error.message');
     expect(attrs).not.toHaveProperty('error_message');
+    // The loop-detection guard now ships a digest instead of a raw excerpt, but
+    // the span path must still scrub the key name if a producer ever sets it —
+    // log records reach onEmit through an `...event` spread (issue #10887).
+    expect(attrs).not.toHaveProperty('error_excerpt');
     expect(attrs).not.toHaveProperty('prompt');
     expect(attrs).not.toHaveProperty('function_args');
     expect(attrs).not.toHaveProperty('request_text');
@@ -210,6 +215,7 @@ describe('LogToSpanProcessor', () => {
         error: 'secret error',
         ['error.message']: 'secret error message',
         error_message: 'secret upstream error',
+        error_excerpt: 'secret error excerpt',
         prompt: 'secret prompt',
         function_args: '{"token":"secret"}',
         request_text: 'secret request',
@@ -225,6 +231,7 @@ describe('LogToSpanProcessor', () => {
     expect(attrs['error']).toBe('secret error');
     expect(attrs['error.message']).toBe('secret error message');
     expect(attrs['error_message']).toBe('secret upstream error');
+    expect(attrs['error_excerpt']).toBe('secret error excerpt');
     expect(attrs['prompt']).toBe('secret prompt');
     expect(attrs['function_args']).toBe('{"token":"secret"}');
     expect(attrs['request_text']).toBe('secret request');
