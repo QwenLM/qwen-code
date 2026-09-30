@@ -27,7 +27,7 @@ import {
   isSDKSystemMessage,
   isSDKResultMessage,
 } from '@qwen-code/sdk';
-import type { Settings } from '../../packages/cli/src/config/settings.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 
 // ============================================================================
 // Core Test Helper Class
@@ -50,14 +50,6 @@ export interface SDKTestHelperOptions {
    */
   chatRecording?: boolean;
 }
-
-// Same default and rationale as TestRig.setup (see
-// integration-tests/test-helper.ts); the `satisfies` tie to the schema keeps
-// this copy honest under a key rename.
-export const E2E_MEMORY_SETTINGS_DEFAULTS = {
-  enableManagedAutoMemory: false,
-  enableManagedAutoDream: false,
-} satisfies Settings['memory'];
 
 /**
  * Helper class for SDK E2E tests
