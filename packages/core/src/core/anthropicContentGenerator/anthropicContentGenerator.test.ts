@@ -176,6 +176,11 @@ describe('AnthropicContentGenerator', () => {
         output_config: { effort: 'medium' },
       });
       if (profile === 'anthropic-manual') {
+        // anthropic-manual + thinking-enabled (the default for an unparseable
+        // alias like 'company-alias') forces temperature: 1 — see the
+        // restored guard in buildRequest. PR #12958 round-1 review caught
+        // that removing this guard introduced a 400 on Claude <4.6 for
+        // callers who set samplingParams.temperature: 0.
         expect(anthropicState.lastCreateArgs?.[0]).toMatchObject({
           temperature: 1,
         });

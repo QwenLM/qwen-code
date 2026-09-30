@@ -74,6 +74,9 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       expect.objectContaining({
         purpose: 'auto-memory-recall',
         config: { temperature: 0 },
+        // Deterministic recall selection preserved (round-2 review on PR #12958).
+        // Without the explicit value, the same recall against unchanged state
+        // could inject different document sets across identical turns.
       }),
     );
   });
@@ -227,6 +230,9 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       expect.objectContaining({
         purpose: 'auto-memory-recall',
         config: { temperature: 0 },
+        // Deterministic recall selection preserved (round-2 review on PR #12958).
+        // Without the explicit value, the same recall against unchanged state
+        // could inject different document sets across identical turns.
       }),
     );
     expect(
@@ -252,6 +258,9 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       expect.objectContaining({
         purpose: 'auto-memory-recall',
         config: { temperature: 0 },
+        // Deterministic recall selection preserved (round-2 review on PR #12958).
+        // Without the explicit value, the same recall against unchanged state
+        // could inject different document sets across identical turns.
       }),
     );
     expect(

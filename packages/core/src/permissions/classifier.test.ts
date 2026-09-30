@@ -318,6 +318,8 @@ describe('classifier configuration', () => {
         thinkingConfig?: { includeThoughts?: boolean };
       };
     };
+    // temperature: 0 preserved at the permission-classifier security gate;
+    // see Risk & Scope in PR #12958 for the maintainer sign-off path.
     expect(opts.config?.temperature).toBe(0);
     expect(opts.config?.maxOutputTokens).toBe(256);
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);

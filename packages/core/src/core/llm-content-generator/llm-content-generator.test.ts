@@ -142,7 +142,6 @@ describe('LlmContentGenerator', () => {
       expect.objectContaining({
         ...request,
         config: expect.objectContaining({
-          temperature: 1,
           topP: 0.95,
           thinkingConfig: {
             includeThoughts: true,
@@ -151,6 +150,11 @@ describe('LlmContentGenerator', () => {
         }),
       }),
     );
+    // #12928: hard-coded temperature default removed; the field is omitted
+    // unless the caller supplied a temperature via configSamplingParams.
+    const llmCallArgs =
+      mockGoogleGenAI.models.generateContent.mock.calls[0]?.[0];
+    expect(llmCallArgs?.config).not.toHaveProperty('temperature');
     expect(mockReportLlmRequest).toHaveBeenCalledWith(
       mockGoogleGenAI.models.generateContent.mock.calls[0][0],
     );
@@ -452,7 +456,6 @@ describe('LlmContentGenerator', () => {
       expect.objectContaining({
         ...request,
         config: expect.objectContaining({
-          temperature: 1,
           topP: 0.95,
           thinkingConfig: {
             includeThoughts: true,
@@ -461,6 +464,11 @@ describe('LlmContentGenerator', () => {
         }),
       }),
     );
+    // #12928: hard-coded temperature default removed; the field is omitted
+    // unless the caller supplied a temperature via configSamplingParams.
+    const llmStreamCallArgs =
+      mockGoogleGenAI.models.generateContentStream.mock.calls[0]?.[0];
+    expect(llmStreamCallArgs?.config).not.toHaveProperty('temperature');
     expect(mockReportLlmRequest).toHaveBeenCalledWith(
       mockGoogleGenAI.models.generateContentStream.mock.calls[0][0],
     );
