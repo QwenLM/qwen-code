@@ -33,6 +33,19 @@ describe('keyToAnsi', () => {
     expect(keyToAnsi(key({ name: 'home' }))).toBe('\x1b[H');
   });
 
+  it.each([
+    ['escape', '\x1b'],
+    ['tab', '\t'],
+    ['backspace', '\x7f'],
+    ['return', '\r'],
+  ])(
+    'pins the literal mapping for %s with and without Ctrl',
+    (name, expected) => {
+      expect(keyToAnsi(key({ name }))).toBe(expected);
+      expect(keyToAnsi(key({ name, ctrl: true }))).toBe(expected);
+    },
+  );
+
   // ShellInputPrompt forwards every key it does not claim to the pty, so a
   // Ctrl modifier on a named key must not be mistaken for a Ctrl + letter.
   // Ctrl+Down and Ctrl+Delete produced 0x04 (EOF) and Ctrl+Left produced a
