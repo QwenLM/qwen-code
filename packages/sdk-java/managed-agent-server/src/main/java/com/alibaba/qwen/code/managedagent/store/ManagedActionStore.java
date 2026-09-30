@@ -56,14 +56,22 @@ public class ManagedActionStore {
     }
 
     public void requireOwner(String tenantId, String sessionId, String actorId) {
-        if (actorId == null
+        byte[] key;
+        try {
+            key = actorId == null
+                    ? null : ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        } catch (IllegalArgumentException error) {
+            throw new ApiException(HttpStatus.FORBIDDEN,
+                    "actor_scope_mismatch", "Authenticated actor scope is invalid.");
+        }
+        if (key == null
                 || jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
                                         + " tenant_id = ? AND session_id = ? AND actor_id = ?",
                                 Integer.class,
                                 tenantId,
                                 sessionId,
-                                ManagedWorkspaceRegistry.actorKey(tenantId, actorId))
+                                key)
                         != 1) {
             throw new ApiException(
                     HttpStatus.FORBIDDEN,
