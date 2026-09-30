@@ -120,6 +120,12 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(ApiModels.PermissionResponse.class, List.of("PermissionResponse")),
+                    entry(ApiModels.WebShellPermissionResponse.class, List.of("WebShellPermissionResponse")),
+                    entry(ApiModels.WebShellActionQueryRequest.class, List.of("WebShellActionQueryRequest")),
+                    entry(ApiModels.WebShellActionGetRequest.class, List.of("WebShellActionGetRequest")),
+                    entry(ApiModels.WebShellActionRespondRequest.class, List.of("WebShellActionRespondRequest")),
+                    entry(ApiModels.PublicActionList.class, List.of("PublicActionList")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -174,7 +180,7 @@ class ManagedAgentApiContractTest {
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
-                            "WebShellTaskPage")),
+                            "WebShellTaskPage", "WebShellActionPage")),
                     entry(PublicTask.class, List.of("PublicTask")),
                     entry(WebShellTask.class, List.of("WebShellTask")),
                     entry(WebShellTaskQueryRequest.class,
@@ -890,6 +896,7 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchangeActions(drift, tenant);
         exchangeTasks(drift, tenant, otherTenant);
         String mcpCatalog = exchange(drift, "getSessionMcpCatalog", 200,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
@@ -913,6 +920,32 @@ class ManagedAgentApiContractTest {
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    private void exchangeActions(Map<String, String> drift, String tenant) throws Exception {
+        String session = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "actions-contract"),
+                "{\"agent_id\":\"qwen-code\",\"input\":[]}")).path("id").asText();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key, request_digest, session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                tenant, "actor-a".getBytes(StandardCharsets.UTF_8), "actions-owner", "sha256:fixture", session, System.currentTimeMillis());
+        ActionJournal journal = new ActionJournal(sessionStore, tenant, session,
+                System.currentTimeMillis(), System.currentTimeMillis() + 600000);
+        journal.change("requested", null);
+        var actor = actor(tenant);
+        String path = "/v1/agents/sessions/" + session + "/actions";
+        exchange(drift, "listSessionActions", 200, get(path).header(TENANT, tenant), null);
+        exchange(drift, "getSessionAction", 200, get(path + "/" + journal.id).header(TENANT, tenant), null);
+        String lookup = "{\"sessionId\":\"%s\",\"actionId\":\"%s\"}".formatted(session, journal.id);
+        exchange(drift, "queryWebShellActions", 200, post(WEB_SHELL + "/actions/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(session));
+        exchange(drift, "getWebShellAction", 200, post(WEB_SHELL + "/actions/get").header(TENANT, tenant), lookup);
+        String body = "{\"kind\":\"permission\",\"input_revision\":1,\"policy_revision\":\"hosted-tool-approval/1\",\"option_id\":\"allow\"}";
+        exchange(drift, "respondToSessionAction", 202, post(path + "/" + journal.id + "/responses")
+                .header(TENANT, tenant).principal(actor).header(IDEMPOTENCY_KEY, "contract-answer"), body);
+        exchange(drift, "respondWebShellAction", 202, post(WEB_SHELL + "/actions/respond").header(TENANT, tenant).principal(actor),
+                "{\"sessionId\":\"%s\",\"actionId\":\"%s\",\"requestId\":\"action-trace\",\"idempotencyKey\":\"contract-answer\",\"response\":{\"kind\":\"permission\",\"inputRevision\":1,\"policyRevision\":\"hosted-tool-approval/1\",\"optionId\":\"allow\"}}".formatted(session, journal.id));
+        journal.change("cancelled", null);
     }
 
     /**
@@ -1186,7 +1219,7 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true,"session_lifecycle":true,"tasks":true}
+                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -1202,7 +1235,7 @@ class ManagedAgentApiContractTest {
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
                 assertThat(other.get("capabilities"))
-                        .isEqualTo(json("{\"tasks\":true}"));
+                        .isEqualTo(json("{\"tasks\":true,\"actions\":false}"));
             }
         }
 
