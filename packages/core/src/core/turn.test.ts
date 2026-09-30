@@ -1870,9 +1870,7 @@ describe('Turn', () => {
           event.type === LlmEventType.ToolCallRequest,
       );
       expect(toolCallEvent).toBeDefined();
-      expect(toolCallEvent!.value).not.toHaveProperty(
-        'hadIncompleteArguments',
-      );
+      expect(toolCallEvent!.value).not.toHaveProperty('hadIncompleteArguments');
       expect(turn.pendingToolCalls).toHaveLength(1);
       expect(turn.pendingToolCalls[0]).not.toHaveProperty(
         'hadIncompleteArguments',
