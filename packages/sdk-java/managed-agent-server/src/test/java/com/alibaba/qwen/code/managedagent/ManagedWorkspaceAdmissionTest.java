@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -535,11 +536,14 @@ class ManagedWorkspaceAdmissionTest {
         String tenant = "tenant-" + UUID.randomUUID();
         String otherTenant = "tenant-" + UUID.randomUUID();
         // Each Workspace differs from the admitted one in exactly one guard.
-        registerFrozen(tenant, "ws-valid", "storage-valid",
+        register(tenant, "ws-valid", "storage-valid",
+                WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        registerFrozen(tenant, "ws-policy", "storage-policy",
+        register(tenant, "ws-policy", "storage-policy",
+                WorkspaceExecutionProfile.CONFIG_REF,
                 "preapproved-workspace-tools/2");
-        registerFrozen(tenant, "ws-tenant", "storage-shared",
+        register(tenant, "ws-tenant", "storage-shared",
+                WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         for (String workspace : List.of("ws-valid", "ws-policy", "ws-tenant")) {
             grant(tenant, workspace, "actor-a", true);
@@ -565,12 +569,17 @@ class ManagedWorkspaceAdmissionTest {
         String digest = "sha256:" + "a".repeat(64);
 
         for (String workspace : List.of("ws-policy", "ws-tenant")) {
-            assertThatThrownBy(() -> transaction.execute(status ->
+            // Captured first so the label survives when nothing is thrown.
+            Throwable thrown = catchThrowable(() -> transaction.execute(status ->
                     gated.insertWorkspaceSessionCommand(tenant, "actor-a",
                             workspace, digest, "qwen-code", null, null, input,
-                            digest, new WorkspaceSelection(workspace, "."))))
-                    .as(workspace)
+                            digest, new WorkspaceSelection(workspace, "."))));
+            assertThat(thrown).as(workspace)
                     .isInstanceOfSatisfying(ApiException.class, error -> {
+                        // The store's message, not the registry's "Workspace is
+                        // unavailable.", ties the refusal to the store guard.
+                        assertThat(error.getMessage()).isEqualTo(
+                                "Hosted Workspace execution is not available.");
                         assertThat(error.getStatus())
                                 .isEqualTo(HttpStatus.CONFLICT);
                         assertThat(error.getCode())
@@ -831,22 +840,16 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     private void register(String tenant, String id, String storageId) {
-        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
-                        + " workspace_id, workspace_generation, storage_id,"
-                        + " display_name, config_ref, policy_ref, state)"
-                        + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')",
-                tenant, id, storageId, id, "config-" + id,
-                "policy-" + id);
+        register(tenant, id, storageId, "config-" + id, "policy-" + id);
     }
 
-    private void registerFrozen(String tenant, String id, String storageId,
-            String policyRef) {
+    private void register(String tenant, String id, String storageId,
+            String configRef, String policyRef) {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')",
-                tenant, id, storageId, id,
-                WorkspaceExecutionProfile.CONFIG_REF, policyRef);
+                tenant, id, storageId, id, configRef, policyRef);
     }
 
     private void grant(String tenant, String workspaceId, String actorId,
