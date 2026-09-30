@@ -1738,9 +1738,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Runnable fence = () -> {
             renewal.close();
             releaseOperationQuietly(bindingId, operationGeneration);
-            operation.completeExceptionally(unavailable(
-                    "runtime_broker_reconcile_timeout",
-                    "Managed Runtime reconciliation timed out."));
+            operation.completeExceptionally(reconcileTimeout());
         };
         // The reclaim keeps the claim alive with its own inline renewals,
         // so when the loop hands a lost binding over, the handoff gets a
@@ -1784,8 +1782,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             long operationGeneration, BindingRenewal renewal,
             long deadlineNanos, int attempt, Runnable rearmDeadline) {
         if (System.nanoTime() >= deadlineNanos) {
-            return failed(unavailable("runtime_broker_reconcile_timeout",
-                    "Managed Runtime reconciliation timed out."));
+            return failed(reconcileTimeout());
         }
         RuntimeBindingRecord current = bindingRepository.findById(bindingId);
         if (current == null || current.getOperationGeneration()
@@ -1839,10 +1836,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     switch (step.kind()) {
                         case RETRY: {
                             if (System.nanoTime() >= deadlineNanos) {
-                                return failed(unavailable(
-                                        "runtime_broker_reconcile_timeout",
-                                        "Managed Runtime reconciliation "
-                                                + "timed out."));
+                                return failed(reconcileTimeout());
                             }
                             long delay = Math.min(2_000,
                                     50L << Math.min(attempt, 6));
@@ -1940,7 +1934,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 seed.getToken(), observation.getLeaseId(),
                 observation.getEpoch());
         return mapFailure(safeStage(() -> transport.attest(lease, request,
-                seed)), "runtime_broker_recovery_failed",
+                seed))
+                        .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
+                        .exceptionally(error -> {
+                            throw mapStepTimeout(error);
+                        }), "runtime_broker_recovery_failed",
                 "Managed Runtime attestation failed")
                 .whenComplete((ignored, error) -> {
                     Throwable cause = unwrap(error);
@@ -2058,8 +2056,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 // so the caller retries instead of proceeding
                                 // without the observation.
                                 if (unwrap(error) instanceof TimeoutException) {
-                                    throw unavailable("runtime_broker_reconcile_timeout",
-                                            "Managed Runtime reconciliation timed out.");
+                                    throw mapStepTimeout(error);
                                 }
                                 return null;
                             });
@@ -2121,6 +2118,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return renewed;
     }
 
+    /** The one identity for "the reconciliation ran out of time" — the fault-gate predicates key on it. */
+    private static RuntimeBrokerException reconcileTimeout() {
+        return unavailable("runtime_broker_reconcile_timeout",
+                "Managed Runtime reconciliation timed out.");
+    }
+
     /**
      * Names a step the cleanup bound cut short, so callers see a named,
      * retryable reconcile timeout rather than a raw {@link TimeoutException};
@@ -2128,8 +2131,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
      */
     private RuntimeException mapStepTimeout(Throwable error) {
         if (unwrap(error) instanceof TimeoutException) {
-            return unavailable("runtime_broker_reconcile_timeout",
-                    "Managed Runtime reconciliation timed out.");
+            return reconcileTimeout();
         }
         return error instanceof RuntimeException runtime
                 ? runtime : new CompletionException(error);
@@ -3456,7 +3458,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             // stopped is per-instance: cancel(false) cannot retract a tick
             // already waiting on this monitor, so once close() ran the tick
             // must return here rather than renew a claim its owner has
-            // started renewing inline.
+            // started renewing inline. The window it closes — a tick
+            // dispatched while another holder sits on this monitor — cannot
+            // be staged deterministically in a test (monitor entry order is
+            // unspecified), so the flag is unpinned by a mutation witness.
             if (stopped.get() || closed.get()) {
                 close();
                 return;
