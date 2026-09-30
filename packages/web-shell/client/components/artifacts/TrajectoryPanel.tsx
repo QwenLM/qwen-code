@@ -53,6 +53,7 @@ import { TrajectoryInspector } from './TrajectoryInspector';
 import styles from './TrajectoryPanel.module.css';
 import {
   buildTrajectoryLayout,
+  type TrajectoryLayout,
   trajectoryRowsInRange,
   visibleTrajectoryRows,
   visibleTrajectoryAncestor,
@@ -377,19 +378,33 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [trajectory],
   );
   const [collapseState, setCollapseState] = useState<{
-    of: Trajectory;
+    of: TrajectoryLayout;
     loader: TrajectoryPageLoader | undefined;
     keys: Set<string>;
   }>();
-  const collapsed = useMemo(
-    () =>
-      collapseState !== undefined &&
-      collapseState.of === trajectory &&
-      collapseState?.loader === loadPage
-        ? collapseState.keys
-        : new Set<string>(),
-    [collapseState, trajectory, loadPage],
-  );
+  const collapsed = useMemo(() => {
+    if (!layout || !collapseState || collapseState.loader !== loadPage)
+      return new Set<string>();
+    if (collapseState.of === layout) return collapseState.keys;
+    return new Set(
+      [...collapseState.keys].filter((key) => {
+        const identity = layout.groupIdentities.get(key);
+        return (
+          identity !== undefined &&
+          identity === collapseState.of.groupIdentities.get(key)
+        );
+      }),
+    );
+  }, [collapseState, layout, loadPage]);
+  useEffect(() => {
+    if (
+      collapseState &&
+      (collapseState.of !== layout || collapseState.loader !== loadPage)
+    )
+      setCollapseState(
+        layout ? { of: layout, loader: loadPage, keys: collapsed } : undefined,
+      );
+  }, [collapseState, layout, loadPage, collapsed]);
   const rangeRows = useMemo(
     () => (layout ? trajectoryRowsInRange(layout, inRange) : []),
     [layout, inRange],
@@ -447,7 +462,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       const keys = new Set(collapsed);
       if (keys.has(key)) keys.delete(key);
       else keys.add(key);
-      setCollapseState({ of: trajectory, loader: loadPage, keys });
+      setCollapseState({ of: layout, loader: loadPage, keys });
       scrollRef.current?.focus({ preventScroll: true });
     },
     [trajectory, layout, visualRows, collapsed, loadPage],
@@ -719,7 +734,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         const keys = new Set(collapsed);
         for (const parent of layout.ancestors.get(rowKey) ?? [])
           keys.delete(parent);
-        setCollapseState({ of: trajectory, loader: loadPage, keys });
+        setCollapseState({ of: layout, loader: loadPage, keys });
         selectRow(rowKey);
         return;
       }

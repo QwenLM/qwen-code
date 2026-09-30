@@ -195,7 +195,7 @@ function toolCall(
 
 function timingFrame(
   timing: Record<string, unknown>,
-  recordId: string,
+  recordId?: string,
 ): DaemonEvent {
   return {
     v: 1,
@@ -1466,7 +1466,7 @@ describe('collapsible trajectory', () => {
     ).not.toBeNull();
   });
 
-  it('retains a failed-refresh fold and resets it on a successful new snapshot', async () => {
+  it('retains stable request folds across failed and successful refreshes', async () => {
     let fail = false;
     const container = await render(async () =>
       fail ? page([], { replayError: 'offline' }) : page(events()),
@@ -1481,6 +1481,111 @@ describe('collapsible trajectory', () => {
     expect(fold(container).getAttribute('aria-expanded')).toBe('false');
     fail = false;
     await act(async () => refresh());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('retains stable turn folds when older turns enter the refreshed window', async () => {
+    let older = false;
+    const container = await render(async () =>
+      page([
+        ...(older ? [userText('Older prompt', 'older-user')] : []),
+        ...events(),
+      ]),
+    );
+    const turnButton = () =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid="trajectory-turn"]',
+        ),
+      )
+        .find((row) => row.textContent?.includes('Inspect a file'))!
+        .querySelector<HTMLButtonElement>('button')!;
+    await act(async () => turnButton().click());
+    expect(turnButton().getAttribute('aria-expanded')).toBe('false');
+    older = true;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click(),
+    );
+    expect(turnButton().getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).toContain('Older prompt');
+    expect(
+      container.querySelector('[data-testid="trajectory-row-tool"]'),
+    ).toBeNull();
+  });
+
+  it.each(['request', 'turn'])(
+    'resets a reused positional %s fold after refresh',
+    async (group) => {
+      let newer = false;
+      const container = await render(async () =>
+        page([
+          timingFrame({
+            kind: 'request',
+            durationMs: 1000,
+            model: newer ? 'New model' : 'Old model',
+          }),
+          toolCall(
+            newer ? 'new-call' : 'old-call',
+            'read_file',
+            newer ? 'New tool' : 'Old tool',
+            newer ? 'new-tool' : 'old-tool',
+          ),
+        ]),
+      );
+      const button =
+        group === 'request'
+          ? fold(container)
+          : container.querySelector<HTMLButtonElement>(
+              '[data-testid="trajectory-turn"] button',
+            )!;
+      await act(async () => button.click());
+      expect(
+        container.querySelector('[data-testid="trajectory-row-tool"]'),
+      ).toBeNull();
+      newer = true;
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+          .click(),
+      );
+      expect(container.textContent).toContain('New model');
+      expect(container.textContent).toContain('New tool');
+      expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+    },
+  );
+
+  it('drops removed groups and does not restore their folds when they return', async () => {
+    let present = true;
+    const container = await render(async () =>
+      page(present ? events() : [userText('Inspect a file', 'fold-user')]),
+    );
+    await act(async () => fold(container).click());
+    const refresh = () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!
+        .click();
+    present = false;
+    await act(async () => refresh());
+    expect(
+      container.querySelector('[data-testid="trajectory-row-request"]'),
+    ).toBeNull();
+    present = true;
+    await act(async () => refresh());
+    expect(fold(container).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('resets stable folds when the session loader changes', async () => {
+    const container = await render(async () => page(events()));
+    await act(async () => fold(container).click());
+    await act(async () =>
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <TrajectoryPanel loadPage={async () => page(events())} />
+        </I18nProvider>,
+      ),
+    );
     expect(fold(container).getAttribute('aria-expanded')).toBe('true');
   });
 });

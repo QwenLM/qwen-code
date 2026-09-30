@@ -6,11 +6,13 @@
 import { describe, expect, it } from 'vitest';
 import { buildTimeline } from './buildTimeline';
 import { summarizeTrajectory } from './summarizeTrajectory';
+import { buildTrajectory } from './buildTrajectory';
 import type {
   Trajectory,
   TrajectoryRow,
   TrajectoryToolRow,
   TrajectoryRequestRow,
+  TrajectoryEntry,
 } from './types';
 import {
   buildTrajectoryLayout,
@@ -61,6 +63,134 @@ function windowOf(rows: TrajectoryRow[]): Trajectory {
 }
 
 describe('trajectory layout', () => {
+  it('folds nested subagents into their main request through recorded tool parents', () => {
+    const spawn = (callId: string, parent?: string): TrajectoryEntry => ({
+      kind: 'block',
+      block: {
+        kind: 'tool',
+        id: `block-${callId}`,
+        toolCallId: callId,
+        status: 'completed',
+        title: callId,
+        toolName: 'task',
+        clientReceivedAt: 0,
+        createdAt: 0,
+        updatedAt: 0,
+        ...(parent
+          ? { parentToolCallId: parent, parentBlockId: `block-${parent}` }
+          : {}),
+      },
+    });
+    const timing = (
+      recordId: string,
+      subagentId?: string,
+    ): TrajectoryEntry => ({
+      kind: 'timing',
+      recordId,
+      timing: {
+        kind: 'request',
+        durationMs: 1000,
+        ...(subagentId ? { subagentId } : {}),
+      },
+    });
+    const trajectory = buildTrajectory([
+      timing('main'),
+      spawn('root'),
+      timing('child', 'general-purpose-root'),
+      spawn('nested', 'root'),
+      timing('grandchild', 'general-purpose-nested'),
+    ]);
+    const layout = buildTrajectoryLayout(trajectory);
+    expect(
+      trajectory.rows.find((row) => row.key === 'req:grandchild'),
+    ).toMatchObject({
+      parentToolCallId: 'nested',
+      depth: 1,
+    });
+    expect(layout.ancestors.get('req:grandchild')).toEqual([
+      'turn:ordinal:1',
+      'req:main',
+    ]);
+    expect(layout.unresolvedParents.size).toBe(0);
+    expect(
+      visibleTrajectoryRows(layout, layout.rows, new Set(['req:main'])).map(
+        (row) => row.key,
+      ),
+    ).toEqual(['turn:ordinal:1', 'req:main']);
+    expect(
+      trajectoryRowsInRange(layout, new Set(['req:grandchild'])).map(
+        (row) => row.key,
+      ),
+    ).toEqual(['turn:ordinal:1', 'req:main', 'req:grandchild']);
+  });
+
+  it('rejects cycles and ambiguous intermediate parents', () => {
+    const nested = (key: string, parentToolCallId: string) => ({
+      ...tool(key),
+      depth: 1,
+      block: { ...tool(key).block, parentToolCallId },
+    });
+    const child = (key: string, parentToolCallId: string) => ({
+      ...request(key),
+      depth: 1,
+      parentToolCallId,
+    });
+    const layout = buildTrajectoryLayout(
+      windowOf([
+        request('r1'),
+        tool('root'),
+        nested('a', 'b'),
+        nested('b', 'a'),
+        child('cyclic', 'a'),
+        {
+          ...nested('duplicate1', 'root'),
+          block: {
+            ...nested('duplicate1', 'root').block,
+            toolCallId: 'duplicate',
+          },
+        },
+        {
+          ...nested('duplicate2', 'root'),
+          block: {
+            ...nested('duplicate2', 'root').block,
+            toolCallId: 'duplicate',
+          },
+        },
+        child('ambiguous', 'duplicate'),
+        child('missing', 'absent'),
+      ]),
+    );
+    for (const key of ['a', 'b', 'cyclic', 'ambiguous', 'missing']) {
+      expect(layout.unresolvedParents.has(key)).toBe(true);
+      expect(layout.ancestors.get(key)).toEqual(['turn:ordinal:1']);
+    }
+    expect(layout.ancestors.get('duplicate1')).toEqual([
+      'turn:ordinal:1',
+      'r1',
+    ]);
+  });
+
+  it('tracks only unique persisted identities for refreshing folds', () => {
+    const trajectory = windowOf([
+      { ...request('r1'), recordId: 'record' },
+      tool('root'),
+      { ...request('r2', 2), responseId: 'response' },
+      { ...tool('second'), requestIndex: 2 },
+      request('req:0', 3),
+      { ...tool('fallback'), requestIndex: 3 },
+    ]);
+    const layout = buildTrajectoryLayout(trajectory);
+    expect([...layout.groupIdentities]).toEqual([
+      ['r1', 'request-record:record'],
+      ['r2', 'request-response:response'],
+    ]);
+    trajectory.rows.push({ ...request('duplicate', 4), recordId: 'record' });
+    trajectory.turns[0]!.rowKeys.push('duplicate');
+    expect(buildTrajectoryLayout(trajectory).groupIdentities.has('r1')).toBe(
+      false,
+    );
+  });
+
   it('keeps interleaved wire order and collapses known request membership', () => {
     const child = { ...request('child'), depth: 1, parentToolCallId: 'spawn' };
     const trajectory = windowOf([
