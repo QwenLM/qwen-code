@@ -856,6 +856,110 @@ describe('ToolCallTool', () => {
       }
     });
 
+    // Same tolerance one level down: todo_write's item schema declares
+    // additionalProperties: false while its own validateToolParams only
+    // type-checks the known keys, so a nested surplus key must not trip the
+    // pre-check either.
+    const makeTodoLike = (Tool: typeof MockTool = MockTool) =>
+      new Tool({
+        name: 'todo_like',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: {
+            todos: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  content: { type: 'string' },
+                  status: { type: 'string', enum: ['pending', 'completed'] },
+                },
+                required: ['id', 'content', 'status'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['todos'],
+          additionalProperties: false,
+        },
+      });
+
+    it('leaves nested surplus-key enforcement to the target without changing its schema', async () => {
+      // Mutation check: relaxing only the top-level additionalProperties
+      // turns this red with "must NOT have additional properties".
+      class LenientTool extends MockTool {
+        override validateToolParams(): string | null {
+          return null;
+        }
+      }
+      for (const Tool of [MockTool, LenientTool]) {
+        const target = makeTodoLike(Tool);
+        const result = await resolveDeferredToolCall(
+          makeRegistry([target], new Set([target.name])),
+          {
+            name: target.name,
+            arguments: {
+              todos: [
+                {
+                  id: '1',
+                  content: 'write the test',
+                  status: 'pending',
+                  priority: 'high',
+                },
+              ],
+            },
+          },
+        );
+        expect(result).not.toHaveProperty('error');
+        expect(JSON.stringify(target.schema.parametersJsonSchema)).toContain(
+          '"additionalProperties":false',
+        );
+        if ('tool' in result) {
+          const build = () => result.tool.build(result.arguments);
+          if (Tool === MockTool) {
+            expect(build).toThrow('must NOT have additional properties');
+          } else {
+            expect(build).not.toThrow();
+          }
+        }
+      }
+    });
+
+    it('still refuses nested schema violations when surplus keys are tolerated', async () => {
+      const target = makeTodoLike();
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        {
+          name: target.name,
+          arguments: {
+            todos: [
+              {
+                id: '1',
+                content: 'write the test',
+                status: 'bogus',
+                priority: 'high',
+              },
+            ],
+          },
+        },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'todo_like',
+      });
+      if ('error' in result) {
+        expect(
+          result.error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+        ).toBe(true);
+        expect(result.error.message).toContain(
+          'must be equal to one of the allowed values',
+        );
+      }
+    });
+
     it('still attributes wrong field types when surplus keys are present', async () => {
       const target = makeWebFetchLike();
       const result = await resolveDeferredToolCall(

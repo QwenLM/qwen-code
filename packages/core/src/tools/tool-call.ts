@@ -310,14 +310,17 @@ export async function resolveDeferredToolCall(
   if (!options?.wasOutputTruncated && !preCheckSuppressed) {
     try {
       const argsClone = structuredClone(invocation.params.arguments);
-      const schemaClone = structuredClone(
-        target.schema.parametersJsonSchema,
-      ) as Record<string, unknown>;
       // Some targets deliberately tolerate surplus keys (for example, Agent's
-      // name outside team mode). Leave that decision to their own build().
-      if (schemaClone['additionalProperties'] === false) {
-        schemaClone['additionalProperties'] = true;
-      }
+      // name outside team mode, or todo_write's item-level extra fields).
+      // Leave that decision to their own build(): relax the keyword at every
+      // level, since a nested `additionalProperties: false` (todo_write's
+      // items schema) refuses bridged calls the target's own validator
+      // accepts. The JSON round-trip also deep-clones the schema.
+      const schemaClone = JSON.parse(
+        JSON.stringify(target.schema.parametersJsonSchema, (key, value) =>
+          key === 'additionalProperties' && value === false ? true : value,
+        ),
+      ) as Record<string, unknown>;
       const required = new Set(
         Array.isArray(schemaClone['required']) ? schemaClone['required'] : [],
       );
