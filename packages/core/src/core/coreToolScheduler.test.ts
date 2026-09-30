@@ -11652,6 +11652,72 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
     expect(messages[2]).toContain('RETRY LOOP DETECTED');
   });
+
+  // The Edit guard rejects before buildInvocation, so schema validation never
+  // runs on these calls: at the retry-loop threshold the directive must match
+  // the actual cause (repeated incomplete writes), not the validation-failure
+  // wording that would send the model re-examining a schema it never violated.
+  it('should inject the incomplete-args retry loop directive after repeated incomplete write_file rejections', async () => {
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      writeFileTool,
+      [WriteFileTool.Name],
+    );
+
+    const messages: string[] = [];
+
+    for (let i = 1; i <= 3; i++) {
+      await scheduler.schedule(
+        [
+          {
+            callId: `incomplete-write-file-${i}`,
+            name: WriteFileTool.Name,
+            args: { file_path: '/tmp/test.txt', content: 'partial' },
+            isClientInitiated: false,
+            prompt_id: `prompt-id-write-file-incomplete-${i}`,
+            hadIncompleteArguments: true,
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i);
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      const completedCall = completedCalls?.[0];
+      expect(completedCall?.status).toBe('error');
+      if (completedCall?.status === 'error') {
+        messages.push(completedCall.response.error?.message ?? '');
+      }
+    }
+
+    expect(messages[0]).toContain(
+      'rejected to prevent writing incomplete content',
+    );
+    expect(messages[0]).not.toContain('RETRY LOOP DETECTED');
+    expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
+    // At the threshold, the directive must be the incomplete-args one: the
+    // validation wording would misdiagnose the cause, and the truncation
+    // wording would re-introduce the max_tokens blame #12970 removed.
+    expect(messages[2]).toContain('RETRY LOOP DETECTED');
+    expect(messages[2]).toContain('same incomplete file write');
+    expect(messages[2]).not.toContain('failed validation');
+    expect(messages[2]).not.toContain('truncated');
+  });
 });
 
 describe('CoreToolScheduler Sequential Execution', () => {

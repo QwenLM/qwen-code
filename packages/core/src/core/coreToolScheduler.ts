@@ -1118,10 +1118,10 @@ function getModelFacingToolName(request: ToolCallRequestInfo): string {
   );
 }
 
-// NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
-// LLM-facing prompt directive (injected into the model prompt, not rendered in
-// the TUI). The width-1 glyph rationale used elsewhere in this change does not
-// apply here — these are not terminal strings to "fix" for column width.
+// NOTE: the `⚠` in this and the other RETRY LOOP directives below is part of
+// an LLM-facing prompt directive (injected into the model prompt, not rendered
+// in the TUI). The width-1 glyph rationale used elsewhere in this change does
+// not apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
@@ -1134,6 +1134,12 @@ const TRUNCATION_RETRY_LOOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
   'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
   'or explain to the user that the content is too large to write safely in one call.';
+
+/** Directive injected when an incomplete-args file-modifying call repeats. */
+const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠ RETRY LOOP DETECTED: The same incomplete file write has been rejected multiple times. ' +
+  'STOP resending the entire content in a single call. Write a skeleton first and fill in the rest with ' +
+  'incremental edit calls, or explain to the user why the content cannot be written safely.';
 
 const createErrorResponse = (
   request: ToolCallRequestInfo,
@@ -3214,12 +3220,19 @@ export class CoreToolScheduler {
               reqInfo.name,
               rejectionMessage,
             );
+            // The directive is appended after the rejectionMessage key was
+            // recorded: recordRetryableToolError prunes the tool's other keys,
+            // so folding the directive into the key would reset the count at
+            // the threshold. And the incomplete-args arm must not reuse
+            // RETRY_LOOP_STOP_DIRECTIVE: this guard rejects before
+            // buildInvocation, so validation never ran and "failed validation
+            // ... re-examine the tool schema" would misdiagnose the cause.
             const truncationError = new Error(
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
                 ? `${rejectionMessage}${
                     truncated
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
-                      : RETRY_LOOP_STOP_DIRECTIVE
+                      : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
                   }`
                 : rejectionMessage,
             );
