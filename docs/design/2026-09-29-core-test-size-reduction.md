@@ -30,11 +30,10 @@ guard against future test growth, are separate work.
 | Parameterized scenarios   | One table replaces cases with the same shape                    | Each row's input, expected result and a useful label       |
 | Whole-result expectations | One hand-written expected value replaces scattered assertions   | Expected values independent of the implementation          |
 | Behavioral contracts      | One lifecycle test checks several related outcomes              | Error paths, option propagation, caller wiring             |
-| Measured deletion         | Remove cases whose checks retained tests already make           | Security, permission and data-integrity checks; negatives  |
 
 Helpers, fixtures and snapshots count toward the size. Merged cases lose
 independent failure labels, so one failed assertion can hide later ones; that
-diagnostic cost is accepted.
+diagnostic cost is accepted. No test file is removed.
 
 ## Guardrails
 
@@ -50,39 +49,46 @@ A reduction is kept only if all of these hold:
 - **Mutation:** in sampled modules, at most 1% of the mutants main kills
   survive.
 
-Coverage and mutation data only suggested what to delete; the replays decided.
-
 ## Result
 
-Full Core suite with coverage on both sides, Linux arm64, against main at
-`e767e223c5`:
+All measurements run on Linux arm64 against main at `e767e223c5`.
 
 | Core                       |    Main | This change |            Change |
 | -------------------------- | ------: | ----------: | ----------------: |
-| Test and support lines     | 714,123 |     491,579 | −222,544 (−31.2%) |
-| Test and support bytes     | 24.9 MB |     17.7 MB |            −28.8% |
-| Test files                 |     861 |         721 |              −140 |
-| Test cases                 |  33,691 |      30,753 |    −2,938 (−8.7%) |
-| Production line coverage   |  91.00% |      90.72% |                   |
-| Production branch coverage |  88.65% |      88.12% |                   |
+| Test and support lines     | 714,123 |     535,949 | −178,174 (−25.0%) |
+| Test and support bytes     | 24.9 MB |     19.3 MB |            −22.6% |
+| Test files                 |     861 |         861 |                 0 |
+| Test cases                 |  33,691 |      33,608 |               −83 |
+| Production line coverage   |  91.00% |      90.98% |                   |
+| Production branch coverage |  88.65% |      88.65% |                   |
 
-770 previously covered lines lose coverage: 0.28 points, within the 0.5 budget.
-The largest per-file losses are microcompaction (48 of 760 covered lines),
-memory discovery (43 of 428) and streaming tool-call parsing (34 of 339). The
-suite has no new failures.
+- **Coverage:** 41 previously covered lines lose coverage (0.015 points). 30
+  are in tool-result cleanup, which the client starts without awaiting and
+  which scans the machine's real temp directory; 10 are an Arena fallback that
+  only other tests' timing reaches. Each module's own tests cover the same
+  lines on both sides.
+- **Historical faults:** of 106 past bugs, 91 still re-apply to this main; both
+  sides catch the same 80.
+- **Mutation:** thirteen whole modules, every operator. Of 4,583 mutants,
+  main's tests kill 3,286; this change loses none of those kills and adds 20.
+  The modules are Anthropic usage accounting, workflow budget, XML tool-call
+  fallback, file read cache, model registry, streaming tool-call parsing, retry
+  error classification, microcompaction, memory discovery, hook system, schema
+  validation, session hooks and hook planning.
+- **Cases:** 203 test names in 24 files, mostly hook and schema-validation
+  tests, are merged into fewer tests or removed as exact duplicates.
+- The suite has no new failures.
 
 ## Costs and limits
 
-- Fewer cases and labels make some failures harder to localize.
-- Some formatting, diagnostic, invalid-input and evaluation-style checks were
-  removed.
-- Fault and mutation replays ran stage by stage during the work, not against
-  the latest main. The last deletion stage still caught all 95 historical
-  faults it was measured on and kept all 385 killed mutants in four sampled
-  modules.
+- Merged cases carry fewer labels, so some failures are harder to localize.
+- An earlier stage also deleted or cut 179 test files where coverage suggested
+  overlap. Sandboxed verification showed it lost real checks (7 of 23 sampled
+  mutants survived), so it was reverted: those files are as on main.
 - Measured on Linux arm64; tests skipped there are outside the measurement.
 
 ## Follow-up
 
-Compression alone levels off near 30%. Keeping Core lean needs a check on how
-much test code each change adds.
+- The 179 restored files can be compressed the same way.
+- Compression alone levels off near 30%. Keeping Core lean needs a check on
+  how much test code each change adds.
