@@ -41,6 +41,8 @@ import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -441,8 +443,11 @@ class ToolPublicationStoreTest {
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
     }
 
-    @Test
-    void publishesImmutableSegmentAndResourceUnderOriginalAuthorization() {
+    @ParameterizedTest
+    @ValueSource(strings = {"intact", "partial", "missing-page", "corrupt-page", "missing-segment",
+            "corrupt-segment", "missing-empty-seal"})
+    void publishesImmutableSegmentAndResourceUnderOriginalAuthorization(String damage) {
+        boolean partial = "partial".equals(damage);
         reserve();
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
@@ -478,8 +483,10 @@ class ToolPublicationStoreTest {
                 .path("byteLength").asLong()).isEqualTo(3);
         assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", 1,
                 3, digest("abc")).path("segmentCount").asInt()).isEqualTo(1);
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
-                0, digest(""));
+        if (!partial) {
+            data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
+                    0, digest(""));
+        }
         assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix-2", "stdout")
                 .path("sealed").asBoolean()).isTrue();
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
@@ -513,8 +520,8 @@ class ToolPublicationStoreTest {
                 .put("bindingGeneration", "1").put("captureId", "capture-1")
                 .put("revision", 1).put("executionStatus", "success").put("exitCode", 0)
                 .putNull("signal").put("captureScope", "process_pipes")
-                .put("capturePolicy", "complete_required").put("captureStatus", "complete")
-                .putNull("captureReason").put("upstreamTruncated", false);
+                .put("capturePolicy", "complete_required").put("captureStatus", partial ? "partial" : "complete")
+                .put("captureReason", partial ? "storage_failed" : null).put("upstreamTruncated", false);
         ObjectNode content = JSON.createObjectNode().put("streamId", "stdout")
                 .put("role", "stdout").put("mimeType", "application/octet-stream")
                 .put("state", "sealed").put("byteLength", 3).put("digest", digest("abc"));
@@ -527,7 +534,7 @@ class ToolPublicationStoreTest {
         manifest.putArray("contents").add(content);
         ObjectNode stderr = JSON.createObjectNode().put("streamId", "stderr")
                 .put("role", "stderr").put("mimeType", "application/octet-stream")
-                .put("state", "sealed").put("byteLength", 0).put("digest", digest(""));
+                .put("state", partial ? "incomplete" : "sealed").put("byteLength", 0).put("digest", digest(""));
         stderr.putArray("missingRanges");
         ObjectNode emptyBody = JSON.createObjectNode();
         emptyBody.putArray("pages");
@@ -536,8 +543,8 @@ class ToolPublicationStoreTest {
         JsonNode manifestRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-manifest", "manifest:1", "managed-tool-result-manifest",
                 manifest.toString().getBytes(StandardCharsets.UTF_8));
-        ObjectNode capture = JSON.createObjectNode().put("captureStatus", "complete")
-                .putNull("captureReason").put("previewTruncated", false)
+        ObjectNode capture = JSON.createObjectNode().put("captureStatus", partial ? "partial" : "complete")
+                .put("captureReason", partial ? "storage_failed" : null).put("previewTruncated", false)
                 .put("deliveryStatus", "pending");
         capture.set("manifest", manifestRef);
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
@@ -554,7 +561,7 @@ class ToolPublicationStoreTest {
                 .isEqualTo(((Number) held.get("admission_bytes")).longValue());
         assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
         ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
-                .put("decision", "committed");
+                .put("decision", partial ? "blocked" : "committed");
         outcome.set("envelope", envelope);
         outcome.set("manifestRef", manifestRef);
         ObjectNode history = JSON.createObjectNode()
@@ -569,7 +576,7 @@ class ToolPublicationStoreTest {
         ObjectNode receiptPayload = JSON.createObjectNode().put("executionCallId", "execution-1")
                 .put("historyRevision", sequence + 1);
         receiptPayload.set("toolOutcomeRef", admission);
-        receiptPayload.set("resultRef", manifestRef);
+        receiptPayload.set("resultRef", partial ? JSON.nullNode() : manifestRef);
         receiptPayload.putArray("resources").add(manifestRef);
         String recordBytes = event(sequence + 1, "tool.receipt", receiptPayload) + "{}\n";
         long receiptSequence = sequence + 1;
@@ -589,11 +596,47 @@ class ToolPublicationStoreTest {
         JsonNode committed = admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
         assertThat(committed.path("historyRevision").asLong()).isEqualTo(receiptSequence);
         assertThat(admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit)).isEqualTo(committed);
-        assertThat(data.receiptForBroker(executions.findByExecutionCallId("execution-1"))
-                .path("historyRevision").asLong()).isEqualTo(receiptSequence);
+        JsonNode brokerReceipt = data.receiptForBroker(executions.findByExecutionCallId("execution-1"));
+        assertThat(brokerReceipt.path("deliveryStatus").asText()).isEqualTo(partial ? "blocked" : "committed");
+        if (!partial) {
+            assertThat(brokerReceipt.path("historyRevision").asLong()).isEqualTo(receiptSequence);
+        }
         assertThat(sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN).bytes())
                 .isEqualTo(outcome.toString().getBytes(StandardCharsets.UTF_8));
+        ObjectNode verification = JSON.createObjectNode().put("executionCallId", "execution-1")
+                .put("historyRevision", receiptSequence);
+        verification.set("toolOutcomeRef", admission);
+        verification.set("manifestRef", manifestRef);
+        assertThat(admissions.verifyReceipt(key, WRITER_TOKEN,
+                ToolPublicationContract.readJson(verification.toString().getBytes(StandardCharsets.UTF_8))))
+                .isEqualTo(committed);
+        assertThatThrownBy(() -> admissions.verifyReceipt(key, "wrong-writer-token", verification))
+                .isInstanceOf(ApiException.class);
+        ObjectNode wrongSequence = verification.deepCopy().put("historyRevision", receiptSequence + 1);
+        assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, wrongSequence))
+                .hasMessageContaining("sequence conflicts");
+        ObjectNode wrongExecution = verification.deepCopy().put("executionCallId", "another-execution");
+        assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, wrongExecution))
+                .hasMessageContaining("receipt conflicts");
+        if (partial) return;
+        if (!"intact".equals(damage)) {
+            switch (damage) {
+                case "missing-page" -> jdbc.update("DELETE FROM qwen_tool_publication_object"
+                        + " WHERE slot_key = 'page:stdout:0'");
+                case "corrupt-page" -> jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = ?"
+                        + " WHERE slot_key = 'page:stdout:0'", new byte[]{1});
+                case "missing-segment" -> jdbc.update("DELETE FROM qwen_tool_publication_object"
+                        + " WHERE slot_key = 'segment:stdout:0'");
+                case "corrupt-segment" -> objects.values().iterator().next()[0] = 'z';
+                case "missing-empty-seal" -> jdbc.update("DELETE FROM qwen_tool_publication_seal"
+                        + " WHERE stream_id = 'stderr'");
+                default -> throw new AssertionError(damage);
+            }
+            assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, verification))
+                    .isInstanceOf(IllegalArgumentException.class);
+            return;
+        }
         ObjectNode identity = manifest.deepCopy();
         assertThat(data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef, identity,
                 "stdout", 1, 2)).isEqualTo("bc".getBytes(StandardCharsets.UTF_8));

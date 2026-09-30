@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -17,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -33,6 +35,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -569,6 +572,77 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    void enabledCreationRefusesPolicyDriftAndAnotherTenantsMount() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String otherTenant = "tenant-" + UUID.randomUUID();
+        // Each Workspace differs from the admitted one in exactly one guard.
+        register(tenant, "ws-valid", "storage-valid",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        register(tenant, "ws-policy", "storage-policy",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                "preapproved-workspace-tools/2");
+        register(tenant, "ws-tenant", "storage-shared",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        for (String workspace : List.of("ws-valid", "ws-policy", "ws-tenant")) {
+            grant(tenant, workspace, "actor-a", true);
+        }
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        enabled.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        tenant, "storage-valid", "/unused/valid"),
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        tenant, "storage-policy", "/unused/policy"),
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                        otherTenant, "storage-shared", "/unused/shared")));
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, enabled);
+        // An unproxied store has no @Transactional; creation resolves the
+        // Workspace only inside a transaction, as the Spring bean provides.
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        List<Map<String, Object>> input = List.of(
+                Map.of("type", "text", "text", "go"));
+        String digest = "sha256:" + "a".repeat(64);
+
+        for (String workspace : List.of("ws-policy", "ws-tenant")) {
+            // Captured first so the label survives when nothing is thrown.
+            Throwable thrown = catchThrowable(() -> transaction.execute(status ->
+                    gated.insertWorkspaceSessionCommand(tenant, "actor-a",
+                            workspace, digest, "qwen-code", null, null, input,
+                            digest, new WorkspaceSelection(workspace, "."))));
+            assertThat(thrown).as(workspace)
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        // The store's message, not the registry's "Workspace is
+                        // unavailable.", ties the refusal to the store guard.
+                        assertThat(error.getMessage()).isEqualTo(
+                                "Hosted Workspace execution is not available.");
+                        assertThat(error.getStatus())
+                                .isEqualTo(HttpStatus.CONFLICT);
+                        assertThat(error.getCode())
+                                .isEqualTo("workspace_unavailable");
+                    });
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_session WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_turn WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
+
+        // The same store admits the Workspace that passes every guard, so the
+        // refusals above come from the policy and mount-tenant checks alone.
+        assertThat(transaction.execute(status ->
+                gated.insertWorkspaceSessionCommand(tenant, "actor-a",
+                        "ws-valid", digest, "qwen-code", null, null, input,
+                        digest, new WorkspaceSelection("ws-valid", ".")))
+                .sessionId()).isNotBlank();
+    }
+
+    @Test
     void webShellCreationIsMetadataOnlyUntilExecutionIsWired()
             throws Exception {
         String tenant = "tenant-" + UUID.randomUUID();
@@ -806,12 +880,16 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     private void register(String tenant, String id, String storageId) {
+        register(tenant, id, storageId, "config-" + id, "policy-" + id);
+    }
+
+    private void register(String tenant, String id, String storageId,
+            String configRef, String policyRef) {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
                         + " VALUES (?, ?, 1, ?, ?, ?, ?, 'ACTIVE')",
-                tenant, id, storageId, id, "config-" + id,
-                "policy-" + id);
+                tenant, id, storageId, id, configRef, policyRef);
     }
 
     private void grant(String tenant, String workspaceId, String actorId,

@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
@@ -85,6 +86,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
@@ -217,6 +219,29 @@ class ManagedAgentApiContractTest {
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    @Test
+    void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
+        Map<String, String> drift = new TreeMap<>();
+        for (Operation operation : CONTRACT.operations()) {
+            if (!operation.path().startsWith("/v1/agents/")
+                    && !operation.path().startsWith(WEB_SHELL + "/")) {
+                continue;
+            }
+            assertThat(operation.node().path("responses").path("403").path("$ref").asText())
+                    .as("%s declares the tenant filter refusal", operation.operationId())
+                    .isEqualTo("#/components/responses/Forbidden");
+            if ("planned".equals(operation.status())) {
+                continue;
+            }
+            String path = operation.path().replaceAll("\\{[^}]+}", "scope-probe");
+            MockHttpServletRequestBuilder request = request(
+                    HttpMethod.valueOf(operation.method()), path)
+                    .header(TENANT, "contract-tenant").principal(actor("other-tenant"));
+            exchange(drift, operation.operationId(), 403, request, null);
+        }
+        assertThat(drift).isEmpty();
+    }
 
     @Test
     void mappedRoutesMatchTheSpec() {
@@ -1326,6 +1351,11 @@ class ManagedAgentApiContractTest {
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
+        if (expectedStatus == 403) {
+            assertThat(json(content).path("error").path("code").asText())
+                    .as("%s actor-scope error code", operationId)
+                    .isEqualTo("actor_scope_mismatch");
+        }
         if (status != expectedStatus) {
             drift.put("response %s: expected %d, got %d%s".formatted(
                     operationId, expectedStatus, status, errorCode(content)),

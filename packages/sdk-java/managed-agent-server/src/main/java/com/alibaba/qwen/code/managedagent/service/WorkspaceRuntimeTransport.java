@@ -288,7 +288,14 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            ownership.assertHeld(context.binding(), context.session());
+            if (recovery) {
+                if (!ownership.isHeld(context.binding(), context.session())) {
+                    throw new RuntimeBrokerException(409, "workspace_busy",
+                            "Workspace storage is held by another tool turn.", true);
+                }
+            } else {
+                ownership.assertHeld(context.binding(), context.session());
+            }
         } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             ownership.assertHeld(context.binding(), context.session());

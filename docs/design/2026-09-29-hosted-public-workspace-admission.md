@@ -64,9 +64,28 @@ stops warming a closed Session and has no Harness-level teardown yet.
 | Existing Broker/worker              | Reuse production routing and fencing                                     | Selected Runtime and persisted Workspace |
 | Contract and README                 | Document the narrow creation capability and remaining gates              | Public REST and WebShell adapter         |
 
-Affected code is under `packages/sdk-java/managed-agent-server` and the private
-Hosted DTOs in `packages/sdk-java/qwencode`. No core authority, tool execution
-loop, database schema or public request field needs a new abstraction.
+Production behavior changes only under `packages/sdk-java/managed-agent-server`
+and in the private Hosted DTOs in `packages/sdk-java/qwencode`; it stays limited
+to the initial Workspace Read/Write/Edit Turn. No core authority, tool
+execution loop, database schema or public request field needs a new
+abstraction.
+
+The merged change also touched three places outside that scope, none of which
+adds runtime behavior:
+
+- **Generated WebShell types.** `packages/web-shell` regenerates
+  `managed-agent-api.ts` from the updated OpenAPI descriptions; only the
+  documentation comments change.
+- **Runtime Broker fault gate.** `DurableLocalRuntimeFaultGateTest` holds the
+  worker's `execute` response in its fault proxy, so the first Broker cannot
+  record the result before it is killed. The replacement Broker's `acquire`
+  then settles the call through the takeover reconciliation of #12964, and the
+  test asserts that outcome (`ALREADY_SETTLED`, one physical execution)
+  instead of accepting either a settled or a resolved state, which depended
+  on timing.
+- **Core resume test.** One `background-agent-resume.test.ts` case reports
+  the Skill tool as registered so that its listing assertion does not pass
+  vacuously. The override is still present on `main`.
 
 ## Validation and acceptance
 
