@@ -21,6 +21,7 @@ import {
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
 } from './shared-env-keys.js';
+import { RELAUNCH_SUPERVISED_ENV } from '../utils/env-provenance.js';
 import type { Settings } from './settingsSchema.js';
 import { TrustLevel, resetTrustedFoldersForTesting } from './trustedFolders.js';
 import {
@@ -100,6 +101,7 @@ const TRACKED_ENV = [
   'QWEN_HOME',
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
+  RELAUNCH_SUPERVISED_ENV,
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
@@ -444,6 +446,31 @@ describe('relaunch environment provenance', () => {
     grandchild.resetEnvironmentTrackingForTesting();
     child.resetEnvironmentTrackingForTesting();
   });
+
+  it.each(['project .env', 'home .env', 'settings.env'])(
+    'never sets the relaunch supervision marker from %s',
+    (source) => {
+      const workspace = makeWorkspace();
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = { [RELAUNCH_SUPERVISED_ENV]: '1' };
+      } else {
+        fs.writeFileSync(
+          path.join(source === 'home .env' ? os.homedir() : workspace, '.env'),
+          `${RELAUNCH_SUPERVISED_ENV}=1\n`,
+        );
+      }
+      loadEnvironment(settings, workspace);
+      expect(process.env[RELAUNCH_SUPERVISED_ENV]).toBeUndefined();
+      reloadEnvironment(settings, workspace);
+      expect(process.env[RELAUNCH_SUPERVISED_ENV]).toBeUndefined();
+      expect(
+        buildRuntimeEnvironment(settings, workspace, {}).effectiveEnv[
+          RELAUNCH_SUPERVISED_ENV
+        ],
+      ).toBeUndefined();
+    },
+  );
 
   it.each(['project .env', 'home .env', 'settings.env'])(
     'rejects forged provenance from %s on load, reload and runtime snapshots',

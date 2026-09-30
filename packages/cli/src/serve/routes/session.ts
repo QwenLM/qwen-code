@@ -58,6 +58,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
+  SESSION_ATTACHMENT_CHUNK_BYTES,
+  SessionAttachmentUploadError,
+} from '@qwen-code/acp-bridge/sessionAttachments';
+import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -7536,6 +7540,172 @@ export function registerSessionRoutes(
         res.status(200).json(result);
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  const attachmentUploadBodyError: ErrorRequestHandler = (
+    error,
+    _req,
+    res,
+    next,
+  ) => {
+    const status =
+      error && typeof error === 'object' && 'status' in error
+        ? error.status
+        : undefined;
+    if (status === 400 || status === 413 || status === 415) {
+      res.status(status).json({
+        error:
+          status === 413
+            ? 'Attachment upload request body exceeds its limit'
+            : 'Invalid attachment upload request body',
+        code:
+          status === 413
+            ? 'attachment_upload_too_large'
+            : status === 415
+              ? error.type === 'encoding.unsupported'
+                ? 'invalid_attachment_upload_encoding'
+                : 'invalid_attachment_upload_content_type'
+              : 'invalid_attachment_upload_body',
+      });
+      return;
+    }
+    next(error);
+  };
+
+  app.post(
+    '/session/:id/attachment-uploads',
+    mutate(),
+    express.json({ limit: '4kb', inflate: false }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads',
+      (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        if (
+          typeof body['name'] !== 'string' ||
+          typeof body['mimeType'] !== 'string' ||
+          !body['mimeType'].trim() ||
+          typeof body['size'] !== 'number'
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_metadata',
+            'name, mimeType, and size are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const upload = runtime.bridge.createSessionAttachmentUpload(
+            sessionId,
+            {
+              name: body['name'],
+              mimeType: body['mimeType'].trim().toLowerCase(),
+              size: body['size'],
+            },
+            clientId === undefined ? undefined : { clientId },
+          );
+          res.set('Cache-Control', 'no-store').status(201).json(upload);
+        } catch (error) {
+          if (error instanceof TypeError || error instanceof RangeError) {
+            throw new SessionAttachmentUploadError(
+              error instanceof RangeError ? 413 : 400,
+              'invalid_attachment_upload_metadata',
+              error.message,
+            );
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/chunks',
+    mutate(),
+    express.raw({
+      type: '*/*',
+      limit: SESSION_ATTACHMENT_CHUNK_BYTES,
+      inflate: false,
+    }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/chunks',
+      (req, res, sessionId, runtime) => {
+        if (
+          req.headers['content-type']
+            ?.split(';', 1)[0]
+            ?.trim()
+            .toLowerCase() !== 'application/octet-stream'
+        ) {
+          throw new SessionAttachmentUploadError(
+            415,
+            'invalid_attachment_upload_content_type',
+            'Chunks require application/octet-stream',
+          );
+        }
+        const offset = req.query['offset'];
+        if (
+          typeof offset !== 'string' ||
+          !/^\d+$/.test(offset) ||
+          !Number.isSafeInteger(Number(offset)) ||
+          !Buffer.isBuffer(req.body)
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_chunk',
+            'A raw chunk and a non-negative integer offset are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.appendSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          Number(offset),
+          req.body,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(result);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/complete',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/complete',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const reference = await runtime.bridge.completeSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+          captureRuntimeGenerationAssertion(runtime),
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(reference);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/attachment-uploads/:uploadId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/attachment-uploads/:uploadId',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        runtime.bridge.cancelSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.status(204).end();
+      },
     ),
   );
 

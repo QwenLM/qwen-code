@@ -17,6 +17,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApprovalMode } from './approval-mode.js';
 import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import {
@@ -48,6 +49,9 @@ import {
 } from '../utils/sessionStorageUtils.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+
+// Mirrors METADATA_REANCHOR_BYTES in chatRecordingService.ts.
+const REANCHOR_GROWTH_BYTES = 32 * 1024 + 2 * 1024;
 
 let root: string;
 let projectDir: string;
@@ -177,7 +181,14 @@ async function activeChatTexts(config: Config): Promise<string[]> {
 
 describe('Managed Session log recording', () => {
   it('records a new session as a Managed Session log', async () => {
-    const config = await start(managedConfig());
+    const building = managedConfig({
+      model: 'definition-model',
+      approvalMode: ApprovalMode.YOLO,
+    });
+    // The definition records the mode the session has when it starts, not
+    // the one it was built with.
+    building.setApprovalMode(ApprovalMode.PLAN);
+    const config = await start(building);
     recordUser(config, 'first prompt');
     await config.getChatRecordingService()!.flush();
 
@@ -222,8 +233,8 @@ describe('Managed Session log recording', () => {
     expect(definition).toEqual({
       version: 1,
       engine: 'managed',
-      model: 'test-model',
-      approvalMode: config.getApprovalMode(),
+      model: 'definition-model',
+      approvalMode: 'plan',
     });
     expect(records.some((record) => record['type'] === 'user')).toBe(false);
     expect(
@@ -717,6 +728,54 @@ describe('Managed Session log recording', () => {
     });
     vi.restoreAllMocks();
     await config.closeSessionWriter();
+  });
+
+  it('seals the log when the title anchor written on close fails', async () => {
+    const config = await start(managedConfig());
+    const recorder = config.getChatRecordingService()!;
+    await recorder.recordCustomTitle('Managed title', 'manual');
+    recordUser(config, 'committed prompt');
+    await recorder.flush();
+    // Renewals alone make the title due, so its anchor is written on close.
+    const transcriptPath =
+      sessionService().getSessionTranscriptPath(SESSION_ID);
+    const from = (await stat(transcriptPath)).size;
+    const { authority } = (
+      config as unknown as { managedSession: ManagedSession }
+    ).managedSession;
+    while ((await stat(transcriptPath)).size - from < REANCHOR_GROWTH_BYTES) {
+      await authority.renewActivation({ leaseDurationMs: 5 * 60 * 1000 });
+    }
+    const write = ManagedSessionRecordSink.prototype.write;
+    const failing = vi
+      .spyOn(ManagedSessionRecordSink.prototype, 'write')
+      .mockImplementation(async function (
+        this: ManagedSessionRecordSink,
+        record: ChatRecord,
+      ) {
+        if (record.subtype === 'custom_title') throw new Error('disk full');
+        return write.call(this, record);
+      });
+
+    await config.closeSessionWriter();
+    expect(failing).toHaveBeenCalledWith(
+      expect.objectContaining({ subtype: 'custom_title' }),
+    );
+    failing.mockRestore();
+    expect(await lockRecord()).toMatchObject({
+      state: 'sealed',
+      schema_version: 3,
+    });
+    // The failed anchor does not skip the stop: the log records that the
+    // session stopped advancing before the seal.
+    const scan = await LocalJsonlManagedSessionJournalStore.read(
+      sessionService().getSessionTranscriptPath(SESSION_ID),
+      localManagedSessionKey(projectDir, SESSION_ID),
+    );
+    expect(scan.activation?.phase).toBe('released');
+    const restored = await start(restoringConfig());
+    expect(await activeChatTexts(restored)).toEqual(['committed prompt']);
+    await restored.closeSessionWriter();
   });
 
   it('keeps a record committed when the anchor behind it fails', async () => {

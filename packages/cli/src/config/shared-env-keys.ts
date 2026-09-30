@@ -10,7 +10,10 @@ import {
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
-import { PRIVATE_RELAUNCH_ENV_PROVENANCE } from '../utils/env-provenance.js';
+import {
+  PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  RELAUNCH_SUPERVISED_ENV,
+} from '../utils/env-provenance.js';
 export { PRIVATE_RELAUNCH_ENV_PROVENANCE };
 
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
@@ -278,6 +281,9 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // unbound-durable-task skip onto sessions the contract does not cover).
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
+  // Only a relaunch supervisor marks its child; a forged marker would make a
+  // piped, one-shot run exit as if its supervisor had gone.
+  RELAUNCH_SUPERVISED_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -322,6 +328,7 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
 const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
   PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
+  RELAUNCH_SUPERVISED_ENV.toLowerCase(),
   'sandbox',
   'sandbox_enforcement',
 ]);

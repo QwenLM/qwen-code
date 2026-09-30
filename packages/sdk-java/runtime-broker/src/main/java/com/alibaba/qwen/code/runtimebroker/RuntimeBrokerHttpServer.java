@@ -12,6 +12,7 @@ import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -22,8 +23,8 @@ import java.util.function.Function;
 /**
  * Private HTTP face of the merged Runtime Broker for a Hosted Harness.
  *
- * <p>Immediate and durable deferred dispatch share the original execution
- * journal. Operator resolution remains unavailable.
+ * <p>Immediate raw-tool dispatch and durable raw-tool or provider dispatch
+ * share the original execution journal. Operator resolution is unavailable.
  */
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
@@ -213,6 +214,11 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         String callId = JsonCodec.requiredString(body, "toolCallId", "execution request");
         String digest = JsonCodec.requiredString(body, "requestDigest", "execution request");
         Map<String, Object> reference = requiredObject(body, "reference", "execution request");
+        if (prepare && !body.keySet().equals(Set.of("protocolVersion", "requestId", "idempotencyKey",
+                "harnessSessionId", "runtimeSessionId", "turnId", "toolCallId", "requestDigest", "reference"))) {
+            throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                    "Prepared execution fields are invalid.", false);
+        }
         if (prepare && (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !callId.equals(reference.get("callId"))
@@ -251,13 +257,23 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String executionCallId = pathId(suffix.substring(0, suffix.length() - ":start".length()));
             Map<String, Object> body = requestBody(exchange, "start request");
             requireProtocol(body);
+            Set<String> fields = body.containsKey("payloadJson")
+                    ? Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId", "payloadJson")
+                    : Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId");
+            if (!body.keySet().equals(fields)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "Start request fields are invalid.", false);
+            }
             JsonCodec.requiredString(body, "requestId", "start request");
             String harnessSessionId = JsonCodec.requiredString(body, "harnessSessionId", "start request");
             String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "start request");
-            if (!(body.get("payloadJson") instanceof String payload)) {
-                throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson is required", false);
+            if (body.containsKey("payloadJson") && !(body.get("payloadJson") instanceof String)) {
+                throw new RuntimeBrokerException(400, "runtime_payload_invalid", "payloadJson must be a string", false);
             }
-            complete(exchange, service.startExecution(harnessSessionId, runtimeSessionId, executionCallId, payload)
+            complete(exchange, (body.containsKey("payloadJson")
+                            ? service.startExecution(harnessSessionId, runtimeSessionId, executionCallId,
+                                    (String) body.get("payloadJson"))
+                            : service.startExecution(harnessSessionId, runtimeSessionId, executionCallId))
                     .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
@@ -303,18 +319,40 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
             String runtimeSessionId, ToolExecutionRecord record) {
-        return record.getState() == ToolExecutionRecord.State.UNKNOWN
-                && Integer.valueOf(3).equals(record.getReference().get("runtimeProtocol"))
-                ? service.reconcileExecution(harnessSessionId, runtimeSessionId, record.getExecutionCallId())
-                : CompletableFuture.completedFuture(new ExecutionReconciliation(record,
-                        ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        // A lost dispatch is asked of the original Runtime when it can answer;
+        // a tool v2 reference keeps its UNKNOWN.
+        if (record.getState() != ToolExecutionRecord.State.UNKNOWN
+                || !record.observableAfterLoss()) {
+            return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null));
+        }
+        // The ask is best-effort: when the original Runtime cannot be asked
+        // or cannot answer, whatever the reason, the record's own UNKNOWN
+        // stands rather than the error of the attempt.
+        return service.reconcileExecution(harnessSessionId, runtimeSessionId,
+                record.getExecutionCallId()).handle((reconciled, error) -> {
+                    if (error == null) {
+                        return reconciled;
+                    }
+                    Throwable cause = unwrap(error);
+                    if (cause instanceof Error) {
+                        throw new CompletionException(cause);
+                    }
+                    return new ExecutionReconciliation(record,
+                            ExecutionReconciliation.Outcome.IN_FLIGHT, null);
+                });
     }
 
     private static Map<String, Object> observedExecutionEnvelope(String harnessSessionId,
             String runtimeSessionId, ExecutionReconciliation observation) {
         ToolExecutionRecord record = observation.getRecord();
         String state = observation.getRuntimeState();
-        if (record.getState() == ToolExecutionRecord.State.UNKNOWN
+        // A provider call the worker still holds as prepared was never
+        // started, and nothing dispatches it a second time: it stays UNKNOWN
+        // for the caller, who would otherwise wait for it for ever.
+        boolean neverStarted = "prepared".equals(state)
+                && ProviderRuntimeProtocol.isReference(record.getReference());
+        if (record.getState() == ToolExecutionRecord.State.UNKNOWN && !neverStarted
                 && ("prepared".equals(state) || "executing".equals(state)
                     || "cancel_requested".equals(state))) {
             Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
