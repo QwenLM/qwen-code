@@ -382,7 +382,7 @@ describe('SendMessageTool — background-task mode', () => {
 
   it('continues a completed task on its resident runtime', async () => {
     register(COMPLETED);
-    const continueResident = vi.fn().mockReturnValue(true);
+    const continueResident = vi.fn().mockReturnValue('continued');
     registry.registerResidentAgent('agent-1', {
       continue: continueResident,
       dispose: vi.fn(),
@@ -396,6 +396,20 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('existing runtime');
     expect(result.returnDisplay).toContain('Continued');
+  });
+
+  it('reports resident capacity without attempting a cold revive', async () => {
+    register(COMPLETED);
+    registry.registerResidentAgent('agent-1', {
+      continue: vi.fn().mockReturnValue('capacity_wait'),
+      dispose: vi.fn(),
+    });
+
+    const result = await send('now refactor the helper');
+
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('capacity');
   });
 
   it('revives a completed task when no resident runtime is available', async () => {

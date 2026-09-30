@@ -159,6 +159,7 @@ describe('applySkillSideEffects', () => {
       isTrustedFolder: () => boolean;
       getHookSystem: () => unknown;
       getSessionId: () => string | undefined;
+      isWorkspaceAgentSession: () => boolean;
     }> = {},
   ) {
     const { pm, addSessionAllowRule } = mockPermissionManager();
@@ -284,6 +285,27 @@ describe('applySkillSideEffects', () => {
     expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
       expect.stringContaining('untrusted folder'),
     );
+  });
+
+  // A workspace agent's capability boundary is read-only, and a skill hook
+  // spawns a command before the invocation guard ever runs.
+  it('applies no side effects in a workspace-agent session', async () => {
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig({
+      isWorkspaceAgentSession: () => true,
+    });
+    await applySkillSideEffects(config, gatedSkill);
+    expect(addSessionAllowRule).not.toHaveBeenCalled();
+    expect(addSessionHook).not.toHaveBeenCalled();
+    expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('workspace-agent session'),
+    );
+
+    await applySkillSideEffects(config, {
+      ...gatedSkill,
+      name: 'review',
+      level: 'bundled',
+    } as SkillConfig);
+    expect(config.enableReviewWorkflow).not.toHaveBeenCalled();
   });
 
   it('is a no-op without a config', async () => {

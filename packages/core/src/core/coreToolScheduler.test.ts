@@ -8008,6 +8008,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      permissionChecked: true,
       sessionId: 'plan-shell-session',
       cwd: '/workspace',
     });
@@ -8076,6 +8077,59 @@ describe('CoreToolScheduler Plan shell routing', () => {
     expectStatus(allowedCall, 'success');
     expect(allowedCall.response.executionStatus).toBe('success');
   });
+
+  it.each([true, false])(
+    'does not mark fixed_policy calls as permission-checked when the host allows=%s',
+    async (allowed) => {
+      const getDefaultPermission = vi.fn().mockResolvedValue('ask');
+      const getConfirmationDetails = vi.fn();
+      const execute = vi.fn().mockResolvedValue(textResult('ok'));
+      const toolInvocationGuard = vi
+        .fn<ToolInvocationGuard>()
+        .mockResolvedValue(
+          allowed
+            ? { allowed: true }
+            : { allowed: false, reason: 'host denied' },
+        );
+      const { completed } = await runPlanShell(
+        {
+          tools: [
+            new MockMediaPolicyTool({
+              name: 'omni_test_policy',
+              getDefaultPermission,
+              getConfirmationDetails,
+              execute,
+            }),
+          ],
+          toolInvocationGuard,
+        },
+        {
+          ...toolRequest(
+            'guard-fixed-policy',
+            'omni_test_policy',
+            {},
+            'prompt-fixed-policy',
+          ),
+          executionOrigin: {
+            kind: 'fixed_policy',
+            policyId: 'test-policy',
+            stage: 'preprocessing',
+          },
+        },
+      );
+
+      expect(getDefaultPermission).not.toHaveBeenCalled();
+      expect(getConfirmationDetails).not.toHaveBeenCalled();
+      expect(toolInvocationGuard).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          toolName: 'omni_test_policy',
+          permissionChecked: false,
+        }),
+      );
+      expect(execute).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      expect(completed[0].status).toBe(allowed ? 'success' : 'error');
+    },
+  );
 
   it('cancels without execution when aborted while awaiting the host guard', async () => {
     const execute = vi.fn();
@@ -8494,6 +8548,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     shouldObserveProducer?: (callId: string) => boolean;
+    configOverrides?: Record<string, unknown>;
   };
 
   function buildScheduler(options: SpanSchedulerOptions) {
@@ -8543,6 +8598,7 @@ describe('CoreToolScheduler telemetry spans', () => {
             options.includeSensitiveSpanAttributes ?? false,
           getTelemetrySensitiveSpanAttributeMaxLength: () =>
             options.sensitiveSpanAttributeMaxLength ?? 1024 * 1024,
+          ...options.configOverrides,
         },
       ),
       {
@@ -9867,6 +9923,233 @@ describe('CoreToolScheduler telemetry spans', () => {
     const blocked = getBlockedSpans();
     expect(blocked).toHaveLength(1);
     expect(blocked[0].ended).toBe(true);
+  });
+
+  // P02a: PreToolUse additionalContext reaches the owning functionResponse.
+  /** Hook bus giving PreToolUse `specific` (or `specific(request)`). */
+  function preContextBus(
+    specific:
+      | Record<string, unknown>
+      | ((request: HookRequest) => Record<string, unknown>),
+    onRequest?: (request: HookRequest) => void,
+  ) {
+    return hookBus((request) => {
+      onRequest?.(request);
+      return hookResponse(
+        'hook',
+        request.eventName === 'PreToolUse'
+          ? {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                ...(typeof specific === 'function'
+                  ? specific(request)
+                  : specific),
+              },
+            }
+          : {},
+      );
+    });
+  }
+
+  /** All of a call's response parts as JSON ('[]' when it has none). */
+  const partsJson = (call: ToolCall | undefined) =>
+    JSON.stringify(
+      (call as CompletedToolCall | undefined)?.response?.responseParts ?? [],
+    );
+  const countOf = (haystack: string, needle: string) =>
+    haystack.split(needle).length - 1;
+  /** The first functionResponse among a completed call's response parts. */
+  const functionResponseIn = (call: ToolCall | undefined) =>
+    (call as CompletedToolCall).response.responseParts.find(
+      (part) => part.functionResponse,
+    )?.functionResponse;
+
+  it('delivers PreToolUse additionalContext on the allowed tool result', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('tool body'));
+    const { call } = await runSingleTool({
+      execute,
+      hooks: preContextBus({ additionalContext: 'P02A_ALLOW <x>' }),
+    });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expectStatus(call, 'success');
+    const delivered = 'tool body\n\nP02A_ALLOW &lt;x&gt;';
+    expect(functionResponseIn(call)?.id).toBe('span-call');
+    expect(functionResponseIn(call)?.response?.['output']).toBe(delivered);
+    // Telemetry length follows the delivered text; the UI projection does not.
+    expect(call.response.contentLength).toBe(delivered.length);
+    expect(call.response.resultDisplay).toBe('tool body');
+  });
+
+  it('delivers PreToolUse additionalContext on a denied result without executing', async () => {
+    const execute = vi.fn();
+    const { call } = await runSingleTool({
+      execute,
+      hooks: preContextBus({
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'blocked by policy',
+        additionalContext: 'P02A_DENY',
+      }),
+    });
+
+    expect(execute).not.toHaveBeenCalled();
+    expectStatus(call, 'error');
+    expect(call.response.error?.message).toBe('blocked by policy');
+    expect(functionResponseIn(call)?.response?.['error']).toBe(
+      'blocked by policy\n\nP02A_DENY',
+    );
+  });
+
+  it('delivers the first PreToolUse ask context exactly once after approval', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('ok'));
+    const messageBus = preContextBus({
+      permissionDecision: 'ask',
+      permissionDecisionReason: 'confirm',
+      additionalContext: 'P02A_ASK',
+    });
+    const completed = await answerApproval(
+      await scheduleWithAsk({ messageBus, execute }),
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    expect(completed[0].status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(preToolUseCallCount(messageBus)).toBe(1);
+    expect(countOf(partsJson(completed[0]), 'P02A_ASK')).toBe(1);
+  });
+
+  it('drops PreToolUse ask context when the user cancels', async () => {
+    const execute = vi.fn();
+    const messageBus = preContextBus({
+      permissionDecision: 'ask',
+      additionalContext: 'P02A_ASK_CANCEL',
+    });
+    const built = await scheduleWithAsk({ messageBus, execute });
+    const completed = await answerApproval(
+      built,
+      ToolConfirmationOutcome.Cancel,
+    );
+
+    expect(completed[0].status).toBe('cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    expect(partsJson(completed[0])).not.toContain('P02A_ASK_CANCEL');
+
+    // A later call with the same id must not inherit the dropped context.
+    messageBus.request.mockImplementation(async () => hookResponse('hook', {}));
+    await scheduleBatch(
+      built.scheduler,
+      toolRequest('ask-call', 'mockTool', { input: 'y' }, 'prompt-ask-2'),
+    );
+    await vi.waitFor(() =>
+      expect(built.onAllToolCallsComplete).toHaveBeenCalledTimes(2),
+    );
+    expect(partsJson(lastBatch(built.onAllToolCallsComplete)[0])).not.toContain(
+      'P02A_ASK_CANCEL',
+    );
+  });
+
+  it('drops PreToolUse context when the turn is cancelled during PostToolBatch', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('done'));
+    const abortController = new AbortController();
+    const messageBus = preContextBus(
+      { additionalContext: 'P02A_POSTBATCH_CANCEL' },
+      ({ eventName }) => {
+        if (eventName === 'PostToolBatch') abortController.abort();
+      },
+    );
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      execute,
+      hooks: messageBus,
+      hasPostToolBatchHook: true,
+    });
+    await scheduler.schedule(
+      [toolRequest('postbatch-call', 'mockTool', {}, 'prompt-postbatch')],
+      abortController.signal,
+    );
+    const [call] = await settledLastBatch(onAllToolCallsComplete);
+
+    expect(
+      messageBus.request.mock.calls.some(
+        ([request]) => request.eventName === 'PostToolBatch',
+      ),
+    ).toBe(true);
+    // The tool really completed; only the hook context is withheld.
+    expectStatus(call, 'success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(functionResponseIn(call)?.id).toBe('postbatch-call');
+    expect(functionResponseIn(call)?.response?.['output']).toBe('done');
+  });
+
+  it('drops PreToolUse context when the turn is cancelled during the final output budget', async () => {
+    const body = 'x'.repeat(900);
+    const execute = vi
+      .fn()
+      .mockResolvedValue({ llmContent: body, returnDisplay: 'read' });
+    const abortController = new AbortController();
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      execute,
+      hooks: preContextBus({
+        additionalContext: 'P02A_BUDGET_CANCEL'.padEnd(200, '-'),
+      }),
+      configOverrides: {
+        // Only the result with the context exceeds this, so only the final
+        // budget pass persists; abort the turn at that persistence boundary.
+        getToolOutputBatchBudget: () => 1_000,
+        getToolResultBytesWritten: () => {
+          abortController.abort();
+          return 0;
+        },
+        trackToolResultBytes: vi.fn(),
+      },
+    });
+    await scheduler.schedule(
+      [toolRequest('budget-call', 'mockTool', {}, 'prompt-budget')],
+      abortController.signal,
+    );
+    const [call] = await settledLastBatch(onAllToolCallsComplete);
+
+    expect(abortController.signal.aborted).toBe(true);
+    expectStatus(call, 'success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(functionResponseIn(call)?.id).toBe('budget-call');
+    expect(functionResponseIn(call)?.response?.['output']).toBe(body);
+  });
+
+  it('keeps PreToolUse context on its own call within a batch and bounds it', async () => {
+    const long = 'L'.repeat(DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD + 5_000);
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      hooks: preContextBus(({ input }) => ({
+        additionalContext: ['call-a', 'call-b'].includes(
+          input?.['tool_call_id'] as string,
+        )
+          ? 'P02A_SAME'
+          : long,
+      })),
+    });
+    await scheduleBatch(
+      scheduler,
+      ...['call-a', 'call-b', 'call-c'].map((callId) =>
+        toolRequest(callId, 'mockTool', { input: callId }, 'prompt-batch'),
+      ),
+    );
+    const completed = await settledLastBatch(onAllToolCallsComplete);
+
+    expect(completed.map((c) => c.request.callId)).toEqual([
+      'call-a',
+      'call-b',
+      'call-c',
+    ]);
+    // Identical text from different calls is not de-duplicated.
+    expect(countOf(partsJson(completed[0]), 'P02A_SAME')).toBe(1);
+    expect(countOf(partsJson(completed[1]), 'P02A_SAME')).toBe(1);
+    const cOutput = functionResponseIn(completed[2])?.response?.[
+      'output'
+    ] as string;
+    expect(cOutput.startsWith('ok\n\nLLL')).toBe(true);
+    expect(cOutput.length).toBeLessThanOrEqual(
+      'ok\n\n'.length + DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+    );
+    expect(cOutput).toContain('[hook additional context truncated]');
   });
 
   it('shows the edit diff when a PreToolUse ask requires approval', async () => {

@@ -15,6 +15,7 @@ import {
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import type { ResidentBackgroundAgent } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import {
   Config,
@@ -4280,8 +4281,10 @@ describe('AgentTool', () => {
           expect(mockRegistry.complete).toHaveBeenCalled();
         else expect(mockRegistry.complete).toHaveBeenCalledTimes(times);
       });
-    const resident = <T>() =>
-      mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as T | undefined;
+    const resident = () =>
+      mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | ResidentBackgroundAgent
+        | undefined;
     const registeredAgentId = () =>
       mockRegistry.register.mock.calls[0][0].agentId as string;
     const expectForegroundRegistration = () =>
@@ -4420,11 +4423,7 @@ describe('AgentTool', () => {
             undefined,
             null,
           );
-          expect(
-            resident<{ continue: (message: string) => boolean }>()!.continue(
-              'Continue externally',
-            ),
-          ).toBe(true);
+          expect(resident()!.continue('Continue externally')).toBe('continued');
           await vi.waitFor(() =>
             expect(mockAgent.execute).toHaveBeenCalledTimes(2),
           );
@@ -4758,7 +4757,7 @@ describe('AgentTool', () => {
       ).not.toHaveBeenCalledWith(agentId, undefined);
       expect(mockSubagentDispose).not.toHaveBeenCalled();
 
-      const idle = resident<{ dispose: () => void }>();
+      const idle = resident();
       expect(idle).toBeDefined();
       idle?.dispose();
 
@@ -4769,9 +4768,9 @@ describe('AgentTool', () => {
     const continueResident = async () => {
       await launch();
       await untilCompleted(1);
-      const completed = resident<{ continue: (message: string) => boolean }>();
+      const completed = resident();
       expect(completed).toBeDefined();
-      expect(completed?.continue('Now inspect the helper')).toBe(true);
+      expect(completed?.continue('Now inspect the helper')).toBe('continued');
     };
 
     it('continues a completed background agent on the same runtime', async () => {
@@ -4814,6 +4813,15 @@ describe('AgentTool', () => {
       expect(runningPatch?.[1]).toHaveProperty('recentActivities', undefined);
       await untilCompleted(2);
       patchMetaSpy.mockRestore();
+    });
+
+    it('reports capacity before restarting a resident runtime', async () => {
+      await launch();
+      await untilCompleted(1);
+      mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
+
+      expect(resident()?.continue('Continue')).toBe('capacity_wait');
+      expect(mockRegistry.restartCompletedAgent).not.toHaveBeenCalled();
     });
 
     it('claims finishing-window input before publishing completion', async () => {
@@ -4879,12 +4887,12 @@ describe('AgentTool', () => {
       loadAs({ approvalMode: 'auto' });
       await launch(classifiedWork);
       await untilCompleted();
-      const idle = resident<{ continue: (message: string) => boolean }>();
+      const idle = resident();
       expect(idle).toBeDefined();
       expect(mockSubagentDispose).not.toHaveBeenCalled();
 
       vi.mocked(config.getApprovalMode).mockReturnValue(DEFAULT);
-      expect(idle?.continue('Continue')).toBe(false);
+      expect(idle?.continue('Continue')).toBe('fallback');
       expect(mockRegistry.unregisterResidentAgent).toHaveBeenCalled();
       expect(mockSubagentDispose).toHaveBeenCalledOnce();
     });

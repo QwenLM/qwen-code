@@ -1303,7 +1303,7 @@ export class AgentCore {
 
         // Update token usage if available
         if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+          this.recordTokenUsage(lastUsage, cumulativeRounds, roundStreamStart);
         }
 
         if (functionCalls.length > 0) {

@@ -9,6 +9,8 @@ import type { MockInstance } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
+import path from 'node:path';
+import * as workspaceContextUtils from '../utils/workspaceContext.js';
 
 const mockOsPlatform = vi.hoisted(() =>
   vi.fn<() => NodeJS.Platform>(() => 'linux'),
@@ -136,6 +138,7 @@ import type {
   ToolExecuteConfirmationDetails,
 } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 
 type MockChild = ChildProcess & {
   stdout: Readable;
@@ -370,12 +373,19 @@ describe('MonitorTool', () => {
       expect(mockSpawn).not.toHaveBeenCalled();
     });
 
-    it('rejects a directory the sandbox will not admit', () => {
+    it('rejects a directory the sandbox will not admit at build time', () => {
       vi.mocked(mockConfig.getShellExecutionSandbox).mockReturnValue({
         workspace: '/test/dir',
-      } as NonNullable<ReturnType<Config['getShellExecutionSandbox']>>);
-      expect(validate({ command: 'tail -f log', directory: '/' })).toContain(
-        'inside the execution sandbox workspace',
+        installation: '/install',
+        state: '/state',
+        filesystem: 'workspace-write',
+        network: 'closed',
+      });
+
+      expect(() =>
+        monitorTool.build({ command: 'tail -f log', directory: '/' }),
+      ).toThrow(
+        "Directory '/' must be an existing directory inside the execution sandbox workspace.",
       );
     });
 
@@ -527,14 +537,25 @@ describe('MonitorTool', () => {
       ).resolves.toBe('ask');
     });
 
-    it('allows read-only monitor commands by default', async () => {
-      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
-      await expect(
-        createInvocation({
+    it.each([undefined, '/test/dir/sub', '/test/dir/sub/..'])(
+      'allows read-only monitor commands within the workspace in %s',
+      async (directory) => {
+        vi.mocked(mockConfig.getWorkspaceContext).mockReturnValue(
+          createMockWorkspaceContext('/test/dir'),
+        );
+        mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+        const invocation = monitorTool.build({
           command: 'tail -f /tmp/app.log',
-        }).getDefaultPermission(),
-      ).resolves.toBe('allow');
-    });
+          directory,
+        });
+
+        await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+        const details = await invocation.getConfirmationDetails(
+          new AbortController().signal,
+        );
+        expect(details).not.toHaveProperty('warnings');
+      },
+    );
 
     it('asks for a read-only command in a directory outside the workspace', async () => {
       mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
@@ -653,15 +674,40 @@ describe('MonitorTool', () => {
       expect(result).toContain('user skills directory is not allowed');
     });
 
-    it('leaves a directory outside the workspace to the permission check', () => {
-      mockIsPathWithinWorkspace.mockReturnValue(false);
-      expect(
-        validate({
-          command: 'tail -f log',
-          directory: '/tmp/project-a/../etc',
-        }),
-      ).toBeNull();
-    });
+    it.each(['/outside', '/tmp/project-a-evil/x', '/tmp/project-a/../etc'])(
+      'accepts an outside directory %s but asks and warns even for read-only commands',
+      async (directory) => {
+        const resolver = vi
+          .spyOn(workspaceContextUtils, 'resolveWorkspacePath')
+          .mockImplementation((value) => path.resolve(value));
+        try {
+          const workspaceContext = createMockWorkspaceContext('/test/dir', [
+            '/tmp/project-a',
+          ]);
+          vi.mocked(mockConfig.getWorkspaceContext).mockReturnValue(
+            workspaceContext,
+          );
+          mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+          const params = { command: 'tail -f log', directory };
+
+          expect(validate(params)).toBeNull();
+          const invocation = monitorTool.build(params);
+          await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+          const details = await invocation.getConfirmationDetails(
+            new AbortController().signal,
+          );
+          expect(details.type).toBe('exec');
+          expect(details).toHaveProperty('warnings', [
+            `Runs outside the workspace in ${directory}`,
+          ]);
+          expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+            directory,
+          );
+        } finally {
+          resolver.mockRestore();
+        }
+      },
+    );
   });
 
   describe('execute', () => {

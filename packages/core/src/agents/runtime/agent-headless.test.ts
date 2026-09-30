@@ -849,6 +849,29 @@ describe('subagent.ts', () => {
         expect(scope.getExecutionSummary()).toMatchObject({ rounds: 2 });
       });
 
+      it('should keep usage rounds unique across finishing input segments', async () => {
+        const { config } = await createMockConfig();
+        const chunk = partsChunk([{ text: 'Done.' }]);
+        mockSendMessageStream.mockImplementation(async () =>
+          streamOf({
+            ...chunk,
+            value: { ...chunk.value, usageMetadata: { totalTokenCount: 1 } },
+          }),
+        );
+        const scope = await createAgent(config, { prompt });
+        const usage = recordEvents(
+          scope.getEventEmitter(),
+          AgentEventType.USAGE_METADATA,
+        );
+
+        await scope.execute(new ContextState());
+        await scope.executeExternalInputs(['late correction'], undefined, {
+          resetStats: false,
+        });
+
+        expect(usage.map((event) => event.round)).toEqual([1, 2]);
+      });
+
       it('should preserve statistics for continuation work in the same logical turn', async () => {
         const { config } = await createMockConfig();
         respond('stop', 'stop');

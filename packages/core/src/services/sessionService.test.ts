@@ -4973,6 +4973,59 @@ describe('SessionService', () => {
       ).resolves.toMatchObject({ goalObjective: undefined });
     };
 
+    /** A one-prompt transcript for `id`, tagged with `sourceType` if given. */
+    const sourced = (id: string, text: string, sourceType?: string) => [
+      msgLine(id, 'u1', null, 'user', 0, text),
+      ...(sourceType
+        ? [sysLine(id, 'u3', 'u2', 'session_source', 2, { sourceType })]
+        : []),
+    ];
+    const visibleId = '00000000-0000-4000-8000-000000000001';
+    const hiddenId = '00000000-0000-4000-8000-000000000002';
+
+    it('excludes a source before applying the page size', async () => {
+      // A second excluded source (a mesh agent's body session) must be dropped
+      // by the same list option, not just the one name it was built for.
+      const sessions: Array<[string, string, string?]> = [
+        [visibleId, 'visible'],
+        [hiddenId, 'hidden', 'agent-host'],
+        ['00000000-0000-4000-8000-000000000003', 'hidden agent', 'agent'],
+      ];
+      sessions.forEach(([id, text, sourceType], i) => {
+        const file = disk.write(id, sourced(id, text, sourceType));
+        fs.utimesSync(file, new Date(i + 1), new Date(i + 1));
+      });
+
+      await expect(
+        service.listSessions({
+          size: 1,
+          excludeSourceTypes: ['agent-host', 'agent'],
+        }),
+      ).resolves.toMatchObject({
+        items: [{ sessionId: visibleId }],
+        hasMore: false,
+        nextCursor: undefined,
+      });
+    });
+
+    it('excludes the source from active and archived counts', async () => {
+      disk.write(visibleId, sourced(visibleId, 'visible'));
+      disk.write(
+        hiddenId,
+        sourced(hiddenId, 'hidden', 'agent-host'),
+        'archived',
+      );
+
+      await expect(
+        service.getSessionInfoCounts({ excludeSourceTypes: ['agent-host'] }),
+      ).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: false,
+      });
+    });
+
     // Short complete fixtures answer from parsed records before the scan runs.
     // The long and truncated fixtures below drive the real tail-window scan
     // and pin the production marker (`"subtype":"goal_state"`) and field name.

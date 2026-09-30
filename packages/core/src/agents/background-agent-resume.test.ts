@@ -1284,7 +1284,7 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager } = createService({
+      const { service, subagentManager, stubToolRegistry } = createService({
         toolMode,
         // The session this resume runs in does have the Skill tool; the rows
         // below are about `subagentWillHaveSkillTool`, not about #12838's
@@ -1303,6 +1303,7 @@ describe('BackgroundAgentResumeService', () => {
           isSkillActive: vi.fn().mockReturnValue(true),
         },
       });
+      stubToolRegistry.getAllToolNames.mockReturnValue([ToolNames.SKILL]);
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',
@@ -2250,7 +2251,16 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
-  it('drops unfinished nested calls and readiness markers while preserving stable history', async () => {
+  it.each([
+    [
+      'drops usage-only assistant records while preserving tool history and pending user text',
+      false,
+    ],
+    [
+      'drops unfinished nested calls and readiness markers while preserving stable history',
+      true,
+    ],
+  ])('%s', async (_title, nested) => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
     const { metaPath, outputFile } = agentPaths(sessionId, agentId);
@@ -2265,6 +2275,8 @@ describe('BackgroundAgentResumeService', () => {
       'user',
       fnResponse('read_file', { output: 'contents' }, 'read-1'),
     );
+    // With `nested`, an unfinished nested call hangs off `u2` and becomes the
+    // leaf, so the `a2`/`u3` branch is not on the resumed chain.
     writeJsonl(
       outputFile,
       userRec(sessionId, 'original task'),
@@ -2284,13 +2296,30 @@ describe('BackgroundAgentResumeService', () => {
       rec('u2', 'a1', sessionId, at('00.500'), 'user', {
         message: userText('and another thing'),
       }),
-      rec('nested-call', 'u2', sessionId, at('00.600'), 'assistant', {
-        message: content('model', fnCall('agent', {}, 'nested')),
+      rec('a2', 'u2', sessionId, at('00.600'), 'assistant', {
+        message: modelText('still working'),
       }),
-      rec('nested-state', 'nested-call', sessionId, at('00.700'), 'system', {
-        subtype: 'agent_session_ready',
-        systemPayload: { callId: 'nested', subagentSessionReady: true },
+      rec('u3', 'a2', sessionId, at('00.700'), 'user', {
+        message: userText('one final constraint'),
       }),
+      ...(nested
+        ? [
+            rec('nested-call', 'u2', sessionId, at('00.600'), 'assistant', {
+              message: content('model', fnCall('agent', {}, 'nested')),
+            }),
+            rec(
+              'nested-state',
+              'nested-call',
+              sessionId,
+              at('00.700'),
+              'system',
+              {
+                subtype: 'agent_session_ready',
+                systemPayload: { callId: 'nested', subagentSessionReady: true },
+              },
+            ),
+          ]
+        : []),
     );
     register(agentId, 'Pending user tail', {
       prompt: 'original task',
@@ -2319,6 +2348,9 @@ describe('BackgroundAgentResumeService', () => {
             readResult,
             modelText('working'),
             userText('and another thing'),
+            ...(nested
+              ? []
+              : [modelText('still working'), userText('one final constraint')]),
           ],
         },
       }),
@@ -2358,7 +2390,7 @@ describe('BackgroundAgentResumeService', () => {
     );
 
     expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
-      true,
+      'continued',
     );
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
@@ -2374,7 +2406,9 @@ describe('BackgroundAgentResumeService', () => {
     registry.reset();
 
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(
+      'not_completed',
+    );
   });
 
   it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
@@ -2534,7 +2568,7 @@ describe('BackgroundAgentResumeService', () => {
     await waitForStatus(agentId, 'completed');
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe('fallback');
     expect(dispose).toHaveBeenCalledOnce();
   });
 
