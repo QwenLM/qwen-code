@@ -87,8 +87,8 @@ class HarnessCoordinatorTest {
     // coordinator is WorkspaceExecutionStore.unavailable() (409,
     // workspace_unavailable, not retryable), raised by the connector's
     // authorization in createOrLoad. Broker lease contention (workspace_busy)
-    // is raised on the tool-execution path and reaches the coordinator as a
-    // DaemonHttpException 409 instead.
+    // is raised inside the Broker's tool-execution transport and is consumed
+    // there: it ends the turn as a turn_error event and never reaches this arm.
     @ParameterizedTest
     @ValueSource(ints = {0, 5})
     void failsOnWorkspaceAuthorizationRefusalBeforeSubmission(int retryCount) {
@@ -132,14 +132,46 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
-    // The real path for Broker lease contention: the Harness reports the
-    // Broker's 409 as an HTTP error, which the coordinator retries.
+    // Pins the 409 cell of the DaemonHttpException arm: a conflict the Harness
+    // itself reports (hosted_turn_active, hosted_prompt_conflict,
+    // hosted_event_epoch_mismatch, ...) is transient, so it is retried rather
+    // than failed. A create-time 409 never reaches here: the connector answers
+    // it by loading the existing authority.
     @Test
     void retriesAConflictReportedByTheHarness() {
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
         AgentStateStore store = dispatchWithCreateOrLoadFailure(conflict,
                 false, 0);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // A permanent Harness rejection ends the Turn even after a recorded
+    // submission, where the pre-admission retry budget cannot end it. The code
+    // distinguishes this arm from retry exhaustion (hosted_harness_unavailable).
+    @Test
+    void failsAPermanentHarnessRejectionAfterSubmission() {
+        DaemonHttpException rejected = mock(DaemonHttpException.class);
+        when(rejected.getStatusCode()).thenReturn(400);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(rejected,
+                true, 5);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_rejected"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // A 5xx from the Harness or a proxy is transient, so a Turn whose
+    // submission may have been admitted is retried, not failed.
+    @Test
+    void retriesATransientHarnessFailureAfterSubmission() {
+        DaemonHttpException unavailable = mock(DaemonHttpException.class);
+        when(unavailable.getStatusCode()).thenReturn(503);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(unavailable,
+                true, 5);
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
