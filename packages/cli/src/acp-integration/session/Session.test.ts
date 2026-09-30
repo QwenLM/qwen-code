@@ -27750,6 +27750,10 @@ describe('Session', () => {
 
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'follow-up',
+          undefined,
+          undefined,
+          expect.stringContaining('test-session-id########'),
+          undefined,
         );
         expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
           1,
