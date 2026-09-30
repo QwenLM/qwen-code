@@ -62,6 +62,14 @@ This guide provides solutions to common issues and debugging tips, including top
     - Note: unlike the flag, an exported `QWEN_CODE_SAFE_MODE` is inherited by child processes. A `qwen serve` daemon or an editor started from that shell hosts every one of its sessions in safe mode, so those sessions are suppressed too: they write no session record, and other sessions can neither list nor message them. Unset the variable for the daemon rather than leaving it exported in the shell that starts it.
     - Note: "MCP servers" here means servers configured in `settings.json` / project `.mcp.json` — local, ambient state that safe mode is meant to isolate against. MCP servers you explicitly supply for the current invocation (an embedding ACP client's `session/new` `mcpServers`, or `--mcp-config`) are not local/ambient state and are still honored under safe mode.
 
+## Attachment upload returns HTTP 413 behind a reverse proxy
+
+A proxy may reject a request before it reaches `qwen serve`, even when the attachment is within the daemon's 8 MiB file limit. Raising only a daemon body limit does not change the proxy limit.
+
+Use a daemon and TypeScript SDK/Web Shell build that supports `session_attachment_chunk_upload`. Attachments larger than 512 KiB are then uploaded in 512 KiB requests without changing their bytes or image quality. Older daemons keep the single-request upload path. If you operate the proxy, you can also raise its request-body limit to accommodate the original attachment request. Proxies with limits below 512 KiB still need a configuration change.
+
+The attachment limit remains 8 MiB. If an upload expires or the daemon restarts, retry the attachment from the UI. A completed upload whose response was lost can remain in the session's attachments; cancellation does not remove a file that has already completed.
+
 ## Common error messages and solutions
 
 - **Error: `EADDRINUSE` (Address already in use) when starting an MCP server.**

@@ -15,6 +15,7 @@ export {
   DaemonCapabilityMissingError,
   DaemonClient,
   DaemonHttpError,
+  DaemonAttachmentUploadError,
   DaemonPendingPromptLimitError,
   DaemonSessionIdProtocolError,
   WorkspaceDaemonClient,

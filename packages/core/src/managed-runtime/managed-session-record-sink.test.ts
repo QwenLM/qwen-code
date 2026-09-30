@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
@@ -204,6 +204,45 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  // A caller refuses what canCarry refuses before it queues the write, so
+  // canCarry has to refuse every shape write would reject.
+  it.each<[string, Partial<ChatRecord>]>([
+    [
+      'a title that is empty',
+      { subtype: 'custom_title', systemPayload: { customTitle: '' } as never },
+    ],
+    [
+      'a turn result with no prompt id',
+      {
+        subtype: 'turn_result',
+        systemPayload: { state: 'completed' } as never,
+      },
+    ],
+    [
+      'a turn result with no state',
+      { subtype: 'turn_result', systemPayload: { promptId: 'p1' } as never },
+    ],
+    [
+      'a compaction with no history',
+      { subtype: 'chat_compression', systemPayload: {} as never },
+    ],
+    [
+      'a branch point that does not parse',
+      { subtype: 'branch_checkpoint', systemPayload: {} as never },
+    ],
+    ['a goal state with no payload', { subtype: 'goal_state' }],
+    ['file history with no payload', { subtype: 'file_history_snapshot' }],
+    ['a session source with no payload', { subtype: 'session_source' }],
+  ])('refuses %s before it is written', async (_name, shape) => {
+    const harness = await createHarness();
+    const refused = record({ type: 'system', ...shape });
+    expect(harness.sink.canCarry(refused)).toBe(false);
+    await expect(harness.sink.write(refused)).rejects.toThrow(
+      ManagedSessionUnmappedRecordError,
+    );
+    await harness.close();
+  });
+
   it('refuses shapes that have their own home and are not mapped yet', async () => {
     const harness = await createHarness();
     // A rewind belongs to the history_rewind domain and a parent session to the
@@ -372,6 +411,54 @@ describe('managed session record sink', () => {
         }),
       ),
     ).rejects.toThrow(ManagedSessionUnmappedRecordError);
+    await harness.close();
+  });
+
+  it('numbers a compaction after a renewal that commits during its summary', async () => {
+    const harness = await createHarness();
+    await harness.sink.write(
+      record({
+        uuid: 'rec-user-1',
+        message: { role: 'user', parts: [{ text: 'summarise the docs' }] },
+      }),
+    );
+    // The session's renewal timer fires while the summary is published.
+    const publish = harness.store.publish.bind(harness.store);
+    vi.spyOn(harness.store, 'publish').mockImplementation(
+      async (kind, bytes) => {
+        const published = await publish(kind, bytes);
+        if (kind === 'managed-compaction-summary') {
+          await harness.authority.renewActivation({ leaseDurationMs: 60_000 });
+        }
+        return published;
+      },
+    );
+    const renewedAt = harness.authority.committedSequence + 1;
+
+    await harness.sink.write(
+      record({
+        uuid: 'rec-compact-1',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: { originalTokenCount: 100, newTokenCount: 10 },
+          compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        },
+      } as Partial<ChatRecord>),
+    );
+
+    const events = harness.authority.readEvents();
+    expect(events.find((event) => event.sequence === renewedAt)?.kind).toBe(
+      'activation.changed',
+    );
+    const compacted = events.filter(
+      (event) => event.kind === 'context.compacted',
+    );
+    expect(compacted).toHaveLength(1);
+    // Numbered after the renewal, covering only the history before it.
+    expect(compacted[0].sequence).toBe(renewedAt + 1);
+    expect(compacted[0].payload['toSequence']).toBe(renewedAt - 1);
+    expect(compacted[0].payload['replacedMessageIds']).toEqual(['rec-user-1']);
     await harness.close();
   });
 

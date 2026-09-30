@@ -52,6 +52,8 @@ import java.util.regex.Pattern;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
@@ -66,10 +68,6 @@ public class ManagedAgentService {
     private static final Pattern TURN_CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):([A-Za-z0-9_-]{1,64})$");
     private static final int TURN_ID_MAX_LENGTH = 64;
-    // Every Session serves its task list and detail; the tasks come from the
-    // Stage H records its Session store holds (H0c).
-    private static final WebShellSessionCapabilities WEB_SHELL_CAPABILITIES =
-            new WebShellSessionCapabilities(true);
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // A context stays ready until cwd changes arrive (W2).
@@ -82,6 +80,18 @@ public class ManagedAgentService {
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
+    private ManagedActionStore actions;
+
+    @Autowired
+    void setActions(ManagedActionStore actions) {
+        this.actions = actions;
+    }
+
+    private boolean hasActions(SessionRecord session) {
+        return session.workspace() != null
+                && actions != null
+                && !"yolo".equals(actions.approvalMode(session.tenantId(), session.sessionId()));
+    }
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
@@ -142,7 +152,7 @@ public class ManagedAgentService {
                     "actor_required", "A trusted actor is required.");
         }
         List<Map<String, Object>> input = input(blocks, false);
-        if (!input.isEmpty()) {
+        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
@@ -468,18 +478,29 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
-        return new PublicSession(session.sessionId(), "agent.session",
-                session.agentId(), session.agentRevision(),
+        return new PublicSession(
+                session.sessionId(),
+                "agent.session",
+                session.agentId(),
+                session.agentRevision(),
                 session.status().toLowerCase(),
-                session.createdAt() / 1000, session.updatedAt() / 1000,
-                metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence(), session.replayFloorSequence(),
-                store.findSnapshotCoveredSequence(session.tenantId(),
-                        session.sessionId()),
+                session.createdAt() / 1000,
+                session.updatedAt() / 1000,
+                metadata,
+                activeTurn == null ? null : publicTurn(activeTurn),
+                session.lastSequence(),
+                session.replayFloorSequence(),
+                store.findSnapshotCoveredSequence(session.tenantId(), session.sessionId()),
                 // A Workspace-bound Session has no lifecycle operations yet;
                 // every Session serves its task list and detail (H0c).
-                new SessionCapabilities(true, true, false, true,
-                        session.workspace() == null, true),
+                new SessionCapabilities(
+                        true,
+                        true,
+                        false,
+                        true,
+                        session.workspace() == null,
+                        true,
+                        hasActions(session)),
                 publicWorkspace(session));
     }
 
@@ -488,13 +509,20 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         EventRecord environmentEvent = store.findLatestEnvironmentEvent(
                 session.tenantId(), session.sessionId()).orElse(null);
-        return new WebShellSession(session.sessionId(), session.title(),
-                session.agentId(), session.status().toLowerCase(),
-                session.createdAt(), session.updatedAt(),
+        return new WebShellSession(
+                session.sessionId(),
+                session.title(),
+                session.agentId(),
+                session.status().toLowerCase(),
+                session.createdAt(),
+                session.updatedAt(),
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
-                session.lastSequence(), webShellWorkspace(session),
-                WEB_SHELL_CAPABILITIES);
+                session.lastSequence(),
+                webShellWorkspace(session),
+                // Every Session serves its task list and detail; the tasks come from the
+                // Stage H records its Session store holds (H0c).
+                new WebShellSessionCapabilities(true, hasActions(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

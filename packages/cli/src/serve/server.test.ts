@@ -29,6 +29,7 @@ import {
   vi,
 } from 'vitest';
 import supertest from 'supertest';
+import { SessionAttachmentStore } from '@qwen-code/acp-bridge/sessionAttachments';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
 import {
@@ -631,6 +632,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_prompt',
   'session_turn_status',
   'session_attachments',
+  'session_attachment_chunk_upload',
   'session_attachment_list',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
@@ -798,6 +800,11 @@ const EXPECTED_REGISTERED_FEATURES = [
     }
     if (feature === 'session_agent_trace') {
       return [feature, 'scheduled_task_session_reuse'];
+    }
+    // Conditional, so it is absent from the stage1 baseline above but present
+    // in the registry, declared immediately after `workspace_agent_generate`.
+    if (feature === 'workspace_agent_generate') {
+      return [feature, 'agent_collaboration_v1'];
     }
     if (feature === 'session_export') {
       return [
@@ -2830,6 +2837,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
+    createSessionAttachmentUpload: vi.fn(() => {
+      throw new Error('Unexpected upload create');
+    }),
+    appendSessionAttachmentUpload: vi.fn(() => {
+      throw new Error('Unexpected upload append');
+    }),
+    completeSessionAttachmentUpload: vi.fn(async () => {
+      throw new Error('Unexpected upload complete');
+    }),
+    cancelSessionAttachmentUpload: vi.fn(),
     async storeSessionAttachment(_sessionId, data, mimeType, _context, name) {
       const attachmentId = name ?? `image-${sessionAttachments.size + 1}.png`;
       sessionAttachments.set(attachmentId, {
@@ -4208,6 +4225,20 @@ describe('createServeApp', () => {
           ).not.toContain(feature);
           continue;
         }
+        if (feature === 'agent_collaboration_v1') {
+          expect(predicate({ agentCollaborationEnabled: true })).toBe(true);
+          expect(predicate({ agentCollaborationEnabled: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              agentCollaborationEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         // Future conditional tag. Authors must add a branch above with
         // the toggle field that drives this predicate. Failing here is
         // intentional: it forces the new conditional tag to ship with a
@@ -5280,6 +5311,83 @@ describe('createServeApp', () => {
   });
 
   describe('GET /capabilities', () => {
+    it('does not mount collaboration routes or recovery when the opt-in is off', async () => {
+      const app = createServeApp(baseOpts, undefined, { bridge: fakeBridge() });
+      const capabilities = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(capabilities.body.features).not.toContain(
+        'agent_collaboration_v1',
+      );
+      expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
+
+      const primary = capabilities.body.workspaces.find(
+        (workspace: { primary?: boolean }) => workspace.primary,
+      );
+      expect(primary).toBeDefined();
+      await request(app)
+        .get(`/workspaces/${primary.id}/agent/agents`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .expect(404);
+    });
+
+    it('keeps collaboration enabled while workspace settings are malformed', async () => {
+      const root = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-agent-collaboration-settings-'),
+      );
+      const home = path.join(root, 'home');
+      const workspace = path.join(root, 'workspace');
+      const workspaceSettings = path.join(workspace, '.qwen', 'settings.json');
+      const previousQwenHome = process.env['QWEN_HOME'];
+      let app: ReturnType<typeof createServeApp> | undefined;
+      try {
+        await fsp.mkdir(home);
+        await fsp.mkdir(path.dirname(workspaceSettings), { recursive: true });
+        await fsp.writeFile(
+          workspaceSettings,
+          JSON.stringify({
+            experimental: { agentCollaboration: true },
+          }),
+        );
+        process.env['QWEN_HOME'] = home;
+        resetHomeEnvBootstrapForTesting();
+        const bridge = fakeBridge();
+        app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          bridge,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: workspace,
+              primary: true,
+              bridge,
+            }),
+          ]),
+        });
+
+        const before = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(before.body.features).toContain('agent_collaboration_v1');
+
+        await fsp.writeFile(workspaceSettings, '{');
+        const after = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(after.body.features).toContain('agent_collaboration_v1');
+        await expect(fsp.readFile(workspaceSettings, 'utf8')).resolves.toBe(
+          '{',
+        );
+      } finally {
+        (
+          app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
+        )?.();
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(root, { recursive: true, force: true });
+      }
+    });
+
     it('advertises the SSH descriptor and disables its workflow while keeping anchor ownership', async () => {
       const primary = makeWorkspaceRuntimeForTest({
         workspaceId: 'primary-id',
@@ -12311,6 +12419,179 @@ describe('createServeApp', () => {
   });
 
   describe('session attachments', () => {
+    it('uploads chunked attachments through owner-bound routes and completes idempotently', async () => {
+      const store = new SessionAttachmentStore();
+      const bridge = fakeBridge();
+      bridge.createSessionAttachmentUpload = vi.fn((_id, metadata, context) =>
+        store.createUpload(metadata, context?.clientId),
+      );
+      bridge.appendSessionAttachmentUpload = vi.fn(
+        (_id, uploadId, offset, data, context) =>
+          store.appendUpload(uploadId, offset, data, context?.clientId),
+      );
+      bridge.completeSessionAttachmentUpload = vi.fn(
+        (_id, uploadId, context, guard) =>
+          store.completeUpload(
+            uploadId,
+            context?.clientId,
+            guard ?? (() => {}),
+          ),
+      );
+      bridge.cancelSessionAttachmentUpload = vi.fn((_id, uploadId, context) =>
+        store.cancelUpload(uploadId, context?.clientId),
+      );
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const post = (url: string) =>
+        request(app)
+          .post(url)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
+      try {
+        const created = await post('/session/s-1/attachment-uploads').send({
+          name: 'large.bin',
+          mimeType: 'application/octet-stream',
+          size: 524289,
+        });
+        expect(created.status).toBe(201);
+        const url = `/session/s-1/attachment-uploads/${created.body.uploadId}`;
+        const foreign = await post(`${url}/chunks?offset=0`)
+          .set('X-Qwen-Client-Id', 'client-2')
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from([1]));
+        expect(foreign.status).toBe(404);
+        expect(foreign.body.code).toBe('attachment_upload_not_found');
+        expect(
+          (
+            await post(`${url}/chunks?offset=0`)
+              .set('Content-Type', 'application/octet-stream')
+              .send(Buffer.alloc(524288, 7))
+          ).body,
+        ).toEqual({ offset: 524288 });
+        expect(await store.list()).toEqual([]);
+        const last = await post(`${url}/chunks?offset=524288`)
+          .set('Content-Type', 'application/octet-stream')
+          .send(Buffer.from([8]));
+        expect(last.status).toBe(200);
+        const completed = await post(`${url}/complete`);
+        expect(completed.status).toBe(200);
+        expect((await post(`${url}/complete`)).body).toEqual(completed.body);
+        expect(completed.body.size).toBe(524289);
+        expect((await store.read(completed.body.attachmentId))?.data).toEqual(
+          Buffer.concat([Buffer.alloc(524288, 7), Buffer.from([8])]),
+        );
+        const cancelled = await request(app)
+          .delete(url)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1');
+        expect(cancelled.status).toBe(409);
+        expect(cancelled.body.code).toBe('attachment_upload_completed');
+        expect(bridge.createSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          expect.any(Object),
+          { clientId: 'client-1' },
+        );
+        expect(bridge.appendSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          created.body.uploadId,
+          0,
+          expect.any(Buffer),
+          { clientId: 'client-1' },
+        );
+        expect(bridge.completeSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          created.body.uploadId,
+          { clientId: 'client-1' },
+          expect.any(Function),
+        );
+        expect(bridge.cancelSessionAttachmentUpload).toHaveBeenCalledWith(
+          's-1',
+          created.body.uploadId,
+          { clientId: 'client-1' },
+        );
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('bounds chunk and metadata bodies and rejects malformed input before bridge calls', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const post = (url: string) =>
+        request(app)
+          .post(url)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+      const base = '/session/s-1/attachment-uploads';
+      expect(
+        (
+          await post(base).send({
+            name: 'a'.repeat(5000),
+            mimeType: 'text/plain',
+            size: 1,
+          })
+        ).status,
+      ).toBe(413);
+      expect(
+        (await post(base).set('Content-Type', 'application/json').send('{'))
+          .status,
+      ).toBe(400);
+      expect((await post(base).send({ size: 1 })).status).toBe(400);
+      expect(
+        (
+          await post(`${base}/id/chunks?offset=0`)
+            .set('Content-Type', 'application/octet-stream')
+            .send(Buffer.alloc(524289))
+        ).status,
+      ).toBe(413);
+      expect(
+        (
+          await post(`${base}/id/chunks?offset=-1`)
+            .set('Content-Type', 'application/octet-stream')
+            .send(Buffer.from([1]))
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await post(`${base}/id/chunks?offset=0`)
+            .set('Content-Type', 'text/plain')
+            .send('a')
+        ).status,
+      ).toBe(415);
+      const compressed = await post(`${base}/id/chunks?offset=0`)
+        .set('Content-Type', 'application/octet-stream')
+        .set('Content-Encoding', 'gzip')
+        .send(Buffer.from([1]));
+      expect(compressed.status).toBe(415);
+      expect(compressed.body.code).toBe('invalid_attachment_upload_encoding');
+      const unsupportedCharset = await post(base)
+        .set('Content-Type', 'application/json; charset=iso-8859-1')
+        .send('{"name":"a.txt","mimeType":"text/plain","size":1}');
+      expect(unsupportedCharset.status).toBe(415);
+      expect(unsupportedCharset.body.code).toBe(
+        'invalid_attachment_upload_content_type',
+      );
+      expect(bridge.createSessionAttachmentUpload).not.toHaveBeenCalled();
+      expect(bridge.appendSessionAttachmentUpload).not.toHaveBeenCalled();
+      expect(
+        (
+          await request(app)
+            .post(base)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ name: 'a.txt', mimeType: 'text/plain', size: 1 })
+        ).status,
+      ).toBe(401);
+    });
+
     it('uploads session-scoped text attachments', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
@@ -13881,6 +14162,27 @@ describe('createServeApp', () => {
       expect(res.body.error).toContain('standalone');
       expect(bridge.calls).toHaveLength(0);
     });
+
+    // Only the daemon's dispatcher creates these, in-process.
+    it.each(['agent-host', 'agent'])(
+      'rejects the reserved %s source',
+      async (sourceType) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType, sourceId: 'ag_x' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.calls).toHaveLength(0);
+      },
+    );
 
     it('forwards a valid UUID sessionId to the bridge', async () => {
       const bridge = fakeBridge();
@@ -15873,6 +16175,84 @@ describe('createServeApp', () => {
             clientCount: 1,
             hasActivePrompt: false,
             worktree: { slug: 'task', path: '/tmp/wt', branch: 'wt-task' },
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when only the hidden agent host shares the workspace', async () => {
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'agent-host',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'agent-host',
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when only a resident mesh agent shares the workspace', async () => {
+      // A mesh agent body session is daemon-driven and holds no user edits;
+      // it must not block branch creation any more than the hidden host does.
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'agent-body',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            sourceType: 'agent',
           },
         ],
       });
@@ -17898,6 +18278,30 @@ describe('createServeApp', () => {
           .post(`/session/persisted-channel/${action}`)
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sourceType: 'standalone' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('reserved_session_source');
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      },
+    );
+
+    // A restore that adopted the body's source would relabel the session so
+    // the dispatcher sends a real agent run into it.
+    it.each(['load', 'resume'] as const)(
+      'rejects the reserved agent source on %s',
+      async (action) => {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post(`/session/persisted-channel/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sourceType: 'agent', sourceId: 'ag_x' });
 
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('reserved_session_source');
@@ -20533,6 +20937,7 @@ describe('createServeApp', () => {
           archiveState: 'active',
           size: 1,
           signal: preflightSignal,
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
         catalogRequest.abort();
         await vi.waitFor(() => expect(preflightSignal?.aborted).toBe(true));
@@ -22101,6 +22506,7 @@ describe('createServeApp', () => {
           cursor: 1000123.456,
           size: 20,
           archiveState: 'active',
+          excludeSourceTypes: ['agent-host', 'agent'],
         });
       } finally {
         listSessionsSpy.mockRestore();

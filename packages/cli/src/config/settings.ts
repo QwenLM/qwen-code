@@ -657,6 +657,49 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const operatorMem0 = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['memory']>['mem0'] | null
+  >(
+    (selected, scope) =>
+      scope.memory === null
+        ? null
+        : scope.memory?.mem0 !== undefined
+          ? scope.memory.mem0
+          : selected,
+    undefined,
+  );
+  if (operatorMem0 === null) {
+    if (merged.memory && typeof merged.memory === 'object') {
+      delete merged.memory.mem0;
+    }
+  } else if (operatorMem0 !== undefined) {
+    const memory = merged.memory;
+    const operatorMemory = customDeepMerge(
+      getMergeStrategyForPath,
+      ...[systemDefaults, user, system]
+        .filter((scope) => scope.memory !== undefined)
+        .map((scope) => ({ memory: scope.memory })),
+    )['memory'] as Settings['memory'];
+    merged.memory = {
+      ...(operatorMemory && typeof operatorMemory === 'object'
+        ? operatorMemory
+        : {}),
+      ...(memory && typeof memory === 'object' && !Array.isArray(memory)
+        ? memory
+        : {}),
+      mem0: operatorMem0,
+    };
+    const operatorExternalContext =
+      tagMcpServerScope(system, 'system').mcpServers?.['external-context'] ??
+      user.mcpServers?.['external-context'] ??
+      systemDefaults.mcpServers?.['external-context'];
+    if (operatorExternalContext) {
+      merged.mcpServers = {
+        ...merged.mcpServers,
+        'external-context': operatorExternalContext,
+      };
+    }
+  }
   const executionSandbox = selectOperatorExecutionSandbox(
     systemDefaults,
     user,
@@ -1036,6 +1079,12 @@ export interface LoadSettingsOptions {
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
   workspaceTrusted?: boolean;
+  /**
+   * Throw on invalid workspace-scope JSON instead of recovering it. Recovery
+   * rewrites the file to `{}`, which a caller polling a setting would read as
+   * the user having turned it off — and the rewrite makes that permanent.
+   */
+  preserveInvalidWorkspaceSettings?: boolean;
 }
 
 export function loadSettings(
@@ -1173,7 +1222,12 @@ function readSettingsLayers(
         try {
           rawSettings = JSON.parse(stripJsonComments(stripUtf8Bom(content)));
         } catch (parseError: unknown) {
-          if (snapshot || scope !== SettingScope.Workspace || operatorSandbox)
+          if (
+            snapshot ||
+            scope !== SettingScope.Workspace ||
+            operatorSandbox ||
+            opts.preserveInvalidWorkspaceSettings
+          )
             throw parseError;
           // ===== JSON parse failed — enter corruption recovery =====
           // Strategy: save corrupted file as .corrupted → reset to empty →

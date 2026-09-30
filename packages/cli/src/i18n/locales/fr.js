@@ -194,6 +194,8 @@ export default {
     'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "Impossible de ramener la conversation à ce tour : il ne correspond plus à l'historique du modèle (par exemple après une nouvelle tentative). Essayez un tour plus récent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
