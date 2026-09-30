@@ -52,25 +52,29 @@ const REPEATS = 5;
 // magnitude. A scan that has blown up still reddens the release; one that
 // merely drifted is caught by the strict bound off shared runners, where
 // the property this test is named for is actually asserted.
-// That contention is the ECS pool's, so it gets its own switch:
-// `test-utils/latency-budget.ts` sizes its pool multiplier for the ~5x that
-// fleet runs, and handing the same multiple to a lane that measures ~1.8x
-// leaves a regression nothing to overrun.
-const POOL_CI = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true;
-// GitHub-hosted lanes are shared VMs too, but measurably so for one row only.
-// On `Test (ubuntu-latest)` the 1000-topic cold scan runs best-of-5 201-226ms
-// against the 125ms bound, while the 200/500 cold rows and the entire
-// warm-cache test stay green under theirs (run 36640349705:
-// `recall-scan-latency.test.ts (2 tests | 1 failed)`, all three retries
-// failing at ceiling 125). So only that row moves off the strict bound here.
+// That contention is the ECS pool's, so it gets its own switch. Both lane
+// predicates take `env` so a case can pin every arm under a controlled
+// environment instead of the ambient one: exactly one arm runs per CI job, and
+// this PR's own `Test (ubuntu-latest)` job lands on the pool, so an arm whose
+// whole failure mode is silently not matching would otherwise never execute
+// anywhere.
+function isPoolLane(env: NodeJS.ProcessEnv): boolean {
+  return env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true;
+}
+
 // RUNNER_ENVIRONMENT is Actions' documented discriminator for the lane class
 // ('github-hosted' | 'self-hosted') and is what this repo's other gates read;
 // the RUNNER_NAME display-name prefix stays beside it rather than being
-// load-bearing alone, because a classifier arm whose whole failure mode is
-// silently not matching should not rest on a string GitHub calls non-unique.
-const HOSTED_CI =
-  process.env['RUNNER_ENVIRONMENT'] === 'github-hosted' ||
-  process.env['RUNNER_NAME']?.startsWith('GitHub Actions') === true;
+// load-bearing alone, because GitHub calls that string non-unique.
+function isHostedLane(env: NodeJS.ProcessEnv): boolean {
+  return (
+    env['RUNNER_ENVIRONMENT'] === 'github-hosted' ||
+    env['RUNNER_NAME']?.startsWith('GitHub Actions') === true
+  );
+}
+
+const POOL_CI = isPoolLane(process.env);
+const HOSTED_CI = isHostedLane(process.env);
 const FAST_RESULT_CEILING_MS = POOL_CI
   ? INITIAL_BUDGET_MS * 10
   : INITIAL_BUDGET_MS / 2;
@@ -83,23 +87,38 @@ const FAST_RESULT_CEILING_MS = POOL_CI
 // bound, keyed off the same `ecs-qwen-` prefix ci.yml uses for
 // QWEN_SKIP_LATENCY_BUDGETS, so routing through expectWithinLatencyBudget's
 // poolMultiplier would stack a second 10x.
-// Hosted lanes get this file's own convention instead of the pool's multiple:
-// the measured worst case (226ms) plus the same ~20% slack the strict
-// 1000-topic bound uses = 275ms. That still reddens the second CST parse
-// (~335ms), which a contention-sized 1250ms would have swallowed.
+//
+// A GitHub-hosted lane is one lane class, not one slow row. Across hosted
+// `Test (ubuntu-latest)` jobs the 1000-topic best-of-5 spans 128-227ms on four
+// runners, and the smaller corpi breached the strict 100ms bound at 110-177ms
+// on six jobs — three of those on all three vitest attempts, which `--retry`
+// cannot rescue. So every cold row moves off the strict bound here, sized by
+// this file's own ~20% slack convention rather than the pool's multiple:
+// against the same developer-machine baseline the `~5x` pool figure in
+// `test-utils/latency-budget.ts` uses, this lane measures ~1.2-2.2x, and 2.2x
+// leaves ~1.2x headroom over the worst sample seen on each row (220ms vs
+// 177ms, 275ms vs 227ms). The pool's 10x would have swallowed the reparse
+// regression at 1250ms.
+// What a wall-clock ceiling cannot do is promise that regression reddens
+// fleet-wide: 275ms only catches the +48% reparse where the 1000-topic
+// baseline exceeds 275/1.48 ≈ 186ms, so the faster hosted runners pass it. It
+// stays reliably asserted on the strict developer-machine lane, which is where
+// this file's header says the number means something. The warm-cache gate is
+// untouched — hosted jobs measured green under it (run 36640349705:
+// `recall-scan-latency.test.ts (2 tests | 1 failed)`).
 const HOSTED_COLD_SCAN_MULTIPLIER = 2.2;
 
-function coldScanCeilingMs(topicCount: number): number {
+/** Ceiling for one cold-scan row on the lane `env` describes. */
+function coldScanCeilingMs(
+  topicCount: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
   const bound =
     topicCount >= 1000 ? INITIAL_BUDGET_MS * 1.25 : INITIAL_BUDGET_MS;
-  if (POOL_CI) {
+  if (isPoolLane(env)) {
     return bound * 10;
   }
-  // Only the row hosted lanes actually overrun: the smaller corpi keep the
-  // bound they already pass under, so for them this stays the strict lane.
-  return HOSTED_CI && topicCount >= 1000
-    ? bound * HOSTED_COLD_SCAN_MULTIPLIER
-    : bound;
+  return isHostedLane(env) ? bound * HOSTED_COLD_SCAN_MULTIPLIER : bound;
 }
 
 /**
@@ -217,6 +236,61 @@ function sessionCacheFor(projectRoot: string): AutoMemoryDocumentCache {
   }
   return documentCache;
 }
+
+describe('coldScanCeilingMs lane arms', () => {
+  // One arm runs per CI job, and this PR's own `Test (ubuntu-latest)` job lands
+  // on the pool, so without these cases the hosted arm never executes anywhere:
+  // dropping a disjunct, or putting `topicCount >= 1000` back, would redden
+  // fork PRs again with nothing failing at the edit. `env` is passed rather
+  // than stubbed, so no case here can leak a lane into the timing tests below.
+  const arms: Array<{
+    lane: string;
+    env: NodeJS.ProcessEnv;
+    /** Ceiling for the 200- and 500-topic cold rows. */
+    small: number;
+    /** Ceiling for the 1000-topic cold row. */
+    large: number;
+  }> = [
+    {
+      lane: 'ecs pool (parity name)',
+      env: { RUNNER_NAME: 'ecs-qwen-parity' },
+      small: 1000,
+      large: 1250,
+    },
+    {
+      lane: 'ecs pool (numbered name)',
+      env: { RUNNER_NAME: 'ecs-qwen-hk1-01' },
+      small: 1000,
+      large: 1250,
+    },
+    {
+      lane: 'GitHub-hosted (RUNNER_ENVIRONMENT)',
+      env: { RUNNER_ENVIRONMENT: 'github-hosted' },
+      small: 220,
+      large: 275,
+    },
+    {
+      lane: 'GitHub-hosted (RUNNER_NAME prefix)',
+      env: { RUNNER_NAME: 'GitHub Actions 1000544680' },
+      small: 220,
+      large: 275,
+    },
+    {
+      lane: 'strict (both unset)',
+      env: {},
+      small: 100,
+      large: 125,
+    },
+  ];
+
+  it.each(arms)('pins the $lane ceilings', ({ env, small, large }) => {
+    // toBeCloseTo rather than toBe: 100 * 2.2 is 220.00000000000003 in binary
+    // floating point, and what this case pins is the multiplier, not rounding.
+    expect(coldScanCeilingMs(200, env)).toBeCloseTo(small, 6);
+    expect(coldScanCeilingMs(500, env)).toBeCloseTo(small, 6);
+    expect(coldScanCeilingMs(1000, env)).toBeCloseTo(large, 6);
+  });
+});
 
 describe('auto-memory recall scan latency', () => {
   beforeAll(async () => {
