@@ -16,6 +16,20 @@ import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
 import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
+const walkFailure = vi.hoisted(() => ({ fail: false }));
+vi.mock('acorn-walk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('acorn-walk')>();
+  return {
+    ...actual,
+    simple: (...args: Parameters<typeof actual.simple>) => {
+      if (walkFailure.fail) {
+        throw new TypeError('baseVisitor[type] is not a function');
+      }
+      return actual.simple(...args);
+    },
+  };
+});
+
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
     const src = `phase("plan")\nreturn 1`;
@@ -3099,10 +3113,48 @@ await import('node:fs');`;
       ).toMatch(/^line 2: /);
     });
 
+    it.each([
+      ['a class static block', "class A { static { import('node:fs'); } }"],
+      ['a class field', "class A { f = import('node:fs'); }"],
+      ['a private static field', "class A { static #f = import('node:fs'); }"],
+      ['a parameter default', "function f(a = import('node:fs')) {}"],
+    ])('refuses import() in %s', (_name, source) => {
+      expect(refusal(source).message).toMatch(
+        /^line 1: dynamic import\(\) is not supported/,
+      );
+    });
+
     // Newer V8 compiles `import.source()`, which the parser does not know.
-    // Whichever of the two refuses it, the script must not run unchecked.
+    // Whichever of the two refuses it, the script must not run unchecked, and
+    // a parser refusal carries its own cause rather than the syntax hint.
     it('refuses a body the parser cannot read even when V8 compiles it', () => {
-      expect(() => compileWorkflowScript("import.source('x');")).toThrow();
+      let caught: unknown;
+      try {
+        compileWorkflowScript("import.source('x');");
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeDefined();
+      if (!(caught instanceof SyntaxError)) {
+        expect(caught).toBeInstanceOf(WorkflowUnsupportedSyntaxError);
+        expect((caught as Error).message).toMatch(
+          /^line 1: the script could not be checked for unsupported syntax/,
+        );
+      }
+    });
+
+    it('refuses with its own cause when the walk itself fails', () => {
+      walkFailure.fail = true;
+      try {
+        expect(() => compileWorkflowScript('return 1;')).toThrow(
+          WorkflowUnsupportedSyntaxError,
+        );
+        expect(() => compileWorkflowScript('return 1;')).toThrow(
+          /could not be checked for unsupported syntax: baseVisitor/,
+        );
+      } finally {
+        walkFailure.fail = false;
+      }
     });
 
     it('leaves an ordinary syntax error to V8', () => {

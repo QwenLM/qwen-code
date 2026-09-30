@@ -9,9 +9,9 @@ import type { Node } from 'acorn';
 import { simple } from 'acorn-walk';
 
 /**
- * A script that compiles but uses syntax a workflow cannot run. Raised before
- * the body executes, so callers can refuse the script without the hint for
- * ordinary syntax errors.
+ * A script that compiles but uses syntax a workflow cannot run, or that the
+ * check could not read. Raised before the body executes, so callers can refuse
+ * the script without the hint for ordinary syntax errors.
  */
 export class WorkflowUnsupportedSyntaxError extends Error {
   constructor(message: string) {
@@ -28,31 +28,29 @@ export class WorkflowUnsupportedSyntaxError extends Error {
  *
  * `wrappedSource` must be the exact text V8 compiled: the wrapper adds one
  * line ahead of the author's first line, which is taken off the reported
- * line number. A parse failure here is thrown, never waved through.
+ * line number. A parse or walk failure is thrown, never waved through.
  */
 export function assertNoDynamicImport(wrappedSource: string): void {
-  let ast: Node;
+  let first: Node | undefined;
   try {
-    ast = parse(wrappedSource, {
+    const ast = parse(wrappedSource, {
       ecmaVersion: 'latest',
       sourceType: 'script',
       locations: true,
+    });
+    simple(ast, {
+      ImportExpression(node) {
+        if (!first || node.start < first.start) first = node;
+      },
     });
   } catch (error) {
     const err = error as { message?: unknown; loc?: { line: number } };
     const message = String(err.message).replace(/ \(\d+:\d+\)$/, '');
     const line = err.loc ? `line ${err.loc.line - 1}: ` : '';
-    throw new Error(
+    throw new WorkflowUnsupportedSyntaxError(
       `${line}the script could not be checked for unsupported syntax: ${message}`,
     );
   }
-
-  let first: Node | undefined;
-  simple(ast, {
-    ImportExpression(node) {
-      if (!first || node.start < first.start) first = node;
-    },
-  });
   if (!first) return;
   throw new WorkflowUnsupportedSyntaxError(
     `line ${first.loc!.start.line - 1}: dynamic import() is not supported in ` +
