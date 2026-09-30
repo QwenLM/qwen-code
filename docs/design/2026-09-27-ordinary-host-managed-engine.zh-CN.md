@@ -370,9 +370,10 @@ M3 确定了契约中的以下细节：
 
 M4 通过 #12693 的 authority，使用其本地 JSONL 日志与资源存储，把 Managed 会话记录为
 Managed Session log。它改动 core 的 `Config`、`ChatRecordingService`、record sink 与读取器的
-Managed 恢复投影，不增加生产调用方：Managed 宿主在 M6 才开始使用它。它不需要 M2 宿主：宿主选定的
-引擎本来就以 `sessionExecutionEngine` 传到 `Config`，测试也像宿主那样直接驱动
-`Config`。
+Managed 恢复投影，不增加生产调用方：Managed 宿主在 M6 才开始使用它。切片计划中「M4 和 M5
+依赖 M2」说的是驱动 Managed 会话的宿主。记录本身不需要这个宿主就能落在 core 中：宿主选定的
+引擎本来就以 `sessionExecutionEngine` 传到 `Config`，测试也像宿主那样直接驱动 `Config`。
+切片计划保持排期更新（#12920）时的样子。
 
 #### 触发条件
 

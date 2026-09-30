@@ -7,6 +7,10 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    default boolean isWorkspaceFilesAvailable() {
+        return false;
+    }
+
     Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting);
 

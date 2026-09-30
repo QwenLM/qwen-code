@@ -13,7 +13,7 @@ import {
   type ExtensionSetting,
 } from '@qwen-code/qwen-code-core';
 import type { Request, Response } from 'express';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type Settings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   detectSystemLanguage,
@@ -59,19 +59,10 @@ const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
 
-const resolveExtensionLocale = (
-  workspaceDir: string,
-  workspaceTrusted?: boolean,
-): string => {
-  const configuredLanguage = loadSettings(
-    workspaceDir,
-    workspaceTrusted === undefined
-      ? true
-      : {
-          skipWorkspaceSettings: !workspaceTrusted,
-          workspaceTrusted,
-        },
-  ).merged.general?.language as string | undefined;
+const resolveExtensionLocale = (mergedSettings: Settings): string => {
+  const configuredLanguage = mergedSettings.general?.language as
+    | string
+    | undefined;
   const requestedLocale = resolveLanguageSetting(configuredLanguage);
   if (requestedLocale === 'auto') {
     return detectSystemLanguage();
@@ -312,13 +303,33 @@ export function createExtensionsController(
     interactions?: ExtensionInteractionHandlers,
   ) => {
     const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
+    // One trust-gated load per call, shared by the locale and the trust
+    // fallback below. `skipLoadEnvironment` keeps this workspace's own
+    // `.env` / `settings.env` out of the daemon's shared `process.env`: one
+    // daemon hosts every workspace, so writing there leaks one repo's values
+    // into every other workspace's resolution for the process lifetime.
+    // `consumeCorruptionEnvVars: false` because this load surfaces neither
+    // the corruption marker nor the recovery notice, and the pair is
+    // one-shot: the default would spend it here and leave the load that does
+    // surface it nothing to report for the rest of the daemon's life.
+    const settings = loadSettings(
+      workspaceDir,
+      workspaceTrusted === undefined
+        ? { skipLoadEnvironment: true, consumeCorruptionEnvVars: false }
+        : {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: !workspaceTrusted,
+            workspaceTrusted,
+            consumeCorruptionEnvVars: false,
+          },
+    ).merged;
     return new ExtensionManager({
       workspaceDir,
-      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
+      locale: resolveExtensionLocale(settings),
       isWorkspaceTrusted:
         workspaceTrusted ??
-        getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
-          .effective.state === 'trusted',
+        getWorkspaceTrustStatus(settings, workspaceDir).effective.state ===
+          'trusted',
       requestConsent: () => Promise.resolve(),
       requestSetting:
         interactions?.requestSetting ??
@@ -1116,13 +1127,55 @@ export function createExtensionsController(
 
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
+      // `skipLoadEnvironment` for the same reason as the load in
+      // `createExtensionManager`: this route is trust-free and reachable with
+      // a single GET, so writing the bound workspace's `.env` /
+      // `settings.env` into the daemon's shared `process.env` would publish
+      // one repo's values to every other workspace the daemon hosts for the
+      // process lifetime. `consumeCorruptionEnvVars: false` for the reason
+      // stated there too: this poll is the most frequently hit load in the
+      // daemon, so letting it spend the one-shot marker it never surfaces
+      // would drop the signal for every hosted workspace.
+      //
+      // The probe stays ungated only where it is actually read. An
+      // authoritative `false` from `isWorkspaceTrusted` short-circuits
+      // `trusted`, so probing there would parse an untrusted workspace's own
+      // `.qwen/settings.json` and then throw the result away — and parsing
+      // runs the migration / corruption-recovery path, which REWRITES that
+      // file (injecting `$version`, or resetting invalid JSON to `{}` beside
+      // a `.corrupted` sibling). A trust-free, read-only-by-contract status
+      // poll must not mutate the workspace it reports on, so that arm
+      // performs exactly one load: the gated one below.
+      const trustedFromDeps = deps.isWorkspaceTrusted?.();
+      const probeSettings =
+        trustedFromDeps === false
+          ? undefined
+          : loadSettings(boundWorkspace, {
+              skipLoadEnvironment: true,
+              consumeCorruptionEnvVars: false,
+            }).merged;
       const trusted =
-        deps.isWorkspaceTrusted?.() ??
-        getWorkspaceTrustStatus(
-          loadSettings(boundWorkspace).merged,
-          boundWorkspace,
-        ).effective.state === 'trusted';
-      const locale = resolveExtensionLocale(boundWorkspace, trusted);
+        trustedFromDeps ??
+        (probeSettings !== undefined &&
+          getWorkspaceTrustStatus(probeSettings, boundWorkspace).effective
+            .state === 'trusted');
+      // An untrusted workspace must not select the locale through its own
+      // `general.language`: `loadSettings` merges the workspace scope for
+      // any directory unless told otherwise, while the entries behind this
+      // key are built by `createExtensionManager(boundWorkspace, trusted)`,
+      // which does gate it. Re-resolving on the gated merge keeps the cache
+      // key and the cached payload on one view of the same file. A trusted
+      // workspace reuses the probe, so that path is still a single load.
+      const mergedSettings =
+        trusted && probeSettings
+          ? probeSettings
+          : loadSettings(boundWorkspace, {
+              skipLoadEnvironment: true,
+              consumeCorruptionEnvVars: false,
+              skipWorkspaceSettings: true,
+              workspaceTrusted: false,
+            }).merged;
+      const locale = resolveExtensionLocale(mergedSettings);
       if (
         extensionsStatusCache?.locale === locale &&
         extensionsStatusCache.trusted === trusted &&
