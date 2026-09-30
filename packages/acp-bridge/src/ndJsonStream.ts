@@ -226,21 +226,27 @@ function createLegacyReadable(
   textDecoder: TextDecoderLike,
   hooks?: NdJsonStreamHooks,
 ): ReadableStream<AnyMessage> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let canceled = false;
   return new ReadableStream<AnyMessage>({
     async start(controller) {
       const pending: Uint8Array[] = [];
-      const reader = input.getReader();
+      reader = input.getReader();
       try {
         while (true) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (canceled || done) break;
           if (!value) continue;
           readLegacyChunk(value, pending, controller, textDecoder, hooks);
         }
       } finally {
         reader.releaseLock();
-        controller.close();
+        if (!canceled) controller.close();
       }
+    },
+    async cancel(reason) {
+      canceled = true;
+      if (reader) await cancelReader(reader, reason);
     },
   });
 }
