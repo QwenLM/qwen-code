@@ -267,6 +267,27 @@ describe('extractXmlToolCalls', () => {
     ]);
   });
 
+  it('extracts a later invoke after a fenced example with a parameter fence line', () => {
+    const fencedExample =
+      '```xml\n' +
+      invoke('edit', param('old_string', '```\ninner')) +
+      '\n```\n';
+    const readCall = invoke('read_file', param('file_path', 'd.ts'));
+    expect(extractXmlToolCalls(fencedExample + readCall)).toEqual([
+      { name: 'read_file', args: { file_path: 'd.ts' } },
+    ]);
+  });
+
+  it('does not extract a fenced invoke after an earlier fenced parameter fence line', () => {
+    const text =
+      '```xml\n' +
+      invoke('edit', param('old_string', '```\ninner')) +
+      '\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
   it('decodes XML entities in parameter values', () => {
     const text = invoke(
       'edit',
@@ -507,6 +528,32 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(result.functionCallParts).toHaveLength(2);
     expect(result.functionCallParts[0]?.functionCall?.name).toBe('edit');
     expect(result.functionCallParts[1]?.functionCall?.name).toBe('read_file');
+  });
+
+  it('recovers a later invoke after a fenced example with a parameter fence line', () => {
+    const fencedExample =
+      '```xml\n' +
+      invoke('edit', param('old_string', '```\ninner')) +
+      '\n```\n';
+    const readCall = invoke('read_file', param('file_path', 'd.ts'));
+    const result = tryRecoverXmlToolCalls(fencedExample + readCall);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts).toHaveLength(1);
+    expect(result.functionCallParts[0]?.functionCall?.name).toBe('read_file');
+    expect(result.remainingText).toContain('```xml');
+  });
+
+  it('does not recover a second fenced invoke after an earlier fenced parameter fence line', () => {
+    const text =
+      '```xml\n' +
+      invoke('edit', param('old_string', '```\ninner')) +
+      '\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
   });
 
   it('strips an empty function_calls wrapper from remainingText', () => {

@@ -645,6 +645,7 @@ export abstract class BaseJsonOutputAdapter {
       }
       return;
     }
+    this.lastAssistantMessage = null;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -669,6 +670,24 @@ export abstract class BaseJsonOutputAdapter {
    */
   processEvent(event: ServerLlmStreamEvent): void {
     const state = this.mainAgentMessageState;
+    if (event.type === LlmEventType.Retry) {
+      if (!event.isContinuation) {
+        this.restartAttempt(false, []);
+      }
+      this.emitSystemMessage('retry', {
+        is_continuation: event.isContinuation === true,
+        retry_info: event.retryInfo
+          ? {
+              message: event.retryInfo.message,
+              attempt: event.retryInfo.attempt,
+              max_retries: event.retryInfo.maxRetries,
+              delay_ms: event.retryInfo.delayMs,
+            }
+          : null,
+      });
+      return;
+    }
+
     if (state.finalized) {
       return;
     }
