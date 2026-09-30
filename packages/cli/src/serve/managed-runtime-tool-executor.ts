@@ -480,8 +480,7 @@ export class ManagedToolExecutor {
     };
     this.entries.set(reference.callId, entry);
     entry.promise = this.run(entry, tool, tools, tools.directory);
-    await entry.promise;
-    return entry.result!;
+    return join(entry, reference, toolName, inputJson);
   }
 
   async executeV3(
@@ -811,19 +810,22 @@ export class ManagedToolExecutor {
         [WriteFileTool.Name, EditTool.Name].includes(entry.toolName)
       ) {
         let outcome: { result: ToolResult } | { error: unknown };
+        let invoked = false;
         try {
           const file = path
             .relative(history.directory, params['file_path'] as string)
             .split(path.sep)
             .join('/');
           outcome = await history.execute(file, async () => {
+            invoked = true;
             try {
               return { result: await invoke() };
             } catch (error) {
               return { error };
             }
           });
-        } catch {
+        } catch (error) {
+          if (!invoked) throw error;
           // A post-execution history failure cannot prove the file outcome.
           entry.state = 'unknown';
           entry.lastSequence++;
@@ -1016,6 +1018,10 @@ async function join(
     );
   }
   await entry.promise;
+  if (entry.state === 'unknown')
+    throw new ManagedMcpToolUnknownError(
+      'Managed Runtime tool outcome is unknown.',
+    );
   return entry.result!;
 }
 

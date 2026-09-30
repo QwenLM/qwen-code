@@ -38,17 +38,20 @@ export class ManagedRuntimeFileHistory {
         ),
       })) ?? [],
     );
-    this.files = structuredClone(state?.files ?? {});
+    this.files = Object.assign(
+      Object.create(null),
+      structuredClone(state?.files ?? {}),
+    );
   }
 
-  async ready(): Promise<void> {
+  async ready(checkPaths = true): Promise<void> {
     await this.history.ready();
     await this.history.service.validateRestoredSnapshots();
     for (const snapshot of this.history.state().snapshots) {
       for (const [file, backup] of Object.entries(
         snapshot.trackedFileBackups,
       )) {
-        await this.resolve(file.split(path.sep).join('/'));
+        if (checkPaths) await this.resolve(file.split(path.sep).join('/'));
         if (backup.failed)
           throw new Error('Hosted file history backup is unavailable.');
       }
@@ -132,16 +135,28 @@ export class ManagedRuntimeFileHistory {
     filesFailed: string[];
     conflict: boolean;
   }> {
-    await this.ready();
+    await this.ready(false);
     return this.history.run(async () => {
-      for (const file of Object.keys(this.files))
-        if (!isDeepStrictEqual(await this.fingerprint(file), this.files[file]))
-          return {
-            state: this.state(),
-            filesChanged: [],
-            filesFailed: [],
-            conflict: true,
-          };
+      let conflict = false;
+      try {
+        for (const file of Object.keys(this.files)) {
+          if (
+            !isDeepStrictEqual(await this.fingerprint(file), this.files[file])
+          ) {
+            conflict = true;
+            break;
+          }
+        }
+      } catch {
+        conflict = true;
+      }
+      if (conflict)
+        return {
+          state: this.state(),
+          filesChanged: [],
+          filesFailed: [],
+          conflict: true,
+        };
       const result = await this.history.service.rewind(promptId, false);
       for (const file of Object.keys(this.files))
         this.files[file] = await this.fingerprint(file);

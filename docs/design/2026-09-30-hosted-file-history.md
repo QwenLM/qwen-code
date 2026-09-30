@@ -51,6 +51,9 @@ or retains idle Workspace ownership. Missing backups can be restored and retried
 unknown responses and failed release still require recovery. Binding a saved
 Shell continuation is different: refusal preserves its original runtime and
 recovery state, because closing that runtime would strand the unfinished turn.
+Refusal inside native execution before entering the tool action also settles as
+a tool error. History failure after entering the action remains unknown, including
+the immediate execution response and retries of the same invocation.
 
 After every completed batch, including tool errors and cancellation, the
 worker records current byte digests and modes for affected files. The Harness
@@ -63,6 +66,10 @@ Snapshots and expected file states are stored in the Session Store. Backup
 bytes remain in FileHistoryService's worker storage. Missing backups and
 invalid/outside/symlink paths fail closed. Backups are revalidated before
 mutation, settlement and undo, including during a live worker's lifetime.
+Transient backup access errors reject the operation without marking the backup
+permanently failed. Tracking maps preserve legal prototype-named files across
+serialization and cold binding. Verified Workspace reload validates file-history
+records and their previous-record resources as well as the latest state.
 Retention is bounded to 100 prompt snapshots; reaching the bound refuses another
 mutating prompt rather than deleting backups still referenced by durable history.
 The existing 64 KiB inline Store limit also applies to each history record.
@@ -82,6 +89,7 @@ The private Hosted API adds `GET /session/:id/files/history` and
 `POST /session/:id/files/rewind` with a target `promptId` and UUID `requestId`.
 Both are live-session-owner scoped and require the existing client identity;
 undo additionally requires an idle, writable, unblocked file-tool Session.
+Closing, busy or recovering owners refuse undo before acquiring a runtime.
 The request uses its own acquired runtime Session and restores the saved state.
 Workspace busy/unavailable returns a retryable 409. A definite bind refusal
 releases the acquired runtime and returns `409 hosted_file_history_refused`
@@ -103,6 +111,9 @@ resulting expected file states before release and completion. A partial restore,
 unknown response or persistence failure remains blocked, including after reload.
 This is not an atomic multi-file transaction: other writers must be quiescent
 throughout undo; a conflict detected before restoration changes no files.
+Path-type changes and fingerprint read failures during the read-only preflight
+also return conflict without changing expected state. Backup validation failures
+and errors after restoration starts retain their existing failure semantics.
 Completed undo receipts remain in subsequent history records, so retrying an
 older request after another undo, Write/Edit or reload returns its original
 result without reacquiring a released runtime. Receipts share the same bounded

@@ -6,6 +6,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import java.util.Locale;
+import java.util.Set;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties {
@@ -51,16 +53,25 @@ public class ManagedAgentProperties {
 
     @PostConstruct
     void validateWorkspaceFiles() {
+        long timeout = harness.getApprovalTimeout().toMillis();
+        if (timeout < 1000 || timeout > 86400000) {
+            throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h");
+        }
         if (harness.isWorkspaceFilesEnabled()
-                && (!harness.isEnabled() || !sessionStore.isEnabled()
+                && (!harness.isEnabled()
+                        || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
                         || !"local-process".equals(runtimeBroker.getProvisioner())
                         || !"session".equals(runtimeBroker.getIsolationClass())
                         || runtimeBroker.getWorkspaceMounts().isEmpty()
-                        || !"yolo".equalsIgnoreCase(harness.getApprovalMode()))) {
-            throw new IllegalStateException("Hosted Workspace files require"
-                    + " a preapproved Harness, Session Store and Session-isolated"
-                    + " local-process Broker with Workspace mounts");
+                        || !Set.of("yolo", "default", "auto-edit")
+                                .contains(
+                                        harness.getApprovalMode()
+                                                .toLowerCase(Locale.ROOT)))) {
+            throw new IllegalStateException(
+                    "Hosted Workspace files require"
+                            + " a supported Harness, Session Store and Session-isolated"
+                            + " local-process Broker with Workspace mounts");
         }
     }
 
@@ -71,6 +82,16 @@ public class ManagedAgentProperties {
         private String token = "";
         private String capabilityDigest = "";
         private String approvalMode = "yolo";
+        private Duration approvalTimeout = Duration.ofMinutes(10);
+
+        public Duration getApprovalTimeout() {
+            return approvalTimeout;
+        }
+
+        public void setApprovalTimeout(Duration value) {
+            approvalTimeout = value;
+        }
+
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
@@ -356,6 +377,7 @@ public class ManagedAgentProperties {
         private boolean durableLocalProcess;
         private boolean trustedLocalRebootRecovery;
         private boolean operatorRecoveryEnabled;
+        private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -485,6 +507,14 @@ public class ManagedAgentProperties {
 
         public void setOperatorRecoveryEnabled(boolean operatorRecoveryEnabled) {
             this.operatorRecoveryEnabled = operatorRecoveryEnabled;
+        }
+
+        public boolean isVerifiedWorkspaceRecoveryEnabled() {
+            return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
+            this.verifiedWorkspaceRecoveryEnabled = verifiedWorkspaceRecoveryEnabled;
         }
 
         public String getStateDirectory() {

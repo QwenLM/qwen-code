@@ -5,6 +5,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import express from 'express';
+import supertest from 'supertest';
+import * as fsPromises from 'node:fs/promises';
 import {
   mkdtemp,
   mkdir,
@@ -21,8 +24,14 @@ import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import {
   createManagedToolSet,
   ManagedToolExecutor,
+  ManagedMcpToolUnknownError,
 } from './managed-runtime-tool-executor.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
+import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+
+vi.mock('node:fs/promises', async (original) => ({
+  ...(await original<typeof import('node:fs/promises')>()),
+}));
 
 let root: string;
 let workspace: string;
@@ -181,14 +190,87 @@ it('captures file changes even when an operation throws', async () => {
   });
 });
 
-it.each(['constructor', '__proto__'])(
-  'requires a real backup entry for %s',
-  async (file) => {
-    await writeFile(path.join(workspace, file), 'original');
-    await expect(history.prepare('prompt', [file])).rejects.toThrow(
-      'backup failed',
-    );
-    expect(await readFile(path.join(workspace, file), 'utf8')).toBe('original');
+it.each([
+  'constructor',
+  '__proto__',
+  'toString',
+  'valueOf',
+  'hasOwnProperty',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'toLocaleString',
+])('backs up and cold-restores the ordinary filename %s', async (file) => {
+  const absolute = path.join(workspace, file);
+  await writeFile(absolute, 'original');
+  await history.prepare('prompt', [file]);
+  await history.execute(file, () => writeFile(absolute, 'changed'));
+  const saved = parseHostedFileHistoryState(
+    JSON.parse(JSON.stringify(history.state())),
+    owner,
+  );
+  expect(Object.hasOwn(saved.files, file)).toBe(true);
+  const restored = new ManagedRuntimeFileHistory(owner, workspace, saved);
+  await restored.prepare('next', [file]);
+  await restored.execute(file, () => writeFile(absolute, 'again'));
+  expect(await restored.rewind('prompt')).toMatchObject({
+    conflict: false,
+    filesChanged: [file],
+    filesFailed: [],
+  });
+  expect(await readFile(absolute, 'utf8')).toBe('original');
+});
+
+it('keeps backup validation retryable after a transient stat failure', async () => {
+  const file = path.join(workspace, 'a');
+  await writeFile(file, 'before');
+  await history.prepare('prompt', ['a']);
+  const saved = history.state();
+  const fault = Object.assign(new Error('temporary fd exhaustion'), {
+    code: 'EMFILE',
+  });
+  const stat = vi.spyOn(fsPromises, 'stat').mockRejectedValueOnce(fault);
+  await expect(history.ready()).rejects.toThrow();
+  stat.mockRestore();
+  expect(history.state()).toEqual(saved);
+  await expect(history.ready()).resolves.toBeUndefined();
+  await history.execute('a', () => writeFile(file, 'after'));
+  expect(await history.rewind('prompt')).toMatchObject({
+    conflict: false,
+    filesFailed: [],
+  });
+  expect(await readFile(file, 'utf8')).toBe('before');
+});
+
+it.each(['symlink', 'directory', 'read error'])(
+  'reports %s drift as an undo conflict without touching other files',
+  async (drift) => {
+    const file = path.join(workspace, 'a');
+    const other = path.join(workspace, 'b');
+    await writeFile(file, 'old a');
+    await writeFile(other, 'old b');
+    await history.prepare('prompt', ['a', 'b']);
+    await history.execute('a', () => writeFile(file, 'new a'));
+    await history.execute('b', () => writeFile(other, 'new b'));
+    if (drift === 'read error') {
+      const lstat = fsPromises.lstat;
+      vi.spyOn(fsPromises, 'lstat').mockImplementation((...args) => {
+        if (args[0] === file)
+          return Promise.reject(
+            Object.assign(new Error('denied'), { code: 'EACCES' }),
+          );
+        return lstat(...args);
+      });
+    } else {
+      await rm(file);
+      if (drift === 'symlink') await symlink(other, file);
+      else await mkdir(file);
+    }
+    expect(await history.rewind('prompt')).toMatchObject({
+      conflict: true,
+      filesChanged: [],
+      filesFailed: [],
+    });
+    expect(await readFile(other, 'utf8')).toBe('new b');
   },
 );
 
@@ -304,12 +386,53 @@ it('wires history to the real raw executor and preserves its original invocation
   await expect(readFile(path.join(workspace, 'new'))).rejects.toMatchObject({
     code: 'ENOENT',
   });
+  await writeFile(path.join(workspace, 'new'), 'external');
+  const refused = { ...reference, callId: randomUUID() };
+  expect(await executor.execute(refused, 'write_file', input)).toMatchObject({
+    executionStatus: 'error',
+    error: { message: 'Hosted file changed after backup preparation.' },
+  });
+  expect(executor.status(refused)?.state).toBe('settled');
+  expect(await readFile(path.join(workspace, 'new'), 'utf8')).toBe('external');
+  await rm(path.join(workspace, 'new'));
+  const execute = ManagedRuntimeFileHistory.prototype.execute;
   vi.spyOn(
     ManagedRuntimeFileHistory.prototype,
     'execute',
-  ).mockRejectedValueOnce(new Error('post-write history unavailable'));
+  ).mockImplementationOnce(async function (
+    this: ManagedRuntimeFileHistory,
+    file,
+    action,
+  ) {
+    await execute.call(this, file, action);
+    throw new Error('post-write history unavailable');
+  });
   const unknown = { ...reference, callId: randomUUID() };
-  await executor.execute(unknown, 'write_file', input);
+  await expect(
+    executor.execute(unknown, 'write_file', input),
+  ).rejects.toBeInstanceOf(ManagedMcpToolUnknownError);
+  const app = express();
+  registerManagedRuntimeToolRoutes(
+    app,
+    { token: 'token', leaseId: 'lease', epoch: 1 },
+    executor,
+  );
+  const replay = await supertest(app)
+    .post('/internal/managed-runtime/v2/execute')
+    .set({
+      authorization: 'Bearer token',
+      'cache-control': 'no-store',
+      'x-qwen-managed-lease-id': 'lease',
+      'x-qwen-managed-lease-epoch': '1',
+    })
+    .send({
+      protocolVersion: 2,
+      reference: unknown,
+      toolName: 'write_file',
+      input,
+    });
+  expect(replay.status).toBe(200);
+  expect(replay.body).toEqual({ protocolVersion: 2, state: 'unknown' });
   expect(executor.status(unknown)?.state).toBe('unknown');
   await expect(
     control({ kind: 'raw-file-history', action: 'snapshot' }),
