@@ -45,6 +45,7 @@ import {
 import { resetLocalGitVersionCacheForTesting } from './github.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { getGlobalDispatcher } from 'undici';
 
 const mockGit = {
   clone: vi.fn(),
@@ -4209,6 +4210,111 @@ describe('extension tests', () => {
 
       await manager.enableExtension('ext1', SettingScope.Workspace);
       expect(manager.isEnabled('ext1', tempWorkspaceDir)).toBe(true);
+    });
+  });
+
+  describe('telemetry config for lifecycle events', () => {
+    function getLoggedTelemetryConfig(mock: {
+      mock: { calls: unknown[][] };
+    }): Config {
+      expect(mock.mock.calls.length).toBeGreaterThan(0);
+      return mock.mock.calls[0]![0] as Config;
+    }
+
+    it('honors usageStatisticsEnabled=false so the RUM logger gate stays closed', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ usageStatisticsEnabled: false });
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      // QwenLogger.getInstance(config) is the only opt-out gate; it closes
+      // only when config.getUsageStatisticsEnabled() is false.
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getUsageStatisticsEnabled()).toBe(false);
+    });
+
+    it('honors usageStatisticsEnabled=true explicitly', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager({ usageStatisticsEnabled: true });
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getUsageStatisticsEnabled()).toBe(true);
+    });
+
+    it('forwards the resolved proxy so RUM uploads use it', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const dispatcherBefore = getGlobalDispatcher();
+      const manager = createExtensionManager({
+        proxy: 'http://127.0.0.1:7890',
+      });
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getProxy()).toBe('http://127.0.0.1:7890');
+      // The throwaway telemetry Config must NOT install the process-global
+      // undici dispatcher: in `qwen serve` one process hosts many
+      // workspaces, and a per-event global install would re-route the
+      // daemon's own plain `fetch` through a proxy another workspace
+      // configured. Give the (unguarded) async installer every chance to
+      // run, then assert the dispatcher is untouched.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(getGlobalDispatcher()).toBe(dispatcherBefore);
+    });
+
+    it('keeps usage statistics enabled by default when the option is omitted', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      await manager.disableExtension('ext1', SettingScope.User);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getUsageStatisticsEnabled()).toBe(true);
+      expect(config.getProxy()).toBeUndefined();
+    });
+
+    it('does not abort the mutation when the proxy is a value a session Config would reject', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+
+      // normalizeProxyUrl throws for SOCKS proxies; that throw must not
+      // escape the throwaway telemetry Config and fail the extension
+      // command, so the upload falls back to a direct connection.
+      const manager = createExtensionManager({
+        proxy: 'socks5h://127.0.0.1:1080',
+      });
+      await manager.refreshCache();
+
+      await manager.disableExtension('ext1', SettingScope.User);
+      expect(manager.isEnabled('ext1')).toBe(false);
+
+      const config = getLoggedTelemetryConfig(mockLogExtensionDisable);
+      expect(config.getProxy()).toBeUndefined();
     });
   });
 

@@ -9,6 +9,8 @@ import {
   redactUrlCredentials,
   getExtensionDisplayName,
   getExtensionDescription,
+  resolveExtensionTelemetryProxy,
+  resolveUsageStatisticsEnabled,
   type Extension,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
@@ -27,6 +29,7 @@ export async function getExtensionManager(
   managedExtensionsDir?: string,
 ): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
+  const settings = loadSettings(workspaceDir).merged;
   const extensionManager = new ExtensionManager({
     managedExtensionsDir,
     workspaceDir,
@@ -36,8 +39,11 @@ export async function getExtensionManager(
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
-    isWorkspaceTrusted:
-      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+    isWorkspaceTrusted: isWorkspaceTrusted(settings).isTrusted ?? true,
+    usageStatisticsEnabled: resolveUsageStatisticsEnabled(
+      settings.privacy?.usageStatisticsEnabled,
+    ),
+    proxy: resolveExtensionTelemetryProxy(settings.proxy),
   });
   await extensionManager.refreshCache();
   return extensionManager;

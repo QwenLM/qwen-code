@@ -1260,6 +1260,17 @@ export interface ConfigParameters {
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
   proxy?: string;
+  /**
+   * Whether construction installs the process-global undici proxy
+   * dispatcher (and the runtime-fetch proxy slot) when `proxy` resolves.
+   * Defaults to `true`. Throwaway Configs that exist only to route
+   * telemetry events must pass `false`: they still expose the proxy via
+   * `getProxy()` for the RUM logger's own agent, but must not rewrite the
+   * host process's global network state — in `qwen serve` one long-lived
+   * process hosts many workspaces, and nothing ever restores the
+   * dispatcher (#12770).
+   */
+  installProxyDispatcher?: boolean;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
   includeDirectories?: string[];
@@ -3708,7 +3719,7 @@ export class Config {
     }
 
     const proxyUrl = this.getProxy();
-    if (proxyUrl) {
+    if (proxyUrl && (params.installProxyDispatcher ?? true)) {
       // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
       // honored. A bare ProxyAgent tunnels EVERY request — including local
       // MCP servers reached over `http://localhost:...` — through the proxy,
@@ -3771,6 +3782,8 @@ export class Config {
       managedExtensionsDir: this.managedExtensionsDir,
       isWorkspaceTrusted: this.isTrustedFolder(),
       locale: params.locale,
+      usageStatisticsEnabled: this.usageStatisticsEnabled,
+      proxy: this.proxy,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;

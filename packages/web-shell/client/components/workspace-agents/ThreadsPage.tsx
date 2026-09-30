@@ -5,6 +5,11 @@
  */
 
 import { useI18n } from '../../i18n';
+import {
+  ShareAgentDialog,
+  type AgentShare,
+  type AgentShareSummary,
+} from './share-agent-dialog';
 import { useMemo, useState, type FormEvent } from 'react';
 import {
   ChevronRightIcon,
@@ -83,6 +88,12 @@ export interface ThreadsPageProps {
   onUpdateAgent?: (agentId: string, patch: AgentConfigPatch) => void;
   onOpenAgentBuilder?: () => void;
   onOpenDefinitions?: () => void;
+  /** A2A shares of one agent; absent hides Share. */
+  shares?: {
+    create: (agentId: string) => Promise<AgentShare>;
+    list: (agentId: string) => Promise<AgentShareSummary[]>;
+    revoke: (agentId: string, callerId: string) => Promise<unknown>;
+  };
   capabilities?: AgentCapabilitiesView;
   onCreateThread: (input: NewThread) => Promise<boolean> | void;
   workspaceCwd?: string;
@@ -236,6 +247,7 @@ export function ThreadsPage({
   onUpdateAgent,
   onOpenAgentBuilder,
   onOpenDefinitions,
+  shares,
   capabilities,
   onCreateThread,
   workspaceCwd,
@@ -251,6 +263,7 @@ export function ThreadsPage({
   const [configuring, setConfiguring] = useState<string>();
   const [openAgentId, setOpenAgentId] = useState<string>();
   const { t } = useI18n();
+  const [sharing, setSharing] = useState<{ id: string; name: string }>();
   const [taskAssignee, setTaskAssignee] = useState('');
   const statusLabel = (status: string) =>
     AGENT_STATUSES.has(status) ? t(`collab.agentStatus.${status}`) : status;
@@ -647,6 +660,15 @@ export function ThreadsPage({
                               {t('collab.agent.configure')}
                             </DropdownMenuItem>
                           ) : null}
+                          {shares ? (
+                            <DropdownMenuItem
+                              onSelect={() =>
+                                setSharing({ id: agent.id, name: agent.name })
+                              }
+                            >
+                              {t('collab.agent.share')}
+                            </DropdownMenuItem>
+                          ) : null}
                           <DropdownMenuItem
                             disabled={pending}
                             onSelect={() =>
@@ -824,6 +846,18 @@ export function ThreadsPage({
           ))
         )}
       </div>
+      {shares && sharing && (
+        <ShareAgentDialog
+          agentName={sharing.name}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSharing(undefined);
+          }}
+          onCreate={() => shares.create(sharing.id)}
+          onList={() => shares.list(sharing.id)}
+          onRevoke={(callerId) => shares.revoke(sharing.id, callerId)}
+        />
+      )}
     </div>
   );
 }

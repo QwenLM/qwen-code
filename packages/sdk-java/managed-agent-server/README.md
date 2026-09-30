@@ -50,7 +50,9 @@ Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-repl
 Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
-[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
+Actions (Java routes planned): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
 ## Prerequisites
 

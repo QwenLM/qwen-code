@@ -30,6 +30,7 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { RemoteShellResultPublisher } from './remote-shell-result-publication.js';
 import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
@@ -143,6 +144,32 @@ export function registerManagedContextRoutes(
   const activations = new WorkspaceActivations();
   const requiresActivation =
     boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST;
+  const remotePublisher =
+    !capturePublisher && requiresActivation
+      ? new RemoteShellResultPublisher()
+      : undefined;
+  const publisher: ManagedShellCapturePublisher | undefined =
+    capturePublisher ??
+    (remotePublishers && remotePublisher
+      ? {
+          async prepare(request) {
+            const local = remotePublishers.hasSession(
+              request.reference.sessionId,
+            );
+            const remote = remotePublisher.hasExecution(
+              request.capture.executionCallId,
+            );
+            if (local && remote)
+              throw new Error('Shell publication modes conflict.');
+            const selected = local ? remotePublishers : remotePublisher;
+            return {
+              ...(await selected.prepare(request)),
+              publisher: selected,
+            };
+          },
+        }
+      : (remotePublishers ?? remotePublisher));
+  remotePublisher?.registerInstallRoute(app, boot);
   const [attestRoute, contextRoute] = MANAGED_CONTEXT_ROUTES;
 
   app.post(
@@ -201,7 +228,7 @@ export function registerManagedContextRoutes(
       ),
       isActive,
     };
-  }, capturePublisher ?? remotePublishers);
+  }, publisher);
   registerManagedRuntimeProviderRoute(
     app,
     boot,
@@ -234,7 +261,7 @@ export function registerManagedContextRoutes(
   );
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
-  if (capturePublisher || remotePublishers) {
+  if (publisher) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }
   remotePublishers?.register(
