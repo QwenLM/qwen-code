@@ -60,6 +60,7 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
   renameSync: vi.fn(),
+  unlinkSync: vi.fn(),
   existsSync: vi.fn(() => false),
 }));
 
@@ -70,7 +71,13 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: mockFetchGatewayUrl,
 }));
 
-import { renameSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+  renameSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+  existsSync,
+} from 'node:fs';
 vi.mock('ws', () => ({
   default: MockWebSocket,
 }));
@@ -145,6 +152,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     sanitizePromptText: real.sanitizePromptText,
     sanitizeLogText: real.sanitizeLogText,
     truncateCodePoints: real.truncateCodePoints,
+    truncateUtf16Units: real.truncateUtf16Units,
   };
 });
 
@@ -574,7 +582,7 @@ describe('purgeSingleScopeOrphans', () => {
       vi
         .mocked(writeFileSync)
         .mock.calls.some((c) =>
-          String(c[0]).endsWith('test-bot-sessions-purged.json'),
+          String(c[0]).includes('test-bot-sessions-purged.json'),
         ),
     ).toBe(false);
     // One line names the count, that nothing was removed, and the switch that
@@ -651,7 +659,7 @@ describe('purgeSingleScopeOrphans', () => {
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
-      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+      String(c[0]).includes('test-bot-sessions-purged.json'),
     );
     expect(rescueIndex).toBeGreaterThanOrEqual(0);
     const write = calls[rescueIndex];
@@ -741,7 +749,7 @@ describe('purgeSingleScopeOrphans', () => {
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
-      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+      String(c[0]).includes('test-bot-sessions-purged.json'),
     );
     const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
       routes: Array<Record<string, unknown>>;
@@ -797,7 +805,7 @@ describe('purgeSingleScopeOrphans', () => {
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
-      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+      String(c[0]).includes('test-bot-sessions-purged.json'),
     );
     const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
       routes: Array<Record<string, unknown>>;
@@ -835,7 +843,7 @@ describe('purgeSingleScopeOrphans', () => {
 
     const calls = vi.mocked(writeFileSync).mock.calls;
     const rescueIndex = calls.findIndex((c) =>
-      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+      String(c[0]).includes('test-bot-sessions-purged.json'),
     );
     const records = JSON.parse(calls[rescueIndex][1] as string) as Array<{
       routes: Array<Record<string, unknown>>;
@@ -1326,6 +1334,12 @@ describe('purgeSingleScopeOrphans', () => {
     ) => {
       files.set(String(path), String(data));
     }) as typeof writeFileSync);
+    // The rescue write goes to a sibling temp file and is renamed over the real
+    // path; model that move so the append is visible on the real path.
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
     vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
       files.get(String(path))) as typeof readFileSync);
     vi.mocked(existsSync).mockImplementation((path: unknown) =>
@@ -1368,6 +1382,171 @@ describe('purgeSingleScopeOrphans', () => {
     expect(records[1].routes[0].sessionId).toBe('user-era-2');
   });
 
+  it('keeps the earlier records when a torn rescue write fails mid-way (R17-2)', () => {
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const earlier = [
+      {
+        purgedAt: '2024-01-01T00:00:00.000Z',
+        sessionScope: 'thread',
+        routes: [{ kind: 'user', sessionId: 'already-gone' }],
+      },
+    ];
+    const files = new Map<string, string>([[target, JSON.stringify(earlier)]]);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    // A write that reaches the kernel and then fails (ENOSPC/EIO, a kill
+    // mid-write) has already truncated whatever it was about to replace. The
+    // real path must never be the target of that write.
+    vi.mocked(writeFileSync).mockImplementation(((path: unknown) => {
+      files.set(String(path), '');
+      throw new Error('no space left on device');
+    }) as typeof writeFileSync);
+
+    const discardSession = vi.fn().mockResolvedValue(undefined);
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(
+      makeChannelWithRouter(
+        router,
+        { purgeLegacySessions: true },
+        { discardSession },
+      ),
+    );
+
+    // Fail closed: nothing was rescue-copied, so nothing is deleted.
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(discardSession).not.toHaveBeenCalled();
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('rescue write failed');
+    // The only copy of the routes a previous purge already deleted survived.
+    expect(JSON.parse(files.get(target) as string)).toEqual(earlier);
+  });
+
+  it('removes the sibling temp file when the rescue write fails (R17-2)', () => {
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const tmp = `${target}.tmp`;
+    const earlier = [
+      {
+        purgedAt: '2024-01-01T00:00:00.000Z',
+        sessionScope: 'thread',
+        routes: [{ kind: 'user', sessionId: 'already-gone' }],
+      },
+    ];
+    const files = new Map<string, string>([[target, JSON.stringify(earlier)]]);
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    // The sibling is created and then the write fails, leaving a zero/partial
+    // file behind on a real filesystem (the kernel witness: EFBIG).
+    vi.mocked(writeFileSync).mockImplementation(((path: unknown) => {
+      files.set(String(path), '');
+      throw new Error('file too large');
+    }) as typeof writeFileSync);
+    vi.mocked(unlinkSync).mockImplementation(((path: unknown) => {
+      files.delete(String(path));
+    }) as typeof unlinkSync);
+
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    // Fail closed, and leave no `.tmp` garbage behind.
+    expect(removeSessionId).not.toHaveBeenCalled();
+    expect(files.has(tmp)).toBe(false);
+    expect(files.get(target)).toBe(JSON.stringify(earlier));
+    const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('rescue write failed');
+  });
+
+  it('quarantines an unreadable rescue file instead of overwriting it (R17-2)', () => {
+    const target = join(
+      '/tmp/test-qwen',
+      'channels',
+      'test-bot-sessions-purged.json',
+    );
+    const files = new Map<string, string>([[target, '{"truncated":']]);
+    const moves: Array<[string, string]> = [];
+    vi.mocked(existsSync).mockImplementation((path: unknown) =>
+      files.has(String(path)),
+    );
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      files.get(String(path))) as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((
+      path: unknown,
+      data: unknown,
+    ) => {
+      files.set(String(path), String(data));
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      moves.push([String(from), String(to)]);
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
+
+    const removeSessionId = vi.fn(() => true);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    callPurge(makeChannelWithRouter(router, { purgeLegacySessions: true }));
+
+    const quarantine = moves.find(([from]) => from === target);
+    expect(quarantine?.[1]).toMatch(/\.corrupt-\d+$/);
+    expect(files.get(quarantine![1])).toBe('{"truncated":');
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'quarantined to',
+    );
+    // The new record still lands on the real path, and the deletion proceeds.
+    expect(JSON.parse(files.get(target) as string)).toHaveLength(1);
+    expect(removeSessionId).toHaveBeenCalledWith('user-era-1');
+  });
+
   it('keeps a legacy single-object rescue record instead of discarding it', () => {
     // An earlier build wrote the record as a bare object. It is the only copy
     // of routes that purge already deleted, so a later purge must carry it into
@@ -1389,6 +1568,12 @@ describe('purgeSingleScopeOrphans', () => {
     ) => {
       files.set(String(path), String(data));
     }) as typeof writeFileSync);
+    // The rescue write goes to a sibling temp file and is renamed over the real
+    // path; model that move so the append is visible on the real path.
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
     vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
       files.get(String(path))) as typeof readFileSync);
     vi.mocked(existsSync).mockImplementation((path: unknown) =>
@@ -1441,6 +1626,12 @@ describe('purgeSingleScopeOrphans', () => {
     ) => {
       files.set(String(path), String(data));
     }) as typeof writeFileSync);
+    // The rescue write goes to a sibling temp file and is renamed over the real
+    // path; model that move so the append is visible on the real path.
+    vi.mocked(renameSync).mockImplementation(((from: unknown, to: unknown) => {
+      files.set(String(to), files.get(String(from)) as string);
+      files.delete(String(from));
+    }) as typeof renameSync);
     vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
       files.get(String(path))) as typeof readFileSync);
     vi.mocked(existsSync).mockImplementation((path: unknown) =>
@@ -4497,5 +4688,290 @@ describe('replyMsgId cleanup timer', () => {
       const parsed = JSON.parse(sentPayload!);
       expect(parsed.op).toBe(2); // IDENTIFY (no sessionId to resume)
     });
+  });
+});
+
+// deliverCancelledStash's text has no second copy — onPromptEnd deletes its
+// stash (and handOffSealedPre clears sealedPre) before the call. But
+// sendMessageWithReplyContext returns normally without sending when
+// resolveRoute yields null (token refresh failure, empty token, chat type
+// cleared), so "no exception" cannot mean "delivered": a transient class the
+// loop cannot see would otherwise drop the text with no retry and no drop log.
+describe('R20-3 acceptance: a null route is not a delivered stash', () => {
+  function makeChannel(
+    overrides: Record<string, unknown> = {},
+  ): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        ...overrides,
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  const drain = async (): Promise<void> => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'refreshed-token',
+      expiresIn: 7200,
+    });
+    mockFetchGatewayUrl.mockResolvedValue('wss://gateway.qq.test/ws');
+    vi.useFakeTimers();
+  });
+
+  it('re-attempts a cancelled stash whose first route resolution fails', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    // Expired token: resolveRoute refreshes it, and the first refresh fails
+    // with the transient class resolveRoute turns into a null route.
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    mockFetchAccessToken.mockRejectedValueOnce(new Error('network blip'));
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    // Nothing reached the wire, so the anchor must NOT have been released.
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+
+    // The retry window re-attempts, resolves a route, and sends.
+    await vi.advanceTimersByTimeAsync(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body['markdown'] as Record<string, string>)['content']).toBe(
+      'STASH',
+    );
+    expect(body['msg_id']).toBe('msg-A');
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('resolves the route once, so no stale probe can drop the stash', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    // Count the resolutions the send path performs: it must consult the route
+    // exactly once, so the route it reports on is the one it sends with. A
+    // pre-probe would resolve twice and could go stale in between.
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('holds the msg seq counter while a send waits on a token refresh', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() - 1;
+    (chp['chatTypeMap'] as Map<string, string>).set('test-chat', 'c2c');
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const inFlight = chp['inFlightMsgSeqSends'] as Map<string, number>;
+
+    // The token refresh hangs: the send is suspended inside resolveRoute, after
+    // the in-flight marker was taken, so the counter cannot be reclaimed while
+    // it is in the air.
+    let releaseToken!: (v: { accessToken: string; expiresIn: number }) => void;
+    mockFetchAccessToken.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseToken = resolve;
+      }),
+    );
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect([...inFlight.entries()]).toEqual([['msg-A', 1]]);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    releaseToken({ accessToken: 'refreshed-token', expiresIn: 7200 });
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(inFlight.size).toBe(0);
+    expect(anchors.has('s1')).toBe(false);
+  });
+
+  it('drops a route that can never resolve instead of retrying it forever', async () => {
+    const ch = makeChannel({ maxFlushRetries: 0 });
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    chp['disposed'] = true;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    // `maxFlushRetries: 0` is documented as unlimited, but a permanently
+    // unavailable route cannot become sendable: 10 minutes of backoff windows.
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await drain();
+    }
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'no usable route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('drops a mis-typed chatType once instead of retrying it forever (R20-C2)', async () => {
+    // resolveRoute accepts only 'group' | 'c2c'; nothing validates chatTypes at
+    // runtime, so a truthy-but-bogus value must classify as permanent.
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'bogus' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const resolve = (
+      chp['resolveRoute'] as (c: string) => Promise<unknown>
+    ).bind(ch);
+    let routeCalls = 0;
+    chp['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      return resolve(chatId);
+    };
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      await drain();
+    }
+
+    expect(routeCalls).toBe(1);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+    expect(anchors.has('s1')).toBe(true);
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'no usable route',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('delivers once through a valid chatTypes config value', async () => {
+    const ch = makeChannel({
+      maxFlushRetries: 0,
+      chatTypes: { 'test-chat': 'c2c' },
+    });
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat');
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    const anchors = chp['sessionReplyMsgId'] as Map<string, unknown>;
+    anchors.set('s1', { msgId: 'msg-A', timestamp: Date.now() });
+
+    const deliver = (
+      chp['deliverCancelledStash'] as (
+        c: string,
+        s: string,
+        t: string,
+      ) => Promise<void>
+    ).bind(ch);
+    void deliver('test-chat', 's1', 'STASH');
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(anchors.has('s1')).toBe(false);
   });
 });
