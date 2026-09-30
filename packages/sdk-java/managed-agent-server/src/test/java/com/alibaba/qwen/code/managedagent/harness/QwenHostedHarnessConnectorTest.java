@@ -8,7 +8,6 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
@@ -53,15 +52,22 @@ class QwenHostedHarnessConnectorTest {
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution);
+        var actions = mock(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        when(attached.getApprovalMode()).thenReturn(null, "yolo", "default");
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
 
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessageContaining("did not confirm");
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessageContaining("did not confirm");
         connector.createOrLoad("tenant-a", SESSION_ID, false);
 
         ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
         ArgumentCaptor<LoadHarnessSession> load = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).createSession(create.capture());
-        verify(client).loadSession(load.capture());
+        verify(client, org.mockito.Mockito.times(3)).loadSession(load.capture());
         for (Object request : new Object[] {create.getValue(), load.getValue()}) {
             assertThat(ReflectionTestUtils.<Object>invokeMethod(request, "toJson").toString())
                     .contains("toolProfile=hosted-workspace-files/1", "workspaceId=selected-workspace", "tenantId=tenant-a")

@@ -51,7 +51,7 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 [简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
-Actions (Java routes planned): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
+Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
 [简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
 ## Prerequisites
@@ -278,12 +278,20 @@ Harness or Runtime Broker credentials.
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
 Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
 adapter uses the same admission. This requires the Hosted Harness and HTTP
-Session Store, `yolo` approval mode, and a `local-process`, `session`-isolated
+Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
 header alone does not authenticate an actor.
+
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
+`auto-edit`, the Session creator can list, inspect and answer pending permission
+Actions through the public API or WebShell. Responses are durable, idempotent
+operations; their final result follows the committed Harness decision.
+`QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
+The approval mode is pinned at Session creation and must be confirmed by the
+Harness on creation and load.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
 through `POST /v1/agents/sessions`. The server chooses the fixed
