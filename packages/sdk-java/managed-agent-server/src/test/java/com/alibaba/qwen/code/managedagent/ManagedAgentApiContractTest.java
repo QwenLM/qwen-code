@@ -1353,8 +1353,7 @@ class ManagedAgentApiContractTest {
         int status = response.getStatus();
         if (status != expectedStatus) {
             drift.put("response %s: expected %d, got %d%s".formatted(
-                    operationId, expectedStatus, status,
-                    content.isEmpty() ? "" : errorCode(content)),
+                    operationId, expectedStatus, status, errorCode(content)),
                     content);
         }
         if (status == 403 && expectedStatus == 403) {
