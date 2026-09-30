@@ -54,7 +54,7 @@ import type {
   WebShellComposerToolbarRenderInfo,
 } from './customization';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
-import { serializeStatsMessage } from './components/messages/StatsMessage';
+import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
@@ -1475,12 +1475,16 @@ vi.mock('./components/dialogs/ModelDialog', async () => {
       mode?: string;
       models?: Array<{ id: string }>;
       onSelect?: (id: string) => void;
+      currentModelId?: string;
     }) =>
       React.createElement(
         'button',
         {
           'data-testid': 'model-select',
           type: 'button',
+          ...(props.currentModelId !== undefined
+            ? { 'data-current-model-id': props.currentModelId }
+            : {}),
           onClick: () => {
             const id =
               props.mode === 'voice' ? props.models?.[0]?.id : 'fast-model-x';
@@ -1554,6 +1558,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
     WebShellSidebar: (props: {
       collapsed?: boolean;
       onOpenSettings?: () => void;
+      onOpenAgents?: (view?: 'agents' | 'tasks') => void;
       onOpenPlugins?: () => void;
       onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
@@ -1595,6 +1600,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           ),
           'data-show-live': String(props.showLive),
           'data-project-features-enabled': String(props.projectFeaturesEnabled),
+          'data-has-open-agents': String(Boolean(props.onOpenAgents)),
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
           'data-can-open-sessions-overview': String(
@@ -2525,6 +2531,23 @@ vi.doMock('./components/terminal/TerminalPanel', async () => {
       }),
   };
 });
+vi.doMock(
+  './components/workspace-agents/ThreadsRoute',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('./components/workspace-agents/ThreadsRoute')
+      >();
+    const React = await import('react');
+    return {
+      ...actual,
+      ThreadsRoute: () =>
+        React.createElement('div', {
+          'data-testid': 'workspace-agent-thread-route',
+        }),
+    };
+  },
+);
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
 const {
@@ -14435,52 +14458,60 @@ describe('App shell command queueing', () => {
 });
 
 describe('App read-only local commands mid-turn', () => {
-  it('runs /stats immediately while streaming and skips the echo', async () => {
-    const statsFixture: DaemonSessionStatsStatus = {
-      v: 1,
-      sessionId: 'session-1',
-      workspaceCwd: '/tmp/project',
-      sessionStartTimeMs: 1000,
-      durationMs: 42000,
-      promptCount: 2,
-      models: {},
-      tools: {
-        totalCalls: 1,
-        totalSuccess: 1,
-        totalFail: 0,
-        totalDurationMs: 120,
-        byName: {},
-      },
-      files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
-      sources: [],
-    };
-    mockSessionActions.getStats.mockResolvedValue(statsFixture);
-    const { rerender } = renderApp({});
-    await flush();
+  it.each([
+    ['/stats', 'overview'],
+    ['/stats model', 'model'],
+    ['/stats tools', 'tools'],
+  ] as const)(
+    'runs %s immediately while streaming and skips the echo',
+    async (command, view) => {
+      const statsFixture: DaemonSessionStatsStatus = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        sessionStartTimeMs: 1000,
+        durationMs: 42000,
+        promptCount: 2,
+        models: {},
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          totalDurationMs: 120,
+          byName: {},
+        },
+        files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+        sources: [],
+      };
+      mockSessionActions.getStats.mockResolvedValue(statsFixture);
+      const { rerender } = renderApp({});
+      await flush();
 
-    act(() => {
-      testState.streamingState = 'responding';
-      rerender({});
-    });
-
-    let accepted: boolean | void;
-    await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
-      await vi.waitFor(() => {
-        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender({});
       });
-    });
 
-    expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: serializeStatsMessage(statsFixture, 'overview'),
-      }),
-    ]);
-  });
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await vi.waitFor(() => {
+          expect(mockSessionActions.getStats).toHaveBeenCalled();
+        });
+      });
+
+      expect(accepted).toBe(true);
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Session Stats',
+          data: createStatsMessageData(statsFixture, view),
+        }),
+      ]);
+    },
+  );
 
   it('echoes /stats when idle', async () => {
     renderApp({});
@@ -37705,6 +37736,39 @@ describe('App session callbacks', () => {
     expect(settingsReload).toHaveBeenCalled();
   });
 
+  it('decodes a pinned fastModel setting before opening the fast-model picker (#12760)', async () => {
+    // The CLI picker persists `authType:id\0<baseUrl>`; handing the raw value
+    // to the dialog makes currentIdx -1 (no registry id can contain NUL), so
+    // the picker highlights an unrelated row and Enter erases the pin.
+    const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    testState.settings = [
+      {
+        key: 'fastModel',
+        values: { effective: pinned, workspace: pinned },
+      } as DaemonSettingDescriptor,
+    ];
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-fast-model"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const select = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-select"]',
+    );
+    expect(select?.getAttribute('data-current-model-id')).toBe(
+      'shared-fast(openai)',
+    );
+  });
+
   it.each([
     ['fast-model selection', ['open-fast-model', 'model-select']],
     ['settings language change', ['change-language-workspace']],
@@ -43747,6 +43811,47 @@ it('runtime-stop does not leak shell drain lock', async () => {
   expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
     'second-after-resume',
   );
+});
+
+it('does not restore a workspace-agent thread when collaboration is disabled', async () => {
+  sessionStorage.setItem(
+    'qwen:team-conversation',
+    JSON.stringify({
+      id: 'thread-1',
+      cwd: '/tmp/project',
+      server: mockWorkspace.baseUrl,
+    }),
+  );
+
+  const { container, rerender } = renderApp();
+  await flush();
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
+
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    features: ['agent_collaboration_v1'],
+  };
+  rerender();
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).not.toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('true');
 });
 
 function mockRuntimeStopChoice() {

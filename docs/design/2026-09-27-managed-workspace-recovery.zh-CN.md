@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-workspace-recovery.md) | [简体中文](2026-09-27-managed-workspace-recovery.zh-CN.md)
 
-状态：W0e-1/2 实现及待评审的 W0e-3 后续设计，2026-09-27。物理回收仍属于后续工作。基线：`e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`。
+状态：W0e-1/2/3 源码实现，2026-09-28。专用 Linux 物理重启验收仍待完成。基线：`e0b8bea9e0ba369a0661bc51cbbb9a27555aff48`。
 
 关联：[路线图 #12380](https://github.com/QwenLM/qwen-code/issues/12380)、[丢失执行 #12670](https://github.com/QwenLM/qwen-code/issues/12670)、[本地 worker #12766](https://github.com/QwenLM/qwen-code/issues/12766)、[W0c-3](2026-09-26-managed-workspace-execution.zh-CN.md) 和 [W0d](managed-workspace-w0d-web-shell-binding.zh-CN.md)。
 
@@ -121,6 +121,10 @@ Flyway V16 和独立 initializer 增加可空证据／放弃字段及 placement 
 ## 6b. W0e-2 实现
 
 [本地持久接管实现](2026-09-27-local-runtime-adoption.zh-CN.md) 增加显式启用的 Linux 身份存储、带持久 PID/启动 tick 登记的 boot 屏障、永久启动锁和 Broker 重启后的接管。默认临时模式保留 W0e-1 行为。两种模式均不在仅 worker 死亡时证明写入者已停止；W0e-3 物理回收仍单独实现。
+
+## 6c. W0e-3 实现
+
+[可信本地重启实现](2026-09-28-local-reboot-recovery.zh-CN.md) 增加单独启用的同宿主 boot 证据、原 holder 清理、迟到 acquire 屏障和独立有界维护扫描。grant、产品 Session 或 Registry 改变后，清理仍使用原保存物理归属。loss 回执始终表示终态不确定性。真实 worker、SQL 和模拟 boot 身份测试覆盖完整链路；宣称物理验收前仍需专用 Linux 重启验证。
 
 ## 7. 交付顺序与边界
 

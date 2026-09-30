@@ -947,6 +947,21 @@ class ManagedAgentMySqlIT {
         return rows == null ? 0 : rows;
     }
 
+    @Test
+    @Order(11)
+    void originalWorkspaceHoldersRecoverWithoutCurrentAuthority() throws Exception {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var jdbc = new JdbcTemplate(source);
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        var authority = new com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore(jdbc,
+                new DataSourceTransactionManager(source));
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verifyOperatorPrepare(
+                source, jdbc, store, authority);
+    }
+
     private static Process startWorkspaceProcess(String action,
             String tenant, String sessionId) throws IOException {
         String java = Path.of(System.getProperty("java.home"), "bin",

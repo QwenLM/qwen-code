@@ -260,7 +260,7 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
 }
 
 /** The digest-chain head of a log that has no commit marker yet. */
-const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
+export const EMPTY_COMMIT_PREFIX_HASH = '0'.repeat(64);
 
 /**
  * A crash between the last event and its commit marker. The remedy is to
@@ -388,6 +388,14 @@ export class LocalManagedSessionAuthority {
 
   get sessionHeader(): ManagedSessionHeader {
     return this.header;
+  }
+
+  /**
+   * True after an append failed. Its records may already be on disk, so this
+   * authority accepts no further writes and the Session needs recovery.
+   */
+  get writesStopped(): boolean {
+    return this.writeFailure !== undefined;
   }
 
   /**
@@ -788,7 +796,10 @@ export class LocalManagedSessionAuthority {
 
   /**
    * Arbiter-only final decision. A later conflicting outcome is rejected; the
-   * same outcome is idempotent so a duplicate client response is safe.
+   * same outcome is idempotent so a duplicate client response is safe. When
+   * given, `admit` is asked inside the serial section just before a new
+   * outcome is written, so a caller's own precondition cannot change while the
+   * write waits its turn; refusing writes nothing.
    */
   resolveAction(
     command: ManagedSessionCommand,
@@ -797,6 +808,7 @@ export class LocalManagedSessionAuthority {
       readonly state: Exclude<ManagedSessionActionState, 'requested'>;
       readonly decisionRef: ManagedSessionDurableRef | null;
     },
+    admit?: () => boolean,
   ): Promise<ManagedSessionAction> {
     return this.runSerial(async () => {
       const existing = this.actions.get(request.requestId);
@@ -811,6 +823,11 @@ export class LocalManagedSessionAuthority {
         }
         throw new ManagedSessionConflictError(
           `action ${request.requestId} already ${existing.state}.`,
+        );
+      }
+      if (admit && !admit()) {
+        throw new ManagedSessionConflictError(
+          `action ${request.requestId} was not admitted.`,
         );
       }
       await this.commit(

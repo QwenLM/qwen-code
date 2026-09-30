@@ -13,7 +13,12 @@ import {
   useRef,
   useState,
 } from 'react';
-import { CornerDownRightIcon, RefreshCwIcon, XIcon } from 'lucide-react';
+import {
+  ChevronRightIcon,
+  CornerDownRightIcon,
+  RefreshCwIcon,
+  XIcon,
+} from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   DaemonTranscriptBlock,
@@ -43,6 +48,7 @@ import {
 } from '../../trajectory/timelineRange';
 import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
 import { TrajectoryOverview } from './TrajectoryOverview';
+import { TrajectoryInspector } from './TrajectoryInspector';
 import styles from './TrajectoryPanel.module.css';
 
 /** Every row is one line and every row is this tall, turn headers included. */
@@ -284,6 +290,14 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   } = useTrajectoryWindow(loadPage);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
+  const [inspectorSelection, setInspectorSelection] = useState<
+    { of: Trajectory; loader: TrajectoryPageLoader; key: string } | undefined
+  >();
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  useEffect(() => {
+    setInspectorOpen(false);
+    setInspectorSelection(undefined);
+  }, [loadPage]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const settledOnceRef = useRef(false);
   /** Last offset this panel knows the reader at; see the resize effect. */
@@ -427,14 +441,26 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [selectedKey, visualRows],
   );
 
+  useLayoutEffect(() => {
+    if (!inspectorOpen || selectedIndex < 0) return;
+    const frame = requestAnimationFrame(() => {
+      virtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [inspectorOpen, selectedIndex, virtualizer]);
+
   const moveSelection = useCallback(
     (nextIndex: number) => {
       if (visualRows.length === 0) return;
       const clamped = Math.min(Math.max(nextIndex, 0), visualRows.length - 1);
-      setSelectedKey(visualRows[clamped]!.key);
+      const key = visualRows[clamped]!.key;
+      setSelectedKey(key);
+      if (inspectorOpen && trajectory && loadPage) {
+        setInspectorSelection({ of: trajectory, loader: loadPage, key });
+      }
       virtualizer.scrollToIndex(clamped, { align: 'auto' });
     },
-    [virtualizer, visualRows],
+    [inspectorOpen, loadPage, trajectory, virtualizer, visualRows],
   );
 
   /**
@@ -442,8 +468,31 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
    * click has to hand focus back to it: the rows themselves are not focusable,
    * and leaving focus on the document would strand the arrow keys.
    */
-  const selectRow = useCallback((key: string) => {
-    setSelectedKey(key);
+  const selectRow = useCallback(
+    (key: string) => {
+      setSelectedKey(key);
+      if (inspectorOpen && trajectory && loadPage) {
+        setInspectorSelection({ of: trajectory, loader: loadPage, key });
+      }
+      scrollRef.current?.focus({ preventScroll: true });
+    },
+    [inspectorOpen, trajectory, loadPage],
+  );
+
+  const openInspector = useCallback(() => {
+    if (!trajectory || !loadPage || !selectedKey) return;
+    if (!trajectory.rowIndexByKey.has(selectedKey)) return;
+    setInspectorSelection({
+      of: trajectory,
+      loader: loadPage,
+      key: selectedKey,
+    });
+    setInspectorOpen(true);
+  }, [trajectory, loadPage, selectedKey]);
+
+  const closeInspector = useCallback(() => {
+    setInspectorOpen(false);
+    setInspectorSelection(undefined);
     scrollRef.current?.focus({ preventScroll: true });
   }, []);
 
@@ -459,6 +508,11 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         return;
       }
       if (visualRows.length === 0) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        openInspector();
+        return;
+      }
       const current = selectedIndex < 0 ? -1 : selectedIndex;
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -474,7 +528,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         moveSelection(visualRows.length - 1);
       }
     },
-    [moveSelection, range, selectedIndex, setRange, visualRows],
+    [moveSelection, openInspector, range, selectedIndex, setRange, visualRows],
   );
 
   const summary = useMemo(
@@ -482,10 +536,32 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [trajectory],
   );
   const selectedEntry = visualRows.find((entry) => entry.key === selectedKey);
-  const selectedText = selectedEntry
+  const inspectorCurrent =
+    inspectorSelection !== undefined &&
+    inspectorSelection.of === trajectory &&
+    inspectorSelection.loader === loadPage;
+  const inspectorIndex = inspectorCurrent
+    ? trajectory?.rowIndexByKey.get(inspectorSelection.key)
+    : undefined;
+  const inspectorRow =
+    inspectorIndex === undefined ? undefined : trajectory?.rows[inspectorIndex];
+  const selectedTitle = selectedEntry
     ? selectedEntry.kind === 'turn'
-      ? t('trajectory.selected.turn', {
-          index: selectedEntry.turn.index,
+      ? t('trajectory.turn', { index: selectedEntry.turn.index })
+      : labelOf(selectedEntry.row, t).text
+    : t('trajectory.selected.none');
+  const selectedTiming =
+    selectedEntry?.kind === 'row' &&
+    (selectedEntry.row.kind === 'request' || selectedEntry.row.kind === 'tool')
+      ? selectedEntry.row.timing
+      : undefined;
+  const selectedTtft =
+    selectedEntry?.kind === 'row' && selectedEntry.row.kind === 'request'
+      ? selectedTiming?.ttftMs
+      : undefined;
+  const selectedMeta = selectedEntry
+    ? selectedEntry.kind === 'turn'
+      ? t('trajectory.turnSummary', {
           requests: selectedEntry.turn.requestCount,
           tools: selectedEntry.turn.toolCount,
           duration:
@@ -495,22 +571,9 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         })
       : selectedEntry.row.kind === 'request' ||
           selectedEntry.row.kind === 'tool'
-        ? t('trajectory.selected.timed', {
-            name: labelOf(selectedEntry.row, t).text.slice(0, 80),
-            duration:
-              selectedEntry.row.timing === undefined
-                ? t('trajectory.unrecorded')
-                : formatDuration(selectedEntry.row.timing.durationMs),
-            ttft:
-              selectedEntry.row.kind === 'request' &&
-              selectedEntry.row.timing.ttftMs !== undefined
-                ? ` · ${t('trajectory.ttft', { duration: formatDuration(selectedEntry.row.timing.ttftMs) })}`
-                : '',
-          })
-        : t('trajectory.selected.untimed', {
-            name: labelOf(selectedEntry.row, t).text.slice(0, 80),
-          })
-    : t('trajectory.selected.none');
+        ? `${selectedTiming === undefined ? t('trajectory.unrecorded') : formatDuration(selectedTiming.durationMs)}${selectedTtft === undefined ? '' : ` · ${t('trajectory.ttft', { duration: formatDuration(selectedTtft) })}`}`
+        : t('trajectory.selected.noTiming')
+    : undefined;
 
   const empty = status === 'ready' && visualRows.length === 0;
   const timingAbsent =
@@ -639,7 +702,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         </div>
       </div>
 
-      <div className={styles.metrics} data-testid="trajectory-metrics">
+      <div className={styles.overviewMetrics} data-testid="trajectory-metrics">
         {(
           [
             ['elapsed', summary?.elapsedMs],
@@ -710,12 +773,38 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       />
 
       <div className={styles.context}>
-        <div
-          className={styles.selectedInfo}
-          data-testid="trajectory-selected"
-          aria-live="polite"
-        >
-          {selectedText}
+        <div className={styles.selectedLine}>
+          <div
+            className={styles.selectedInfo}
+            data-testid="trajectory-selected"
+            aria-live="polite"
+          >
+            <span className={styles.selectedLabel}>
+              {t('trajectory.selected.label')}
+            </span>
+            <span className={styles.selectedName} title={selectedTitle}>
+              {selectedTitle}
+            </span>
+            {selectedMeta && (
+              <span className={styles.selectedMeta} title={selectedMeta}>
+                {selectedMeta}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            className={styles.detailsButton}
+            onClick={openInspector}
+            disabled={
+              !trajectory ||
+              !loadPage ||
+              !selectedKey ||
+              !trajectory.rowIndexByKey.has(selectedKey)
+            }
+          >
+            {t('trajectory.inspector.open')}
+            <ChevronRightIcon size={13} aria-hidden="true" />
+          </button>
         </div>
         <div
           className={styles.contextNotice}
@@ -759,7 +848,6 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
             .join(' · ') || (rangeCounts ? '' : '\u00a0')}
         </div>
       </div>
-
       <div className={styles.errorSlot}>
         {error !== undefined && (
           <div className={styles.error} role="alert">
@@ -781,7 +869,9 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         )}
       </div>
 
-      <div className={styles.tableWrap}>
+      <div
+        className={`${styles.tableWrap} ${inspectorOpen ? styles.tableWrapWithInspector : ''}`}
+      >
         {visualRows.length === 0 ? (
           // An error with nothing folded is already stated by the alert above;
           // repeating it here as a placeholder would say it twice.
@@ -914,6 +1004,25 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           </>
         )}
       </div>
+      {inspectorOpen &&
+        inspectorSelection !== undefined &&
+        inspectorSelection.loader === loadPage && (
+          <TrajectoryInspector
+            row={inspectorRow}
+            stale={!inspectorCurrent}
+            turnSelected={selectedEntry?.kind === 'turn'}
+            title={inspectorRow ? labelOf(inspectorRow, t).text : undefined}
+            hiddenByRange={
+              !!(
+                range &&
+                inspectorRow &&
+                !visualRows.some((entry) => entry.key === inspectorRow.key)
+              )
+            }
+            onClearRange={() => setRange(undefined)}
+            onClose={closeInspector}
+          />
+        )}
     </div>
   );
 }
@@ -994,7 +1103,11 @@ function RecordRow({
       <span className={`${styles.text} ${label.faint ? styles.faint : ''}`}>
         {label.text}
       </span>
-      <span className={styles.metrics} data-testid="trajectory-row-metrics">
+      <span
+        className={styles.rowMetrics}
+        data-testid="trajectory-row-metrics"
+        title={metrics.length > 0 ? metrics.join(' · ') : undefined}
+      >
         {metrics.length > 0 ? metrics.join(' · ') : '—'}
       </span>
     </div>

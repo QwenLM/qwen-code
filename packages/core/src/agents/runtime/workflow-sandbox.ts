@@ -244,11 +244,12 @@ function wrapWorkflowBody(strippedSource: string): string {
  * Parse `export const meta`, strip it, and compile the remaining body.
  *
  * Exported so the pre-launch gate in `WorkflowRunner.start` and the run itself
- * compile through one function rather than two lookalikes. Throws exactly what
- * either step would throw: `extractAndStripMeta`'s errors for a malformed meta
- * literal, and V8's `SyntaxError` for a body that does not parse. The compile
- * copy masks the meta declaration instead of deleting it so V8's source lines
- * still match the author's original script.
+ * compile through one function rather than two lookalikes. Throws
+ * `extractAndStripMeta`'s errors for a malformed meta literal, V8's
+ * `SyntaxError` for a body that does not parse, and
+ * `WorkflowUnsupportedSyntaxError` for a body that uses dynamic `import()`.
+ * The compile copy masks the meta declaration instead of deleting it so V8's
+ * source lines still match the author's original script.
  */
 export function compileWorkflowScript(scriptSource: string): {
   script: vm.Script;
@@ -263,9 +264,11 @@ export function compileWorkflowScript(scriptSource: string): {
         .replace(/[^\r\n\u2028\u2029]/g, ' ') +
       scriptSource.slice(bounds.afterMeta)
     : stripped;
-  const script = new vm.Script(wrapWorkflowBody(compilable), {
+  const wrapped = wrapWorkflowBody(compilable);
+  const script = new vm.Script(wrapped, {
     filename: WORKFLOW_SCRIPT_FILENAME,
   });
+  assertNoDynamicImport(wrapped);
   return { script, meta };
 }
 
@@ -479,6 +482,7 @@ import {
 } from './workflow-agent-tools.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import { parseWorkflowMetaLiteral } from './workflow-meta-literal.js';
+import { assertNoDynamicImport } from './workflow-script-validation.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // Shared with workflow-orchestrator (avoids a duplicate createDebugLogger
@@ -781,6 +785,24 @@ const DEFAULT_MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
  * pinned to this value.
  */
 export const WORKFLOW_SYNC_EVALUATION_TIMEOUT_MS = 30_000;
+
+/**
+ * Most entries each list of one `parallel()` or `pipeline()` call may hold:
+ * the thunks, the items, and the stages are each bounded separately. A longer
+ * list rejects the whole call; it is never truncated. Exported so the
+ * authoring reference's statement of it is pinned to this value.
+ */
+export const WORKFLOW_BATCH_LIMIT = 4096;
+
+/** The rejection message for a `parallel()` / `pipeline()` list over the limit. */
+export function describeOversizedBatch(list: string, length: number): string {
+  return (
+    `${list}: ${length} entries, over the limit of ` +
+    `${WORKFLOW_BATCH_LIMIT} per call. Nothing in this call ran. Split the ` +
+    `input into batches of at most ${WORKFLOW_BATCH_LIMIT}, await each ` +
+    'batch in turn, and concatenate the results in order.'
+  );
+}
 
 function resolveMaxWallClockMs(opts: SandboxOptions): number {
   if (typeof opts.maxWallClockMs === 'number' && opts.maxWallClockMs > 0) {
@@ -1174,6 +1196,8 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     hasBudget: !!opts.budget,
     hostParallel: opts.parallel,
     hostPipeline: opts.pipeline,
+    batchLimit: WORKFLOW_BATCH_LIMIT,
+    describeOversizedBatch,
     hostWorkflow: (
       ref: string | { scriptPath: string },
       args: unknown,
@@ -1623,9 +1647,9 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         // createProductionDispatch → SubagentManager.createAgentHeadless.
         // The dispatch surfaces descriptive errors for "agent type not found",
         // "isolation:'remote' is not available in this build", parent-dirty
-        // refuse, worktree creation failures, and StructuredOutput contract
-        // violations ("completed without calling StructuredOutput after 2
-        // in-conversation nudges").
+        // refuse, worktree creation failures, schemas refused before dispatch,
+        // and structured_output contract violations (no valid result after
+        // the failed submissions it names).
         if (
           agentOpts.isolation !== undefined &&
           agentOpts.isolation !== 'worktree' &&
@@ -1863,6 +1887,13 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       }
       if (__b.hasPipeline) {
         const callPipeline = vmAsync(function (items) {
+          // Refuse before copying an oversized stage list; the host checks
+          // the final list again.
+          if (arguments.length - 1 > __b.batchLimit) {
+            throw new Error(
+              __b.describeOversizedBatch('pipeline() stages', arguments.length - 1)
+            );
+          }
           const stages = [];
           for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
           return __b.hostPipeline.apply(null, [items].concat(stages));
