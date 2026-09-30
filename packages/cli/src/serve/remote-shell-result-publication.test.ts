@@ -522,6 +522,96 @@ describe('remote Shell result publication', () => {
     expect(statusReads).toBe(0);
   });
 
+  it.each([false, true])(
+    'recovers an expired original segment with fixed bytes (lost recovery response: %s)',
+    async (loseRecoveryReply) => {
+      const posts: Buffer[] = [];
+      let recovered = false;
+      let recoveries = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: URL, init: RequestInit) => {
+          expect(init.headers).toMatchObject({
+            'X-Qwen-Tool-Publication-Operation': 'seg-stdout-0',
+          });
+          if (input.pathname.endsWith('/recover')) {
+            expect(init.method).toBe('POST');
+            recovered = true;
+            recoveries++;
+            if (loseRecoveryReply)
+              throw new TypeError('lost recovery response');
+            return new Response(JSON.stringify({ state: 'RETRYABLE' }));
+          }
+          if (input.pathname.includes('/operations/'))
+            return new Response(
+              JSON.stringify({ state: recovered ? 'RETRYABLE' : 'EXPIRED' }),
+            );
+          const bytes = Buffer.from(init.body as Buffer);
+          posts.push(bytes);
+          if (!recovered)
+            return new Response(
+              JSON.stringify({
+                error: { code: 'managed_tool_publication_operation_expired' },
+              }),
+              { status: 409 },
+            );
+          return new Response(
+            JSON.stringify({
+              captureId: 'capture-a',
+              streamId: 'stdout',
+              ordinal: 0,
+              byteLength: bytes.length,
+              digest: digest(bytes),
+            }),
+          );
+        }),
+      );
+      const publisher = new RemoteShellResultPublisher();
+      publisher.install(installation, boot);
+      const { sink } = await publisher.prepare(request);
+      const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+      expect(
+        await store.publish({
+          captureId: 'capture-a',
+          streamId: 'stdout',
+          ordinal: 0,
+          bytes: Buffer.from('original'),
+        }),
+      ).toMatchObject({ status: 'ok' });
+      expect(posts).toEqual([Buffer.from('original'), Buffer.from('original')]);
+      expect(recoveries).toBe(1);
+    },
+  );
+
+  it('bounds expired-attempt recovery instead of retrying forever', async () => {
+    let recoveries = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: URL) => {
+        if (input.pathname.endsWith('/recover')) recoveries++;
+        if (input.pathname.includes('/operations/'))
+          return new Response(JSON.stringify({ state: 'EXPIRED' }));
+        return new Response(
+          JSON.stringify({ error: { code: 'internal_error' } }),
+          { status: 503 },
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    await expect(
+      store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      }),
+    ).rejects.toThrow('EXPIRED');
+    expect(recoveries).toBe(3);
+  });
+
   it('rejects a grant for another Workspace before recording it', () => {
     const publisher = new RemoteShellResultPublisher();
     expect(() =>

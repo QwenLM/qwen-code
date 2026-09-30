@@ -208,6 +208,7 @@ class PublicationClient {
     headers?: Record<string, string>,
   ): Promise<Record<string, unknown>> {
     const deadline = Date.now() + 30 * 60_000;
+    let recoveries = 0;
     const statusPath = `/operations/${encodeURIComponent(operationId)}`;
     const retryable = (failure: unknown): boolean =>
       failure instanceof PublicationRejection
@@ -252,6 +253,7 @@ class PublicationClient {
             failure.status >= 400 &&
             failure.status < 500 &&
             failure.status !== 429 &&
+            failure.code !== 'managed_tool_publication_operation_expired' &&
             status['state'] !== 'SUCCEEDED'
           )
             throw failure;
@@ -267,6 +269,20 @@ class PublicationClient {
       while (Date.now() < deadline) {
         if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
         if (status['state'] === 'RETRYABLE') break;
+        if (status['state'] === 'EXPIRED' && recoveries < 3) {
+          recoveries++;
+          try {
+            status = await this.request(
+              `${statusPath}/recover`,
+              operationId,
+              Buffer.from('{}'),
+            );
+          } catch (failure) {
+            if (!retryable(failure)) throw failure;
+            status = (await observe()) ?? status;
+          }
+          continue;
+        }
         if (status['state'] !== 'PENDING')
           throw new Error(
             `Publication operation ended as ${String(status['state'])}.`,

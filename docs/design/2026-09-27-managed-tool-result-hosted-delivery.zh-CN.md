@@ -141,6 +141,8 @@ seal 按顺序扫描不可变 verified 段，核对精确数量/长度及 SHA-25
 
 seal/finish 可能超过普通 HTTP 请求时限。每个 publication 同时仅接纳一个生产操作；其他调用得到可重试 busy，不分配对象或队列项。持久保存操作 ID、请求摘要、对象 key、绝对 deadline、claim owner 和 epoch。接管只增加 epoch。GET status 不启动工作。最终安装在短事务内检查当前 claim、grant fence、phase 和 deadline；迟到 claim 只能留下计费的候选对象。内存正文丢失后，重试必须提交相同请求字节，除非原 key 已通过校验。被拒绝的 seal 不固化 seal：补齐缺段后，新 attempt 可成功。prefix 新查询从 ordinal 0 重新扫描；只保留有界的当前/最近 attempt 状态。不引入 SHA checkpoint。
 
+普通重放不会恢复已过期 attempt。生产方通过认证后的 `POST /publications/{publicationId}/operations/{operationId}/recover` 显式为原候选、seal 或冻结 finish 开始新的有界验证 attempt。路由归属于原 capture，不归属于 live Session owner 或其他 Runtime。短授权事务递增 epoch 来隔离旧 claim，保留首次绝对 deadline，另外记录恢复 deadline，并清除 claim 以便精确请求重放。当前 attempt 仍有效时，重复恢复不延长期限。slot、请求摘要、对象 key、资源引用、冻结 envelope、前置操作及配额占用均不改变；迟到的旧 PUT 无法安装回执。恢复检查 phase、隔离标记及原 grant；已 fenced publication 不能继续生产。过期 prefix 查询仍保持过期，必须使用新查询 ID。worker 在最初固定观察期限内最多恢复三次；GET status 只读。恢复不重新执行 Shell，也不升级 partial/unavailable 结果。
+
 同一 publication 的 publish/seal/prefix 保持 O1a 顺序。finish 持久保存固定 envelope 和唯一的前置操作，关闭新增写入；允许该操作以原 claim 完成或恢复，然后校验并冻结结果，等待及 OSS I/O 期间不持有 SQL 锁。建立 barrier 前拒绝非法 finish；之后的故障重试原 finalization，不能升级最终 capture。busy、超时、失权和 I/O 故障属于操作失败，不伪装成 O1a 校验拒绝码。操作 deadline 和重试预算有限。HTTP 响应丢失不触发 Shell 重执行。
 
 ## 7. 容量与背压
@@ -209,6 +211,8 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 | object 损坏/缺失，或 Java/OSS 不可用        | 读取/接纳失败；保留已知物理结果、归属与容量不确定性；不降级执行                                          |
 
 替代宿主使用全新文件系统，只依赖持久 SQL/OSS 和受支持的 Session writer 获取流程。恢复测试必须区分正常 writer seal 与 lease 到期/fenced takeover，单纯杀进程不能证明合法接管。合法新 owner 可接纳 finished publication，但不会自动接管或续期旧 generation 的未完成上传。公开 cold-load 拒绝行为保持，直到专门恢复入口被实现并验证。
+
+加载已提交结果时，在挂载 Hosted Session 或返回成功之前确认 Workspace acquisition。确定性的 `workspace_busy` 或 `workspace_unavailable` HTTP 409 仅关闭临时挂载，并返回该可重试拒绝。后续 load 继续使用同一持久回执、history 和 checkpoint，不产生新执行。回执对账及 ACK 可能已经在 acquisition 前完成；这些事实保持权威且幂等。未知 acquisition 失败仍需恢复，不允许新 prompt 绕过原 continuation。
 
 正常关闭按顺序停止新执行、排空执行/finalization、关闭远端适配器、停止续期、依据已有停止证据释放 Workspace activation/ownership，最后 seal Session writer。失去归属不允许继续 catalog 写入。不需要后台 watcher 或无限 retry job：操作工作有界、状态持久可观察，只在授权有效时恢复。
 

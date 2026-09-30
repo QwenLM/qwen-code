@@ -186,7 +186,8 @@ public final class ToolPublicationDataStore {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
-        var rows = jdbc.query("SELECT o.state, o.receipt_json, o.deadline,"
+        var rows = jdbc.query("SELECT o.state, o.receipt_json,"
+                        + " COALESCE(o.recovery_deadline, o.deadline) AS deadline,"
                         + " CASE WHEN o.claim_owner IS NULL OR o.claim_until < CURRENT_TIMESTAMP(6)"
                         + " THEN 1 ELSE 0 END AS retryable, p.tenant_id, p.token_hash,"
                         + " p.workspace_id, p.session_id FROM qwen_tool_publication_operation o"
@@ -216,12 +217,62 @@ public final class ToolPublicationDataStore {
         if ("SUCCEEDED".equals(state)) {
             response.set("receipt", ToolPublicationContract.readJson(
                     ((String) row.get("receipt")).getBytes(StandardCharsets.UTF_8)));
-        } else if (((Timestamp) row.get("deadline")).before(now())) {
+        } else if (!((Timestamp) row.get("deadline")).after(now())) {
             response.put("state", "EXPIRED");
         } else if ("PENDING".equals(state) && ((Number) row.get("retryable")).intValue() == 1) {
             response.put("state", "RETRYABLE");
         }
         return response;
+    }
+
+    public JsonNode recoverOperation(JsonNode key, String publicationId, String token, String operationId) {
+        require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
+                "Invalid publication operation ID");
+        String scope = scope(key);
+        transactions.executeWithoutResult(status -> {
+            authorize(key, scope, publicationId, token);
+            var publication = jdbc.queryForMap("SELECT producer_phase, finish_operation_id,"
+                    + " finish_predecessor_id, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                    + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ?",
+                    scope, publicationId);
+            require(((Number) publication.get("quarantined")).intValue() == 0,
+                    "Publication is quarantined");
+            List<Operation> rows = operation(scope, publicationId, operationId, true);
+            require(rows.size() == 1, "Publication operation is missing");
+            Operation row = rows.get(0);
+            require(!row.slot().startsWith("prefix:"), "Expired prefix cannot be recovered");
+            if ("SUCCEEDED".equals(row.state())) {
+                return;
+            }
+            require("OPEN".equals(publication.get("producer_phase"))
+                    || "FINISHING".equals(publication.get("producer_phase"))
+                    && (operationId.equals(publication.get("finish_operation_id"))
+                    || operationId.equals(publication.get("finish_predecessor_id"))),
+                    "Publication is finishing");
+            if (!row.slot().startsWith("seal:")) {
+                List<Stored> candidates = stored(scope, publicationId, row.slot());
+                require(candidates.size() == 1 && "CANDIDATE".equals(candidates.get(0).state())
+                        && operationId.equals(candidates.get(0).operationId()),
+                        "Publication candidate cannot be recovered");
+            }
+            Timestamp current = now();
+            if (row.deadline().after(current)) {
+                return;
+            }
+            // A recovery starts a new bounded verification attempt. It does
+            // not extend the original deadline, change bytes or release quota.
+            String active = availableActive(scope, publicationId, operationId, current);
+            require(active == null || operationId.equals(active), "Publication is busy");
+            jdbc.update("UPDATE qwen_tool_publication_operation SET recovery_deadline = ?,"
+                            + " claim_epoch = claim_epoch + 1, claim_owner = NULL, claim_until = NULL"
+                            + " WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
+                    new Timestamp(current.getTime() + operationTimeout.toMillis()), scope, publicationId, operationId);
+            if (!"terminal".equals(row.slot())) {
+                jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = ?"
+                        + " WHERE scope_key = ? AND publication_id = ?", operationId, scope, publicationId);
+            }
+        });
+        return operationStatus(key, publicationId, token, operationId);
     }
 
     public JsonNode finished(JsonNode key, String publicationId, String writerToken) {
@@ -545,8 +596,8 @@ public final class ToolPublicationDataStore {
                     "Terminal candidate is quarantined");
             require(operationId.equals(row.get("finish_operation_id"))
                     && digest.equals(row.get("finish_digest")) && prior.size() == 1
-                    && requestDigest.equals(prior.get(0).digest())
-                    && prior.get(0).deadline().after(now), "Finish replay conflicts");
+                    && requestDigest.equals(prior.get(0).digest()), "Finish replay conflicts");
+            requireUnexpired(prior.get(0).deadline(), now);
             require(prior.get(0).claimUntil() == null || !prior.get(0).claimUntil().after(now),
                     "Finish operation is busy");
         } else {
@@ -751,7 +802,7 @@ public final class ToolPublicationDataStore {
                         String.class, scope, publicationId, operationId);
                 return new ScanClaim(0, ToolPublicationContract.readJson(saved.getBytes(StandardCharsets.UTF_8)));
             }
-            require(row.deadline().after(now), "Publication operation expired");
+            requireUnexpired(row.deadline(), now);
         }
         String active = availableActive(scope, publicationId, operationId, now);
         require(active == null || active.equals(operationId), "Publication is busy");
@@ -1022,7 +1073,7 @@ public final class ToolPublicationDataStore {
         Timestamp now = now();
         if (!prior.isEmpty()) {
             Operation row = prior.get(0);
-            require(row.deadline().after(now), "Publication operation expired");
+            requireUnexpired(row.deadline(), now);
         }
         String active = availableActive(scope, publicationId, operationId, now);
         require(active == null || active.equals(operationId), "Publication is busy");
@@ -1138,7 +1189,8 @@ public final class ToolPublicationDataStore {
     }
 
     private List<Operation> operation(String scope, String publicationId, String operationId, boolean locked) {
-        return jdbc.query("SELECT request_digest, slot_key, state, claim_epoch, claim_until, deadline"
+        return jdbc.query("SELECT request_digest, slot_key, state, claim_epoch, claim_until,"
+                        + " COALESCE(recovery_deadline, deadline) AS deadline"
                         + " FROM qwen_tool_publication_operation WHERE scope_key = ? AND publication_id = ?"
                         + " AND operation_id = ?" + (locked ? " FOR UPDATE" : ""),
                 (r, n) -> new Operation(r.getString("request_digest"), r.getString("slot_key"),
@@ -1398,6 +1450,11 @@ public final class ToolPublicationDataStore {
                     "managed_tool_publication_quota_exhausted",
                     "Tool publication capacity is exhausted");
         }
+    }
+
+    private static void requireUnexpired(Timestamp deadline, Timestamp current) {
+        requireContract(deadline.after(current), HttpStatus.CONFLICT,
+                "managed_tool_publication_operation_expired", "Publication operation expired");
     }
 
     private static void requireContract(boolean valid, HttpStatus status,

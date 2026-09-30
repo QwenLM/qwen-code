@@ -141,6 +141,15 @@ public class ToolPublicationController {
                 publicationId, token, operationId));
     }
 
+    @PostMapping("/publications/{publicationId}/operations/{operationId}/recover")
+    public JsonNode recover(TenantContext tenant, @PathVariable String sessionId,
+            @PathVariable String publicationId, @PathVariable String operationId,
+            @RequestParam String workspaceId,
+            @RequestHeader(PUBLICATION_TOKEN_HEADER) String token) {
+        return limited(() -> data.recoverOperation(scope(tenant, workspaceId, sessionId),
+                publicationId, token, operationId));
+    }
+
     @GetMapping("/publications/{publicationId}/finished")
     public JsonNode finished(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @RequestParam String workspaceId,

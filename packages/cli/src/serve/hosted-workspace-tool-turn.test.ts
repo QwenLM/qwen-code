@@ -1011,6 +1011,35 @@ it.each([
 );
 
 it.each(['workspace_busy', 'workspace_unavailable'])(
+  'allows recovery acquisition to retry after a definite %s refusal',
+  async (code) => {
+    const refusal = new HostedWorkspaceBrokerRejection(409, code);
+    broker.acquire.mockRejectedValueOnce(refusal);
+    await expect(turn.resumeCommittedResults()).rejects.toBe(refusal);
+    await expect(turn.finish()).resolves.toBeUndefined();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+    await turn.resumeCommittedResults();
+    expect(broker.acquire).toHaveBeenCalledTimes(2);
+  },
+);
+
+it.each([
+  new Error('lost recovery acquire response'),
+  new HostedWorkspaceBrokerRejection(503, 'workspace_unavailable'),
+  new HostedWorkspaceBrokerRejection(409, 'runtime_session_acquire_failed'),
+])('keeps ambiguous recovery acquisition blocked: %s', async (cause) => {
+  broker.acquire.mockRejectedValueOnce(cause);
+  await expect(turn.resumeCommittedResults()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(broker.release).not.toHaveBeenCalled();
+});
+
+it.each(['workspace_busy', 'workspace_unavailable'])(
   'allows another attempt after a definite %s acquire refusal',
   async (code) => {
     const refusal = new HostedWorkspaceBrokerRejection(409, code);

@@ -41,6 +41,7 @@ import {
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
+  isRetryableWorkspaceAcquisition,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
@@ -373,6 +374,7 @@ async function executeHostedTurn(
   brokerOptions: HostedWorkspaceBrokerOptions | undefined,
   resumeFromToolResults?: Part[],
   onTurnResult?: (result: ChatRecord) => void,
+  onResumeReady?: () => void,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
   const harness = createManagedHarnessHandle(session.managed);
@@ -447,8 +449,10 @@ async function executeHostedTurn(
       try {
         await toolTurn.resumeCommittedResults();
       } catch (cause) {
+        if (isRetryableWorkspaceAcquisition(cause)) throw cause;
         throw new HostedToolRecoveryRequiredError(cause);
       }
+      onResumeReady?.();
     }
     let state: 'completed' | 'cancelled' | 'error' = 'completed';
     let stopReason = 'end_turn';
@@ -720,14 +724,6 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_turn_recovery_required');
         return;
       }
-      sessions.set(sessionId, session);
-      res.status(200).json({
-        sessionId,
-        clientId: session.clientId,
-        workspaceCwd: cwd,
-        lastEventId: managed.authority.committedSequence,
-        eventEpoch: epoch,
-      });
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -735,7 +731,13 @@ export function registerHostedHarnessSessionRoutes(
           digest: '',
           abort,
         };
-        void executeHostedTurn(
+        let resolveReady!: () => void;
+        let rejectReady!: (cause: unknown) => void;
+        const ready = new Promise<void>((resolve, reject) => {
+          resolveReady = resolve;
+          rejectReady = reject;
+        });
+        const resumed = executeHostedTurn(
           session,
           sessionId,
           cwd,
@@ -744,7 +746,14 @@ export function registerHostedHarnessSessionRoutes(
           abort,
           brokerOptions,
           resume.parts,
-        )
+          undefined,
+          resolveReady,
+        );
+        // Do not attach a Session whose original continuation cannot acquire
+        // Workspace ownership. The caller can retry load without losing it.
+        void resumed.catch(rejectReady);
+        await ready;
+        void resumed
           .catch((cause: unknown) => {
             session.blocked = true;
             writeStderrLineSafe(
@@ -756,6 +765,14 @@ export function registerHostedHarnessSessionRoutes(
             session.active = undefined;
           });
       }
+      sessions.set(sessionId, session);
+      res.status(200).json({
+        sessionId,
+        clientId: session.clientId,
+        workspaceCwd: cwd,
+        lastEventId: managed.authority.committedSequence,
+        eventEpoch: epoch,
+      });
       if (settlePromptId) {
         const originalPromptId = settlePromptId;
         const abort = new AbortController();
@@ -796,7 +813,9 @@ export function registerHostedHarnessSessionRoutes(
     } catch (cause) {
       await managed?.close().catch(() => undefined);
       await stores.close().catch(() => undefined);
-      if (cause instanceof ManagedSessionAlreadyExistsError) {
+      if (isRetryableWorkspaceAcquisition(cause)) {
+        error(res, 409, cause.code);
+      } else if (cause instanceof ManagedSessionAlreadyExistsError) {
         error(res, 409, 'managed_session_already_exists');
       } else if (cause instanceof ManagedSessionNotFoundError) {
         error(res, 404, 'managed_session_not_found');

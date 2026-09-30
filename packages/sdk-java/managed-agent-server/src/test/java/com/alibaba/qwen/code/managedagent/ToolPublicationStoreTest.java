@@ -67,9 +67,7 @@ class ToolPublicationStoreTest {
 
     @BeforeEach
     void setup() {
-        JdbcDataSource source = new JdbcDataSource();
-        source.setURL("jdbc:h2:mem:publication-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000");
+        javax.sql.DataSource source = publicationDataSource();
         Flyway.configure().dataSource(source).load().migrate();
         jdbc = new JdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -124,6 +122,13 @@ class ToolPublicationStoreTest {
                 + event(2, "tool.intent", intent) + "{}\n", 2,
                 List.of(resource(binding.get("argsRef"), args), resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
+    }
+
+    javax.sql.DataSource publicationDataSource() {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:publication-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000");
+        return source;
     }
 
     @Test
@@ -202,6 +207,157 @@ class ToolPublicationStoreTest {
         assertThat(((Number) held.get("producer_held_bytes")).longValue()).isZero();
         assertThat(((Number) held.get("producer_used_bytes")).longValue()).isZero();
         assertThat(((Number) held.get("admission_held_bytes")).longValue()).isZero();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void recoversExpiredCandidatesWithoutChangingBytesQuotaOrOriginalDeadline(boolean terminal) throws Exception {
+        reserve();
+        Map<String, byte[]> objects = new java.util.concurrent.ConcurrentHashMap<>();
+        CountDownLatch written = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+                if (writes.incrementAndGet() == 1) {
+                    written.countDown();
+                    try {
+                        if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("Test writer did not resume");
+                        }
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(error);
+                    }
+                }
+            }
+
+            @Override
+            public InputStream open(String key) { return new ByteArrayInputStream(objects.get(key)); }
+
+            @Override
+            public void requireUnversioned() { }
+        };
+        var first = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        var replacement = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        ObjectNode capture = JSON.createObjectNode().put("captureStatus", "unavailable")
+                .put("captureReason", "storage_failed").put("previewTruncated", false)
+                .put("deliveryStatus", "pending").putNull("manifest");
+        ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
+        envelope.putArray("responseParts").add("x".repeat(100_000));
+        envelope.set("capture", capture);
+        byte[] bytes = terminal ? envelope.toString().getBytes(StandardCharsets.UTF_8)
+                : "abc".getBytes(StandardCharsets.UTF_8);
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var old = pool.submit(() -> terminal
+                    ? first.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
+                    : first.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null));
+            try {
+                assertThat(written.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ? WHERE operation_id = 'original'",
+                        java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+                var originalDeadline = jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation"
+                        + " WHERE operation_id = 'original'", java.sql.Timestamp.class);
+                var before = jdbc.queryForMap("SELECT object_key, resource_id, byte_length, sha256, operation_id"
+                        + " FROM qwen_tool_publication_object WHERE publication_id = 'pub-1'");
+                assertThat(replacement.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original")
+                        .path("state").asText()).isEqualTo("EXPIRED");
+                assertThatThrownBy(() -> {
+                    if (terminal) {
+                        replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes);
+                    } else {
+                        replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
+                    }
+                }).isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
+                assertThat(replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original")
+                        .path("state").asText()).isEqualTo("RETRYABLE");
+                var recoveryDeadline = jdbc.queryForObject("SELECT recovery_deadline FROM qwen_tool_publication_operation"
+                        + " WHERE operation_id = 'original'", java.sql.Timestamp.class);
+                replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original");
+                assertThat(jdbc.queryForObject("SELECT recovery_deadline FROM qwen_tool_publication_operation"
+                        + " WHERE operation_id = 'original'", java.sql.Timestamp.class)).isEqualTo(recoveryDeadline);
+                assertThatThrownBy(() -> {
+                    if (terminal) {
+                        replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "other", bytes);
+                    } else {
+                        replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "other", "stdout", 0, bytes, null);
+                    }
+                }).isInstanceOf(IllegalArgumentException.class);
+                byte[] changed = bytes.clone();
+                changed[changed.length - 2] = 'y';
+                assertThatThrownBy(() -> {
+                    if (terminal) {
+                        ObjectNode other = envelope.deepCopy().put("executionStatus", "error");
+                        replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original",
+                                other.toString().getBytes(StandardCharsets.UTF_8));
+                    } else {
+                        replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, changed, null);
+                    }
+                }).isInstanceOf(IllegalArgumentException.class);
+                JsonNode receipt = terminal
+                        ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
+                        : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
+                release.countDown();
+                assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(IllegalArgumentException.class);
+                assertThat(replacement.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original")
+                        .path("receipt")).isEqualTo(receipt);
+                assertThat(jdbc.queryForMap("SELECT object_key, resource_id, byte_length, sha256, operation_id"
+                        + " FROM qwen_tool_publication_object WHERE publication_id = 'pub-1'")).isEqualTo(before);
+                assertThat(jdbc.queryForObject("SELECT deadline FROM qwen_tool_publication_operation"
+                        + " WHERE operation_id = 'original'", java.sql.Timestamp.class)).isEqualTo(originalDeadline);
+                assertThat(objects).hasSize(1);
+                String category = terminal ? "producer" : "capture";
+                assertThat(jdbc.queryForObject("SELECT " + category + "_used_bytes FROM qwen_tool_publication"
+                        + " WHERE publication_id = 'pub-1'", Long.class)).isEqualTo((long) bytes.length);
+                if (terminal) {
+                    assertThat(replacement.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
+                } else {
+                    replacement.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-after-recovery", "stdout", 1,
+                            bytes.length, ToolPublicationContract.sha256(bytes));
+                }
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void expiredPrefixRemainsExpiredAndFencedPublicationCannotRecover() {
+        reserve();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) { throw new IllegalStateException("lost PUT reply"); }
+
+            @Override
+            public InputStream open(String key) { throw new AssertionError("Unexpected read"); }
+
+            @Override
+            public void requireUnversioned() { }
+        };
+        var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30));
+        JsonNode key = binding.get("sessionKey");
+        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                "candidate", "stdout", 0, new byte[] {1}, null)).hasMessageContaining("lost PUT reply");
+        data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stderr");
+        jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?, state = 'PENDING'",
+                java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+        assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "prefix"))
+                .hasMessageContaining("prefix cannot be recovered");
+        assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", "wrong-token", "candidate"))
+                .isInstanceOf(RuntimeException.class);
+        store.apply(request("fence"), WRITER_TOKEN, null);
+        assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "candidate"))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "candidate")
+                .path("state").asText()).isEqualTo("EXPIRED");
     }
 
     @Test

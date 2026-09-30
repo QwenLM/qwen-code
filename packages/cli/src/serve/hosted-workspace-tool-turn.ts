@@ -50,6 +50,17 @@ import { boundedShellPreview } from './managed-shell-publisher.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+export function isRetryableWorkspaceAcquisition(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection & {
+  code: 'workspace_busy' | 'workspace_unavailable';
+} {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    (cause.code === 'workspace_busy' || cause.code === 'workspace_unavailable')
+  );
+}
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
@@ -208,8 +219,22 @@ export class HostedWorkspaceToolTurn {
   async resumeCommittedResults(): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
-    await this.broker.acquire();
-    this.acquired = true;
+    await this.acquire();
+    this.uncertain = false;
+  }
+
+  private async acquire(): Promise<void> {
+    this.uncertain = true;
+    try {
+      await this.broker.acquire();
+      this.acquired = true;
+    } catch (cause) {
+      if (isRetryableWorkspaceAcquisition(cause)) {
+        this.uncertain = false;
+        throw cause;
+      }
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
   }
 
   async execute(
@@ -367,22 +392,7 @@ export class HostedWorkspaceToolTurn {
     signal.throwIfAborted();
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
-      this.uncertain = true;
-      try {
-        await this.broker.acquire();
-        this.acquired = true;
-      } catch (cause) {
-        if (
-          cause instanceof HostedWorkspaceBrokerRejection &&
-          cause.status === 409 &&
-          (cause.code === 'workspace_busy' ||
-            cause.code === 'workspace_unavailable')
-        ) {
-          this.uncertain = false;
-          throw cause;
-        }
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
+      await this.acquire();
     }
     const reserved: string[] = [];
     const shellBindings = new Map<
