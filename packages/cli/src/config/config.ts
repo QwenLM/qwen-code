@@ -122,6 +122,7 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 import {
   parseDurationSeconds,
   validateGoalMaxActiveMinutes,
@@ -1257,8 +1258,9 @@ function formatUnavailableAdvisorModelMessage(
     availableModelIds.length === 0
       ? 'No models are configured.'
       : `Configured models: ${availableModelIds.join(', ')}.`;
+  const displayModelName = formatAuxModelSelectorForDisplay(modelName);
   return (
-    `Advisor model '${modelName}' is not configured.\n` +
+    `Advisor model '${displayModelName}' is not configured.\n` +
     `${availableModelsLine}\n` +
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
   );

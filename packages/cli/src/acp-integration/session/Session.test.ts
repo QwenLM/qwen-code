@@ -8600,6 +8600,70 @@ describe('Session', () => {
       });
     });
 
+    it('writes an empty-string tombstone for model.baseUrl at workspace scope when baseUrl carries credentials', async () => {
+      const credentialUrl = 'https://u:sk@h.example/v1';
+      const models = [
+        {
+          id: 'shared-model',
+          label: 'Provider One',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://one.example/v1',
+          registryBaseUrl: 'https://one.example/v1',
+        },
+        {
+          id: 'shared-model',
+          label: 'Provider Two',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: credentialUrl,
+          registryBaseUrl: credentialUrl,
+        },
+      ];
+      let activeBaseUrl = 'https://one.example/v1';
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockImplementation(
+        () =>
+          ({
+            authType: currentAuthType,
+            model: currentModel,
+            baseUrl: activeBaseUrl,
+          }) as ReturnType<Config['getContentGeneratorConfig']>,
+      );
+      switchModelSpy.mockImplementation(
+        async (
+          authType: AuthType,
+          modelId: string,
+          options?: { baseUrl?: string },
+        ) => {
+          currentAuthType = authType;
+          currentModel = modelId;
+          activeBaseUrl = options?.baseUrl ?? activeBaseUrl;
+        },
+      );
+
+      mockSettings.isTrusted = true;
+      mockSettings.workspace.settings.modelProviders = {
+        openai: { models: [{ id: 'shared-model' }] },
+      };
+
+      const routeId = buildAcpModelOptions(models)[1]!.modelId;
+
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: routeId,
+      });
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.name',
+        'shared-model',
+      );
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.baseUrl',
+        '',
+      );
+    });
+
     it('switches an implicit route without using its resolved default as a registry key', async () => {
       const models = [
         {

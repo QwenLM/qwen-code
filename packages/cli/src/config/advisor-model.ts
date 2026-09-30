@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import type { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { splitAuxModelSelector } from '../utils/aux-model-selector.js';
 
 export interface AdvisorModelContext {
   fastModel?: string;
@@ -80,11 +81,7 @@ export function checkAdvisorModelAvailability(
     currentAuthType:
       runtimeContext.currentAuthType ?? fallbackContext.currentAuthType,
   };
-  const endpointIndex = modelName.indexOf('\0');
-  const modelSelector =
-    endpointIndex < 0 ? modelName : modelName.slice(0, endpointIndex);
-  const registryBaseUrl =
-    endpointIndex < 0 ? undefined : modelName.slice(endpointIndex + 1) || null;
+  const { modelSelector, registryBaseUrl } = splitAuxModelSelector(modelName);
   let selector: ReturnType<typeof resolveModelId> | undefined;
   try {
     if (modelSelector.trim() === 'inherit') {

@@ -43,6 +43,7 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
+import { isCleanPublicProviderBaseUrl } from '../../utils/aux-model-selector.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -117,6 +118,24 @@ export function encodeAuxModelSelector(selected: string): string {
     return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
   }
   return selected;
+}
+
+function encodeVisionModelSelector(
+  selected: string,
+  scope?: SettingScope,
+): string {
+  if (!selected.includes('::')) {
+    return encodeAuxModelSelector(selected);
+  }
+  const parsed = parseModelSelectionKey(selected);
+  const selector = `${parsed.authType}:${parsed.modelId}`;
+  if (!parsed.baseUrl) return selector;
+  if (scope === SettingScope.Workspace) {
+    return isCleanPublicProviderBaseUrl(parsed.baseUrl)
+      ? `${selector}\0${parsed.baseUrl}`
+      : selector;
+  }
+  return `${selector}\0${parsed.baseUrl}`;
 }
 
 interface ModelDialogProps {
@@ -1020,7 +1039,8 @@ export function ModelDialog({
       // Vision model mode: keep the selected row's baseUrl when present so
       // same-provider OpenAI-compatible endpoints with the same id stay distinct.
       if (isVisionModelMode) {
-        const visionModel = encodeAuxModelSelector(selected);
+        const scope = resolvePersistScope(settings, persistScope);
+        const visionModel = encodeVisionModelSelector(selected, scope);
         const visionModelDisplay =
           parseVisionModelSetting(visionModel)?.selector ?? visionModel;
         // Pinning the primary itself is ignored by the bridge at runtime, so
@@ -1037,7 +1057,6 @@ export function ModelDialog({
           );
           return;
         }
-        const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'visionModel', visionModel);
         // Sync runtime Config so the vision bridge picks it up without a restart.
         config?.setVisionModel(visionModel);
@@ -1095,7 +1114,8 @@ export function ModelDialog({
           setErrorMessage(t('Selected image model is unavailable.'));
           return;
         }
-        const imageModel = encodeAuxModelSelector(selected);
+        const scope = resolvePersistScope(settings, persistScope);
+        const imageModel = encodeVisionModelSelector(selected, scope);
         const imageModelDisplay =
           parseVisionModelSetting(imageModel)?.selector ?? imageModel;
         if (!config.resolveImageGenerationModel(imageModel)) {
@@ -1107,7 +1127,6 @@ export function ModelDialog({
           );
           return;
         }
-        const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'imageModel', imageModel);
         selectionInFlightRef.current = true;
         try {
