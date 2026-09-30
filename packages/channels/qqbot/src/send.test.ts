@@ -615,6 +615,22 @@ describe('purgeSingleScopeOrphans', () => {
       ],
       removeSessionId,
     };
+    // This duck-typed router exposes no persistPath, so the fallback source of
+    // a route's cwd is globalSessionsPath — for a supplied router, the shared
+    // sessions.json, not the per-channel file: the router's getAll() does not
+    // report it. It has one doomed key but not the other, so the record must
+    // carry the cwd where it exists and omit it — never fabricate one — where
+    // it does not.
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        'test-bot:__single__': {
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+          cwd: '/work/single',
+        },
+      }),
+    );
     callPurge(makeChannelWithRouter(router));
 
     const calls = vi.mocked(writeFileSync).mock.calls;
@@ -639,6 +655,7 @@ describe('purgeSingleScopeOrphans', () => {
         key: 'test-bot:__single__',
         sessionId: 'single-era-1',
         target: { channelName: 'test-bot' },
+        cwd: '/work/single',
       },
       {
         kind: 'user',
@@ -653,6 +670,161 @@ describe('purgeSingleScopeOrphans', () => {
     expect(
       vi.mocked(writeFileSync).mock.invocationCallOrder[rescueIndex],
     ).toBeLessThan(removeSessionId.mock.invocationCallOrder[0]);
+  });
+
+  it('does not fabricate a cwd for a doomed route whose stored entry has none (negative guard, not regression coverage)', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:u1:c1',
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+        },
+      ],
+      removeSessionId,
+    };
+    // The stored entry exists for the doomed key but has no cwd (an older
+    // file), and the empty string is not a usable workspace either — both must
+    // leave the field off rather than resurrect the router's default. This
+    // passes even with the cwd attach reverted (the base attaches no cwd at
+    // all), so it guards against fabrication, not the attach's regression.
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        'test-bot:u1:c1': {
+          sessionId: 'user-era-1',
+          target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+          cwd: '',
+        },
+      }),
+    );
+    callPurge(makeChannelWithRouter(router));
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+    );
+    const rescue = JSON.parse(calls[rescueIndex][1] as string) as {
+      routes: Array<Record<string, unknown>>;
+    };
+    expect(rescue.routes).toEqual([
+      {
+        kind: 'user',
+        key: 'test-bot:u1:c1',
+        sessionId: 'user-era-1',
+        target: { channelName: 'test-bot', senderId: 'u1', chatId: 'c1' },
+      },
+    ]);
+    expect('cwd' in rescue.routes[0]).toBe(false);
+  });
+
+  it("reads a doomed route's cwd from the router's own persisted store", () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    // In daemon mode the shared router persists to its own routes.json, not
+    // this channel's sessions.json, which may still hold a stale cwd from an
+    // earlier standalone `qwen channel start`. The record must carry the
+    // router's value, not the stale file's.
+    const persistPath = '/tmp/daemon-workspace/routes.json';
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+      persistPath,
+    };
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockImplementation(((path: unknown) =>
+      String(path) === persistPath
+        ? JSON.stringify({
+            'test-bot:__single__': {
+              sessionId: 'single-era-1',
+              target: { channelName: 'test-bot' },
+              cwd: '/work/router',
+            },
+          })
+        : JSON.stringify({
+            'test-bot:__single__': {
+              sessionId: 'single-era-1',
+              target: { channelName: 'test-bot' },
+              cwd: '/work/stale-global',
+            },
+          })) as typeof readFileSync);
+    callPurge(makeChannelWithRouter(router));
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+    );
+    const rescue = JSON.parse(calls[rescueIndex][1] as string) as {
+      routes: Array<Record<string, unknown>>;
+    };
+    expect(rescue.routes[0]['cwd']).toBe('/work/router');
+  });
+
+  it('falls back to the shared sessions file for a supplied router without a persistPath', () => {
+    vi.mocked(writeFileSync).mockClear();
+    const removeSessionId = vi.fn(() => true);
+    // A supplied router (external/duck-typed) exposing no persistPath is the
+    // only case that reaches the fallback, where globalSessionsPath is the
+    // shared sessions.json — never the per-channel file.
+    const router = {
+      getAll: () => [
+        {
+          key: 'test-bot:__single__',
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+        },
+      ],
+      removeSessionId,
+    };
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        'test-bot:__single__': {
+          sessionId: 'single-era-1',
+          target: { channelName: 'test-bot' },
+          cwd: '/work/standalone',
+        },
+      }),
+    );
+    callPurge(makeChannelWithRouter(router));
+
+    const calls = vi.mocked(writeFileSync).mock.calls;
+    const rescueIndex = calls.findIndex((c) =>
+      String(c[0]).endsWith('test-bot-sessions-purged.json'),
+    );
+    const rescue = JSON.parse(calls[rescueIndex][1] as string) as {
+      routes: Array<Record<string, unknown>>;
+    };
+    expect(rescue.routes[0]['cwd']).toBe('/work/standalone');
+  });
+
+  it('coerces persistPath off a real SessionRouter, so a rename cannot silently disable the lookup', async () => {
+    const { SessionRouter } = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const persistPath = '/tmp/real-router/routes.json';
+    // The purge reads the private field as a plain property, so every stub
+    // router above would keep passing if the real class renamed it and the
+    // daemon lookup silently fell back to the shared sessions file. Construct
+    // the real class — its constructor only stores the bridge, and no method
+    // that needs a working one is called — and pin the property it exposes.
+    const router = new SessionRouter(
+      {} as unknown as ChannelAgentBridge,
+      '/work',
+      'thread',
+      persistPath,
+    );
+    expect((router as unknown as Record<string, unknown>)['persistPath']).toBe(
+      persistPath,
+    );
   });
 
   it('writes no rescue file when nothing is purged', () => {

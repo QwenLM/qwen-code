@@ -1504,6 +1504,7 @@ describe('pendingStreamDelete coordination', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
       string,
       { msgId: string; timestamp: number }
@@ -1518,6 +1519,9 @@ describe('pendingStreamDelete coordination', () => {
 
     expect(pendingStreamDelete.has('sess-1')).toBe(true);
     expect(streamState(ch).has('sess-1')).toBe(true);
+    // The deferred completion recorded this turn; the chain's own terminal
+    // settle is the only teardown that can drop it.
+    expect(completedTurns.get('sess-1')).toBe(1);
 
     // Let the idle-flush send promise resolve
     resolveSend!(mockResponse(true));
@@ -1527,6 +1531,7 @@ describe('pendingStreamDelete coordination', () => {
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
     expect(streamState(ch).has('sess-1')).toBe(false);
     expect(flushingSessions.has('sess-1')).toBe(false);
+    expect(completedTurns.has('sess-1')).toBe(false);
     // The deferred chain's else branch released the anchor; the chat-level
     // entry still points at msg-A, so its msg_seq counter is kept (cascaded
     // away only when the chat entry moves on or expires).
@@ -1886,6 +1891,7 @@ describe('error recovery paths', () => {
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
     const flushedSessions = chp['flushedSessions'] as Set<string>;
     const turnCounter = chp['turnCounter'] as Map<string, number>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
       string,
       { msgId: string; timestamp: number }
@@ -1908,6 +1914,7 @@ describe('error recovery paths', () => {
     pendingStreamDelete.add('sess-1');
     flushedSessions.add('sess-1');
     turnCounter.set('sess-1', 5);
+    completedTurns.set('sess-1', 5);
     sessionAnchors.set('sess-1', { msgId: 'msg-P', timestamp: Date.now() });
     seqMap.set('msg-P', 2);
 
@@ -1932,6 +1939,7 @@ describe('error recovery paths', () => {
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
     expect(flushedSessions.has('sess-1')).toBe(false);
     expect(turnCounter.has('sess-1')).toBe(false);
+    expect(completedTurns.has('sess-1')).toBe(false);
   });
 
   it('a permanent failure of a proactive turn never releases the successor anchor', async () => {
@@ -4525,6 +4533,7 @@ describe('stash ownership regressions', () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
     await reachStashedOrphan(ch);
     onResponseBoundary(ch, 'test-chat', 's1');
 
@@ -4564,6 +4573,9 @@ describe('stash ownership regressions', () => {
     expect(streamState(ch).has('s1')).toBe(false);
 
     expect(sentContents().slice(before)).toContain('T2-HEAD ');
+    // Retry exhaustion abandons the turn, so its completion record must go
+    // with the counter; a later turn reusing the number must not alias it.
+    expect(completedTurns.has('s1')).toBe(false);
   });
 
   it("delivers a cancelled turn's stashed head before the park early-return (R10-1)", async () => {
@@ -4693,6 +4705,7 @@ describe('stash ownership regressions', () => {
     const chp = ch as unknown as Record<string, unknown>;
     const flushingSessions = chp['flushingSessions'] as Map<string, unknown>;
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
     const sessionAnchors = chp['sessionReplyMsgId'] as Map<
       string,
       { msgId: string; timestamp: number }
@@ -4719,6 +4732,10 @@ describe('stash ownership regressions', () => {
     // so the msg_seq cascade is observable.
     onPromptStart(ch, 'test-chat', 's1', 'msg-B');
     onResponseChunk(ch, 'test-chat', '', 's1');
+    // Turn 2's completion has run and recorded its turn; onPromptStart already
+    // cleared the record for the turn bump, so re-seed it to model the
+    // completed turn whose empty-buffer teardown the chain must settle.
+    completedTurns.set('s1', 2);
     onPromptEnd(ch, 'test-chat', 's1');
     expect(pendingStreamDelete.has('s1')).toBe(true);
     expect(streamState(ch).get('s1')!.buffer).toBe('');
@@ -4736,6 +4753,8 @@ describe('stash ownership regressions', () => {
     // The release ran after the timer was cleared: had the armed idle timer
     // still been visible, the release guard would have kept the counter.
     expect(seqMap.has('msg-B')).toBe(false);
+    // The empty-buffer parked settle drops the completed turn's record too.
+    expect(completedTurns.has('s1')).toBe(false);
   });
 
   it('the parked self-heal does not postpone a live idle timer (R9-3)', async () => {
@@ -5163,25 +5182,96 @@ describe('R15-1 acceptance: tail hand-off must not stash under an ended turn', (
     stderrSpy.mockRestore();
   });
 
-  it('drops a finished turn record so a reused turn number cannot alias it', async () => {
+  it('drops a finished turn record at turn end so a reused turn number cannot alias it', async () => {
     const ch = makeChannel();
     const chp = ch as unknown as Record<string, unknown>;
     const completedTurns = chp['completedTurns'] as Map<string, number>;
     setReplyMsgId(ch, 'test-chat', 'msg-A');
     onPromptStart(ch, 'test-chat', 's1', 'msg-A');
 
-    // Turn 1 completes and ends, leaving a record behind for turn 1.
+    // Turn 1 completes and ends. Nothing can consult the record afterwards —
+    // the completion that consumes a stash tagged turn 1 has already run — so
+    // the teardown must drop it rather than leave one entry per session seen.
     onResponseChunk(ch, 'test-chat', 'H', 's1');
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
     await onResponseComplete(ch, 'test-chat', 'H', 's1');
     onPromptEnd(ch, 'test-chat', 's1');
-    expect(completedTurns.get('s1')).toBe(1);
+    expect(completedTurns.has('s1')).toBe(false);
 
     // The turn counter is gone, so the next prompt is turn 1 again. A record
     // left over from the finished turn 1 would alias it and make a later
     // hand-off treat a turn whose completion never ran as already completed.
     setReplyMsgId(ch, 'test-chat', 'msg-B');
     onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    expect(completedTurns.has('s1')).toBe(false);
+  });
+});
+
+describe('completedTurns lifetime (R18-1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps the completion record while an in-flight chain can still read it', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
+    const flushingSessions = chp['flushingSessions'] as Map<
+      string,
+      FlushMarkerState
+    >;
+    // A chain still owns the session marker with no streamState entry of its
+    // own (a settle path deleted the entry a microtask before clearing the
+    // marker). Its handOffSealedPre can still run, so the teardown must keep
+    // the record for it rather than drop it with the absent entry.
+    flushingSessions.set('s1', flushMarkerState());
+    completedTurns.set('s1', 1);
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(completedTurns.get('s1')).toBe(1);
+
+    // Once the chain releases the marker nothing can read the record, so the
+    // next teardown drops it instead of leaking it for the session's lifetime.
+    flushingSessions.delete('s1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(completedTurns.has('s1')).toBe(false);
+  });
+
+  it('drops the completion record when a parked chain settles', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const completedTurns = chp['completedTurns'] as Map<string, number>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // Turn 1's send stays in flight, so completion parks onto its chain.
+    let resolveSend!: (v: MockResponse) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((resolve) => {
+        resolveSend = resolve;
+      }),
+    );
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // onPromptEnd early-returns on the park flag, so only the chain's own
+    // terminal settle can drop the record.
+    await onResponseComplete(ch, 'test-chat', 'HEAD', 's1');
+    onPromptEnd(ch, 'test-chat', 's1');
+    expect(pendingStreamDelete.has('s1')).toBe(true);
+    expect(completedTurns.get('s1')).toBe(1);
+
+    resolveSend(mockResponse(true));
+    await drain();
+
+    expect(pendingStreamDelete.has('s1')).toBe(false);
     expect(completedTurns.has('s1')).toBe(false);
   });
 });

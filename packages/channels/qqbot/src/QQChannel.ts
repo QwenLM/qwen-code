@@ -339,9 +339,15 @@ export class QQChannel extends ChannelBase {
    * The turn whose onResponseComplete has already run, per session. The
    * completion that prepends a turn's stash cannot run a second time, so a
    * stash tagged with that turn has no guaranteed consumer, and
-   * handOffSealedPre delivers its text directly instead of writing it. Cleared
-   * when a new turn starts, on session death, and on disconnect, so it holds at
-   * most one entry per session seen since the last of those.
+   * handOffSealedPre delivers its text directly instead of writing it. Dropped
+   * when a new turn starts, on session death, and on disconnect; onPromptEnd's
+   * terminal teardown drops it unless a chain still holds the session's flush
+   * marker, and a flush chain's terminal settle drops it when it still owns the
+   * generation (deleteTurnGenerationIfOwned). A teardown that finds a live
+   * marker keeps the record so that chain's handOffSealedPre can still read it;
+   * because that teardown also clears the marker, the chain's own .finally
+   * returns on its ownership check and the record is instead dropped by the
+   * next onPromptStart, onSessionDied, or disconnect.
    */
   private completedTurns: Map<string, number> = new Map();
   /**
@@ -1453,12 +1459,23 @@ export class QQChannel extends ChannelBase {
     // flushingSessions for a live flush, so it must still see this session's
     // entry (and marker) or it would drop the msg_seq counter under a send
     // still in flight — QQ dedupes on msg_id + msg_seq and drops the tail.
+    // Read the flush marker before the delete below erases it: the completion
+    // record may only go once no chain can still consult it. The guard above
+    // parks whenever a live stream entry has a marker, so this teardown sees
+    // flushInFlight=true only when a chain holds the marker with no streamState
+    // entry of its own. That chain's handOffSealedPre can still read the
+    // record, so it is kept here; the delete below also clears the marker, so
+    // the chain's own .finally returns on its ownership check and never reaches
+    // deleteTurnGenerationIfOwned. The next onPromptStart, onSessionDied, or
+    // disconnect drops the record instead.
+    const flushInFlight = this.flushingSessions.has(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
     this.streamState.delete(sessionId);
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
     this.turnCounter.delete(sessionId);
+    if (!flushInFlight) this.completedTurns.delete(sessionId);
     this.streamOrphanBuffer.delete(sessionId);
   }
 
@@ -1905,7 +1922,7 @@ export class QQChannel extends ChannelBase {
               // successor turn that replaced the state owns its own
               // turnCounter/flushedSessions and must be left untouched.
               this.flushedSessions.delete(sessionId);
-              this.deleteTurnCounterIfOwned(state, sessionId);
+              this.deleteTurnGenerationIfOwned(state, sessionId);
             }
           }
         }
@@ -1966,7 +1983,7 @@ export class QQChannel extends ChannelBase {
           if (current === state && this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
             this.flushedSessions.delete(sessionId);
-            this.deleteTurnCounterIfOwned(state, sessionId);
+            this.deleteTurnGenerationIfOwned(state, sessionId);
           }
           return;
         }
@@ -2034,9 +2051,9 @@ export class QQChannel extends ChannelBase {
               }
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
-              // Deferred turn fully abandoned — drop its turn counter only
-              // when it still belongs to this turn.
-              this.deleteTurnCounterIfOwned(state, sessionId);
+              // Deferred turn fully abandoned — drop its turn-generation
+              // records only when they still belong to this turn.
+              this.deleteTurnGenerationIfOwned(state, sessionId);
               process.stderr.write(
                 `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
               );
@@ -2173,7 +2190,7 @@ export class QQChannel extends ChannelBase {
               }
               this.pendingStreamDelete.delete(sessionId);
               this.flushedSessions.delete(sessionId);
-              this.deleteTurnCounterIfOwned(parked, sessionId);
+              this.deleteTurnGenerationIfOwned(parked, sessionId);
               if (this.streamState.get(sessionId) === parked) {
                 this.streamState.delete(sessionId);
               }
@@ -2184,18 +2201,21 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Delete the session's turn counter only when it still belongs to the
-   * settling turn. A successor turn that started while this chain was in
-   * flight bumped the counter already (see onPromptStart); deleting it here
-   * would reset the successor's stale-state detection to 0 and its fresh
-   * entries would be created under turn 0.
+   * Drop the session's turn-generation records — the turn counter and the
+   * completion record completedTurns — only when they still belong to the
+   * settling turn. A successor turn that started while this chain was in flight
+   * bumped the counter and cleared the completion record already (see
+   * onPromptStart); deleting them here would reset the successor's stale-state
+   * detection to 0 and let a stale completion record alias onto its turn.
    */
-  private deleteTurnCounterIfOwned(
+  private deleteTurnGenerationIfOwned(
     state: { turn: number },
     sessionId: string,
   ): void {
-    if (state.turn === (this.turnCounter.get(sessionId) ?? 0)) {
-      this.turnCounter.delete(sessionId);
+    if (state.turn !== (this.turnCounter.get(sessionId) ?? 0)) return;
+    this.turnCounter.delete(sessionId);
+    if (this.completedTurns.get(sessionId) === state.turn) {
+      this.completedTurns.delete(sessionId);
     }
   }
 
@@ -3030,7 +3050,9 @@ export class QQChannel extends ChannelBase {
    *
    * Before the first deletion this purge performs, the doomed routes are copied
    * to `<name>-sessions-purged.json` in the channel state directory so an
-   * operator can restore a legacy conversation by hand. That rescue file is
+   * operator can restore a legacy conversation by hand. Each record carries the
+   * route's `cwd` when the router's persisted route store still has it, so a
+   * restored route resolves to the same workspace. That rescue file is
    * best-effort and is never read back automatically.
    *
    * Runs AFTER restoreSessions(): SessionRouter exposes no public API to drop
@@ -3068,7 +3090,49 @@ export class QQChannel extends ChannelBase {
       // Phase 1: collect what would be deleted, with the predicate that doomed
       // it. Nothing is torn down yet — the rescue copy below must reach disk
       // before the first removeSessionId(), because that call persists.
-      const doomed: Array<RouterRoute & { kind: 'single' | 'user' }> = [];
+      // getAll() reports no cwd, so the only source for a doomed route's cwd is
+      // the store the router persists to, which records entry.cwd verbatim
+      // (SessionRouter.persist). In daemon mode that is the shared router's own
+      // routes.json, not this channel's sessions.json, so resolve the path off
+      // the router and fall back to globalSessionsPath only for a supplied
+      // router that exposes no persistPath (external/duck-typed). The fallback
+      // cannot serve standalone mode: there the internally built router's own
+      // persistPath is the per-channel file and wins, so the fallback reads the
+      // shared sessions.json. Read it once, best-effort: a missing, empty, or
+      // unparsable file — or a key absent from it — must leave cwd off the
+      // record rather than fall back to the router default, which would point a
+      // hand-restored route at the wrong workspace.
+      const routerPersistPath = (
+        this.router as unknown as Record<string, unknown>
+      )['persistPath'];
+      const cwdStorePath =
+        typeof routerPersistPath === 'string' && routerPersistPath.length > 0
+          ? routerPersistPath
+          : this.globalSessionsPath;
+      const persistedCwdByKey = new Map<string, string>();
+      try {
+        if (existsSync(cwdStorePath)) {
+          const raw: unknown = JSON.parse(readFileSync(cwdStorePath, 'utf-8'));
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            for (const [key, value] of Object.entries(
+              raw as Record<string, unknown>,
+            )) {
+              const cwd = (value as { cwd?: unknown } | null)?.cwd;
+              if (typeof cwd === 'string' && cwd.length > 0) {
+                persistedCwdByKey.set(key, cwd);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Best-effort: a rescue record without cwd is still restorable by hand.
+        process.stderr.write(
+          `[QQ:${this.name}] purgeSingleScopeOrphans cwd read failed, rescue copies omit cwd: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+      }
+      const doomed: Array<
+        RouterRoute & { kind: 'single' | 'user'; cwd?: string }
+      > = [];
       for (const entry of all) {
         // Exact-match only this channel's own keys: in daemon mode the router
         // is shared across channels, so a suffix match on ':__single__' would
@@ -3099,11 +3163,13 @@ export class QQChannel extends ChannelBase {
           entry.key ===
             `${entry.target.channelName}:${entry.target.senderId}:${entry.target.chatId}`;
         if (isSingleOrphan || isOwnLegacyUserKey) {
+          const cwd = persistedCwdByKey.get(entry.key);
           doomed.push({
             kind: isSingleOrphan ? 'single' : 'user',
             key: entry.key,
             sessionId: entry.sessionId,
             target: entry.target,
+            ...(cwd !== undefined ? { cwd } : {}),
           });
         }
       }
