@@ -46,6 +46,7 @@ import { MemoryManager } from '../memory/manager.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
+import { computeThresholds } from '../services/chatCompressionService.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -618,6 +619,8 @@ describe('Gemini Client (client.ts)', () => {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
+      clearReviewedDeclarations: vi.fn(),
+      syncReviewedDeclarations: vi.fn(),
       revealDeferredTool: vi.fn(),
       preloadDeferredToolsWithinBudget: vi.fn().mockReturnValue(0),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
@@ -954,6 +957,9 @@ describe('Gemini Client (client.ts)', () => {
       await resumedClient.initialize();
 
       expect(resumedClient.getHistory().at(-1)).toEqual(apiHistory[0]);
+      expect(
+        mockConfig.getToolRegistry().syncReviewedDeclarations,
+      ).toHaveBeenCalledWith(apiHistory);
       expect(uiTelemetryService.resetSession).toHaveBeenCalledWith(
         'test-session-id',
       );
@@ -4233,12 +4239,15 @@ describe('Gemini Client (client.ts)', () => {
       // the "clean slate" expectation of `/clear`.
       const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         clearRevealedDeferredTools: ReturnType<typeof vi.fn>;
+        clearReviewedDeclarations: ReturnType<typeof vi.fn>;
       };
       reg.clearRevealedDeferredTools.mockClear();
+      reg.clearReviewedDeclarations.mockClear();
 
       await client.resetChat();
 
       expect(reg.clearRevealedDeferredTools).toHaveBeenCalledTimes(1);
+      expect(reg.clearReviewedDeclarations).toHaveBeenCalledTimes(1);
     });
 
     it('fires SessionStart with Clear source when resetting chat', async () => {
@@ -11220,6 +11229,26 @@ hello
         // Read only while a no-op cooldown is active (#13004).
         isBelowCompactionWarn: expect.any(Function),
       });
+      const cooldownPosition =
+        mockMemoryManager.scheduleExtract.mock.calls.at(-1)?.[0]
+          .isBelowCompactionWarn;
+      const window = 100_000;
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        ...mockConfig.getContentGeneratorConfig()!,
+        contextWindowSize: window,
+      });
+      const { warn } = computeThresholds(
+        window,
+        mockConfig.getAutoCompactThreshold(),
+      );
+      const tokenCount = vi.fn();
+      mockChat.getLastPromptTokenCount = tokenCount;
+      tokenCount.mockReturnValue(0);
+      expect(cooldownPosition?.()).toBe(false);
+      tokenCount.mockReturnValue(warn - 1);
+      expect(cooldownPosition?.()).toBe(true);
+      tokenCount.mockReturnValue(warn);
+      expect(cooldownPosition?.()).toBe(false);
       expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
         2,
       );

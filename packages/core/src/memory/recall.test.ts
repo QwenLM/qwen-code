@@ -1011,29 +1011,24 @@ describe('auto-memory relevant recall', () => {
       );
     });
 
-    it('keeps the selector when the single fast document is a stale-body reread', async () => {
-      // Published stale-body-first without passing the strength test, so one
-      // delivered document is not one strong match.
+    it('keeps the selector when the unique strong fast document has a stale body', async () => {
       const stale = {
-        ...docs[0]!,
-        title: 'Fork setup',
-        description: 'Repository migration notes',
-        keywords: [],
-        usageScenarios: [],
+        ...exact,
         mtimeMs: 42,
       };
       mockSnapshot([stale]);
       bodyPresentVersions.set('project:reference.md', 41);
       const onFastResult = vi.fn();
 
-      await resolveRelevantAutoMemoryPromptForQuery(
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
         '/tmp/project',
-        'Check the migration update.',
+        query,
         { config, onFastResult },
       );
 
       expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([stale]);
       expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
     });
 
     it('keeps the selector when two strong matches compete', async () => {
