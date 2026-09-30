@@ -2,7 +2,7 @@
 
 [English](2026-09-30-atomic-settings-save.md) | [简体中文](2026-09-30-atomic-settings-save.zh-CN.md)
 
-Status: implemented locally; macOS verification passes; native Windows/Linux checks remain open.
+Status: implemented; macOS verification passes; maintainer reports native Linux acceptance at `d0be922868`; native Windows checks remain open.
 Date: 2026-09-30.
 Issue: [#12417](https://github.com/QwenLM/qwen-code/issues/12417).
 Source baseline: 3a8fd11711a10b9a2435bd0051485e31479e90ae.
@@ -88,10 +88,13 @@ and gives each invocation exclusive ownership of its artifacts.
    beforehand.
 4. After successful publication, remove only this invocation's working
    directory, best effort. Cleanup failure does not undo a successful save.
-5. On failure before publication, remove the invocation's staging file, best
-   effort. If a complete backup exists, retain its private directory and name
-   that backup in the error. Otherwise clean up the private directory, best
-   effort. Never restore a backup automatically over the target.
+5. On failure before publication, compare a complete backup with the current
+   target as raw bytes. If they match, remove this invocation's directory, best
+   effort: retaining an identical copy would accumulate directories when
+   replacement persistently fails, such as on a single-file bind mount. If they
+   differ or either read fails, retain the backup, name it in the error and
+   remove only staging, best effort. Without a complete backup, clean up the
+   private directory. Never restore a backup automatically over the target.
 
 The private directory avoids shared .tmp collisions and shared .orig ownership.
 A plain copy into a fixed backup path could also overwrite a pre-existing
@@ -108,14 +111,14 @@ backup. The provider adapter's explicit transaction restore remains separate.
 
 ## Failure and crash behavior
 
-| Point                                                   | Target behavior                                                                         | Artifact/result behavior                                                  |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Working-directory or staging creation/write/flush fails | Existing target untouched                                                               | Save fails; clean only owned artifacts.                                   |
-| Backup copy fails                                       | Existing target untouched                                                               | Save fails; incomplete backup is not advertised as usable.                |
-| Final rename fails, including EPERM/EACCES              | Current target untouched by this invocation, including another writer's successful save | Save fails; retain complete private backup; no rollback or copy fallback. |
-| Publication succeeds but cleanup fails                  | Complete new file remains committed                                                     | Save succeeds; private artifacts may remain.                              |
-| Process stops before publication                        | Existing committed file remains at the target                                           | Private artifacts may remain and are ignored by readers.                  |
-| Process stops after publication                         | Complete committed file remains at the target                                           | Backup/staging cleanup may be incomplete; no automatic replay.            |
+| Point                                                   | Target behavior                                                                         | Artifact/result behavior                                                                                  |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Working-directory or staging creation/write/flush fails | Existing target untouched                                                               | Save fails; clean only owned artifacts.                                                                   |
+| Backup copy fails                                       | Existing target untouched                                                               | Save fails; incomplete backup is not advertised as usable.                                                |
+| Final rename fails, including EPERM/EACCES/EBUSY        | Current target untouched by this invocation, including another writer's successful save | Save fails; remove identical backup, retain different or unreadable backup; no rollback or copy fallback. |
+| Publication succeeds but cleanup fails                  | Complete new file remains committed                                                     | Save succeeds; private artifacts may remain.                                                              |
+| Process stops before publication                        | Existing committed file remains at the target                                           | Private artifacts may remain and are ignored by readers.                                                  |
+| Process stops after publication                         | Complete committed file remains at the target                                           | Backup/staging cleanup may be incomplete; no automatic replay.                                            |
 
 These are process-crash and publication-visibility requirements on supported
 local filesystems. The current file flush is retained, but this change adds
@@ -123,11 +126,14 @@ no directory fsync and makes no new power-loss durability guarantee. External
 deletion, permission changes, network-filesystem semantics, and an actor
 replacing the containing directory are outside the guarantee.
 
-Repeated failed saves or process crashes can leave multiple private directories.
+Repeated failed saves do not accumulate identical backups when cleanup succeeds.
+Different or unreadable recovery copies, cleanup failures and process crashes
+can still leave multiple private directories. Comparison is not a lock or a
+guarantee against later external deletion; it never changes the live target.
 Recovery copies are never loaded automatically. Inspect the current target before
 manually restoring a reported backup, since it may predate another writer.
 After inspection, remove only the named invocation's directory; this proposal
-does not introduce automatic retention or cleanup policy.
+does not introduce a scavenger for artifacts from earlier invocations.
 
 ## Windows and alternatives
 
@@ -199,7 +205,10 @@ Tests must assert outcomes rather than the number or order of filesystem calls:
   do not infer read-modify-write serializability from this test.
 - Inject backup and final-rename failures; confirm exact committed bytes remain.
   Let writer B publish between A's backup and A's forced failure and verify B
-  survives. Include custom suffix, encoding, first creation, directory refusal
+  survives and the different recovery copy is reported. Repeated EBUSY failures
+  with unchanged target bytes must leave no owned artifacts after cleanup;
+  comparison-read failures must retain the complete copy and original write
+  error. Include custom suffix, encoding, first creation, directory refusal
   and best-effort cleanup.
 - Kill a writer before and after publication; readers ignore private leftovers.
   Existing JSONC, migration, adapter-restore and watcher behavior must remain.
@@ -270,6 +279,24 @@ Initial raw evidence is retained in .qwen/e2e-tests/issue-12417-settings-gap-ver
 and .qwen/e2e-tests/issue-12417-concurrent-save-verify.json; the corresponding
 scripts are in .qwen/scripts/.
 
-Native Windows replacement/refusal and Linux confinement during saves require
-their respective hosts and remain pending. macOS error injection and the CLI's
-unsupported-platform refusal do not satisfy those platform requirements.
+On 2026-09-30, maintainer wenshao supplied [native Linux verification at
+`d0be922868`](https://github.com/QwenLM/qwen-code/pull/13119#issuecomment-5918187683):
+Linux 6.12/ext4, Node 22.22 and real bubblewrap 0.12.0, using the bundled CLI.
+The report covers every writer checkpoint, process-kill injection, concurrent
+saves and live watcher behavior. During saves, the admitted policy remains
+configured, workspace writes succeed and outside-workspace writes fail with
+EROFS. This is maintainer-supplied evidence, not a run on the local macOS host.
+The same report also verifies the proposed identical-backup cleanup patch on
+Linux; local reproduction and post-fix verification are recorded separately.
+
+The cleanup follow-up is independently reproduced on macOS with the compiled
+writer and real isolated files: three injected EBUSY failures leave three
+identical backups before the fix and none after it. A second process publishing
+before the first writer fails keeps its newer target and the different recovery
+copy. Injected errors reading either comparison input retain the complete copy
+and original publication error. First-publication failure and normal creation
+and replacement also pass; 17 focused writer tests pass. These injected errors
+are control-flow evidence, not native Linux bind-mount or Windows verification.
+
+Native Windows replacement/refusal remains pending. macOS error injection and
+the CLI's unsupported-platform refusal do not satisfy that requirement.

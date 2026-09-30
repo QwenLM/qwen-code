@@ -23,7 +23,8 @@ export interface WriteWithBackupOptions {
  * Staging and backup files belong to a private directory beside the target.
  * Publication replaces the target with one rename, keeping existing settings
  * readable throughout the save. Failed publication retains a recovery copy
- * without restoring it: another writer may have already committed newer data.
+ * unless it matches the current target; it never restores the copy over another
+ * writer's newer data.
  * Successful saves clean up their private directory on a best-effort basis.
  *
  * @param targetPath - The path to write to
@@ -88,8 +89,11 @@ export function writeWithBackupSync(
 
     fs.renameSync(tempPath, targetPath);
   } catch (error) {
+    // Identical copies recover nothing and would accumulate on persistent failures.
+    const recoveryRetained =
+      backupCreated && !sameContents(backupPath, targetPath);
     try {
-      if (backupCreated) {
+      if (recoveryRetained) {
         fs.unlinkSync(tempPath);
       } else {
         fs.rmSync(workingDirectory, { recursive: true, force: true });
@@ -97,7 +101,7 @@ export function writeWithBackupSync(
     } catch {
       // Cleanup must not obscure the write failure or remove a recovery copy.
     }
-    if (backupCreated) {
+    if (recoveryRetained) {
       throw new Error(
         `Failed to write file: ${error instanceof Error ? error.message : String(error)}. ` +
           `Recovery copy retained at '${backupPath}'; inspect the current target before restoring it.`,
@@ -110,5 +114,13 @@ export function writeWithBackupSync(
     fs.rmSync(workingDirectory, { recursive: true, force: true });
   } catch {
     // Publication already succeeded; leftover artifacts do not invalidate it.
+  }
+}
+
+function sameContents(first: string, second: string): boolean {
+  try {
+    return fs.readFileSync(first).equals(fs.readFileSync(second));
+  } catch {
+    return false;
   }
 }

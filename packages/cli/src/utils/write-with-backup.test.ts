@@ -23,6 +23,7 @@ vi.mock('node:fs', async (importOriginal) => {
     writeFileSync: vi.fn(actual.writeFileSync),
     copyFileSync: vi.fn(actual.copyFileSync),
     renameSync: vi.fn(actual.renameSync),
+    readFileSync: vi.fn(actual.readFileSync),
     rmSync: vi.fn(actual.rmSync),
   };
 });
@@ -35,6 +36,7 @@ describe('writeWithBackup', () => {
     vi.mocked(fs.writeFileSync).mockImplementation(nativeFs.writeFileSync);
     vi.mocked(fs.copyFileSync).mockImplementation(nativeFs.copyFileSync);
     vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
+    vi.mocked(fs.readFileSync).mockImplementation(nativeFs.readFileSync);
     vi.mocked(fs.rmSync).mockImplementation(nativeFs.rmSync);
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-with-backup-test-'));
     targetPath = path.join(tempDir, 'settings.json');
@@ -154,7 +156,7 @@ describe('writeWithBackup', () => {
   });
 
   it.each(['EPERM', 'EACCES'])(
-    'preserves the target and reports a complete recovery copy on %s',
+    'preserves the target and removes its identical recovery copy on %s',
     (code) => {
       fs.writeFileSync(targetPath, 'old');
       vi.mocked(fs.renameSync).mockImplementation(() => {
@@ -171,15 +173,58 @@ describe('writeWithBackup', () => {
       expect(error).toBeInstanceOf(Error);
       expect(String(error)).toContain(code);
       expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
-      const directories = fs
+      expect(String(error)).not.toContain('Recovery copy retained');
+      expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+    },
+  );
+
+  it('does not accumulate identical backups when publication keeps failing', () => {
+    fs.writeFileSync(targetPath, 'old');
+    vi.mocked(fs.renameSync).mockImplementation(() => {
+      throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    });
+
+    for (const content of ['v1', 'v2', 'v3']) {
+      expect(() => writeWithBackupSync(targetPath, content)).toThrow('EBUSY');
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe('old');
+      expect(fs.readdirSync(tempDir)).toEqual(['settings.json']);
+    }
+  });
+
+  it.each(['target', 'backup'])(
+    'retains the recovery copy when reading the %s for comparison fails',
+    (unreadable) => {
+      fs.writeFileSync(targetPath, 'old');
+      vi.mocked(fs.renameSync).mockImplementation(() => {
+        throw new Error('publication failed');
+      });
+      vi.mocked(fs.readFileSync).mockImplementation((...args) => {
+        const isTarget = args[0] === targetPath;
+        if (isTarget === (unreadable === 'target')) {
+          throw new Error('comparison read failed');
+        }
+        return nativeFs.readFileSync(...args);
+      });
+
+      let error: unknown;
+      try {
+        writeWithBackupSync(targetPath, 'new');
+      } catch (caught) {
+        error = caught;
+      }
+
+      expect(String(error)).toContain('publication failed');
+      expect(String(error)).not.toContain('comparison read failed');
+      expect(nativeFs.readFileSync(targetPath, 'utf8')).toBe('old');
+      const directory = fs
         .readdirSync(tempDir)
-        .filter((name) => name.startsWith('settings.json.write-'));
-      expect(directories).toHaveLength(1);
-      const directory = path.join(tempDir, directories[0]);
-      const recoveryPath = path.join(directory, 'settings.json.bak');
+        .find((name) => name.startsWith('settings.json.write-'))!;
+      const recoveryPath = path.join(tempDir, directory, 'settings.json.orig');
       expect(String(error)).toContain(recoveryPath);
-      expect(fs.readFileSync(recoveryPath, 'utf8')).toBe('old');
-      expect(fs.readdirSync(directory)).toEqual(['settings.json.bak']);
+      expect(nativeFs.readFileSync(recoveryPath, 'utf8')).toBe('old');
+      expect(fs.readdirSync(path.join(tempDir, directory))).toEqual([
+        'settings.json.orig',
+      ]);
     },
   );
 
@@ -208,19 +253,24 @@ describe('writeWithBackup', () => {
       throw new Error('writer A failed');
     });
 
-    expect(() => writeWithBackupSync(targetPath, 'writer A')).toThrow(
-      'writer A failed',
-    );
+    let error: unknown;
+    try {
+      writeWithBackupSync(targetPath, 'writer A', { backupSuffix: '.bak' });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(String(error)).toContain('writer A failed');
     expect(fs.readFileSync(targetPath, 'utf8')).toBe('writer B');
     const directory = fs
       .readdirSync(tempDir)
       .find((name) => name.startsWith('settings.json.write-'))!;
-    expect(
-      fs.readFileSync(
-        path.join(tempDir, directory, 'settings.json.orig'),
-        'utf8',
-      ),
-    ).toBe('original');
+    const recoveryPath = path.join(tempDir, directory, 'settings.json.bak');
+    expect(String(error)).toContain(recoveryPath);
+    expect(fs.readFileSync(recoveryPath, 'utf8')).toBe('original');
+    expect(fs.readdirSync(path.join(tempDir, directory))).toEqual([
+      'settings.json.bak',
+    ]);
   });
 
   it('isolates overlapping successful writers and publishes complete content', () => {
