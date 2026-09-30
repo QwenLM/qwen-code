@@ -64,6 +64,7 @@ let turn: HostedWorkspaceToolTurn;
 let commit: ConstructorParameters<typeof HostedWorkspaceToolTurn>[4];
 const messageFitsInline = vi.fn(() => true);
 let waiters: HostedApprovalWaiters;
+let expectWritesStopped: boolean;
 function createTurn(
   shell = false,
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
@@ -103,6 +104,7 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  expectWritesStopped = false;
   for (const method of [
     broker.warm,
     broker.acquire,
@@ -174,7 +176,7 @@ afterEach(async () => {
   await turn?.close();
   vi.restoreAllMocks();
   // A Session whose writes stopped cannot record its own close.
-  if (session?.authority.writesStopped)
+  if (expectWritesStopped)
     await expect(session.close()).rejects.toThrow(/writes stopped/);
   else await session?.close();
   await rm(root, { recursive: true, force: true });
@@ -1025,7 +1027,7 @@ it('asks before an edit in default mode and runs the batch once the owner allows
   const options = JSON.parse(
     (await session.resources.read(action.optionsRef!)).toString(),
   );
-  expect(options).toMatchObject({
+  expect(options).toEqual({
     v: 1,
     requestId,
     turnId: 'prompt',
@@ -1033,6 +1035,8 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     toolName: 'edit',
     policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
     inputRevision: 1,
+    createdAt: expect.any(Number),
+    expiresAt: expect.any(Number),
     options: [
       { id: 'allow', label: 'Allow' },
       { id: 'deny', label: 'Deny' },
@@ -1330,6 +1334,7 @@ it('keeps an answer retryable when it fails before any write', async () => {
 });
 
 it('stops the Turn when a late answer cannot record the expiry', async () => {
+  expectWritesStopped = true;
   turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
   const running = turn.execute(
     [calls[1]],
@@ -1360,6 +1365,7 @@ it('stops the Turn when a late answer cannot record the expiry', async () => {
 });
 
 it('stops a waiting Turn soon after another write stops the Session', async () => {
+  expectWritesStopped = true;
   turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
   const running = turn.execute(
     [calls[1]],
@@ -1845,58 +1851,74 @@ it('answers what landed while the decision was published, even once blocked', as
   expect(broker.execute).toHaveBeenCalledOnce();
 });
 
-it('writes nothing when the Session blocks while the decision waits in the queue', async () => {
-  turn = createTurn(false, { mode: 'default' });
-  const running = turn.execute(
-    [calls[1]],
-    [parts[1]],
-    'model',
-    new AbortController().signal,
-  );
-  const requestId = await requested();
-  // Hold another write inside the authority's queue.
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let entered!: () => void;
-  const inQueue = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  const append =
-    LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
-  vi.spyOn(
-    LocalJsonlManagedSessionJournalHandle.prototype,
-    'appendTransaction',
-  ).mockImplementationOnce(async function (
-    this: LocalJsonlManagedSessionJournalHandle,
-    records,
-  ) {
-    entered();
-    await gate;
-    return append.call(this, records);
-  });
-  const held = commit('assistant', [{ text: 'held' }], 'model');
-  await inQueue;
-  const queued = vi.spyOn(session.authority, 'resolveAction');
-  let blocked = false;
-  const answering = resolveHostedAction(
-    session,
-    waiters,
-    requestId,
-    answer('allow'),
-    () => blocked,
-  );
-  await vi.waitFor(() => expect(queued).toHaveBeenCalled());
-  blocked = true;
-  release();
-  await held;
-  await expect(answering).resolves.toEqual({
-    status: 409,
-    code: 'hosted_turn_recovery_required',
-  });
-  expect(session.authority.action(requestId)?.state).toBe('requested');
-  await resolveHostedAction(session, waiters, requestId, answer('deny'));
-  await running;
-  expect(broker.execute).not.toHaveBeenCalled();
-});
+it.each(['decision', 'expiry'])(
+  'writes nothing when the Session blocks while the %s waits in the queue',
+  async (resolution) => {
+    turn = createTurn(false, { mode: 'default' });
+    const running = turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    // Hold another write inside the authority's queue.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const inQueue = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const append =
+      LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'appendTransaction',
+    ).mockImplementationOnce(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      records,
+    ) {
+      entered();
+      await gate;
+      return append.call(this, records);
+    });
+    const held = commit('assistant', [{ text: 'held' }], 'model');
+    await inQueue;
+    const queued = vi.spyOn(session.authority, 'resolveAction');
+    const now =
+      resolution === 'expiry'
+        ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000)
+        : undefined;
+    // Observe only the answer's write; the Turn settles its own Action later.
+    const notify = vi.spyOn(waiters, 'notify').mockImplementation(() => {});
+    let blocked = false;
+    const answering = resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    );
+    try {
+      await vi.waitFor(() => expect(queued).toHaveBeenCalled());
+      blocked = true;
+    } finally {
+      release();
+    }
+    await held;
+    await expect(answering).resolves.toEqual({
+      status: 409,
+      code: 'hosted_turn_recovery_required',
+    });
+    expect(session.authority.action(requestId)?.state).toBe('requested');
+    expect(session.authority.writesStopped).toBe(false);
+    expect(notify).toHaveBeenCalledWith(requestId);
+    now?.mockRestore();
+    notify.mockRestore();
+    await resolveHostedAction(session, waiters, requestId, answer('deny'));
+    await running;
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
