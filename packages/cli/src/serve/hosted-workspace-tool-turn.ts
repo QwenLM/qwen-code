@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
@@ -47,6 +47,16 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
+import {
+  endHostedAction,
+  HOSTED_APPROVAL_OPTIONS,
+  HOSTED_TOOL_APPROVAL_POLICY,
+  hostedActionAllowed,
+  hostedApprovalAsks,
+  type HostedActionOptions,
+  type HostedApprovalSettings,
+  type HostedApprovalWaiters,
+} from './hosted-tool-approval.js';
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
@@ -80,6 +90,20 @@ function shellHistoryId(executionCallId: string): string {
   const hex = bytes.subarray(0, 16).toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
+
+export interface HostedApprovalTurnOptions {
+  settings: HostedApprovalSettings;
+  waiters: HostedApprovalWaiters;
+}
+
+const APPROVAL_REFUSALS = {
+  denied: 'The Session owner denied this tool call, so it was not run.',
+  expired:
+    'Nobody answered the approval request before it expired, so this tool call was not run.',
+  cancelled: 'The turn was cancelled before this tool call ran.',
+  unanswered:
+    'An earlier approval request in this turn expired unanswered, so this tool call was not asked about or run.',
+} as const;
 
 const pathProperty = {
   type: 'string',
@@ -171,6 +195,8 @@ export class HostedWorkspaceToolTurn {
     captureBytes: number;
   };
   private readonly shell?: HostedShellTurnOptions;
+  // Once an approval expires nobody is answering, so the Turn asks no more.
+  private unanswered = false;
   readonly declarations: FunctionDeclaration[];
 
   constructor(
@@ -193,6 +219,7 @@ export class HostedWorkspaceToolTurn {
       | { owner: HttpToolPublicationOwner; captureBytes: number }
       | HostedShellTurnOptions,
     shell?: HostedShellTurnOptions,
+    private readonly approval?: HostedApprovalTurnOptions,
   ) {
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -394,7 +421,6 @@ export class HostedWorkspaceToolTurn {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire();
     }
-    const reserved: string[] = [];
     const shellBindings = new Map<
       string,
       {
@@ -415,6 +441,9 @@ export class HostedWorkspaceToolTurn {
     let renewTimer: NodeJS.Timeout | undefined;
     let renewInFlight: Promise<void> | null = null;
     let renewGrants: (() => Promise<void>) | undefined;
+    let messageId: string;
+    let refusals: Array<string | undefined>;
+    const inputRefs = new Map<number, ManagedSessionDurableRef>();
     try {
       this.uncertain = true;
       if (
@@ -432,13 +461,48 @@ export class HostedWorkspaceToolTurn {
           await this.publisher.start(),
         );
       }
-      const messageId = await this.commit('assistant', parts, model);
+      messageId = await this.commit('assistant', parts, model);
+      refusals = await this.approve(requests, messageId, inputRefs, signal);
+    } catch (cause) {
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
+    const refusal = (index: number): Part[] | undefined => {
+      const reason = refusals[index];
+      return reason === undefined
+        ? undefined
+        : convertToFunctionErrorResponse(
+            requests[index].call.name,
+            requests[index].call.callId,
+            [],
+            reason,
+          );
+    };
+    if (refusals.every((reason) => reason !== undefined)) {
+      const responses = requests.flatMap((_, index) => refusal(index)!);
+      try {
+        if (!this.messageFitsInline('tool_result', responses, model))
+          throw new Error(
+            'Hosted tool refusal exceeds the inline Session Store limit.',
+          );
+        await this.commit('tool_result', responses, model);
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+      this.uncertain = false;
+      signal.throwIfAborted();
+      return responses;
+    }
+    const reserved = new Map<number, string>();
+    try {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
-        const routeRef = await this.session.resources.publish(
-          'managed-tool-input',
-          request.inputBytes,
-        );
+        if (refusals[ordinal] !== undefined) continue;
+        const routeRef =
+          inputRefs.get(ordinal) ??
+          (await this.session.resources.publish(
+            'managed-tool-input',
+            request.inputBytes,
+          ));
         const prepared =
           request.isShell && this.publication
             ? await this.broker.prepareV3(
@@ -455,7 +519,7 @@ export class HostedWorkspaceToolTurn {
             request.digest,
             request.inputDigest,
           ));
-        reserved.push(executionCallId);
+        reserved.set(ordinal, executionCallId);
         const toolDefinitionRef = await this.session.resources.publish(
           'managed-tool-definition',
           Buffer.from(
@@ -673,7 +737,13 @@ export class HostedWorkspaceToolTurn {
       }
       const responses: Part[] = [];
       for (const [index, request] of requests.entries()) {
-        const executionCallId = reserved[index];
+        const refused = refusal(index);
+        if (refused) {
+          await this.commit('tool_result', refused, model);
+          responses.push(...refused);
+          continue;
+        }
+        const executionCallId = reserved.get(index)!;
         if (request.isShell && this.publication) {
           const saved = shellBindings.get(executionCallId);
           if (!saved) throw new Error('Original Shell publication is missing.');
@@ -835,7 +905,9 @@ export class HostedWorkspaceToolTurn {
       }
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
-      await Promise.allSettled(reserved.map((id) => this.broker.cancel(id)));
+      await Promise.allSettled(
+        [...reserved.values()].map((id) => this.broker.cancel(id)),
+      );
       for (const executionCallId of shellBindings.keys()) {
         const saved = shellBindings.get(executionCallId);
         if (!saved) continue;
@@ -1218,6 +1290,112 @@ export class HostedWorkspaceToolTurn {
     if (decision !== 'committed')
       throw new Error('Incomplete Shell capture blocked the Hosted tool turn.');
     return converted;
+  }
+
+  /**
+   * Asks before each call that the approval mode does not pre-approve, one at
+   * a time in the model's order, and returns the refusal for each call that
+   * will not run. Nothing runs once the turn is cancelled.
+   */
+  private async approve(
+    requests: ReadonlyArray<{ call: ToolCallRequestInfo; inputBytes: Buffer }>,
+    messageId: string,
+    inputRefs: Map<number, ManagedSessionDurableRef>,
+    signal: AbortSignal,
+  ): Promise<Array<string | undefined>> {
+    const refusals: Array<string | undefined> = requests.map(() => undefined);
+    const approval = this.approval;
+    if (!approval) return refusals;
+    let asked = false;
+    for (const [index, request] of requests.entries()) {
+      if (!hostedApprovalAsks(approval.settings, request.call.name)) continue;
+      asked = true;
+      if (signal.aborted) break;
+      if (this.unanswered) {
+        refusals[index] = APPROVAL_REFUSALS.unanswered;
+        continue;
+      }
+      const inputRef = await this.session.resources.publish(
+        'managed-tool-input',
+        request.inputBytes,
+      );
+      inputRefs.set(index, inputRef);
+      refusals[index] = await this.ask(
+        approval,
+        request.call,
+        inputRef,
+        messageId,
+        signal,
+      );
+    }
+    return asked && signal.aborted
+      ? refusals.map((reason) => reason ?? APPROVAL_REFUSALS.cancelled)
+      : refusals;
+  }
+
+  private async ask(
+    approval: HostedApprovalTurnOptions,
+    call: ToolCallRequestInfo,
+    inputRef: ManagedSessionDurableRef,
+    messageId: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    const authority = this.session.authority;
+    const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
+    const createdAt = Date.now();
+    const options: HostedActionOptions = {
+      v: 1,
+      requestId,
+      turnId: this.promptId,
+      functionCallId: call.callId,
+      toolName: call.name,
+      policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+      inputRevision: 1,
+      createdAt,
+      expiresAt: createdAt + approval.settings.timeoutMs,
+      options: HOSTED_APPROVAL_OPTIONS,
+    };
+    const optionsRef = await this.session.resources.publish(
+      'managed-action-options',
+      Buffer.from(JSON.stringify(options)),
+    );
+    if (signal.aborted) return APPROVAL_REFUSALS.cancelled;
+    await this.harness.commitDurableWait(
+      {
+        requestId,
+        kind: 'permission',
+        source: 'tool_call',
+        optionsRef,
+        inputRevision: '1',
+        invocationRef: inputRef,
+        attemptId: messageId,
+        routeRef: inputRef,
+      },
+      { turnId: this.promptId, promptId: this.promptId },
+    );
+    await approval.waiters.wait(
+      requestId,
+      options.expiresAt,
+      signal,
+      () =>
+        authority.action(requestId)?.state !== 'requested' ||
+        authority.writesStopped,
+    );
+    if (authority.action(requestId)?.state === 'requested')
+      await endHostedAction(
+        this.session,
+        requestId,
+        signal.aborted ? 'cancelled' : 'expired',
+      );
+    await this.harness.resolveDurableWait();
+    const action = authority.action(requestId)!;
+    if (action.state === 'decided')
+      return hostedActionAllowed(action, options.policyRevision)
+        ? undefined
+        : APPROVAL_REFUSALS.denied;
+    if (action.state !== 'expired') return APPROVAL_REFUSALS.cancelled;
+    this.unanswered = true;
+    return APPROVAL_REFUSALS.expired;
   }
 
   async consumeResults(): Promise<void> {
