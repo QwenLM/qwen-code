@@ -1100,6 +1100,107 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void reclaimRenewsItsClaimThroughSlowLostCleanup() {
+        MutableClock clock = new MutableClock(START);
+        SlowRecoveryBindingRepository bindings =
+                new SlowRecoveryBindingRepository(clock,
+                        Duration.ofMillis(1200));
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "slow-cleanup");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError(
+                        "Lost writer domain must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return CompletableFuture.completedFuture(
+                        RuntimeObservation.unknown(handle));
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            // Each recoverLost burns 1.2s of the 2s claim, like the slow
+            // JDBC transactions of a loaded CI runner; only the inline
+            // renewal between cleanup steps keeps the claim live, so this
+            // answered runtime_provision_fenced before (#13017).
+            assertEquals("runtime_broker_runtime_lost",
+                    failure(service.warm("slow-cleanup-harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void reclaimStillFencesWhenTheClaimGenuinelyLapses() {
+        MutableClock clock = new MutableClock(START);
+        StaleBindingRepository bindings = new StaleBindingRepository(clock);
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "lapsed-cleanup");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
+            @Override
+            public String kind() {
+                return "test-supervisor";
+            }
+
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    RuntimeProvisionRequest request) {
+                throw new AssertionError(
+                        "Lost writer domain must not be reprovisioned");
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // A single step that outlasts the whole operation lease
+                // must still fence rather than march on with a dead claim.
+                clock.advance(Duration.ofSeconds(3));
+                return CompletableFuture.completedFuture(
+                        RuntimeObservation.unknown(handle));
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            assertEquals("runtime_provision_fenced",
+                    failure(service.warm("lapsed-cleanup-harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
     void overlappingSameKeyCreatesDispatchOnce() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Map<String, Object>> result =
@@ -4042,7 +4143,7 @@ class RuntimeBrokerServiceTest {
         }
     }
 
-    private static final class StaleBindingRepository
+    private static class StaleBindingRepository
             implements RuntimeBindingRepository {
         private final InMemoryRuntimeBindingRepository delegate;
         volatile RuntimeBindingRecord nextRead;
@@ -4148,6 +4249,31 @@ class RuntimeBrokerServiceTest {
                 String owner, long operationGeneration) {
             return delegate.releaseOperation(bindingId, owner,
                     operationGeneration);
+        }
+    }
+
+    /**
+     * A binding repository whose {@code recoverLost} advances the clock
+     * first, simulating the slow recovery transactions of a loaded runner.
+     */
+    private static final class SlowRecoveryBindingRepository
+            extends StaleBindingRepository {
+        private final MutableClock clock;
+        private final Duration advance;
+
+        SlowRecoveryBindingRepository(MutableClock clock, Duration advance) {
+            super(clock);
+            this.clock = clock;
+            this.advance = advance;
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            clock.advance(advance);
+            return super.recoverLost(sessions, executions, expected);
         }
     }
 
