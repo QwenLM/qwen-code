@@ -44,8 +44,7 @@ describe('legacy NDJSON cancellation', () => {
       );
       const reader = readable.getReader();
       try {
-        await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
-        expect(input.locked).toBe(true);
+        await expect(reader.read()).rejects.toThrow(/ReadableStream is locked/);
       } finally {
         reader.releaseLock();
       }
@@ -77,13 +76,40 @@ describe('legacy NDJSON cancellation', () => {
   it('forwards cancellation before data and releases the upstream lock', async () => {
     const stream = fixture();
     const reason = new Error('consumer stopped');
+    const close = vi.spyOn(ReadableStreamDefaultController.prototype, 'close');
     try {
       await stream.readable.cancel(reason);
+      expect(close).not.toHaveBeenCalled();
       expect(stream.cancel).toHaveBeenCalledExactlyOnceWith(reason);
       expect(stream.input.locked).toBe(false);
     } finally {
+      close.mockRestore();
       stream.cleanup();
     }
+  });
+
+  it('waits for asynchronous upstream cancellation to settle', async () => {
+    let finishCancel!: () => void;
+    const pendingCancel = new Promise<void>((resolve) => {
+      finishCancel = resolve;
+    });
+    const cancel = vi.fn(() => pendingCancel);
+    const input = new ReadableStream<Uint8Array>({ cancel });
+    const { readable } = ndJsonStream(new WritableStream<Uint8Array>(), input);
+    let resolved = false;
+    const cancellation = readable.cancel('stop').then(() => {
+      resolved = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(cancel).toHaveBeenCalledExactlyOnceWith('stop');
+      expect(resolved).toBe(false);
+    } finally {
+      finishCancel();
+      await cancellation;
+    }
+    expect(resolved).toBe(true);
+    expect(input.locked).toBe(false);
   });
 
   it('forwards reader cancellation after a complete message', async () => {
