@@ -63,13 +63,32 @@ const FLYWAY_FAIL_PATTERN =
 // a module directory that does not exist — are standing reds too, so they get
 // their own stable identity keyed on the module and the mode; without one
 // they fall back to the sha-keyed per-commit issue and each stacked merge
-// opens a fresh one.
+// opens a fresh one. The location half is tightened to its real charset (the
+// guard emits its LOCATIONS constant joined with `/`): a runner-decoded
+// annotation is the runner's own rendering, and an unbounded [^;]+ would let
+// a filename-borne payload smuggle spaces and backticks into an id that is
+// rendered inside a code span in the issue body.
 const FLYWAY_CONFIG_PATTERN =
-  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [^;]+)/;
+  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [\w./-]+)/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 // A Surefire id is a dotted `Class.method`, optionally with the parameter
 // types and invocation index of a parameterized case.
 const JAVA_ID_PATTERN = /^(?:[\w$]+\.)+[\w$]+(?:\([^)]*\))?(?:\[\d+])?$/;
+// The module half of a guard id is untrusted for the same reason: the line it
+// is parsed from may be a runner-decoded continuation of a migration FILENAME
+// (git carries LF and `:` in filenames). The genuine value always comes from
+// the invocation's paths, so it is path-shaped — a filename-borne forgery can
+// never contain `/`, and a Windows drive prefix is the only genuine leading
+// `X:\` shape — and whitespace and backticks are rejected outright because
+// the id is rendered inside a code span in the issue body.
+const GUARD_MODULE_UNSAFE = /[\s`]/;
+
+function guardModule(raw) {
+  return !GUARD_MODULE_UNSAFE.test(raw) &&
+    (raw.includes('/') || /^[A-Za-z]:[\\/]/.test(raw))
+    ? raw
+    : undefined;
+}
 
 function cleanLine(line) {
   return line
@@ -109,14 +128,19 @@ export function extractFailingTests(logText) {
     if (!vitest && !pytest && !maven && !flyway && !flywayConfig) continue;
 
     // The flyway id doubles as the issue title and body bullet, so it is
-    // written to be read, not only to be hashed.
+    // written to be read, not only to be hashed — and both captures are
+    // validated before they become a dedupe identity, the way the Surefire
+    // id is validated below.
     if (flyway) {
-      seen.add(`flyway duplicate version ${flyway[2]} in ${flyway[1]}`);
+      const module = guardModule(flyway[1]);
+      if (module)
+        seen.add(`flyway duplicate version ${flyway[2]} in ${module}`);
       continue;
     }
 
     if (flywayConfig) {
-      seen.add(`flyway ${flywayConfig[2]} in ${flywayConfig[1]}`);
+      const module = guardModule(flywayConfig[1]);
+      if (module) seen.add(`flyway ${flywayConfig[2]} in ${module}`);
       continue;
     }
 
@@ -209,6 +233,18 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
         tests.push({ id, key: testKey(id) });
     }
   }
+
+  // Guard-derived ids are the only run-level diagnoses in the set: the
+  // collision they name is stable across every merge stacked on a standing
+  // red, so they title the issue and are searched first. First-seen order
+  // would let a mass failure in another lane crowd them past the search and
+  // body caps — nothing guarantees the guard's log is globbed first. The
+  // sort is stable, so each group keeps its first-seen order and the cap
+  // counts are unchanged.
+  tests.sort(
+    (a, b) =>
+      Number(b.id.startsWith('flyway ')) - Number(a.id.startsWith('flyway ')),
+  );
 
   const extra = tests.length > 1 ? ` (+${tests.length - 1} more)` : '';
   return {

@@ -210,10 +210,11 @@ jobs:
   # catches it boots a database and runs only in the slow lanes below. This
   # job is the fast lane: a filename scan, seconds in, on every pull request —
   # whose checkout is the prospective merge result — and on every push.
-  # runtime-broker carries no migrations today but shares the namespace:
-  # managed-agent-server depends on it, so Flyway resolves
-  # classpath:db/migration across both jars and a version it claims would
-  # collide with managed-agent-server's exactly like an in-module duplicate.
+  # runtime-broker and qwencode carry no migrations today but share the
+  # namespace: managed-agent-server depends on both at compile scope, so
+  # Flyway resolves classpath:db/migration across the jars and a version
+  # claimed in any of them collides with managed-agent-server's exactly like
+  # an in-module duplicate.
   flyway-migrations:
     name: 'Flyway migration version uniqueness'
     runs-on: 'ubuntu-latest'
@@ -223,7 +224,7 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Check Flyway migration versions are unique'
-        run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker'
+        run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
 
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'

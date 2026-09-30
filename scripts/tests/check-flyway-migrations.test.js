@@ -213,7 +213,76 @@ describe('check-flyway-migrations', () => {
     expect(result.output).toContain(
       'found no migration under src/main/resources/db/migration',
     );
+    // A moved location is an error, not a smaller scan: no clean summary.
+    expect(result.output).not.toContain('all versions unique');
     expect(result.status).toBe(1);
+  });
+
+  it('fails when the Java location moved but the SQL location stayed', () => {
+    // The twin of the case above, and the live layout: managed-agent-server
+    // really carries its V15 under src/main/java/db/migration, so a package
+    // rename there must fail rather than print "all versions unique" from a
+    // scan that skipped it.
+    const dir = module('server', { sql: ['V15__a.sql'] });
+    const moved = join(dir, 'src/main/java/db/migrations');
+    mkdirSync(moved, { recursive: true });
+    writeFileSync(join(moved, 'V15__b.java'), '');
+    const result = check(dir);
+    expect(result.output).toContain(
+      'found no migration under src/main/java/db/migration',
+    );
+    expect(result.output).not.toContain('all versions unique');
+    expect(result.status).toBe(1);
+  });
+
+  it('fails when the location was renamed outside the migration* family', () => {
+    // The ownership predicate cannot key on the two exact directory names:
+    // db/changelog holds the whole sequence, no db/migration* sibling exists
+    // anywhere, and a name-keyed probe passes silently on exactly the
+    // collision the guard exists for.
+    const dir = module('server', { sql: ['V16__a.sql', 'V16__b.sql'] });
+    rmSync(join(dir, 'src/main/resources/db/migration'), { recursive: true });
+    const moved = join(dir, 'src/main/resources/db/changelog');
+    mkdirSync(moved, { recursive: true });
+    writeFileSync(join(moved, 'V16__a.sql'), '');
+    writeFileSync(join(moved, 'V16__b.sql'), '');
+    const result = check(dir);
+    expect(result.output).toContain('found no migration under');
+    expect(result.status).toBe(1);
+  });
+
+  it('scans a Java-only module for collisions instead of misreading it as moved', () => {
+    // No src/main/resources at all: a module carrying only BaseJavaMigration
+    // classes owns a sequence like any other, so one class passes and two
+    // classes claiming one version fail by name.
+    const single = module('single', { java: ['V15__event_identity.java'] });
+    const one = check(single);
+    expect(one.output).toContain('1 migrations, all versions unique');
+    expect(one.status).toBe(0);
+    const dup = module('dup', { java: ['V15__a.java', 'V15__b.java'] });
+    const two = check(dup);
+    expect(two.output).toContain('2 migrations claim version 15');
+    expect(two.status).toBe(1);
+  });
+
+  it('passes a module whose only SQL file is not a versioned migration', () => {
+    const dir = module('server', {
+      sql: ['R__view.sql'],
+      java: ['V1__x.java'],
+    });
+    const result = check(dir);
+    expect(result.output).toContain('1 migrations, all versions unique');
+    expect(result.status).toBe(0);
+  });
+
+  it('counts a module once when it is passed twice', () => {
+    // A repeated argument must not fabricate a collision of a file with
+    // itself; the message names the same path twice, so it would read as a
+    // real duplicate while meaning nothing.
+    const dir = module('server', { sql: ['V1__a.sql'] });
+    const result = check(dir, dir);
+    expect(result.output).toContain('1 migrations, all versions unique');
+    expect(result.status).toBe(0);
   });
 
   it.skipIf(!newlineNamesWork)(

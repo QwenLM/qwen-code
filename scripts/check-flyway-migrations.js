@@ -20,16 +20,14 @@ import path from 'node:path';
 import { escapeWorkflowCommand } from './release-script-utils.js';
 
 // Both locations resolve into Flyway's classpath:db/migration, so their
-// versions share one namespace. The SQL location is required of a module
-// that owns migrations: finding none there means the location moved and the
-// guard went blind. The Java location is optional — a module may carry SQL
-// migrations only.
+// versions share one namespace. Flyway scans each location AND its
+// subdirectories, and nowhere else — a versioned-migration file anywhere
+// else under the source root is invisible to it, so finding one there means
+// the location moved and the guard must say so instead of passing on what is
+// left. Everything below derives the db roots and source roots from this
+// table, so editing it cannot silently blind the probes.
 const LOCATIONS = [
-  {
-    dir: ['src', 'main', 'resources', 'db', 'migration'],
-    suffix: '.sql',
-    required: true,
-  },
+  { dir: ['src', 'main', 'resources', 'db', 'migration'], suffix: '.sql' },
   { dir: ['src', 'main', 'java', 'db', 'migration'], suffix: '.java' },
 ];
 
@@ -37,7 +35,7 @@ const LOCATIONS = [
 // segments joined by dots or underscores.
 const MIGRATION_NAME = /^V(\d+(?:[._]\d+)*)__/;
 
-const modules = process.argv.slice(2);
+const modules = [...new Set(process.argv.slice(2))];
 if (modules.length === 0) {
   console.error(
     'usage: node scripts/check-flyway-migrations.js <maven-module-dir>...',
@@ -54,48 +52,74 @@ const normalize = (version) =>
     .join('.')
     .replace(/(\.0)*$/, '');
 
-// Not readdirSync's `recursive`: a Node older than 18.17 ignores it (see
-// check-failsafe-reports.js). Flyway scans a location's subdirectories too,
-// and matches the suffix case-insensitively — V1__b.SQL claims version 1
+// Flyway matches the suffix case-insensitively — V1__b.SQL claims version 1
 // exactly like V1__a.sql does.
+const isMigrationFile = (name, suffix) =>
+  name.toLowerCase().endsWith(suffix) && MIGRATION_NAME.test(name);
+
+// Not readdirSync's `recursive`: a Node older than 18.17 ignores it (see
+// check-failsafe-reports.js). Flyway scans a location's subdirectories too.
 const migrationFiles = (dir, suffix) => {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory()
       ? migrationFiles(path.join(dir, entry.name), suffix)
-      : entry.name.toLowerCase().endsWith(suffix) &&
-          MIGRATION_NAME.test(entry.name)
+      : isMigrationFile(entry.name, suffix)
         ? [path.join(dir, entry.name)]
         : [],
   );
 };
 
-// A db/migration* directory under either db root — including a renamed-away
-// sibling such as db/migrations — marks the module as owning a migration
-// sequence. Only then does an empty SQL location mean the location moved;
-// a module with no such directory at all (runtime-broker today) simply has
-// no sequence to check, which is what lets one invocation cover every module
-// that shares the classpath namespace below.
-const hasMigrationDir = (module) =>
-  ['src/main/resources/db', 'src/main/java/db'].some((dbRoot) => {
-    const dir = path.join(module, dbRoot);
-    return (
-      existsSync(dir) &&
-      readdirSync(dir, { withFileTypes: true }).some(
-        (entry) => entry.isDirectory() && entry.name.startsWith('migration'),
-      )
-    );
-  });
+// Files shaped like a versioned migration of this location's kind, anywhere
+// under the source root EXCEPT inside the configured location. A renamed
+// location (db/migration → db/changelog) leaves the guard scanning an empty
+// directory, so the renamed-away state must fail here — and so must a
+// location whose files moved while its sibling stayed populated.
+const outOfPlaceFiles = (module, location) => {
+  const sourceRoot = path.join(module, ...location.dir.slice(0, -2));
+  const configured = path.join(module, ...location.dir);
+  const found = [];
+  const walk = (dir) => {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (file !== configured) walk(file);
+      } else if (isMigrationFile(entry.name, location.suffix)) {
+        found.push(file);
+      }
+    }
+  };
+  walk(sourceRoot);
+  return found;
+};
+
+// A db/migration* sibling under the location's OWN db root — including an
+// emptied rename such as db/migrations — marks the location as moved even
+// when nothing migration-shaped survives anywhere. A module with no such
+// directory at all (runtime-broker today) simply has no sequence to check,
+// which is what lets one invocation cover every module that shares the
+// classpath namespace below.
+const hasMigrationDir = (module, location) => {
+  const dbRoot = path.join(module, ...location.dir.slice(0, -1));
+  return (
+    existsSync(dbRoot) &&
+    readdirSync(dbRoot, { withFileTypes: true }).some(
+      (entry) =>
+        entry.isDirectory() && entry.name.startsWith(location.dir.at(-1)),
+    )
+  );
+};
 
 let failed = false;
 // Flyway resolves classpath:db/migration across every jar on the classpath,
-// and managed-agent-server depends on runtime-broker, so the modules given in
-// one invocation share one version namespace — a version claimed in two
-// modules collides exactly like two files in one module do. Collisions are
-// reported only after every module is scanned: one ::error:: line per
-// collided version names EVERY claimant (the consumer keys its issue on the
-// module and version in this line, so a second line for the same version
-// would file a second issue), and a claimant module never prints an
+// and managed-agent-server depends on the other modules at compile scope, so
+// the modules given in one invocation share one version namespace — a version
+// claimed in two modules collides exactly like two files in one module do.
+// Collisions are reported only after every module is scanned: one ::error::
+// line per collided version names EVERY claimant (the consumer keys its issue
+// on the module and version in this line, so a second line for the same
+// version would file a second issue), and a claimant module never prints an
 // "all versions unique" summary.
 const claimants = new Map();
 const scanned = [];
@@ -107,28 +131,37 @@ for (const module of modules) {
     );
     continue;
   }
-  const found = LOCATIONS.map(({ dir, suffix, required = false }) => ({
-    dir,
-    required,
-    files: migrationFiles(path.join(module, ...dir), suffix),
-  }));
-  const moved = found.find(
-    ({ required, files }) => required && files.length === 0,
-  );
-  if (moved) {
-    if (!hasMigrationDir(module)) {
-      console.log(`${module}: no migration directories`);
-      continue;
-    }
-    failed = true;
-    console.error(
-      `::error::${escapeWorkflowCommand(module)}: found no migration under ` +
-        `${moved.dir.join('/')}; if it moved, point this check at the new location`,
-    );
-    continue;
-  }
+  let errored = false;
   let count = 0;
-  for (const { files } of found) {
+  for (const location of LOCATIONS) {
+    const files = migrationFiles(
+      path.join(module, ...location.dir),
+      location.suffix,
+    );
+    // Out-of-place files must not join the claimants: invisible to Flyway,
+    // they cannot collide at runtime — they are the moved location's error,
+    // not a second claimant for their version. A location that EXISTS is not
+    // moved, however empty: the rename probe fires only when the location
+    // directory itself is gone and a migration* sibling took its place.
+    const misplaced = outOfPlaceFiles(module, location);
+    if (
+      misplaced.length > 0 ||
+      (files.length === 0 &&
+        !existsSync(path.join(module, ...location.dir)) &&
+        hasMigrationDir(module, location))
+    ) {
+      failed = true;
+      errored = true;
+      console.error(
+        `::error::${escapeWorkflowCommand(module)}: found no migration under ` +
+          `${location.dir.join('/')}; if it moved, point this check at the ` +
+          `new location${
+            misplaced.length > 0
+              ? `: ${misplaced.map(escapeWorkflowCommand).join(', ')}`
+              : ''
+          }`,
+      );
+    }
     for (const file of files) {
       count += 1;
       const version = normalize(MIGRATION_NAME.exec(path.basename(file))[1]);
@@ -137,7 +170,11 @@ for (const module of modules) {
       claimants.set(version, group);
     }
   }
-  scanned.push({ module, count });
+  if (!errored && count === 0) {
+    console.log(`${module}: no migration directories`);
+    continue;
+  }
+  scanned.push({ module, count, errored });
 }
 const collided = new Set();
 for (const [version, group] of claimants) {
@@ -149,8 +186,8 @@ for (const [version, group] of claimants) {
   );
   for (const { module } of group) collided.add(module);
 }
-for (const { module, count } of scanned) {
-  if (collided.has(module)) continue;
+for (const { module, count, errored } of scanned) {
+  if (errored || collided.has(module)) continue;
   console.log(`${module}: ${count} migrations, all versions unique`);
 }
 process.exitCode = failed ? 1 : 0;

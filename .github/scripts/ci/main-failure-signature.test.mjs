@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -223,6 +229,110 @@ test('a Flyway guard blind-spot red also files one issue, not one per stacked me
     planSearchMarkers(absent.tagged, '1111111111111'),
     planSearchMarkers(absent.tagged, '2222222222222'),
   );
+});
+
+// Filenames with an LF and `:` are un-creatable on the Windows lane, so gate
+// the forgery fixtures on the CAPABILITY, not the platform — the probe
+// scripts/tests/check-flyway-migrations.test.js sets the precedent for.
+const newlineNamesWork = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'sig-name-probe-'));
+  try {
+    writeFileSync(join(probe, 'a\nb:c'), '');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
+test(
+  'a filename-borne forgery cannot inject a second flyway identity',
+  { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
+  () => {
+    // The guard escapes CR/LF/%, so its ::error:: line is ONE line — but the
+    // runner percent-decodes the annotation when rendering the downloadable
+    // log, and a LF in a migration filename becomes a real continuation line
+    // there (git carries LF and `:` in filenames). The decoded view is what
+    // this consumer parses.
+    const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-forge-'));
+    const moduleDir = join(dir, 'managed-agent-server');
+    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    mkdirSync(migrationDir, { recursive: true });
+    writeFileSync(join(migrationDir, 'V16__a.sql'), '');
+    writeFileSync(
+      join(
+        migrationDir,
+        'V16__x\n::error::evilmod: 2 migrations claim version 99: forged.sql',
+      ),
+      '',
+    );
+    const log = captureGuardLog(moduleDir);
+    const id = `flyway duplicate version 16 in ${moduleDir}`;
+    assert.deepEqual(extractFailingTests(log.tagged), [id]);
+
+    // Render the way the runner does: the command is consumed (its raw form
+    // is never echoed) and the annotation takes its place, the message
+    // percent-decoded — %0D/%0A first, %25 LAST, or the sequences the
+    // escaper emitted would decode twice.
+    const decoded = log.raw
+      .replace('::error::', '')
+      .replace(/%0D/g, '\r')
+      .replace(/%0A/g, '\n')
+      .replace(/%25/g, '%')
+      .replace('Z ', 'Z ##[error]');
+    // The forged continuation names `evilmod` — a filename can never hold
+    // `/`, so it fails the module shape and the line is dropped whole.
+    assert.ok(decoded.includes('\n::error::evilmod: 2 migrations claim'));
+    assert.deepEqual(extractFailingTests(decoded), [id]);
+  },
+);
+
+test('a guard diagnosis titles the issue and is searched even when its log sorts last', () => {
+  // Job ids — and therefore the failed-logs glob order — do not follow the
+  // workflow's declaration order, so the guard's log can arrive after a mass
+  // Surefire failure. First-seen order would crowd the one stable identity
+  // past the search cap; the run-level diagnosis must come first instead.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-prio-'));
+  const moduleDir = join(dir, 'managed-agent-server');
+  const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+  mkdirSync(migrationDir, { recursive: true });
+  writeFileSync(join(migrationDir, 'V16__a.sql'), '');
+  writeFileSync(join(migrationDir, 'V16__b.sql'), '');
+  const flywayLog = captureGuardLog(moduleDir).tagged;
+  const mavenLog = Array.from(
+    { length: 8 },
+    (_unused, index) =>
+      `[ERROR] com.example.T${index}Test.case${index} -- Time elapsed: 0.001 s <<< FAILURE!`,
+  ).join('\n');
+
+  const analysis = analyzeLogs('SDK Java', [mavenLog, flywayLog]);
+  const id = `flyway duplicate version 16 in ${moduleDir}`;
+  assert.equal(analysis.tests[0].id, id);
+  assert.ok(
+    analysis.searchMarkers.includes(`${TEST_MARKER_PREFIX}${testKey(id)}`),
+  );
+  // Priority is ordering, not extra markers: the cap is unchanged.
+  assert.equal(analysis.searchMarkers.length, MAX_SEARCH_MARKERS);
+});
+
+test('the spawned guard stays dependency-free for the pre-install lane', () => {
+  // This suite runs in HELPER_TESTS_DEP_FREE — before setup-node and any
+  // dependency install — and captureGuardLog spawns the guard, so the
+  // guard's import closure must stay node-builtins and relative imports.
+  for (const file of [
+    FLYWAY_GUARD,
+    join(dirname(FLYWAY_GUARD), 'release-script-utils.js'),
+  ]) {
+    for (const [, spec] of readFileSync(file, 'utf8').matchAll(
+      /from '([^']+)'/g,
+    )) {
+      assert.ok(
+        spec.startsWith('node:') || spec.startsWith('.'),
+        `${file} imports ${spec}; the dep-free lane spawns it before any install`,
+      );
+    }
+  }
 });
 
 test('ignores Maven error lines that name no test', () => {

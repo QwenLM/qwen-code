@@ -97,7 +97,7 @@ describe('SDK Java Flyway migration version guard', () => {
     expect(block).toContain('actions/checkout@');
     expect(block).not.toContain('if:');
     expect(block).toContain(
-      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker'",
+      "run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'",
     );
   });
 
