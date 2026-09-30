@@ -358,7 +358,7 @@ export interface components {
              * @description True when the caller may submit and cancel later Turns of this Workspace-bound Session: the deployment enables Workspace files and the caller created the Session. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
-            workspaceTurns: boolean;
+            workspaceTurns?: boolean;
             tasks: boolean;
         };
         WebShellSessionPage: {
