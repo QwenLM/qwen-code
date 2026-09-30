@@ -22,7 +22,7 @@ Both routes share the same projection and per-bridge last-exposed catalog-versio
 
 ## Bounds, discovery, and clients
 
-Limit the explicit list to 20, each selector to 4096 characters, and each serialized successful member to 512 KiB. Members are read synchronously from bridge memory, so no disk-read worker pool is needed. The existing read rate-limit tier applies to the batch HTTP request. Request telemetry records a batch route and member count; workspace-specific work is attributed to each resolved runtime. A response-too-large member fails with `413 live_state_response_too_large` rather than being silently truncated.
+Limit the explicit list to 20, each selector to 4096 characters, and each serialized successful member to 512 KiB. Each member is read synchronously from bridge memory, so no disk-read worker pool is needed; the loop yields one macrotask between members so a client disconnect aborts the remaining reads. The existing read rate-limit tier applies to the batch HTTP request. Request telemetry records a batch route and member count; workspace-specific work is attributed to each resolved runtime. A response-too-large member fails with `413 live_state_response_too_large` rather than being silently truncated.
 
 Advertise `workspace_session_live_state_batch` separately from the single-workspace capability. The SDK exposes one native REST request with transport cancellation and timeout. Callers can preflight capability once and retain the existing single-workspace request path on older daemons; the SDK does not issue hidden per-workspace retries. This change does not switch Web Shell polling to the batch method.
 

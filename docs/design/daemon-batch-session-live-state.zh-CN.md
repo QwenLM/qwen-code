@@ -22,7 +22,7 @@ daemon 已提供权威、仅来自内存的 `GET /workspaces/:workspace/sessions
 
 ## 资源上限、能力发现与客户端
 
-显式列表最多 20 项，每个 selector 最多 4096 字符，每个序列化后的成功成员最多 512 KiB。成员直接同步读取 bridge 内存，不需要磁盘读取线程池。批量 HTTP 请求使用现有读取限流档位。请求遥测记录批量路由和成员数量；与 workspace 相关的工作归属到各自解析出的 runtime。超大成员返回 `413 live_state_response_too_large`，不会静默截断。
+显式列表最多 20 项，每个 selector 最多 4096 字符，每个序列化后的成功成员最多 512 KiB。每个成员都直接同步读取 bridge 内存，不需要磁盘读取线程池；循环在成员之间让出一个宏任务，以便客户端断连时中止剩余读取。批量 HTTP 请求使用现有读取限流档位。请求遥测记录批量路由和成员数量；与 workspace 相关的工作归属到各自解析出的 runtime。超大成员返回 `413 live_state_response_too_large`，不会静默截断。
 
 独立公布 `workspace_session_live_state_batch` 能力。SDK 使用一次原生 REST 请求，支持传输取消和超时。调用方可预检一次 capability，旧 daemon 继续使用现有单 workspace 请求；SDK 不会暗中逐个重试。本次改动不将 Web Shell 轮询切换到批量方法。
 

@@ -5,7 +5,9 @@
  */
 
 import * as path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -22,6 +24,7 @@ import {
   setDebugLogSession,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
   InvalidRewindTargetError,
   SessionBusyError,
@@ -52,6 +55,30 @@ import {
   workspaceTranscriptCursorExceedsLimitForTesting,
 } from './routes/session.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+
+const telemetryMocks = vi.hoisted(() => ({
+  span: vi.fn(),
+  attribute: vi.fn(),
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/telemetry/daemon-tracing.js')
+    >()),
+    withDaemonSpan: telemetryMocks.span,
+    addDaemonRequestAttribute: telemetryMocks.attribute,
+  }),
+);
+
+beforeEach(() => {
+  telemetryMocks.span.mockReset();
+  telemetryMocks.span.mockImplementation(
+    (_name: string, _attributes: Record<string, string>, read: () => unknown) =>
+      read(),
+  );
+  telemetryMocks.attribute.mockReset();
+});
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -7417,6 +7444,174 @@ describe('batch workspace session live-state route', () => {
     });
     expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
     expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+  it('returns a generic 500 member for an unexpected bridge failure without leaking details', async () => {
+    const { app, secondaryBridge } = makeHarness();
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      () => {
+        throw new Error('private bridge detail ENOMEM');
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toEqual({
+      workspace: 'secondary-id',
+      workspaceId: 'secondary-id',
+      cwd: SECONDARY_CWD,
+      error: {
+        status: 500,
+        code: 'session_live_state_failed',
+        message: expect.any(String),
+      },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(JSON.stringify(res.body)).not.toContain('private bridge detail');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('fails closed if the selected runtime starts draining during its read', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    const list = secondaryBridge.listWorkspaceSessions.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        registry.beginDrain(entry.current!.runtime);
+        return sessions;
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('logs the discarded bridge error for a failed member', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app, secondaryBridge } = makeHarness({ daemonLog });
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      () => {
+        throw new Error('private bridge detail ENOMEM');
+      },
+    );
+    await batch(app, ['secondary-id']).expect(200);
+    expect(daemonLog.error).toHaveBeenCalledTimes(1);
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'private bridge detail ENOMEM',
+      expect.any(Error),
+      expect.objectContaining({
+        route: 'POST /sessions/live-state',
+        workspaceId: 'secondary-id',
+      }),
+    );
+  });
+
+  it('logs a routing failure warning for an untrusted member', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app } = makeHarness({ daemonLog, secondaryTrusted: false });
+    await batch(app, ['secondary-id']).expect(200);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /sessions/live-state',
+        resolutionKind: 'untrusted_workspace',
+        workspaceId: 'secondary-id',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
+  });
+
+  it('stops reading members once the client disconnects mid-batch', async () => {
+    const { app, registry, primaryBridge } = makeHarness();
+    const thirdCwd = path.resolve(path.sep, 'work', 'third');
+    const thirdBridge = makeBridge(thirdCwd, [
+      makeSummary('33333333-3333-4333-a333-333333333333', thirdCwd),
+    ]);
+    registry.add(
+      makeRuntime({
+        workspaceId: 'third-id',
+        workspaceCwd: thirdCwd,
+        primary: false,
+        trusted: true,
+        bridge: thirdBridge,
+      }),
+    );
+    const server = app.listen(0);
+    const sockets = new Set<Socket>();
+    server.on('connection', (socket) => sockets.add(socket));
+    const list = primaryBridge.listWorkspaceSessions.bind(primaryBridge);
+    vi.spyOn(primaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        for (const socket of sockets) socket.destroy();
+        return sessions;
+      },
+    );
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id', 'secondary-id', 'third-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() =>
+        expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Socket close delivery lags the destroy by a turn or two, so the
+      // member after the disconnect may still be read; the batch must stop
+      // before the member after that.
+      expect(thirdBridge.listCalls).toEqual([]);
+    } finally {
+      pending.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('attributes the batch request and each member span to its workspace', async () => {
+    const memberScope = new AsyncLocalStorage<string>();
+    const writes: Array<{ scope?: string; key: string; value: unknown }> = [];
+    telemetryMocks.span.mockImplementation(
+      (
+        _name: string,
+        attributes: Record<string, string>,
+        read: () => unknown,
+      ) => memberScope.run(attributes['qwen-code.workspace.hash']!, read),
+    );
+    telemetryMocks.attribute.mockImplementation(
+      (key: string, value: unknown) => {
+        writes.push({ scope: memberScope.getStore(), key, value });
+      },
+    );
+    const { app } = makeHarness();
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces).toHaveLength(2);
+    const memberSpans = telemetryMocks.span.mock.calls.filter(
+      ([name]) => name === 'qwen-code.daemon.session_live_state_batch.member',
+    );
+    expect(
+      memberSpans.map(
+        ([, attributes]) => attributes['qwen-code.workspace.hash'],
+      ),
+    ).toEqual([
+      hashDaemonWorkspace(SECONDARY_CWD),
+      hashDaemonWorkspace(PRIMARY_CWD),
+    ]);
+    expect(
+      writes.filter(
+        (write) =>
+          write.key === 'qwen-code.daemon.session_live_state_batch.members',
+      ),
+    ).toEqual([
+      {
+        scope: undefined,
+        key: 'qwen-code.daemon.session_live_state_batch.members',
+        value: 2,
+      },
+    ]);
   });
 });
 

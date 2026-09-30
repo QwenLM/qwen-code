@@ -223,7 +223,12 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 import {
+  captureWorkspaceEntryCurrency,
+  failedBatchMember,
   isGenerationClosedError,
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
   resolveWorkspaceEntryBySelector,
   resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
@@ -9667,7 +9672,10 @@ export function registerSessionRoutes(
 
   const liveStateBatchRequest = z
     .object({
-      workspaces: z.array(z.string().min(1).max(4096)).min(1).max(20),
+      workspaces: z
+        .array(z.string().min(1).max(MAX_SELECTOR_CHARS))
+        .min(1)
+        .max(MAX_BATCH_WORKSPACES),
     })
     .strict();
 
@@ -9681,27 +9689,13 @@ export function registerSessionRoutes(
       return;
     }
 
-    const failedMember = (
-      workspace: string,
-      entry: WorkspaceEntry | undefined,
-      status: number,
-      code: string,
-      message: string,
-    ) => ({
-      workspace,
-      ...(entry
-        ? { workspaceId: entry.workspaceId, cwd: entry.workspaceCwd }
-        : {}),
-      error: { code, message, status },
-    });
-
     const readMember = async (workspace: string) => {
       const entry = resolveWorkspaceEntryBySelector(
         workspaceRegistry,
         workspace,
       );
       if (!entry) {
-        return failedMember(
+        return failedBatchMember(
           workspace,
           undefined,
           404,
@@ -9710,24 +9704,29 @@ export function registerSessionRoutes(
         );
       }
       const unavailable = () =>
-        failedMember(
+        failedBatchMember(
           workspace,
           entry,
           503,
           'workspace_runtime_unavailable',
           'Workspace runtime is not active.',
         );
-      const generation = entry.current;
-      const isCurrent = () =>
-        workspaceRegistry.getEntryByWorkspaceId(entry.workspaceId) === entry &&
-        entry.state === 'active' &&
-        entry.current?.generationId === generation?.generationId &&
-        generation !== undefined &&
-        !generation.guard.closed;
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
       if (!generation || !isCurrent()) return unavailable();
       const runtime = generation.runtime;
       if (!runtime.trusted) {
-        return failedMember(
+        logSessionRoutingFailure(
+          'POST /sessions/live-state',
+          'untrusted_workspace',
+          {
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
+        return failedBatchMember(
           workspace,
           entry,
           403,
@@ -9752,8 +9751,8 @@ export function registerSessionRoutes(
           cwd: runtime.workspaceCwd,
           ...snapshot,
         };
-        if (Buffer.byteLength(JSON.stringify(member)) > 512 * 1024) {
-          return failedMember(
+        if (Buffer.byteLength(JSON.stringify(member)) > MAX_MEMBER_BYTES) {
+          return failedBatchMember(
             workspace,
             entry,
             413,
@@ -9766,7 +9765,18 @@ export function registerSessionRoutes(
         if (isGenerationClosedError(error) || !isCurrent()) {
           return unavailable();
         }
-        return failedMember(
+        // The member body stays generic by contract; the raw error exists
+        // only here, so losing it would leave a polling client with no
+        // server-side trace of which workspace is failing.
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route: 'POST /sessions/live-state',
+            workspaceId: entry.workspaceId,
+          },
+        );
+        return failedBatchMember(
           workspace,
           entry,
           500,
@@ -9776,18 +9786,36 @@ export function registerSessionRoutes(
       }
     };
 
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
     const workspaces = [];
-    for (const workspace of parsed.data.workspaces) {
-      if (req.aborted || res.destroyed) return;
-      workspaces.push(await readMember(workspace));
+    try {
+      for (const workspace of parsed.data.workspaces) {
+        if (controller.signal.aborted) return;
+        workspaces.push(await readMember(workspace));
+        // Member reads are synchronous bridge-memory reads chained through
+        // microtasks, so without this yield the loop cannot observe a
+        // disconnect until every member has been read.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.session_live_state_batch.members',
+        workspaces.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
     }
-    addDaemonRequestAttribute(
-      'qwen-code.daemon.session_live_state_batch.members',
-      workspaces.length,
-    );
-    if (req.aborted || res.destroyed) return;
-    res.setHeader('Cache-Control', 'no-store');
-    res.status(200).json({ workspaces });
   });
 
   const workspaceSessionInfoHandler =
