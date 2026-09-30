@@ -14,6 +14,9 @@ in the #12737
 [Q2/Q3 reply](https://github.com/QwenLM/qwen-code/issues/12737#issuecomment-5846370487).
 Acknowledged workspace-change delivery (the second part of B2b) and host wiring
 (B2d) remain separate slices. No ordinary host constructs a paired Bridge yet.
+The two follow-ups the #12795 review required before B2d, background
+notifications during a quarantine and the start of the exit check, are
+reflected below.
 
 ## Problem and current behavior
 
@@ -56,15 +59,28 @@ While the episode lasts:
 
 - The engine refuses fresh sessions as before. The channel refuses, with the
   same 503 `acp_channel_unavailable` classification and reason, any new work
-  for its sessions: prompts, mid-turn messages, background turns, and side
-  requests that start work in the child (content generation, side questions,
-  recaps, fork agents, and the goal and workflow actions that start or resume
-  work; pausing or clearing stays allowed). Turns that are already running
-  continue and settle. A prompt queued before the episode began is refused when
-  it reaches the head of its queue, and a mid-turn message the running turn
-  never drained is removed from the queue view instead of starting a turn.
-  Goal turns are started by the child itself and cannot be refused; they settle
-  or are cancelled at the deadline.
+  for its sessions: prompts, mid-turn messages, and side requests that start
+  work in the child (content generation, side questions, recaps, fork agents,
+  and the goal and workflow actions that start or resume work; pausing or
+  clearing stays allowed). Turns that are already running continue and settle.
+  A prompt queued before the episode began is refused when it reaches the head
+  of its queue, and a mid-turn message the running turn never drained is
+  removed from the queue view instead of starting a turn.
+- Background work may settle too. A background notification turn that reports
+  it is admitted, whether the work began before the quarantine or was started
+  by a turn admitted during it, and its session drains once that turn ends. A
+  refused report never retires the channel sooner: the child keeps it queued,
+  retries, and keeps reporting it as held work, so its session stays unsettled
+  until the deadline. The deadline, not a refusal, is what bounds admitted
+  turns. A message from another session is new input and is refused, and no
+  background turn is admitted once the channel's termination has begun. Goal
+  turns are started by the child itself and cannot be refused; they settle or
+  are cancelled at the deadline. On a session fenced by a change that tightens
+  permissions, including one whose restore or creation lands after the change,
+  every background turn is refused and a Goal turn is cancelled as soon as it
+  is reported, as
+  [workspace change propagation](./2026-09-27-paired-engine-workspace-change-propagation.md)
+  describes.
 - The Bridge closes the channel's settled sessions at the start and again
   whenever a session settles or its restore, creation or worktree reset
   finishes. A settled session has no queued or running prompt or automatic
@@ -72,10 +88,12 @@ While the episode lasts:
   and no work the child reports holding. The close is authorized locally and
   bounded, as for any condemned channel. Once the channel holds no work, it is
   retired early.
-- No current cause ends the episode early. The #12737 decision lets only a
-  validated acknowledgement of a missing workspace change clear a quarantine
-  before the deadline; B2b adds that cause. An overdue settlement therefore
-  retires the channel even if the late work settles afterwards.
+- The #12737 decision lets only a validated acknowledgement of a missing
+  workspace change clear a quarantine before the deadline;
+  [the second part of B2b](./2026-09-27-paired-engine-workspace-change-propagation.md)
+  adds that cause and its early end. No other cause ends an episode early, so
+  an overdue settlement retires the channel even if the late work settles
+  afterwards.
 
 At the deadline, the Bridge requests cancellation of running turns and then
 terminates the channel with the existing escalation. The deadline triggers
@@ -89,9 +107,11 @@ stop waits for; a channel without a registry uses its exit). This holds while a
 channel that drained early is still terminating, too, and a workspace runtime
 stop reports `stopping` until then. If the child is not confirmed gone one
 initialization budget (at least 15 s, the registry's own termination window)
-after the deadline's escalation, or after its root exited, the refusal reason
+after its termination began, or after its root exited, the refusal reason
 becomes `channel_exit_unverified`, and the daemon log and telemetry report that
-operator action may be required.
+operator action may be required. Termination begins at the deadline, when a
+drained channel is reaped, when a failed close is recovered by killing the
+channel, or when its transport fails.
 
 After that, each session can be restored on demand. The owner selector sends it
 to a fresh channel of the same engine, and that engine decides whether its
@@ -158,9 +178,13 @@ by the existing 503 `acp_channel_unavailable` body.
 
 Each behavior is covered on a paired Bridge, not only on Legacy.
 
-1. A quarantined channel refuses new prompts, mid-turn messages, background
-   turns and side requests while a running turn settles; the other engine keeps
-   accepting work.
+1. A quarantined channel refuses new prompts, mid-turn messages, side requests
+   and messages from other sessions while a running turn settles, and still
+   refuses them after admitting a report. It admits the notification turns of
+   background jobs that finish during the quarantine, including work an
+   admitted turn started and reports that name no source turn, but none on a
+   session fenced by a tightening change and none once its termination has
+   begun. The other engine keeps accepting work.
 2. Settled sessions on a quarantined channel are closed, a session with a side
    request or notification in flight is kept until it answers, and the channel
    retires before the deadline once it drains.

@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
+import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
   OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
@@ -22,10 +23,20 @@ import {
 } from './managed-context-envelope.js';
 import {
   MANAGED_CONTEXT_WORKER_ROUTES,
+  ManagedContextMount,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
-import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import {
+  ManagedToolExecutor,
+  type ManagedShellCapturePublisher,
+} from './managed-runtime-tool-executor.js';
+import {
+  ManagedShellPublisherRegistry,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
+import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -137,12 +148,19 @@ export async function readManagedRuntimeWorkerBoot(
 
 export async function startManagedRuntimeAttestationWorker(
   boot: ManagedRuntimeWorkerBoot | ManagedContextBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
 ): Promise<ManagedRuntimeAttestationWorkerHandle> {
   const app = express();
   app.disable('x-powered-by');
   let executor: ManagedToolExecutor;
   if (boot.version === 2) {
-    executor = registerManagedContextRoutes(app, boot);
+    executor = registerManagedContextRoutes(
+      app,
+      boot,
+      capturePublisher,
+      remotePublishers,
+    );
   } else {
     registerManagedRuntimeAttestationRoute(app, boot);
     executor = ManagedToolExecutor.forWorkspace(
@@ -150,13 +168,26 @@ export async function startManagedRuntimeAttestationWorker(
       boot.runtimeInstanceId,
     );
     registerManagedRuntimeToolRoutes(app, boot, executor);
+    const mount = new ManagedContextMount(boot.workspaceCwd);
+    registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
+      const directory = await mount.resolve('');
+      return directory === undefined
+        ? undefined
+        : { directory, workspaceRoot: directory, preapproved: false };
+    });
   }
   const server = createServer(
     ownedManagedRuntimeRouteGate(
       app,
       boot.version === 2
-        ? MANAGED_CONTEXT_WORKER_ROUTES
-        : OWNED_MANAGED_RUNTIME_ROUTES,
+        ? capturePublisher || remotePublishers
+          ? [
+              ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...MANAGED_TOOL_RESULT_ROUTES,
+              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
+            ]
+          : MANAGED_CONTEXT_WORKER_ROUTES
+        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
     ),
   );
   server.maxHeadersCount = 32;
@@ -214,7 +245,11 @@ export async function startManagedRuntimeAttestationWorker(
 
 export async function runManagedRuntimeAttestationWorker(): Promise<void> {
   const boot = await readManagedRuntimeWorkerBoot(process.stdin);
-  const worker = await startManagedRuntimeAttestationWorker(boot);
+  const worker = await startManagedRuntimeAttestationWorker(
+    boot,
+    undefined,
+    boot.version === 2 ? new ManagedShellPublisherRegistry() : undefined,
+  );
 
   await new Promise<void>((resolve, reject) => {
     let closing = false;

@@ -16,22 +16,30 @@ vi.mock('../utils/sideQuery.js', () => ({
 
 const docs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'user',
     type: 'user',
     filePath: '/tmp/user.md',
     relativePath: 'user.md',
     filename: 'user.md',
     title: 'User Memory',
     description: 'User preferences',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body: '- User prefers terse responses.',
     mtimeMs: 1,
   },
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/reference.md',
     relativePath: 'reference.md',
     filename: 'reference.md',
     title: 'Reference Memory',
     description: 'Operational references',
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body: '- Grafana dashboard: https://grafana.internal/d/api-latency',
     mtimeMs: 2,
   },
@@ -154,6 +162,53 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     );
   });
 
+  it('adds compact keywords while keeping scenarios and bodies out of the selector manifest', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({ selected_memories: [] });
+    const metadataDoc = {
+      ...docs[1]!,
+      keywords: ['latency dashboard'],
+      usageScenarios: ['Debugging latency'],
+      body: 'SECRET MEMORY BODY',
+    };
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'latency',
+      [metadataDoc],
+      2,
+    );
+
+    const text =
+      vi.mocked(runSideQuery).mock.calls[0]![1].contents[0]?.parts?.[0]?.text ??
+      '';
+    expect(text).toContain(metadataDoc.filePath);
+    expect(text).toContain(metadataDoc.description);
+    expect(text).toContain('keywords: latency dashboard');
+    expect(text).not.toContain('Debugging latency');
+    expect(text).not.toContain('SECRET MEMORY BODY');
+  });
+
+  it('limits selector metadata to three sanitized keywords', async () => {
+    vi.mocked(runSideQuery).mockResolvedValue({ selected_memories: [] });
+    const metadataDoc = {
+      ...docs[1]!,
+      keywords: ['one', 'two\nlines', 'three', 'four'],
+    };
+
+    await selectRelevantAutoMemoryDocumentsByModel(
+      mockConfig,
+      'find details',
+      [metadataDoc],
+      2,
+    );
+
+    const text =
+      vi.mocked(runSideQuery).mock.calls[0]![1].contents[0]?.parts?.[0]?.text ??
+      '';
+    expect(text).toContain('keywords: one, two lines, three');
+    expect(text).not.toContain('four');
+  });
+
   it('lets runSideQuery choose the default side-query model when fast model is configured', async () => {
     vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-flash-model');
     vi.mocked(runSideQuery).mockResolvedValue({
@@ -231,22 +286,30 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     // collapsed them; keying by filePath (absolute, unique) must surface both.
     const dualScopeDocs: ScannedAutoMemoryDocument[] = [
       {
+        scope: 'project',
         type: 'user',
         filePath: '/qwen/projects/proj/memory/user/role.md',
         relativePath: 'user/role.md',
         filename: 'role.md',
         title: 'Project User',
         description: 'Project-scoped user note',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         body: '- Project-specific.',
         mtimeMs: 1,
       },
       {
+        scope: 'user',
         type: 'user',
         filePath: '/qwen/memories/user/role.md',
         relativePath: 'user/role.md',
         filename: 'role.md',
         title: 'Cross-Project User',
         description: 'User-scoped cross-project note',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         body: '- Applies everywhere.',
         mtimeMs: 2,
       },

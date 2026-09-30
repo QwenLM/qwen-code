@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -20,6 +21,35 @@ import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
+
+// monitor_run is enabled by H3; the Stage H case below runs ahead of it.
+vi.mock('./managed-session-records.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./managed-session-records.js')>();
+  return {
+    ...actual,
+    assertManagedSessionDomainEnabled: (
+      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+    ) => {
+      if (domain !== 'monitor_run') {
+        actual.assertManagedSessionDomainEnabled(domain);
+      }
+    },
+  };
+});
+
+// The Stage H golden case needs the IDs a writer draws to repeat.
+const ids = vi.hoisted(() => ({ fixed: false, next: 0 }));
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomUUID: () =>
+      ids.fixed
+        ? `00000000-0000-4000-8000-${String(++ids.next).padStart(12, '0')}`
+        : actual.randomUUID(),
+  };
+});
 
 const SESSION_KEY: ManagedSessionKey = {
   tenantId: 'tenant-a',
@@ -39,6 +69,108 @@ describe('HTTP Managed Session store', () => {
         .splice(0)
         .map((directory) => rm(directory, { recursive: true, force: true })),
     );
+  });
+
+  it('publishes bounded tool output immediately under the original writer grant', async () => {
+    const server = new FakeManagedSessionStore();
+    let publication: Record<string, unknown> | undefined;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!requestUrl(input).endsWith('/tool-results:publish'))
+          return server.fetch(input, init);
+        expect(
+          new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+        ).toBe(TOKEN_A);
+        publication = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const { resourceId, kind, schemaVersion, byteLength, digest } =
+          publication;
+        return jsonResponse({
+          resourceId,
+          kind,
+          schemaVersion,
+          byteLength,
+          digest,
+        });
+      },
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(1024 * 1024, 0x91);
+      const ref = await stores.toolResultResources.publish(
+        'managed-tool-result-content',
+        bytes,
+        'segment-id',
+      );
+      expect(publication).toMatchObject({
+        resourceId: 'segment-id',
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        byteLength: bytes.length,
+        bytesBase64: bytes.toString('base64'),
+      });
+      expect(ref.byteLength).toBe(bytes.length);
+      expect(server.commits).toHaveLength(0);
+      await expect(
+        stores.resourceStore.publish('ordinary', bytes),
+      ).rejects.toThrow('inline limit');
+      await expect(
+        stores.toolResultResources.publish('ordinary', bytes),
+      ).rejects.toThrow('Unsupported');
+      await expect(
+        stores.toolResultResources.publish(
+          'managed-tool-result-content',
+          Buffer.alloc(bytes.length + 1),
+        ),
+      ).rejects.toThrow('Unsupported');
+      await stores.assertWritable();
+      expect(
+        server.fetch.mock.calls.some(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toBe(true);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('refuses a changed durable publication receipt rather than staging it', async () => {
+    const server = new FakeManagedSessionStore();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!requestUrl(input).endsWith('/tool-results:publish'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          resourceId: 'other',
+          kind: body['kind'],
+          schemaVersion: 1,
+          byteLength: body['byteLength'],
+          digest: body['digest'],
+        });
+      },
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      await expect(
+        stores.toolResultResources.publish(
+          'managed-tool-result-content',
+          Buffer.from('bytes'),
+          'original',
+        ),
+      ).rejects.toThrow('different metadata');
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
   });
 
   it('commits staged resources and restores without a local transcript', async () => {
@@ -519,6 +651,254 @@ describe('HTTP Managed Session store', () => {
       finishSeal();
       await stores.close();
       vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('commits the resources a Stage H record names and rebuilds it cold', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const open = async (writerId: string, writerToken: string) => {
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId,
+        writerToken,
+        fetchFn: server.fetch,
+      });
+      const create =
+        writerId === 'harness-a'
+          ? {
+              definitionRef: await stores.resourceStore.publish(
+                'managed-session-definition',
+                Buffer.from('{}', 'utf8'),
+              ),
+              rootSnapshotRef: await stores.resourceStore.publish(
+                'managed-session-root-snapshot',
+                Buffer.from('{}', 'utf8'),
+              ),
+              createdBy: 'test',
+            }
+          : undefined;
+      return openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath,
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: writerId,
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        ...(create === undefined ? {} : { create }),
+      });
+    };
+    const first = await open('harness-a', TOKEN_A);
+    const commandRef = await first.resources.publish(
+      'managed-tool-args',
+      Buffer.from('{"command":"tail -f build.log"}', 'utf8'),
+    );
+    const start = {
+      monitorId: 'monitor-1',
+      ownerScopeId: 'scope-main',
+      commandRef,
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 0,
+      startReceiptRef: null,
+      observationSequence: 0,
+      lastObservationRef: null,
+      notifiedThrough: 0,
+      stopReason: null,
+      outputRef: null,
+      run: {
+        state: 'admitted',
+        reason: null,
+        definition: null,
+        executionCallId: 'call-monitor-1',
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'intent',
+        runtime: null,
+        delivery: null,
+      },
+    };
+    const committed = await first.authority.commitExtensionRecord(
+      {
+        operation: 'commitMonitorRun',
+        commandId: 'monitor-1:1',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'e'.repeat(64),
+      },
+      { domain: 'monitor_run', record: start },
+      { class: 'trusted_entry' },
+    );
+    // The args are named only inside the body, and still travel with it.
+    expect(server.commits.at(-1)?.['resources']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          resourceId: committed.recordRef.resourceId,
+          kind: 'managed-monitor_run',
+          bytesBase64: expect.any(String),
+        }),
+        expect.objectContaining({
+          resourceId: commandRef.resourceId,
+          bytesBase64: Buffer.from('{"command":"tail -f build.log"}').toString(
+            'base64',
+          ),
+        }),
+      ]),
+    );
+    const views = first.authority.taskViews();
+    expect(views).toHaveLength(1);
+    await first.close();
+
+    const restored = await open('harness-b', TOKEN_B);
+    expect(restored.authority.taskViews()).toEqual(views);
+    expect(
+      restored.authority.extensionRecord('monitor_run', 'monitor-1'),
+    ).toMatchObject({ revision: 1, recordRef: committed.recordRef });
+    await restored.close();
+  });
+
+  it('writes the Stage H transactions that the Java store replays', async () => {
+    // ManagedSessionStoreIntegrationTest sends these requests to the Java
+    // Session store, which must accept them and project the same tasks.
+    const fixture = new URL(
+      './contracts/managed-extension-journal-v1.fixtures.json',
+      import.meta.url,
+    );
+    vi.useFakeTimers({ now: 1_790_000_000_000, toFake: ['Date'] });
+    ids.fixed = true;
+    ids.next = 0;
+    try {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'managed-http-golden-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: server.fetch,
+      });
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: {
+          definitionRef: await stores.resourceStore.publish(
+            'managed-session-definition',
+            Buffer.from('{}', 'utf8'),
+          ),
+          rootSnapshotRef: await stores.resourceStore.publish(
+            'managed-session-root-snapshot',
+            Buffer.from('{}', 'utf8'),
+          ),
+          createdBy: 'test',
+        },
+      });
+      const command = (commandId: string) => ({
+        operation: 'commitMonitorRun',
+        commandId,
+        sessionKey: SESSION_KEY,
+        contentDigest: 'e'.repeat(64),
+      });
+      const start = {
+        monitorId: 'monitor-1',
+        ownerScopeId: 'scope-main',
+        commandRef: await session.resources.publish(
+          'managed-tool-args',
+          Buffer.from('{"command":"tail -f build.log"}', 'utf8'),
+        ),
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 0,
+        startReceiptRef: null,
+        observationSequence: 0,
+        lastObservationRef: null,
+        notifiedThrough: 0,
+        stopReason: null,
+        outputRef: null,
+        run: {
+          state: 'admitted',
+          reason: null,
+          definition: null,
+          executionCallId: 'call-monitor-1',
+          effectId: null,
+          dispatchId: null,
+          deliveryId: null,
+          execution: 'intent',
+          runtime: null,
+          delivery: null,
+        },
+      };
+      await session.authority.commitExtensionRecord(
+        command('monitor-1:1'),
+        { domain: 'monitor_run', record: start },
+        { class: 'trusted_entry' },
+      );
+      vi.setSystemTime(1_790_000_001_000);
+      // The second revision also queues a notification, so its transaction
+      // holds the record event, the input and the wake.
+      await session.authority.commitExtensionRecord(
+        command('monitor-1:2'),
+        {
+          domain: 'monitor_run',
+          record: {
+            ...start,
+            run: {
+              ...start.run,
+              execution: 'dispatch_started',
+              runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+            },
+          },
+          input: {
+            inputId: 'monitor-1:notify:1',
+            turnId: 'monitor-1:notify:1',
+            source: 'monitor',
+            contentRef: await session.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"build.log changed"}', 'utf8'),
+            ),
+            deadline: null,
+            admissionRef: await session.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            wakeReason: 'input',
+          },
+        },
+        { class: 'trusted_entry' },
+      );
+      const written = {
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        commits: server.commits,
+        tasks: session.authority.taskViews(),
+      };
+      await session.close();
+      if (process.env['QWEN_WRITE_GOLDEN'] === '1') {
+        writeFileSync(fixture, `${JSON.stringify(written, null, 2)}\n`);
+      }
+      expect(written).toEqual(JSON.parse(readFileSync(fixture, 'utf8')));
+    } finally {
+      ids.fixed = false;
       vi.useRealTimers();
     }
   });

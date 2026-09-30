@@ -988,6 +988,37 @@ describe('HookRegistry', () => {
   });
 
   describe('addAgentHooks — per-agent frontmatter ephemeral entries', () => {
+    it('rolls back partially registered entries when registration throws', async () => {
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+      const valid = {
+        hooks: [{ type: HookType.Command as const, command: 'echo valid' }],
+      };
+      registry.addAgentHooks(
+        { [HookEventName.PreToolUse]: [valid] },
+        'existing',
+        {
+          owner: { sessionId: 's', agentId: 'existing' },
+        },
+      );
+      const broken = {
+        get hooks(): HookConfig[] {
+          throw new Error('broken definition');
+        },
+      };
+      expect(() =>
+        registry.addAgentHooks(
+          { [HookEventName.PreToolUse]: [valid, broken] },
+          'new',
+          {
+            owner: { sessionId: 's', agentId: 'new' },
+          },
+        ),
+      ).toThrow('broken definition');
+      expect(registry.getAllHooks()).toHaveLength(1);
+      expect(registry.getAllHooks()[0].agentScope).toBe('existing');
+    });
+
     it('appends entries tagged with agentScope and returns an unregister callback', async () => {
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -1009,6 +1040,7 @@ describe('HookRegistry', () => {
           ],
         },
         'agent:test:abc',
+        { owner: { sessionId: 'session-1', agentId: 'agent-1' } },
       );
 
       const after = registry.getAllHooks();
@@ -1039,7 +1071,9 @@ describe('HookRegistry', () => {
 
       // Same identity, different source path (Session + agentScope) — must
       // NOT be deduped against the user-source entry.
-      registry.addAgentHooks(userHooks, 'agent:test:def');
+      registry.addAgentHooks(userHooks, 'agent:test:def', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
       const after = registry.getAllHooks();
       expect(after).toHaveLength(2);
       // Assert the scope tag itself participates in the dedup key, not just
@@ -1075,8 +1109,12 @@ describe('HookRegistry', () => {
         ],
       };
 
-      const u1 = registry.addAgentHooks(sameHooks, 'agent:a:1');
-      const u2 = registry.addAgentHooks(sameHooks, 'agent:b:2');
+      const u1 = registry.addAgentHooks(sameHooks, 'agent:a:1', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
+      const u2 = registry.addAgentHooks(sameHooks, 'agent:b:2', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
 
       expect(registry.getAllHooks()).toHaveLength(2);
       u1();
@@ -1122,6 +1160,7 @@ describe('HookRegistry', () => {
           ],
         },
         'agent:test:reload',
+        { owner: { sessionId: 'session-1', agentId: 'agent-1' } },
       );
 
       mockConfig.getUserHooks = vi.fn().mockReturnValue(undefined);
@@ -1203,6 +1242,7 @@ describe('HookRegistry', () => {
           ],
         },
         'agent:test:reload-failure',
+        { owner: { sessionId: 'session-1', agentId: 'agent-1' } },
       );
 
       const before = registry.getAllHooks();
@@ -1220,7 +1260,9 @@ describe('HookRegistry', () => {
     it('silently keeps entries when the hooks payload is empty', async () => {
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
-      const unregister = registry.addAgentHooks({}, 'agent:empty:0');
+      const unregister = registry.addAgentHooks({}, 'agent:empty:0', {
+        owner: { sessionId: 'session-1', agentId: 'agent-1' },
+      });
       expect(registry.getAllHooks()).toHaveLength(0);
       // No-op unregister should not throw
       unregister();
