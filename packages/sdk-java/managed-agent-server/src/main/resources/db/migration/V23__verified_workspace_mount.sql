@@ -8,4 +8,5 @@ ALTER TABLE managed_workspace_execution_lease ADD COLUMN mount_root VARCHAR(2048
 ALTER TABLE managed_workspace_execution_lease ADD COLUMN mount_host_id VARCHAR(256);
 ALTER TABLE managed_workspace_execution_lease ADD COLUMN mount_device VARCHAR(32);
 ALTER TABLE managed_workspace_execution_lease ADD COLUMN mount_inode VARCHAR(32);
+ALTER TABLE managed_workspace_execution_lease ADD COLUMN mount_birth_time VARCHAR(64);
 ALTER TABLE managed_workspace_execution_lease ADD COLUMN mount_registration_id CHAR(36);

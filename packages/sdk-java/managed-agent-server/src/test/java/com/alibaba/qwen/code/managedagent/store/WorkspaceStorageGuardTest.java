@@ -10,12 +10,15 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,6 +74,57 @@ class WorkspaceStorageGuardTest {
         assertUnavailable(() -> guard().verify(binding));
         assertThat(guard().inspect("tenant", "storage")).contains("identity=mismatch");
         assertUnavailable(() -> guard().register("tenant", "storage", operation));
+    }
+
+    @Test
+    void rejectsDeletedAndRestoredRootWhenInodeIsReusedButBirthTimeChanges() throws Exception {
+        AtomicReference<String> birth = new AtomicReference<>("2026-09-30T00:00:00.123456789Z");
+        WorkspaceStorageGuard.IdentityReader reader = path -> new WorkspaceStorageGuard.Identity(
+                path.toString(), "test-host", "same-device", "reused-inode", birth.get());
+        var manager = new DataSourceTransactionManager(dataSource);
+        var original = new WorkspaceStorageGuard(jdbc, manager, properties, reader);
+        String operation = UUID.randomUUID().toString();
+        original.register("tenant", "storage", operation);
+        original.verify(binding);
+        Path marker = root.resolve(".qwen-managed-storage.json");
+        byte[] backup = Files.readAllBytes(marker);
+        var registration = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease");
+        Files.delete(marker);
+        Files.delete(root.resolve("child"));
+        Files.delete(root);
+        Files.createDirectory(root);
+        Files.createDirectory(root.resolve("child"));
+        Files.write(marker, backup);
+        birth.set("2026-09-30T00:00:00.123456790Z");
+        var restarted = new WorkspaceStorageGuard(jdbc, manager, properties, reader);
+        assertThat(restarted.inspect("tenant", "storage"))
+                .contains("identity=mismatch", "marker=match");
+        assertUnavailable(() -> restarted.verify(binding));
+        assertUnavailable(() -> restarted.register("tenant", "storage", operation));
+        assertUnavailable(() -> restarted.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease"))
+                .isEqualTo(registration);
+    }
+
+    @Test
+    void refusesMissingPersistedBirthTime() {
+        guard().register("tenant", "storage", UUID.randomUUID().toString());
+        jdbc.update("UPDATE managed_workspace_execution_lease SET mount_birth_time = NULL");
+        assertUnavailable(() -> guard().verify(binding));
+        assertThat(guard().inspect("tenant", "storage")).contains("identity=mismatch");
+    }
+
+    @Test
+    void rejectsUnavailableAndAmbiguousBirthTimeWithoutUsingDirectoryMtimeAsIdentity() throws Exception {
+        FileTime birth = FileTime.from(Instant.parse("2026-09-30T00:00:00.123456789Z"));
+        assertThatThrownBy(() -> WorkspaceStorageGuard.verifiedBirthTime(birth, birth))
+                .isInstanceOf(java.io.IOException.class);
+        assertThatThrownBy(() -> WorkspaceStorageGuard.verifiedBirthTime(FileTime.fromMillis(0), birth))
+                .isInstanceOf(java.io.IOException.class);
+        assertThat(WorkspaceStorageGuard.verifiedBirthTime(birth, FileTime.fromMillis(1)))
+                .isEqualTo("2026-09-30T00:00:00.123456789Z");
+        assertThat(WorkspaceStorageGuard.verifiedBirthTime(birth, FileTime.fromMillis(2)))
+                .isEqualTo("2026-09-30T00:00:00.123456789Z");
     }
 
     @Test
@@ -235,7 +289,7 @@ class WorkspaceStorageGuardTest {
                         throw new java.io.IOException("Root changed");
                     }
                     return new WorkspaceStorageGuard.Identity(path.toString(), "test-host",
-                            "test-device", attributes.fileKey().toString());
+                            "test-device", attributes.fileKey().toString(), attributes.creationTime().toInstant().toString());
                 });
     }
 

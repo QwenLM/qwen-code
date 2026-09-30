@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -42,6 +43,8 @@ class HostedWorkspaceStorageGuardMySqlIT {
         Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
         Path root = Files.createDirectory(temporary.resolve("root")).toRealPath();
         Files.createDirectory(root.resolve("child"));
+        // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+        Files.setLastModifiedTime(root, FileTime.fromMillis(1));
         String tenant = "w1-" + UUID.randomUUID();
         String storage = "storage-" + UUID.randomUUID();
         var properties = new ManagedAgentProperties();
@@ -57,6 +60,9 @@ class HostedWorkspaceStorageGuardMySqlIT {
             var original = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease"
                     + " WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
             guard.verify(binding);
+            assertThat(original.get("mount_birth_time")).isEqualTo(Files.readAttributes(root,
+                    java.nio.file.attribute.BasicFileAttributes.class).creationTime().toInstant().toString());
+            assertThat(original.get("mount_host_id")).isNotEqualTo(Files.readString(Path.of("/etc/machine-id")).strip());
             maintenance(url, user, password, "register", tenant, storage, root.toString(), registration,
                     "--offline-confirmed");
             assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease"

@@ -16,7 +16,10 @@ import {
 } from './managed-session-message-projection.js';
 import type { ManagedSessionStoreHttpError } from './http-managed-session-store.js';
 import { createHttpManagedSessionStores } from './http-managed-session-store.js';
-import type { ManagedSessionKey } from './managed-session-records.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionKey,
+} from './managed-session-records.js';
 import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
@@ -69,6 +72,48 @@ describe('HTTP Managed Session store', () => {
         .splice(0)
         .map((directory) => rm(directory, { recursive: true, force: true })),
     );
+  });
+
+  it('verifies committed publication receipts with the scoped Session writer', async () => {
+    const server = new FakeManagedSessionStore();
+    const request = { executionCallId: 'execution-1', historyRevision: 7 };
+    const verified = vi.fn();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const url = new URL(requestUrl(input));
+        if (!url.pathname.endsWith('/receipts/verify'))
+          return server.fetch(input, init);
+        verified();
+        expect(url.pathname).toBe(
+          `/internal/managed-tool-publications/v1/sessions/${SESSION_KEY.sessionId}/receipts/verify`,
+        );
+        expect(url.searchParams.get('workspaceId')).toBe(
+          SESSION_KEY.workspaceId,
+        );
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
+        expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual(request);
+        return jsonResponse(request);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(
+        stores.publication.request('/receipts/verify', request),
+      ).resolves.toEqual(request);
+      expect(verified).toHaveBeenCalledOnce();
+      await expect(
+        stores.publication.request('/receipts/other', request),
+      ).rejects.toThrow('owner path is invalid');
+    } finally {
+      await stores.close();
+    }
   });
 
   it('publishes bounded tool output immediately under the original writer grant', async () => {
@@ -170,6 +215,103 @@ describe('HTTP Managed Session store', () => {
       expect(server.commits).toHaveLength(0);
     } finally {
       await stores.close();
+    }
+  });
+
+  it('retries a busy receipt commit with the original transaction', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const requests: Array<Record<string, unknown>> = [];
+    let outcomeRef: ManagedSessionDurableRef;
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        if (!new URL(requestUrl(input)).pathname.endsWith('/receipts/commit'))
+          return server.fetch(input, init);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push(body);
+        if (requests.length === 1)
+          return jsonResponse(
+            { error: { code: 'managed_tool_publication_busy' } },
+            429,
+          );
+        const committed = await server.fetch(
+          `http://session-store.test/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}/transactions:commit`,
+          init,
+        );
+        return jsonResponse({
+          ...(await committed.json()),
+          historyRevision: body['lastSequence'],
+          toolOutcomeRef: outcomeRef,
+        });
+      },
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}'),
+      );
+      stores.publication.rememberAdmission('publication-a', outcomeRef);
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-a',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:a',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-a',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(
+        server.commits.filter(
+          (commit) => commit['operation'] === 'recordToolResult',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await session.close();
     }
   });
 

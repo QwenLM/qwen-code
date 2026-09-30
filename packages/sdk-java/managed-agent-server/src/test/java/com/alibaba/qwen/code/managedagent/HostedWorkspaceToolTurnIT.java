@@ -18,6 +18,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -203,6 +204,8 @@ class HostedWorkspaceToolTurnIT {
             arguments.add(prefix + "storage-id=storage-" + index);
             arguments.add(prefix + "root=" + workspaces.get(index));
             Files.createDirectory(workspaces.get(index).resolve("child"));
+            // Give initialized roots an unambiguous birth time without a timing-dependent sleep.
+            Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
         boolean verifiedRecovery = !faults && !latency && "Linux".equals(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);

@@ -2,15 +2,15 @@
 
 [English](2026-09-29-managed-workspace-w1-recovery.md) | [简体中文](2026-09-29-managed-workspace-w1-recovery.zh-CN.md)
 
-状态：W1a 已有实现候选；W1b/W1c 仍为设计提案，Linux 端到端验收待完成。
+状态：W1a 已有实现候选；W1b/W1c 仍为设计提案。`7c54aa78` 已有 Linux/MySQL 验收证据；birth-time 身份修复及 O2 整合需要重新验证。
 调研基线：`be1ebc74d7f5b0bdce2b88a6565d4940d5a6b3c0`，2026-09-29。
-实现整合基线：`23e0a451e`，2026-09-30；该基线已包含合入的初始 Workspace 文件 Turn 与可审计运维恢复。
+实现整合基线：main `3b18cfe5e`，2026-09-30；已包含初始 Workspace 文件 Turn、可审计运维恢复及 O2 远端 Shell 结果持久交付（#12894）。
 属于 [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380)。
 目标契约为 [Workspace v1.12 第 2、3.5、5 节](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md)。
 
 ## 1. 建议范围
 
-将 W1 分成三个切片交付。**先做 W1a：对已经绑定 Workspace、Turn 已结算的 Hosted Session，在原位置完成可验证的冷恢复。** W1b 增加有证据的历史回填和外部快照恢复校验，W1c 增加同一存储的受控挂载迁移。这是本文提出的拆分，不是已经认领的路线图任务。
+将 W1 分成三个切片交付。**先做 W1a：对已经绑定 Workspace 的 Hosted Session，在原位置完成可验证的冷恢复，并保留已有的原回执恢复规则。** W1b 增加有证据的历史回填和外部快照恢复校验，W1c 增加同一存储的受控挂载迁移。这是本文提出的拆分，不是已经认领的路线图任务。
 
 W0 已持久保存 binding，并提供 Runtime 接管与回收。W1 补充的是：文件和私有恢复资源仍属于原 binding 的证据。目录存在、storage holder 已释放或公开 transcript 可读，都不能单独证明恢复成功。
 
@@ -40,17 +40,17 @@ W0 已持久保存 binding，并提供 Runtime 接管与回收。W1 补充的是
 - 保留 `tenantId`、`workspaceId`、`workspaceGeneration`、`workspaceStorageId`、`cwdRelative`、`contextConfigRef` 和 `contextRevision`。W1 不切换 Session cwd、不改选 Workspace、不替换存储。逻辑变更需要另行准入、W2 或新建 Session。
 - 保留原 command、input、execution 身份、结果回执、日志字节和模型实际消费的消息。挂载迁移和回填都不改写已提交内容，也不重放工具副作用。
 - 区分三件事：原执行结果、旧写入者不能再回来的证据、存储及资源可用的证据。三者互不推导。`ABANDONED` 仍表示结果未知，不是成功结果或自动解锁。
-- W1a 面向受信任的单主机 Linux local-process 部署的进程重启，以及已保存的 `hosted-workspace-files/1` 或 `hosted-workspace-shell/1` profile。整机重启后只有登记身份仍匹配才允许恢复，不承诺可跨重启的通用身份。任意配置快照、Legacy 导入、跨主机接管、Kubernetes、同 UID 恶意写入者、磁盘/虚拟机回滚、在线迁移均不在其验收范围。
+- W1a 面向 root 具有无歧义持久 birth time 的受信任单主机 OpenJDK 21/Linux local-process 部署的进程重启，以及已保存的 `hosted-workspace-files/1` 或 `hosted-workspace-shell/1` profile。Broker 重启后的下一工具 Turn 需要 `durable-local-process=true`。整机重启后只有登记身份仍匹配才允许恢复，不承诺可跨重启的通用身份。任意配置快照、Legacy 导入、跨主机接管、Kubernetes、同 UID 恶意写入者、磁盘/虚拟机回滚、在线迁移均不在其验收范围。
 - 新执行需要当前授权。获授权的历史/导出，以及基于保存身份的清理，不要求挂载正常。撤权必须阻断新工作，同时允许可信清理继续。
 - 公开 Items/Snapshots 不能重建私有 Session authority。O2 的结果字节也不是 Workspace 文件系统备份。
 
 ## 4. 交付切片
 
-| 切片                    | 交付内容                                                                                       | 依赖与退出条件                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| **W1a：原位置恢复**     | 持久本地存储登记、运行时准入检查、clean-load 校验和运维诊断；显式纳管现有已绑定部署。          | 基于 W0e/G2。证明同 root 恢复，以及跨进程重启后拒绝替换过的 root。公开恢复在产品路由存在前继续受门禁限制。不依赖 O2 或本地 M2/M5/M6。       |
-| **W1b：回填与快照校验** | 从 authority 记录有界重建恢复元数据，版本化恢复 manifest，以及外部 snapshot/restore 回执校验。 | 依赖 W1a、可信快照来源及私有资源闭包。仅当所选 profile 的已接纳结果使用 O2 时依赖它。不构建通用备份引擎。                                   |
-| **W1c：可验证迁移**     | 同一逻辑存储在同主机上的离线迁移、持久迁移回执与新 Runtime 安装。                              | 依赖 W1a/W1b、全部旧写入者已停止的证据，以及所有受影响 Session/profile 都支持迁移的清单。首版仅支持使用相对路径的 Hosted 文件工具 Session。 |
+| 切片                    | 交付内容                                                                                       | 依赖与退出条件                                                                                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **W1a：原位置恢复**     | 持久本地存储登记、运行时准入检查、clean-load 校验和运维诊断；显式纳管现有已绑定部署。          | 基于 W0e/G2，启用远端 publication 时复用 O2 校验。证明同 root 恢复，以及跨进程重启后拒绝替换过的 root。公开恢复在产品路由存在前继续受门禁限制。本地 M2/M5/M6 保持独立。 |
+| **W1b：回填与快照校验** | 从 authority 记录有界重建恢复元数据，版本化恢复 manifest，以及外部 snapshot/restore 回执校验。 | 依赖 W1a、可信快照来源及私有资源闭包。仅当所选 profile 的已接纳结果使用 O2 时依赖它。不构建通用备份引擎。                                                               |
+| **W1c：可验证迁移**     | 同一逻辑存储在同主机上的离线迁移、持久迁移回执与新 Runtime 安装。                              | 依赖 W1a/W1b、全部旧写入者已停止的证据，以及所有受影响 Session/profile 都支持迁移的清单。首版仅支持使用相对路径的 Hosted 文件工具 Session。                             |
 
 W1b/W1c 不代表 G1/G3 完成。调研时仍 open 的[运维恢复 #12977](https://github.com/QwenLM/qwen-code/pull/12977)在证明后释放旧 holder，但保留失败 Turn 的阻塞状态。W1 应复用该边界，不另造强制解锁路径。
 
@@ -62,9 +62,13 @@ W1b/W1c 不代表 G1/G3 完成。调研时仍 open 的[运维恢复 #12977](http
 
 没有登记意味着 `unverified`，不能自动登记启动时碰巧找到的目录。启用 W1 的执行路径必须拒绝它。现有部署只能在维护期间登记：运维人员检查原存储、停止准入并核对全部旧写入者后，显式纳管。这建立了有记录的 W1 起点，不反向证明全部历史字节都曾被捕获。
 
-首版 Linux 身份格式保存持久 host 身份、规范 root、明确的数值 device/inode，以及随机分配的 storage registration ID。登记 ID 同时写在 root 下由管理员创建的版本化标记 `.qwen-managed-storage.json` 中；SQL 与标记必须一致。登记只校验已存在的 root，绝不创建替代项目目录。标记使用排他/no-follow 创建和持久发布；登记中断后保持 unverified，按原回执恢复。已有冲突标记时拒绝，不能覆盖。
+V23 保存规范 root、应用专属 host 身份、明确的数值 device/inode、独立的 `mount_birth_time`，以及随机分配的 storage registration ID。Marker v2 `.qwen-managed-storage.json` 保存同一身份，其中 `birthTime` 为保留纳秒精度的规范 `Instant` 字符串；SQL 与 marker 必须一致。Host 身份使用 HMAC-SHA256，以去除首尾空白的 `/etc/machine-id` UTF-8 字节为 key，以 `Qwen-Code/verified-workspace/v2` 为输入；marker 不暴露原始 machine ID。登记只校验已存在的 root，绝不创建替代项目目录。标记使用排他/no-follow 创建和持久发布；登记中断后保持 unverified，按原回执恢复。已有冲突标记时拒绝，不能覆盖。
+
+在同一次 no-follow 属性读取中取得 `unix:creationTime`、`lastModifiedTime`、`dev` 和 `ino`。OpenJDK 21 在 birth time 不可用时会返回 mtime 或 epoch，因此 creation time 不晚于 epoch 或等于 mtime 都拒绝。真实 birth time 恰好等于 mtime 也保守拒绝：离线完成项目布局或更新 root 的 mtime 后再重试登记。Mtime 只用于识别歧义，绝不作为身份持久化；普通 mtime 变化不能使未变的 birth time 失效。仅 device/inode 不够，因为删除目录后从备份解压可能复用 inode 号。
 
 标记是 host/文件系统身份的补充，不是授权凭证或文件完整性证据。复制标记不能授权另一个 root。登记完成后标记丢失会阻断恢复；W1a 不提供修复或重新纳管命令，也不自动重建。这是可信负载下的连续性检查，不防御同 UID 恶意进程、文件系统回滚或管理员有意复制身份。device 身份变化、不支持的身份提供方式或重启后的比较不明确时，保持阻塞，等待维护校验。不能把 `fileKey.toString()` 持久化后当成可移植身份格式。
+
+Storage root 必须位于所有 Git worktree 之外，Session 工作目录放在其子目录中。Marker 是管理员维护文件，不能通过模型工具读写，也不能纳入 Git cleanup/stash 操作。这种布局减少误删除，不限制工具通过主机权限访问其他路径。缺失 marker 的修复需另行设计，包含精确 revision/回执和 holder 校验。
 
 只有完整且有效的登记才能将 `unverified` 改为 `ready`。`fenced` 关闭准入，直至同一维护操作完成，或明确恢复仍已验证的原映射。进入 `fenced` 时比较 `ready` 状态与预期 revision，并保存 operation ID。续办、切换映射和解围都同时比较该 operation ID 与 revision；第二个操作不能仅凭 revision 相同就接管。解围递增 revision 并保留已完成操作回执，以便丢失 ACK 后重试，且旧 fence 不能重新开启维护。不存在超时自动解锁。`mountRevision` 为已验证物理 placement 及维护转换的证据编号，不替代 Workspace generation、context revision 或 Runtime generation。
 
@@ -84,15 +88,17 @@ W1a 维护先关闭新工作入口，结算或取消原执行，证明全部写�
 
 旧二进制不会读取新增 guard 字段。W1 变更启用前，所有能够控制该 storage 的进程都必须停止/排空并统一升级。维护证据还必须覆盖普通工具和其他能够写入目录的外部服务；升级 Java 并不能隔离它们。首版使用离线部署，避免再建在线版本协调系统。完成 schema migration 不等于完成安全升级。回滚至旧二进制时，服务和入口必须保持停止，直到显式对账完成。持久 fence 或关闭新开关无法约束不读取新增列的旧二进制。
 
-物理 mount guard 使用默认关闭的 Broker 属性 `verified-workspace-recovery-enabled`。Hosted Workspace 冷加载校验始终启用，不受该属性控制；省略 tool profile 时读取保存的 definition，显式提供时必须与保存值一致。保存的审批设置继续固定。私有入口 `WorkspaceStorageRegistrationMain` 支持 `register`、`inspect`、`fence` 和 `restore-original`；修改操作必须显式声明离线维护，并使用精确的 operation ID。[服务端 README](../../packages/sdk-java/managed-agent-server/README.md)给出了调用方式和升级顺序。该声明本身不能停止外部写入者。登记和执行需要受信任的 Linux 身份提供者；本地 H2 测试使用合成提供者，不能代替 Linux 验收。
+物理 mount guard 使用默认关闭的 Broker 属性 `verified-workspace-recovery-enabled`。Hosted Workspace 冷加载校验始终启用，不受该属性控制；省略 tool profile 或 Shell `captureBytes` 时采用保存的 definition，显式提供的值必须精确匹配。保存的审批设置继续固定。私有入口 `WorkspaceStorageRegistrationMain` 支持 `register`、`inspect`、`fence` 和 `restore-original`；修改操作必须显式声明离线维护，并使用精确的 operation ID。[服务端 README](../../packages/sdk-java/managed-agent-server/README.md)给出了调用方式和升级顺序。该声明本身不能停止外部写入者。登记和执行需要受信任的 Linux 身份提供者；本地 H2 测试使用合成提供者，不能代替 Linux 验收。
 
 ### 5.4 已确认的 W1a 恢复契约（2026-09-30）
 
-Owner 已选择内部 Java → Hosted → Runtime 恢复、进程重启，以及严格的历史完整性。公开恢复和后续 Turn 准入作为独立接线。Passive Hosted attachment 保留 Session、Registry、grants 和 profile 授权，只跳过物理 mount 校验；原执行清理继续通过保存的 Broker 身份处理。仅接纳已经绑定、Turn 已结算的 Session；W0e/G2 继续负责精确原执行的对账。打开 Session 不清除物理 holder。
+Owner 已选择内部 Java → Hosted → Runtime 恢复、进程重启，以及严格的历史完整性。公开恢复和后续 Turn 准入作为独立接线。Passive Hosted attachment 保留 Session、Registry、grants 和 profile 授权，只跳过物理 mount 校验；原执行清理继续通过保存的 Broker 身份处理。保留 O2 对原 `results_ready`、consumed-final 和 `not_started` 回执的受控恢复，不能将 unknown/abandoned 执行当作新工作。W0e/G2 继续负责精确原执行的对账。打开 Session 不清除物理 holder。
 
-取得独占 writer 并安装 activation 后，捕获 `S = restoreBundle.throughSequence`。未结算输入、全部保留的事件/资源根和消息投影统一限定在 S。为现有 record sink/projection 增加实际使用的可选 `throughSequence` 参数；不传参的调用保留原行为。校验期间 activation 续租可推进传输 cursor，因此不要求原始日志尾部完全不变。发布 attachment 前重新验证 writer 所有权。失败加载可能追加租约管理记录，但不能接纳业务输入或运行模型/工具副作用；只关闭本次取得的租约。
+取得独占 writer 并安装 activation 后，捕获 `S = restoreBundle.throughSequence`。发起新模型工作或 Broker prepare/execute 之前，在同一 S 校验全部保留的事件/资源根和消息投影。Record sink/projection 使用可选的 `throughSequence`，不传参的调用保留原行为。保留原回执的受控恢复，包括为不完整回执 ACK blocked 或修复历史后仍拒绝加载。因此拒绝加载不意味着零 journal 写入或零 ACK。恢复扫描和投影使用已验证的 cut，只按原身份写入已校验的原结果，不 prepare 或 execute 替代工具。完成本次 history/checkpoint 修复后，按最新授权及 continuation 状态判定，在 `executeHostedTurn` 和发布 attachment 之前最终调用 `assertWritable`。这些已知恢复写入不要求再次完整扫描历史。Activation 续租可以推进传输 cursor，不要求原始日志尾部完全不变。拒绝时不接纳新业务输入，只关闭本次取得的租约。
 
 验证 header 引用、事件 schema 声明的引用、checkpoint typed refs 和实际消息投影。继续支持内建 session-metadata 标题记录及其 previous-record 引用，扩展 domain 仍拒绝。所有承诺完整的 Shell manifest、page、segment、seal、长度及完整流摘要都必须有效；空流也需要 seal。按资源 ID 去重，同时拒绝引用元数据冲突。输出分块读取，不降级为仅检查最新 checkpoint。旧已结算 Turn 的资源缺失同样拒绝冷加载。不支持的扩展 domain、Legacy file-history 备份和外部附件形态直接拒绝，不能将顶层读取冒充闭包验证。W1a 不构建通用 JSON 引用遍历或快照引擎。
+
+对于 O2 持有的输出，受 Session writer 授权的窄验证入口按原 outcome 引用定位唯一 REFERENCED publication，核对执行 ID 和 journal 回执序列，复用 `validateFinished` 校验远端 pages、全部 segments 和 SQL seals。顶层 publication receipt 可读并不足够。不完整回执只有在该校验成功后才允许修复原历史或 ACK blocked，加载仍拒绝。已证明 `not_started` 且 capture 为 null 的回执无需 publication catalog。其他私有引用仍按固定 committed cut 校验。该整合仍需新版本验收结果。
 
 登记先持久化准备好的身份，再持久发布 marker，最后提交 READY。同一操作的并发重试必须收敛，包括最终提交成功但 ACK 丢失。已完成的登记/restore 重试重新验证当前身份和 marker，不再次推进 revision。Inspect 即使在 FENCED 状态也报告状态、revision、操作回执、holder 存在性和物理校验。根 marker 证明连续身份，不证明文件内容完整。
 
@@ -100,7 +106,7 @@ Owner 已选择内部 Java → Hosted → Runtime 恢复、进程重启，以及
 
 1. 读取保存的 Session 和原创建回执，重新检查当前访问权、精确的 Registry generation/storage、固定 config/policy 引用及启用的 profile。不能用当前默认值填补缺失字段。
 2. 校验已登记存储身份与原相对 cwd。目录缺失、别名、符号链接替换、身份变化或 fenced storage 都保持执行关闭。不能 `mkdir`、clone 或回退到 `.`。
-3. 获取现有私有 Session writer lease，恢复权威日志和所需资源闭包，核对原 definition，复用读取器严格的损坏拒绝行为。基线中的 load 检查 definition/checkpoint，但消息投影是惰性的，直到后续输入接纳后才读取。W1a 在报告 load 成功或接纳下一输入前，在同一 committed cut 校验受支持 profile 的 typed message/checkpoint/result 闭包，并拒绝不支持的 domain；后续惰性读取失败不能算恢复成功。未结算输入继续返回 `hosted_turn_recovery_required`，不能作为新工作重放。拒绝时只释放本次新获取的 writer lease，不释放物理 holder。
+3. 获取现有私有 Session writer lease，恢复权威日志和所需资源闭包，核对保存的 definition，包括 tool profile 和 `captureBytes`。新模型工作或 Broker prepare/execute 之前，在同一 committed cut 校验 typed message/checkpoint/result 闭包。保留 O2 基于该 cut 对原回执的受控恢复；修复后按最新授权/continuation 状态判定，并在模型工作或发布 attachment 前复查 writer 所有权。不可恢复的未结算输入返回 `hosted_turn_recovery_required`，绝不作为新工作重放。拒绝时只释放本次新获取的 writer lease，不释放物理 holder。
 4. 在考虑新 generation 前，先对账原 Runtime binding。G2 可以恢复有确定证据的原结果，W0e 可以证明丢失和物理释放。未知或 abandoned 结果不能让中断的 Hosted Turn 变得可续跑。
 5. 对后续已准入的工具 Turn，解析同一 storage/cwd，获取精确 storage holder，安装原逻辑 context 和支持的冻结 profile。按当前 Runtime 校验 attestation、context 与 activation 回执；旧 incarnation 的回执不能激活新的 Runtime。
 6. 准入副作用之前再次检查物理 guard 和当前权限。只报告已证明的事实：私有历史已打开、存储已校验，以及独立的 Runtime 已激活。逻辑 binding ready 与物理 ready 继续区分。
@@ -169,38 +175,38 @@ Java 请求路径不递归复制存储，SQL 元数据/SSE 不携带文件字节
 
 ## 9. 组件、所有权与兼容性
 
-| 组件 / 消费者                                                                  | 所需变更或保留边界                                                                                |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `ManagedWorkspaceRegistry`、`ManagedAgentStore`                                | 复用原 binding 与当前授权；有界回填不能修改旧创建回执。                                           |
-| `WorkspaceExecutionStore`                                                      | 增加 storage 登记/guard，在 claim/assertion 路径检查，精确 holder 释放时保留它。                  |
-| `WorkspaceRuntimeResolver`、`WorkspaceRuntimeTransport`                        | 比较配置与持久映射、root 身份；guard revision 仅用于维护 CAS。保留 cwd 检查和回执校验。           |
-| `EmbeddedRuntimeBroker`、`WorkspaceRuntimeProvisioner`、`RuntimeBrokerService` | 对新工作施加门禁，保留原身份观测/清理，维护时枚举所有相关已保存 placement；复用 W0e/G2。          |
-| `QwenHostedHarnessConnector`、`HarnessCoordinator`                             | 在 attachment 和缓存复用时校验；接通 clean-load，不意外扩大 G0 公开 Turn 范围。                   |
-| `hosted-harness-session.ts`、Managed authority/resource readers                | 保留严格私有恢复及未结算输入拒绝；若需要新增明确的 binding/profile 证据，通过版本化契约交付。     |
-| Worker context/activation                                                      | 在新 Runtime 重新安装和验证原逻辑 context；W1a 不静默增加 boot-envelope 字段。                    |
-| File-history readers / snapshot adapter                                        | W1b 校验元数据和字节；W1c 只支持逐项审计过的类型化路径映射。                                      |
-| 公开 API / WebShell                                                            | 保留读权限与现有失败语义；不开放 cwd 变更、storage 路径、强制恢复或提前宣告 `workspace_context`。 |
+| 组件 / 消费者                                                                  | 所需变更或保留边界                                                                                               |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `ManagedWorkspaceRegistry`、`ManagedAgentStore`                                | 复用原 binding 与当前授权；有界回填不能修改旧创建回执。                                                          |
+| `WorkspaceExecutionStore`                                                      | 增加 storage 登记/guard，在 claim/assertion 路径检查，精确 holder 释放时保留它。                                 |
+| `WorkspaceRuntimeResolver`、`WorkspaceRuntimeTransport`                        | 比较配置与持久映射、root 身份；guard revision 仅用于维护 CAS。保留 cwd 检查和回执校验。                          |
+| `EmbeddedRuntimeBroker`、`WorkspaceRuntimeProvisioner`、`RuntimeBrokerService` | 对新工作施加门禁，保留原身份观测/清理，维护时枚举所有相关已保存 placement；复用 W0e/G2。                         |
+| `QwenHostedHarnessConnector`、`HarnessCoordinator`                             | 在 attachment 和缓存复用时校验；接通 clean-load，不意外扩大 G0 公开 Turn 范围。                                  |
+| `hosted-harness-session.ts`、Managed authority/resource readers                | 原回执恢复前验证保留的私有资源及 O2 输出闭包；拒绝不可恢复的未结算输入，并在 continuation 前复查 writer 所有权。 |
+| Worker context/activation                                                      | 在新 Runtime 重新安装和验证原逻辑 context；W1a 不静默增加 boot-envelope 字段。                                   |
+| File-history readers / snapshot adapter                                        | W1b 校验元数据和字节；W1c 只支持逐项审计过的类型化路径映射。                                                     |
+| 公开 API / WebShell                                                            | 保留读权限与现有失败语义；不开放 cwd 变更、storage 路径、强制恢复或提前宣告 `workspace_context`。                |
 
 W1a 首版实现包含一个增量 migration、登记/guard 及其调用者、小型私有维护入口、定向测试和本设计。后续 PR 不应将 W1b snapshot adapter 或 W1c 迁移状态机并入其中。整合基线已包含 #12977；保留其可审计原 owner 清理，并将 storage 登记与部分 Shell 恢复分开。
 
-V21 在整合基线之上增量添加；#12894 独立开发期间，后续 rebase 继续核对 migration 编号。保留现有封闭 ContextBinding 和 worker 协议，整个部署升级并完成登记前不启用 W1。普通本地 Managed 引擎仍按独立排期延期。
+V23 接在 main 的 O2 migrations V20–V22 之后，在 mount 登记中增加 `mount_birth_time`。保留现有封闭 ContextBinding 和 worker 协议，整个部署升级并完成登记前不启用 W1。预合并实验的 W1 V21 数据库和 marker v1 不能直接升级至 V23/v2。不能通过 Flyway `repair`、`outOfOrder` 或手动改 history 绕过不匹配。有保留数据的部署需要备份及独立的离线迁移设计；只有可丢弃测试部署可以重建。普通本地 Managed 引擎仍按独立排期延期。
 
 ## 10. 验证与验收
 
 详细工作计划位于 `.qwen/e2e-tests/managed-workspace-w1-recovery.md`（被忽略的开发产物）。随本设计提交的验收要求如下：
 
-| 门禁               | 必须观察到的结果                                                                                                                                                                                                                                    |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A1：干净重启       | 保存一个已绑定、Turn 已完成的 Session；重启 Java/Harness，只删除其可丢弃 home。同一 storage/cwd/config 和私有模型历史能够恢复，没有重复物理副作用。                                                                                                 |
-| A2：持久身份       | 服务停止时替换原路径上的 root。重启后 W1 拒绝它；未变化的已登记 root 成功。标记缺失/冲突和不支持的身份也应拒绝。                                                                                                                                    |
-| A3：权限           | 默认值改变不会重新绑定。Registry generation/storage 不符、移除、撤权、cwd 缺失或配置不符时阻断新工作，同时保留相应授权的历史访问和基于原 owner 的清理。                                                                                             |
-| A4：并发           | 两个 Broker 进程的 claim/execute 与 storage fence 竞争，包含已经通过早期检查的请求。Claim 先成功则 fence 拒绝；fence 先成功则 claim 拒绝，包括已通过早期检查的请求。过期 release/cleanup 不能清除较新的 holder 或 guard。Fence 本身不证明在线静默。 |
-| A5：中断 Turn      | 物理 storage 可复用之后，unsettled/unknown/abandoned 执行仍保持阻塞。只查询原 ID；拒绝冷加载时断言模型调用和替代执行均为零。                                                                                                                        |
-| B1：回填           | 在每批处理边界崩溃重试，派生数据保持相同身份/digest、内存有界且无重复引用；无绑定或证据不足的 Session 不升级。                                                                                                                                      |
-| B2：快照闭包       | 检出缺失/损坏的备份、checkpoint、message/result 对象、变化文件、越界链接及来源水位不符。任何不兼容 Session 都阻止整个 storage 激活；晚到的 Session 创建和无工具 journal 提交不能越过维护边界。不能报告完整恢复，也不能覆盖活动共享文件树。          |
-| C1：迁移           | 两个 Workspace/子目录以及共享 storage 的多个 Session 保留逻辑 binding。新副作用只写入验证后的目标路径，旧回调仍绑定旧 placement。                                                                                                                   |
-| C2：迁移中断       | 在 fence 后、字节校验后、映射 CAS 后和最终 ACK 前杀掉维护进程。同一 operation 重试；旧请求不能解开或切换更高 revision。                                                                                                                             |
-| C3：不支持的消费者 | 存在不可映射绝对路径资产的 Session/profile 时，拒绝整个 storage 迁移。成功的受支持迁移也保持历史消息和结果字节完全不变。                                                                                                                            |
+| 门禁               | 必须观察到的结果                                                                                                                                                                                                                                                                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1：干净重启       | 保存一个已绑定、Turn 已完成的 Session；重启 Java/Harness，只删除其可丢弃 home。同一 storage/cwd/config 和私有模型历史能够恢复，没有重复物理副作用。                                                                                                                                                                                                  |
+| A2：持久身份       | 停服后替换原路径上的 root，包含删除后从备份解压、复制 marker 且实际复用 inode 的情形。Birth time 变化必须拒绝；身份未变时重启及普通 mtime 变化仍成功。缺失/冲突/v1 marker、缺失 birth time、epoch 和 birth==mtime 均拒绝。                                                                                                                           |
+| A3：权限           | 默认值改变不会重新绑定。Registry generation/storage 不符、移除、撤权、cwd 缺失或配置不符时阻断新工作，同时保留相应授权的历史访问和基于原 owner 的清理。                                                                                                                                                                                              |
+| A4：并发           | 两个 Broker 进程的 claim/execute 与 storage fence 竞争，包含已经通过早期检查的请求。Claim 先成功则 fence 拒绝；fence 先成功则 claim 拒绝，包括已通过早期检查的请求。过期 release/cleanup 不能清除较新的 holder 或 guard。Fence 本身不证明在线静默。                                                                                                  |
+| A5：中断 Turn      | Storage 可复用后 unknown/abandoned 执行仍阻塞。保留 O2 原 ID 的 results_ready/consumed-final/not_started 恢复及保存的 captureBytes/profile 匹配。私有或远端 pages/segments/seals 缺失或损坏时不能发起新模型/prepare/execute；不完整回执可在拒绝前 ACK blocked 或修复历史。恢复使用已校验 cut，之后按最新授权/continuation 状态判定并最终复查所有权。 |
+| B1：回填           | 在每批处理边界崩溃重试，派生数据保持相同身份/digest、内存有界且无重复引用；无绑定或证据不足的 Session 不升级。                                                                                                                                                                                                                                       |
+| B2：快照闭包       | 检出缺失/损坏的备份、checkpoint、message/result 对象、变化文件、越界链接及来源水位不符。任何不兼容 Session 都阻止整个 storage 激活；晚到的 Session 创建和无工具 journal 提交不能越过维护边界。不能报告完整恢复，也不能覆盖活动共享文件树。                                                                                                           |
+| C1：迁移           | 两个 Workspace/子目录以及共享 storage 的多个 Session 保留逻辑 binding。新副作用只写入验证后的目标路径，旧回调仍绑定旧 placement。                                                                                                                                                                                                                    |
+| C2：迁移中断       | 在 fence 后、字节校验后、映射 CAS 后和最终 ACK 前杀掉维护进程。同一 operation 重试；旧请求不能解开或切换更高 revision。                                                                                                                                                                                                                              |
+| C3：不支持的消费者 | 存在不可映射绝对路径资产的 Session/profile 时，拒绝整个 storage 迁移。成功的受支持迁移也保持历史消息和结果字节完全不变。                                                                                                                                                                                                                             |
 
 使用真实打包的 Harness/worker、生产 Broker/SQL 接线和确定性本地模型。H2 用于定向契约；双进程竞争和持久化门禁还必须在 MySQL 8 上运行。Linux 进程重启是必需验收，合成身份检查不能替代它。整机重启验收不属于 W1a，不重启共享工作站。公开 G0/后续 Turn E2E 在路由落地前继续是独立门禁。
 
@@ -216,8 +222,10 @@ W1a 的可信 Linux/原位置、仅内部、进程重启、离线登记和严格
 
 ## 12. 实现证据
 
-已检查 Java 持久化/租约/placement 和 TypeScript 恢复/context/file history，并对两侧分别进行了独立代码探索。通过 `gh` 重新核对了 #12955、#12977、#12894 的 PR 边界；前两项已在实现整合基线中合入。全局 CLI 报告版本 `0.24.6`。
+已检查 Java 持久化/租约/placement 和 TypeScript 恢复/context/file history，并对两侧分别进行了独立探索。当前整合基线为 main `3b18cfe5e`，包含 #12955、#12977 和 O2 #12894。全局 CLI 基线为 `0.24.6`，没有 W1 维护入口，因此不能直接通过全局 CLI dry-run。
 
-本工作树中已实现 W1a 候选。本地 H2 测试覆盖持久登记、同操作并发登记/fence、真实登记提交后的 ACK 丢失、替换 root 拒绝、已完成 restore 的重新验证及旧 fence 拒绝。29 个定向 Java 测试、29 个 Hosted 测试和 62 个投影/sink 测试已在实现整合基线上通过，全仓 build、typecheck、bundle、ESLint 和 Java Checkstyle 也已通过。Java 测试还覆盖缓存新工作重新授权，以及保留 grants、仅跳过物理 mount 验证的 passive attachment。Hosted 测试验证合法 activation 续租期间固定恢复水位、资源元数据冲突、不支持的 domain、writer 丢失、重命名后文件/Shell Session 的兼容性及新模型工作前拒绝缺失的历史资源。
+此前本地验证已通过定向 Java、Hosted、projection/sink 测试，以及 build、typecheck、bundle、ESLint 和 Java Checkstyle，覆盖登记/重试/fence、缓存新工作授权、passive attachment、固定 cut 校验、重命名后的文件/Shell Session 历史及保留资源缺失。打包 macOS/H2 E2E 覆盖 stderr seal 修复、Harness 重启、下一 Turn、100 MiB Shell 输出和七个 Shell producer 退出；该环境关闭物理 guard，单独不构成 Linux 验收。
 
-打包后的 macOS/H2 E2E 也已通过真实 Java SDK 的无 tool-profile 加载。用例篡改实际持久化的空 stderr seal，观察到冷加载拒绝且模型/工具执行不增加；修复 seal 后重启 Harness 进程、取得新 boot ID，再加载原 Session 并执行下一 Turn。验证使用生产 Broker/worker 接线，并覆盖 100 MiB Shell 输出和七个 Shell producer 退出。macOS 上关闭物理 mount 验证，因此这项结果不成立 Linux/MySQL 验收。仅 Linux 运行的 `HostedWorkspaceStorageGuardMySqlIT` 新增独立维护进程的登记/restore 和双客户端维护测试，已由现有 MySQL 8 Hosted CI profile 选中，但未在本机执行。新增的 `HostedWorkspaceConcurrencyIT` 通过生产内嵌 Broker 接线启动两个独立 JVM，分别运行真实 Node worker 并共享 SQL 存储。测试屏障设在早期授权之后和 claim 提交之后，固定两种竞争顺序。派发屏障验证持有者存在时 fence 被拒，再完成实际批准的文件写入。普通 release 和有效的 LOST cleanup 在另一个 Broker 取得已恢复的新 revision 后重试，完整存储行必须保持不变。Linux 使用生产物理身份及精确登记 worker 的停止证明；macOS/H2 使用合成身份且不执行 Linux LOST cleanup 分支。现有 Hosted MySQL 选择器包含这项门禁。在提交 `04048333152fd0544dd53cd4b0eedd413fd36c68` 上，[Linux/MySQL Hosted CI 门禁](https://github.com/QwenLM/qwen-code/actions/runs/36685563589/job/109790495390)已通过两项 storage 门禁及全部 15 个 Hosted 集成用例，包含物理身份和旧 LOST 清理。独立反向检查在原代码上通过，仅移除锁内 claim 校验后失败。后续整合提交仍必须通过各自的检查。公开 Workspace 恢复/后续 Turn 准入仍需产品路由接线。全局 CLI 没有 W1 维护入口，不能直接 dry-run；测试计划记录了这一基线及剩余环境门禁。
+[维护者针对 `7c54aa78` 的真实环境报告](https://github.com/QwenLM/qwen-code/pull/13088#issuecomment-5910509307)提供了 Linux/ext4 与 MySQL 8.4 证据，包括进程重启、专用主机重启/断电检查、两个真实 Broker JVM/worker、两种 claim/fence 顺序、派发前 fence 拒绝，以及旧 release/LOST cleanup 保持完整 storage 行不变。该精确 head 的选择集通过 209 个单元测试、15 个 Hosted 集成测试和 44 个故障门禁；只移除锁内 claim 校验的反向检查连续失败两次。这些结果证明该 head，不能代替更新候选的验证。
+
+同一报告复现了删除目录后从备份恢复并复用 inode，以及普通 Git 清理导致 marker 丢失，分别促成本轮 birth time 和 storage 布局要求。V23/marker v2 及 O2 整合后的 load 路径仍需新的定向测试、Linux/MySQL 门禁及精确 head 验证，尤其要重跑实际 inode 复用拒绝、远端输出闭包失败时零新模型/prepare/execute，以及原回执的成功恢复。公开 Workspace 恢复/后续 Turn 准入保持独立；被忽略的测试计划记录剩余门禁。

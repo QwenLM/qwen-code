@@ -432,12 +432,18 @@ for the exact boundary.
 
 ### Verified original-mount recovery (W1a)
 
-W1a's physical mount guard is opt-in for process restart in a trusted, single-host Linux `local-process` deployment. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
-V21 adds a persistent storage registration and mount fence. Leave
+W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
+V23 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
 upgrading every Broker and Harness instance. An unregistered mount is refused
 once the option is enabled; it is never registered from the directory found at
 startup.
+
+Marker v2 stores birth time as a canonical `Instant` string preserving nanoseconds. The guard reads creation time, mtime, device and inode in one `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID, keyed by the trimmed machine-id UTF-8 bytes with `Qwen-Code/verified-workspace/v2` as input, rather than the raw machine ID.
+
+Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
+
+Prerelease W1 V21 databases and marker v1 cannot be directly upgraded to V23/v2. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
 
 Stop all processes and external jobs that can write the storage, account for
 old Runtime holders and verify the original root before registration. Apply
@@ -450,6 +456,15 @@ crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 mvn -q -DskipTests compile exec:java \
   -Dexec.mainClass=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
+```
+
+The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
+
+```bash
+java -cp /path/to/app.jar \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  org.springframework.boot.loader.launch.PropertiesLauncher \
+  register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
 ```
 
 `inspect <tenant> <storage> <canonical-root>` is read-only. The same entry also
@@ -466,13 +481,13 @@ After registration, enable
 `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on the
 whole upgraded deployment. On each new attachment, model submission, Runtime
 claim and execute, the server compares the configured canonical root against
-the SQL registration, Linux host/device/inode identity and the root marker.
+the SQL registration, Linux host/device/inode/birth-time identity and the root marker.
 A missing or conflicting marker, replacement root, missing saved cwd or fenced
 storage blocks new work; original execution status/cancel and authorized
 history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
-Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. It reads the saved tool profile when Java omits it; an explicitly supplied profile must match the saved one. Saved approval settings remain pinned. It checks retained history and resources through one committed sequence, verifies complete Shell output including empty-stream seals, and rechecks writer ownership before publishing an attachment. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
+Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
 Workspace resume/next-turn admission still requires product-route integration; this
 internal guard is not a public resume capability yet.
 

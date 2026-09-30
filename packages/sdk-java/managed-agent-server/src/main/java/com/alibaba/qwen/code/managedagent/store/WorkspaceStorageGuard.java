@@ -11,7 +11,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -20,6 +21,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -147,10 +150,10 @@ public class WorkspaceStorageGuard {
                 String registrationId = UUID.randomUUID().toString();
                 jdbc.update("UPDATE managed_workspace_execution_lease SET tenant_id = ?, storage_id = ?,"
                         + " mount_operation_id = ?, mount_root = ?, mount_host_id = ?,"
-                        + " mount_device = ?, mount_inode = ?, mount_registration_id = ?"
+                        + " mount_device = ?, mount_inode = ?, mount_birth_time = ?, mount_registration_id = ?"
                         + " WHERE storage_key = ? AND mount_state = 'UNVERIFIED'",
                         tenantId, storageId, operationId, identity.root(), identity.hostId(),
-                        identity.device(), identity.inode(), registrationId, key);
+                        identity.device(), identity.inode(), identity.birthTime(), registrationId, key);
                 return row(key, true);
             }
             if (!operationId.equals(row.operationId())) {
@@ -292,7 +295,7 @@ public class WorkspaceStorageGuard {
         List<Registration> rows = jdbc.query("SELECT tenant_id, storage_id, holder_key,"
                 + " binding_id, runtime_generation, runtime_session_id,"
                 + " mount_revision, mount_state, mount_operation_id, mount_root,"
-                + " mount_host_id, mount_device, mount_inode, mount_registration_id,"
+                + " mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
                 + " mount_completed_operation_id"
                 + " FROM managed_workspace_execution_lease WHERE storage_key = ?"
                 + (lock ? " FOR UPDATE" : ""), (result, index) -> new Registration(
@@ -303,6 +306,7 @@ public class WorkspaceStorageGuard {
                         result.getString("mount_state"), result.getString("mount_operation_id"),
                         result.getString("mount_root"), result.getString("mount_host_id"),
                         result.getString("mount_device"), result.getString("mount_inode"),
+                        result.getString("mount_birth_time"),
                         result.getString("mount_registration_id"),
                         result.getString("mount_completed_operation_id")), key);
         return rows.size() == 1 ? rows.getFirst() : null;
@@ -328,21 +332,38 @@ public class WorkspaceStorageGuard {
         if (!"Linux".equals(System.getProperty("os.name"))) {
             throw new IOException("Unsupported mount identity provider");
         }
-        BasicFileAttributes attributes = Files.readAttributes(root, BasicFileAttributes.class,
-                LinkOption.NOFOLLOW_LINKS);
-        if (!attributes.isDirectory() || !root.isAbsolute()
+        Map<String, Object> attributes = Files.readAttributes(root,
+                "unix:isDirectory,dev,ino,creationTime,lastModifiedTime", LinkOption.NOFOLLOW_LINKS);
+        if (!Boolean.TRUE.equals(attributes.get("isDirectory")) || !root.isAbsolute()
                 || !root.equals(root.toRealPath())) {
             throw new IOException("Workspace root is not canonical");
         }
-        String host = Files.readString(Path.of("/etc/machine-id")).strip();
-        if (host.isEmpty() || host.length() > 256) {
+        String birthTime = verifiedBirthTime((FileTime) attributes.get("creationTime"),
+                (FileTime) attributes.get("lastModifiedTime"));
+        String machineId = Files.readString(Path.of("/etc/machine-id")).strip();
+        if (machineId.isEmpty() || machineId.length() > 256) {
             throw new IOException("Host identity is unavailable");
         }
-        String device = Long.toUnsignedString(((Number) Files.getAttribute(root,
-                "unix:dev", LinkOption.NOFOLLOW_LINKS)).longValue());
-        String inode = Long.toUnsignedString(((Number) Files.getAttribute(root,
-                "unix:ino", LinkOption.NOFOLLOW_LINKS)).longValue());
-        return new Identity(root.toString(), host, device, inode);
+        String host;
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(machineId.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            host = HexFormat.of().formatHex(mac.doFinal(
+                    "Qwen-Code/verified-workspace/v2".getBytes(StandardCharsets.UTF_8)));
+        } catch (GeneralSecurityException error) {
+            throw new IOException("Host identity is unavailable", error);
+        }
+        String device = Long.toUnsignedString(((Number) attributes.get("dev")).longValue());
+        String inode = Long.toUnsignedString(((Number) attributes.get("ino")).longValue());
+        return new Identity(root.toString(), host, device, inode, birthTime);
+    }
+
+    static String verifiedBirthTime(FileTime creation, FileTime modified) throws IOException {
+        // OpenJDK 21 substitutes mtime or epoch when Linux does not provide birth time.
+        if (creation.compareTo(FileTime.fromMillis(0)) <= 0 || creation.equals(modified)) {
+            throw new IOException("Workspace birth time is unavailable or ambiguous");
+        }
+        return creation.toInstant().toString();
     }
 
     private static void requireMatching(Registration row, Identity identity,
@@ -350,14 +371,14 @@ public class WorkspaceStorageGuard {
         if (!tenantId.equals(row.tenantId()) || !storageId.equals(row.storageId())
                 || !identity.root().equals(row.root()) || !identity.hostId().equals(row.hostId())
                 || !identity.device().equals(row.device()) || !identity.inode().equals(row.inode())
-                || row.registrationId() == null) {
+                || !identity.birthTime().equals(row.birthTime()) || row.registrationId() == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     private Marker marker(Registration row) {
-        return new Marker(1, row.tenantId(), row.storageId(), row.root(), row.hostId(),
-                row.device(), row.inode(), row.registrationId());
+        return new Marker(2, row.tenantId(), row.storageId(), row.root(), row.hostId(),
+                row.device(), row.inode(), row.birthTime(), row.registrationId());
     }
 
     private Marker readMarker(Path root) {
@@ -437,7 +458,7 @@ public class WorkspaceStorageGuard {
         Identity read(Path root) throws IOException;
     }
 
-    record Identity(String root, String hostId, String device, String inode) {
+    record Identity(String root, String hostId, String device, String inode, String birthTime) {
     }
 
     private record Storage(String tenantId, String storageId) {
@@ -446,10 +467,10 @@ public class WorkspaceStorageGuard {
     private record Registration(String tenantId, String storageId, String holderKey,
             String bindingId, Long runtimeGeneration, String runtimeSessionId,
             long revision, String state, String operationId, String root, String hostId,
-            String device, String inode, String registrationId, String completedOperationId) {
+            String device, String inode, String birthTime, String registrationId, String completedOperationId) {
     }
 
     private record Marker(int version, String tenantId, String storageId, String root,
-            String hostId, String device, String inode, String registrationId) {
+            String hostId, String device, String inode, String birthTime, String registrationId) {
     }
 }

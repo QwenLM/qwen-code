@@ -32,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
@@ -77,6 +78,8 @@ class HostedWorkspaceConcurrencyIT {
         var jdbc = new JdbcTemplate(source);
         String tenant = "w1-race-" + UUID.randomUUID();
         Path root = Files.createDirectory(temporary.resolve("workspace"));
+        // Keep initialized-root mtime distinct from birth time without relying on sleeps.
+        Files.setLastModifiedTime(root, FileTime.fromMillis(1));
         Files.createDirectory(temporary.resolve("initial-state"));
         var properties = properties(tenant, root, temporary.resolve("initial-state"));
         try {
@@ -242,7 +245,7 @@ class HostedWorkspaceConcurrencyIT {
             var attributes = Files.readAttributes(root, BasicFileAttributes.class);
             if (!attributes.isDirectory() || !root.equals(root.toRealPath())) throw new java.io.IOException("Invalid root");
             return new WorkspaceStorageGuard.Identity(root.toString(), "synthetic-host", "synthetic-device",
-                    attributes.fileKey().toString());
+                    attributes.fileKey().toString(), attributes.creationTime().toInstant().toString());
         });
     }
 
