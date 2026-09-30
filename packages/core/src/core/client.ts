@@ -4630,6 +4630,23 @@ export class LlmClient {
           // deliberately left unconsumed: there is no send to deliver it on,
           // and consuming it here would drop it instead of deferring it.
           this.getChat().addHistory(createUserContent(requestToSend));
+          // requestToSend also carries the parts of an attached steer /
+          // teammate carrier (the CLI appends them after the tool results),
+          // and they were just written to history above. Settle the carrier
+          // as accepted, as the normal send path does after its push —
+          // otherwise the outer finally restores it and the same user input
+          // is delivered to the model a second time.
+          if (
+            attachedSteerInput &&
+            !this.settledSteerInputs.has(attachedSteerInput)
+          ) {
+            this.settledSteerInputs.add(attachedSteerInput);
+            try {
+              attachedSteerInput.accept();
+            } catch (error) {
+              debugLogger.warn(`Failed to settle steer input: ${error}`);
+            }
+          }
           for (const goalEvent of await finalizeInterruptedGoalTurn(
             undefined,
             'loop detected',

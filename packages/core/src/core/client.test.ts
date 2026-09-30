@@ -10372,6 +10372,10 @@ hello
     async function runFailingToolTurns(
       errorFor: (round: number) => string,
       maxRounds = 5,
+      steer?: {
+        round: number;
+        input: { parts: Part[]; accept: () => void; restore: () => void };
+      },
     ) {
       const promptId = 'prompt-repeated-tool-error';
       const allEvents: Array<{ type: string; value?: unknown }> = [];
@@ -10390,6 +10394,7 @@ hello
             };
           })(),
         );
+        const steerThisRound = steer && steer.round === round;
         const contents =
           round === 0
             ? [{ text: 'do the work' }]
@@ -10401,6 +10406,9 @@ hello
                     response: { error: errorFor(round - 1) },
                   },
                 },
+                // The CLI appends a drained mid-turn steer after the tool
+                // results and hands the carrier over as `steerInput`.
+                ...(steerThisRound ? steer.input.parts : []),
               ];
         const events = await fromAsync(
           client.sendMessageStream(
@@ -10412,6 +10420,7 @@ hello
                 round === 0
                   ? SendMessageType.UserQuery
                   : SendMessageType.ToolResult,
+              ...(steerThisRound ? { steerInput: steer.input } : {}),
             },
           ),
         );
@@ -10477,6 +10486,32 @@ hello
             typeof part.functionResponse?.response?.['error'] === 'string',
         ),
       ).toBe(true);
+    });
+
+    it('settles a steer carrier written by the halt as accepted, not restored (#10887)', async () => {
+      // The halt writes requestToSend — tool results AND the attached steer
+      // parts — to history. Restoring the carrier afterwards would re-queue
+      // the same user input and deliver it to the model a second time.
+      const accept = vi.fn();
+      const restore = vi.fn();
+      const events = await runFailingToolTurns(
+        () =>
+          'fatal: not a git repository (or any of the parent directories): .git',
+        5,
+        {
+          round: 3,
+          input: {
+            parts: [{ text: 'steer: summarize instead' }],
+            accept,
+            restore,
+          },
+        },
+      );
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
+        true,
+      );
+      expect(accept).toHaveBeenCalledTimes(1);
+      expect(restore).not.toHaveBeenCalled();
     });
 
     it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
