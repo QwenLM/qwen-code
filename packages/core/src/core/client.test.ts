@@ -3097,7 +3097,10 @@ describe('Gemini Client (client.ts)', () => {
               functionCall: {
                 id: 'call-bridged-agent',
                 name: ToolNames.TOOL_CALL,
-                args: { name: 'agent', args: { description: 'd', prompt: 'p' } },
+                args: {
+                  name: 'agent',
+                  args: { description: 'd', prompt: 'p' },
+                },
               },
             },
           ],
