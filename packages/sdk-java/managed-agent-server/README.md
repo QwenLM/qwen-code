@@ -60,8 +60,8 @@ Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in initial Workspace
-file Turn described in the G0 section below.
+process. It supports durable no-tool Sessions and the opt-in Workspace file
+Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -304,8 +304,10 @@ creation with input, including replays, while empty bound creation remains
 available. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Later submit/cancel/lifecycle/cwd operations and broad Workspace capability
-advertisement remain gated. Shell and in-flight recovery are separate slices.
+Later Turns may be submitted and cancelled by the Session's creator under the
+same opt-in, and the creator may rename the Session. Close, archive, delete,
+unarchive and cwd operations and broad Workspace capability advertisement
+remain gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -435,9 +437,11 @@ does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
 in G0 above and to later Turns submitted by the Session's creator under the same
 opt-in; the creator may also cancel them and rename the Session. Later Turns run
-under the creator's Workspace grants, so any other actor keeps the
-`workspace_unavailable` refusal. Public close, archive, delete and unarchive
-remain gated; the private Shell profile is not enabled through public creation.
+under the creator's Workspace grants, so any other actor keeps the existing
+refusal: `workspace_unavailable` when the actor can read the Workspace,
+`session_not_found` when they cannot. Public close, archive, delete and
+unarchive remain gated; the private Shell profile is not enabled through public
+creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 

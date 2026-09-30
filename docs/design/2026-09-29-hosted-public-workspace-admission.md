@@ -14,18 +14,22 @@ and uses the deployment's global Workspace for every Session Store connection.
 
 G0 enables one initial file-tool Turn admitted with Session creation. It uses
 the existing public REST route and the WebShell creation adapter that shares its
-service. Later submit, cancel, rename, lifecycle and cwd operations retain their
-existing Workspace gates. Discovery continues to advertise only Workspace
-binding, not complete Workspace execution support. No UI changes are required.
+service. The follow-up below admits later Turns for the Session's creator under
+the same opt-in, including cancel and rename; lifecycle and cwd operations
+retain their existing Workspace gates. Discovery continues to advertise only
+Workspace binding, not complete Workspace execution support. G0 requires no UI
+changes; the follow-up's only UI change is enabling the creator's composer.
 
 A follow-up admits later Turns for the Session's creator under the same opt-in,
 and lets the creator cancel a running Turn, which the Hosted Harness aborts and
 settles through the original Runtime identities. Execution authorizes every
 Turn against the creator's Workspace grants, so any other actor, and every
-deployment without the opt-in, keeps the existing `workspace_unavailable`
-refusal. The creator may also rename the Session. Close, archive, delete,
-unarchive and cwd operations remain gated: the Runtime Broker's drain only
-stops warming a closed Session and has no Harness-level teardown yet.
+deployment without the opt-in, keeps the existing refusal:
+`workspace_unavailable` when the actor can read the Workspace,
+`session_not_found` when they cannot. The creator may also rename the Session.
+Close, archive, delete, unarchive and cwd operations remain gated: the Runtime
+Broker's drain only stops warming a closed Session and has no Harness-level
+teardown yet.
 
 ## Decisions
 

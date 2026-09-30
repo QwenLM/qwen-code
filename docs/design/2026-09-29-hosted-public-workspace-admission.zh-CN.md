@@ -8,9 +8,9 @@
 
 Hosted Read/Write/Edit 已能经过生产 Broker 和 worker 执行，但目前只有私有集成测试把它接到持久 Workspace 会话。公开创建在 service 和 SQL store 两层拒绝初始输入；coordinator 也拒绝有绑定的会话。Java connector 不传工具 profile，所有 Session Store 连接均使用部署的全局 Workspace。
 
-G0 开放随创建会话准入的一次初始文件工具轮次，使用现有公开 REST 路由及共享 service 的 WebShell 创建适配器。后续提交、取消、重命名、生命周期与 cwd 操作保持现有 Workspace 门禁。发现接口仍仅广播 Workspace 绑定能力，不宣称完整的 Workspace 执行支持。无需修改 UI。
+G0 开放随创建会话准入的一次初始文件工具轮次，使用现有公开 REST 路由及共享 service 的 WebShell 创建适配器。下文的后续改动在同一开关下为会话创建者开放后续 Turn 以及取消与重命名；生命周期与 cwd 操作保持现有 Workspace 门禁。发现接口仍仅广播 Workspace 绑定能力，不宣称完整的 Workspace 执行支持。G0 本身无需修改 UI；后续改动唯一的 UI 变化是为创建者开放输入框。
 
-后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有的 `workspace_unavailable` 拒绝。创建者也可以重命名该会话。关闭、归档、删除、取消归档与 cwd 操作仍保持门禁：Runtime Broker 的 drain 只是停止为已关闭会话预热，尚无 Harness 级别的回收。
+后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。关闭、归档、删除、取消归档与 cwd 操作仍保持门禁：Runtime Broker 的 drain 只是停止为已关闭会话预热，尚无 Harness 级别的回收。
 
 ## 决策
 
