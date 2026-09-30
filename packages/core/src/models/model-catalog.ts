@@ -74,6 +74,15 @@ export const CATALOG_MODALITIES: ReadonlyArray<keyof InputModalities> = [
 ];
 
 /**
+ * Narrows a raw object key to one the catalog understands. Widening to
+ * `readonly string[]` is what lets `includes` accept an arbitrary key, but it
+ * also stops the result from narrowing — hence the predicate.
+ */
+function isCatalogModality(key: string): key is keyof InputModalities {
+  return (CATALOG_MODALITIES as readonly string[]).includes(key);
+}
+
+/**
  * Keeps the fields that are valid instead of discarding the entry for one
  * that is not: an unrecognised modality key (e.g. written by a newer build
  * that knows more modalities) degrades that one field rather than taking the
@@ -106,10 +115,7 @@ function sanitizeEntry(value: unknown): ModelCatalogEntry | undefined {
     }
     const clean: InputModalities = {};
     for (const [key, flag] of Object.entries(modalities)) {
-      if (
-        (CATALOG_MODALITIES as readonly string[]).includes(key) &&
-        flag === true
-      ) {
+      if (isCatalogModality(key) && flag === true) {
         clean[key] = true;
       }
     }
