@@ -500,7 +500,7 @@ export interface components {
             sessionId: string;
             operationId: string;
         };
-        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel completion means that the authority recorded the cancel, not that the task stopped: the task becomes cancelled only after its physical execution settles. */
+        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation. */
         WebShellCommandOperation: {
             operationId: string;
             /** Format: uuid */
@@ -575,7 +575,7 @@ export interface components {
              * @description Unix epoch milliseconds.
              */
             settledAt?: number;
-            /** @description The newest Artifacts that hold durable task output, at most 100, oldest first; older Artifacts stay readable through the Session artifact routes. */
+            /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
         } & (unknown & unknown & unknown & unknown);
