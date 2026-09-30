@@ -39,6 +39,14 @@ describe('OllamaOpenAICompatibleProvider', () => {
       ).toBe(true);
     });
 
+    it('matches a local Ollama server reached over IPv6 loopback', () => {
+      expect(
+        OllamaOpenAICompatibleProvider.isOllamaProvider(
+          createConfig('http://[::1]:11434/v1'),
+        ),
+      ).toBe(true);
+    });
+
     it('matches a host named ollama on any port', () => {
       expect(
         OllamaOpenAICompatibleProvider.isOllamaProvider(
