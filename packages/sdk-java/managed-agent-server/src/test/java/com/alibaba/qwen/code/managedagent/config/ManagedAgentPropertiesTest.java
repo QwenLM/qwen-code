@@ -1,13 +1,44 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Configuration;
 
 class ManagedAgentPropertiesTest {
+    @Test
+    void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
+        ApplicationContextRunner context = new ApplicationContextRunner()
+                .withUserConfiguration(PropertiesConfiguration.class);
+        context.run(started -> assertThat(started).hasNotFailed());
+        ApplicationContextRunner enabled = context.withPropertyValues(
+                "qwen.managed-agent.harness.enabled=true",
+                "qwen.managed-agent.harness.workspace-files-enabled=true",
+                "qwen.managed-agent.session-store.enabled=true",
+                "qwen.managed-agent.runtime-broker.enabled=true",
+                "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
+                "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
+                "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
+        enabled.run(started -> assertThat(started).hasNotFailed());
+        enabled.withPropertyValues("qwen.managed-agent.runtime-broker.isolation-class=workspace")
+                .run(started -> assertThat(started).hasFailed()
+                        .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
+                        .hasRootCauseMessage("Hosted Workspace files require"
+                                + " a preapproved Harness, Session Store and Session-isolated"
+                                + " local-process Broker with Workspace mounts"));
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableConfigurationProperties(ManagedAgentProperties.class)
+    static class PropertiesConfiguration {
+    }
+
     @Test
     void fileAdmissionRequiresTheCompleteTrustedLocalDeployment() {
         assertThatCode(() -> new ManagedAgentProperties().validateWorkspaceFiles()).doesNotThrowAnyException();
