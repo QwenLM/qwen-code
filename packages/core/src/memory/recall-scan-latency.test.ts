@@ -52,14 +52,26 @@ const REPEATS = 5;
 // magnitude. A scan that has blown up still reddens the release; one that
 // merely drifted is caught by the strict bound off shared runners, where
 // the property this test is named for is actually asserted.
-// GitHub-hosted lanes (`GitHub Actions NNN`) are shared VMs too: the
-// 1000-file cold scan measures ~2x the author-machine baseline there
-// (best-of-5 201-226ms against the 125ms bound), so the strict bound cannot
-// hold on them either — only the order-of-magnitude bound means anything.
-const SHARED_CI =
-  process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true ||
+// That contention is the ECS pool's, so it gets its own switch:
+// `test-utils/latency-budget.ts` sizes its pool multiplier for the ~5x that
+// fleet runs, and handing the same multiple to a lane that measures ~1.8x
+// leaves a regression nothing to overrun.
+const POOL_CI = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') === true;
+// GitHub-hosted lanes are shared VMs too, but measurably so for one row only.
+// On `Test (ubuntu-latest)` the 1000-topic cold scan runs best-of-5 201-226ms
+// against the 125ms bound, while the 200/500 cold rows and the entire
+// warm-cache test stay green under theirs (run 36640349705:
+// `recall-scan-latency.test.ts (2 tests | 1 failed)`, all three retries
+// failing at ceiling 125). So only that row moves off the strict bound here.
+// RUNNER_ENVIRONMENT is Actions' documented discriminator for the lane class
+// ('github-hosted' | 'self-hosted') and is what this repo's other gates read;
+// the RUNNER_NAME display-name prefix stays beside it rather than being
+// load-bearing alone, because a classifier arm whose whole failure mode is
+// silently not matching should not rest on a string GitHub calls non-unique.
+const HOSTED_CI =
+  process.env['RUNNER_ENVIRONMENT'] === 'github-hosted' ||
   process.env['RUNNER_NAME']?.startsWith('GitHub Actions') === true;
-const FAST_RESULT_CEILING_MS = SHARED_CI
+const FAST_RESULT_CEILING_MS = POOL_CI
   ? INITIAL_BUDGET_MS * 10
   : INITIAL_BUDGET_MS / 2;
 // The cold scan is what the initial-turn budget actually has to cover, so the
@@ -67,14 +79,60 @@ const FAST_RESULT_CEILING_MS = SHARED_CI
 // even at one YAML parse per file (~104ms measured) — the budget was sized for
 // the warm path — so its ceiling is the measured cost with ~20% slack, which
 // still reddens if the frontmatter rescue's second CST parse returns (~+48%
-// at 1000 files). The shared pool faces the same loosened bound as the warm
-// path's, keyed off the same SHARED_CI switch — ci.yml already exports
-// QWEN_SKIP_LATENCY_BUDGETS=1 there, so routing through
-// expectWithinLatencyBudget's poolMultiplier would stack a second 10x.
+// at 1000 files). On the pool every row instead faces an order-of-magnitude
+// bound, keyed off the same `ecs-qwen-` prefix ci.yml uses for
+// QWEN_SKIP_LATENCY_BUDGETS, so routing through expectWithinLatencyBudget's
+// poolMultiplier would stack a second 10x.
+// Hosted lanes get this file's own convention instead of the pool's multiple:
+// the measured worst case (226ms) plus the same ~20% slack the strict
+// 1000-topic bound uses = 275ms. That still reddens the second CST parse
+// (~335ms), which a contention-sized 1250ms would have swallowed.
+const HOSTED_COLD_SCAN_MULTIPLIER = 2.2;
+
 function coldScanCeilingMs(topicCount: number): number {
   const bound =
     topicCount >= 1000 ? INITIAL_BUDGET_MS * 1.25 : INITIAL_BUDGET_MS;
-  return SHARED_CI ? bound * 10 : bound;
+  if (POOL_CI) {
+    return bound * 10;
+  }
+  // Only the row hosted lanes actually overrun: the smaller corpi keep the
+  // bound they already pass under, so for them this stays the strict lane.
+  return HOSTED_CI && topicCount >= 1000
+    ? bound * HOSTED_COLD_SCAN_MULTIPLIER
+    : bound;
+}
+
+/**
+ * The detected lane class, for assertion messages only.
+ *
+ * `packages/core/vitest.config.ts` sets `silent: true` and core's test scripts
+ * are bare `vitest run`, so both console tables below — which this file's
+ * header calls the artifact worth reading — are discarded in CI. The lane has
+ * to ride along in the assertion message, or a red gate reports a bare number
+ * with no way to tell which classifier arm fired (or failed to).
+ */
+function laneLabel(): string {
+  return `env=${process.env['RUNNER_ENVIRONMENT'] ?? 'unset'} runner=${
+    process.env['RUNNER_NAME'] ?? 'unset'
+  }`;
+}
+
+/**
+ * Assert a measured duration against its ceiling, naming the lane and both
+ * numbers when it fails.
+ *
+ * The tables above are what a human reads locally; this message is what
+ * survives CI, where `silent: true` discards them. `vitest/valid-expect`
+ * defaults to one argument, so the message needs a local disable.
+ */
+function expectWithinCeiling(
+  actualMs: number,
+  ceilingMs: number,
+  context: string,
+): void {
+  const message = `${context} actual=${actualMs.toFixed(1)}ms ceiling=${ceilingMs}ms`;
+  // eslint-disable-next-line vitest/valid-expect -- the message argument is the point
+  expect(actualMs, message).toBeLessThan(ceilingMs);
 }
 
 let tempDir: string;
@@ -208,12 +266,18 @@ describe('auto-memory recall scan latency', () => {
     }
 
     const [smallest] = rows;
-    // The ordinary case must leave the rest of the budget to spare. On
-    // shared runners only the best sample survives contention, so the loose
-    // bound checks it; off them the median faces the strict ceiling. The
-    // table is what carries the detail.
+    // The ordinary case must leave the rest of the budget to spare. On the
+    // pool only the best sample survives contention, so the loose bound checks
+    // it; everywhere else — including hosted lanes, which measured green here —
+    // the median faces the strict ceiling. The table is what carries the
+    // detail, and the assertion message carries the lane.
     expect(smallest[0]).toBe(TOPIC_COUNTS[0]);
-    expect(smallest[SHARED_CI ? 1 : 2]).toBeLessThan(FAST_RESULT_CEILING_MS);
+    expectWithinCeiling(
+      smallest[POOL_CI ? 1 : 2],
+      FAST_RESULT_CEILING_MS,
+      `warm scan topics=${TOPIC_COUNTS[0]} ${laneLabel()} pool=${POOL_CI} ` +
+        `hosted=${HOSTED_CI} statistic=${POOL_CI ? 'best' : 'median'}`,
+    );
 
     console.log(
       [
@@ -264,7 +328,12 @@ describe('auto-memory recall scan latency', () => {
       // without waiting. Every documented corpus size must fit. The
       // assertion faces the best sample: the one least contaminated by
       // contention when the suite shares a machine.
-      expect(best).toBeLessThan(coldScanCeilingMs(topicCount));
+      expectWithinCeiling(
+        best,
+        coldScanCeilingMs(topicCount),
+        `cold scan topics=${topicCount} ${laneLabel()} pool=${POOL_CI} ` +
+          `hosted=${HOSTED_CI}`,
+      );
     }
 
     console.log(
