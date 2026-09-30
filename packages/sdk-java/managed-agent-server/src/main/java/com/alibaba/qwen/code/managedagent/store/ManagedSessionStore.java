@@ -1169,7 +1169,9 @@ public class ManagedSessionStore {
     private InputStream guardedPublicationResource(ResourceRow resource) {
         var rows = jdbc.queryForList("SELECT scope_key, publication_id FROM qwen_tool_publication_object"
                 + " WHERE resource_id = ? AND object_key = ?", resource.resourceId(), resource.objectKey());
-        if (rows.size() != 1) { throw resourceCorrupt(); }
+        if (rows.size() != 1) {
+            throw resourceCorrupt();
+        }
         return outputRetention.open((String) rows.getFirst().get("scope_key"),
                 (String) rows.getFirst().get("publication_id"), resource.objectKey(), publicationObjects);
     }

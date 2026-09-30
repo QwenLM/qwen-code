@@ -25,7 +25,9 @@ public final class ToolPublicationRetentionObserver {
             long eligibleBytes = 0;
             for (var candidate : sample) {
                 blockers.merge(candidate.blocker() == null ? "eligible" : candidate.blocker(), 1L, Long::sum);
-                if (candidate.blocker() == null) { eligibleBytes += candidate.bytes(); }
+                if (candidate.blocker() == null) {
+                    eligibleBytes += candidate.bytes();
+                }
             }
             LOG.info("tool_output_retention sample={} eligible_bytes={} reasons={}", sample.size(), eligibleBytes, blockers);
         } catch (RuntimeException error) {

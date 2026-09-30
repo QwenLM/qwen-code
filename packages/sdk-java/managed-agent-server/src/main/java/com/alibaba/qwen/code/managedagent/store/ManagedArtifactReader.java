@@ -52,12 +52,20 @@ public class ManagedArtifactReader {
     public InputStream open(Artifact artifact, Runnable guard) {
         var lease = lease(artifact);
         try {
-            Runnable protectedGuard = () -> { lease.check(); guard.run(); check(artifact); };
+            Runnable protectedGuard = () -> {
+                lease.check();
+                guard.run();
+                check(artifact);
+            };
             var input = verified(artifact, protectedGuard).open(protectedGuard);
             return new java.io.FilterInputStream(input) {
                 @Override
                 public void close() throws java.io.IOException {
-                    try { super.close(); } finally { lease.close(); }
+                    try {
+                        super.close();
+                    } finally {
+                        lease.close();
+                    }
                 }
             };
         } catch (RuntimeException error) {
@@ -76,7 +84,11 @@ public class ManagedArtifactReader {
                         && length <= artifact.descriptor().path("byte_length").asLong() - offset,
                 "Artifact range is invalid");
         try (var lease = lease(artifact)) {
-            Runnable protectedGuard = () -> { lease.check(); guard.run(); check(artifact); };
+            Runnable protectedGuard = () -> {
+                lease.check();
+                guard.run();
+                check(artifact);
+            };
             return readRange(artifact, verified(artifact, protectedGuard), offset, length, protectedGuard);
         }
     }

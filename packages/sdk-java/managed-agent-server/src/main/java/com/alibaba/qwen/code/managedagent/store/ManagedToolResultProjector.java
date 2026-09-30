@@ -87,7 +87,9 @@ public class ManagedToolResultProjector {
             if (projection == null) {
                 store.fail(claim, "UNSUPPORTED", "unsupported_receipt_producer");
             } else {
-                if (lease != null) { lease.check(); }
+                if (lease != null) {
+                    lease.check();
+                }
                 store.complete(claim, projection, policy.version());
             }
         } catch (NoSuchElementException error) {

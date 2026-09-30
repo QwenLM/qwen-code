@@ -128,14 +128,18 @@ public class ManagedArtifactService {
                 && policy.readOriginal(tenant.tenantId(), tenant.actorId(),
                         session.workspace().getWorkspaceId(), session.sessionId());
         var availability = reader.availability(page.artifacts());
-        if (availability.containsValue(false)) { session(tenant, sessionId); }
+        if (availability.containsValue(false)) {
+            session(tenant, sessionId);
+        }
         return new WebShellPage<>(page.artifacts().stream().map(a -> view(a,
                 availability.get(a.descriptor().path("id").asText()), sessionRead)).toList(), next, page.hasMore());
     }
 
     private ArtifactResponse view(TenantContext tenant, SessionRecord session, Artifact artifact) {
         boolean available = reader.available(artifact);
-        if (!available) { session(tenant, artifact.source().sessionId()); }
+        if (!available) {
+            session(tenant, artifact.source().sessionId());
+        }
         return view(artifact, available, policy.readOriginal(tenant.tenantId(), tenant.actorId(),
                 session.workspace().getWorkspaceId(), session.sessionId()));
     }

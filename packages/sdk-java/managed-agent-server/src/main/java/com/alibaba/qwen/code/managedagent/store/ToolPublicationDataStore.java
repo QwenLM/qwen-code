@@ -1611,14 +1611,16 @@ public final class ToolPublicationDataStore {
         MessageDigest hash = sha256();
         try (var lease = retention.readPublication(scope, publicationId);
                 InputStream input = resource.objectKey() == null
-                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : retention.open(scope, publicationId, resource.objectKey(), objects, heartbeat)) {
+                        ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : retention.open(scope, publicationId, resource.objectKey(), objects, heartbeat)) {
             byte[] buffer = new byte[64 * 1024];
             long position = 0;
             for (;;) {
                 lease.check();
                 heartbeat.run();
                 int count = input.read(buffer);
-                if (count == -1) { break; }
+                if (count == -1) {
+                    break;
+                }
                 lease.check();
                 heartbeat.run();
                 hash.update(buffer, 0, count);

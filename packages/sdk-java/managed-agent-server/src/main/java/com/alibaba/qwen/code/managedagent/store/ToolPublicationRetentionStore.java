@@ -101,7 +101,9 @@ public final class ToolPublicationRetentionStore {
         lockSession(jdbc, tenant, session);
         var retired = jdbc.queryForList("SELECT generation FROM qwen_output_session_retirement"
                 + " WHERE tenant_key = ? AND session_key = ? FOR UPDATE", hash(tenant), hash(session));
-        if (!retired.isEmpty()) { throw retired(); }
+        if (!retired.isEmpty()) {
+            throw retired();
+        }
         var states = jdbc.queryForList("SELECT retention_state FROM qwen_tool_publication"
                 + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE", scope, publication);
         ToolPublicationContract.require("PINNED".equals(states.getFirst().get("retention_state")), "Publication is retired");
@@ -160,7 +162,11 @@ public final class ToolPublicationRetentionStore {
                 }
                 @Override
                 public void close() throws java.io.IOException {
-                    try { super.close(); } finally { lease.close(); }
+                    try {
+                        super.close();
+                    } finally {
+                        lease.close();
+                    }
                 }
             };
         } catch (RuntimeException error) {
@@ -250,7 +256,9 @@ public final class ToolPublicationRetentionStore {
             long bytes, String blocker) {}
 
     public List<Candidate> observe(Duration grace) {
-        if (grace.isNegative()) { throw new IllegalArgumentException("Negative deletion grace"); }
+        if (grace.isNegative()) {
+            throw new IllegalArgumentException("Negative deletion grace");
+        }
         return jdbc.queryForList("SELECT p.* FROM qwen_tool_publication p WHERE retention_state = 'RETIRING'"
                 + " ORDER BY scope_key, publication_id LIMIT 100").stream()
                 .map(row -> candidate(row, grace)).toList();
@@ -266,24 +274,33 @@ public final class ToolPublicationRetentionStore {
         var roots = jdbc.queryForList("SELECT retired_at, recovery_protected FROM qwen_output_session_retirement"
                 + " WHERE tenant_key = ? AND session_key = ?", hash(tenant), hash(session));
         String blocker;
-        if (roots.isEmpty()) { blocker = "session_not_retired"; }
-        else if (flag(roots.getFirst(), "recovery_protected")) { blocker = "recovery_protected"; }
-        else if (number(roots.getFirst(), "retired_at") > now(jdbc) - grace.toMillis()) { blocker = "grace_period"; }
-        else if (!flag(row, "write_evidence")) { blocker = "legacy_write_evidence_missing"; }
-        else if (flag(row, "quarantined")) { blocker = "quarantined"; }
-        else if (!"REFERENCED".equals(row.get("producer_phase")) || !flag(row, "accepted_complete")) {
+        if (roots.isEmpty()) {
+            blocker = "session_not_retired";
+        } else if (flag(roots.getFirst(), "recovery_protected")) {
+            blocker = "recovery_protected";
+        } else if (number(roots.getFirst(), "retired_at") > now(jdbc) - grace.toMillis()) {
+            blocker = "grace_period";
+        } else if (!flag(row, "write_evidence")) {
+            blocker = "legacy_write_evidence_missing";
+        } else if (flag(row, "quarantined")) {
+            blocker = "quarantined";
+        } else if (!"REFERENCED".equals(row.get("producer_phase")) || !flag(row, "accepted_complete")) {
             blocker = "not_accepted_complete";
         } else if (count("SELECT COUNT(*) FROM qwen_output_read_lease WHERE tenant_key = ? AND session_key = ?"
-                + " AND expires_at > ?", hash(tenant), hash(session), now(jdbc)) != 0) { blocker = "reader_active"; }
-        else if (count("SELECT COUNT(*) FROM qwen_output_put_attempt WHERE scope_key = ? AND publication_id = ?"
-                + " AND state <> 'RETURNED'", scope, publication) != 0) { blocker = "put_unresolved"; }
-        else if (count("SELECT COUNT(*) FROM qwen_tool_publication_operation WHERE scope_key = ?"
+                + " AND expires_at > ?", hash(tenant), hash(session), now(jdbc)) != 0) {
+            blocker = "reader_active";
+        } else if (count("SELECT COUNT(*) FROM qwen_output_put_attempt WHERE scope_key = ? AND publication_id = ?"
+                + " AND state <> 'RETURNED'", scope, publication) != 0) {
+            blocker = "put_unresolved";
+        } else if (count("SELECT COUNT(*) FROM qwen_tool_publication_operation WHERE scope_key = ?"
                 + " AND publication_id = ? AND state <> 'SUCCEEDED'", scope, publication) != 0) {
             blocker = "operation_unresolved";
         } else if (count("SELECT COUNT(*) FROM qwen_tool_publication_object WHERE scope_key = ?"
                 + " AND publication_id = ? AND state <> 'VERIFIED'", scope, publication) != 0) {
             blocker = "object_unverified";
-        } else { blocker = null; }
+        } else {
+            blocker = null;
+        }
         return new Candidate(scope, publication, tenant, session, bytes, blocker);
     }
 
