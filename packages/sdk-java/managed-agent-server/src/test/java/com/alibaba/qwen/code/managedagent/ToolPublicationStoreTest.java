@@ -953,12 +953,14 @@ class ToolPublicationStoreTest {
             @Override
             public void requireUnversioned() { }
         };
+        var publisher = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
+                Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
+        JsonNode key = binding.get("sessionKey");
+        String digest = ToolPublicationContract.sha256(segment);
+        publisher.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment", "stdout", 0, segment, digest);
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofSeconds(1), Duration.ofMillis(500),
                 new ToolPublicationDataStore.VerificationBudget(256, Duration.ofSeconds(5)));
-        JsonNode key = binding.get("sessionKey");
-        String digest = ToolPublicationContract.sha256(segment);
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment", "stdout", 0, segment, digest);
         slow[0] = true;
         assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, segment.length, digest)
                 .path("digest").asText()).isEqualTo(digest);
