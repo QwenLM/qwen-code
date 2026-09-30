@@ -20420,6 +20420,64 @@ describe('Session', () => {
         }
       });
 
+      it('treats a drain with more than 256 matching attachment references as reliable input', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          installFailingTool();
+          const attachmentReferences = Array.from(
+            { length: 257 },
+            (_, index) => ({
+              type: 'resource' as const,
+              attachmentId: `notes-${index}.txt`,
+              mimeType: 'text/plain',
+              size: 3,
+            }),
+          );
+          mockClient.extMethod = vi.fn().mockImplementation(async (method) => {
+            if (method === 'craft/drainMidTurnQueue') {
+              return {
+                hasQueuedPrompt: false,
+                items: [
+                  {
+                    content: attachmentReferences.map((reference) => ({
+                      type: 'resource' as const,
+                      resource: {
+                        uri: `attachment:///${reference.attachmentId}`,
+                        mimeType: 'text/plain',
+                        text: 'abc',
+                      },
+                    })),
+                    displayText: 'queued notes',
+                    attachmentReferences,
+                  },
+                ],
+              };
+            }
+            return {};
+          });
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            expect.objectContaining({ sessionId: 'test-session-id' }),
+          );
+          expect(
+            logRepeatedToolFailureGuardSpy.mock.calls.some(
+              ([event]) => event.reset_reason === 'unreliable_input',
+            ),
+          ).toBe(false);
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
       it('resets the streak when the host reports a queued prompt', async () => {
         recreateSessionWithGuardMode('enforce');
         try {
@@ -23397,6 +23455,96 @@ describe('Session', () => {
           readManyFilesSpy.mockRestore();
           await fs.rm(tempDir, { recursive: true, force: true });
         }
+      });
+
+      it('records more than 256 drained attachment references when the content carries them', async () => {
+        // The prompt path widens the reference bound to the prompt's block
+        // count; a drain item carrying the same attachment set must keep its
+        // references too.
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        const attachmentReferences = Array.from(
+          { length: 257 },
+          (_, index) => ({
+            type: 'image' as const,
+            attachmentId: `media-${index}`,
+            mimeType: 'image/png',
+            size: 8,
+          }),
+        );
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          hasQueuedPrompt: false,
+          items: [
+            {
+              content: attachmentReferences.map(() => ({
+                type: 'image' as const,
+                mimeType: 'image/png',
+                data: 'aW1n',
+              })),
+              displayText: 'describe these',
+              attachmentReferences,
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: describe these',
+            },
+          ],
+          'describe these',
+          undefined,
+          attachmentReferences,
+        );
       });
 
       it('keeps later structured mid-turn messages when one resolution fails', async () => {

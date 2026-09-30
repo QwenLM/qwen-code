@@ -1406,6 +1406,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
         if (content.length === 0) return [];
         const attachmentReferences = readDaemonAttachmentReferences(
           item['attachmentReferences'],
+          Math.max(MAX_DAEMON_ATTACHMENT_REFERENCES, content.length),
         );
         // Same gate #buildMidTurnParts uses to decide whether references are
         // persisted; display text must agree or a mixed inline+reference
@@ -1474,8 +1475,10 @@ function isValidMidTurnDrainResponse(
         item['content'].length > 0 &&
         item['content'].every(isContentBlock) &&
         (item['attachmentReferences'] === undefined ||
-          readDaemonAttachmentReferences(item['attachmentReferences']) !==
-            undefined),
+          readDaemonAttachmentReferences(
+            item['attachmentReferences'],
+            Math.max(MAX_DAEMON_ATTACHMENT_REFERENCES, item['content'].length),
+          ) !== undefined),
     );
   }
 
