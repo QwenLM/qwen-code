@@ -55,18 +55,18 @@ Coverage and mutation data only suggested what to delete; the replays decided.
 ## Result
 
 Full Core suite with coverage on both sides, Linux arm64, against main at
-`81582ca19d`:
+`e767e223c5`:
 
 | Core                       |    Main | This change |            Change |
 | -------------------------- | ------: | ----------: | ----------------: |
-| Test and support lines     | 710,076 |     488,045 | −222,031 (−31.3%) |
-| Test and support bytes     | 24.8 MB |     17.6 MB |            −28.9% |
-| Test files                 |     855 |         715 |              −140 |
-| Test cases                 |  33,494 |      30,566 |    −2,928 (−8.7%) |
-| Production line coverage   |  90.97% |      90.71% |                   |
-| Production branch coverage |  88.65% |      88.13% |                   |
+| Test and support lines     | 714,123 |     491,579 | −222,544 (−31.2%) |
+| Test and support bytes     | 24.9 MB |     17.7 MB |            −28.8% |
+| Test files                 |     861 |         721 |              −140 |
+| Test cases                 |  33,691 |      30,753 |    −2,938 (−8.7%) |
+| Production line coverage   |  91.00% |      90.72% |                   |
+| Production branch coverage |  88.65% |      88.12% |                   |
 
-727 previously covered lines lose coverage: 0.27 points, within the 0.5 budget.
+770 previously covered lines lose coverage: 0.28 points, within the 0.5 budget.
 The largest per-file losses are microcompaction (48 of 760 covered lines),
 memory discovery (43 of 428) and streaming tool-call parsing (34 of 339). The
 suite has no new failures.
