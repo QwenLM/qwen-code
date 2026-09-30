@@ -768,6 +768,12 @@ type PendingToolResultRecord = {
   toolName: string;
   toolArgs: Record<string, unknown>;
   responseParts: Part[];
+  /**
+   * `responseParts` without the hook additionalContext appended to them;
+   * set only when context was appended. Used instead of `responseParts` if
+   * the turn is aborted before the result is recorded.
+   */
+  responsePartsWithoutHookContext?: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
   toolType?: 'native' | 'mcp';
@@ -12400,19 +12406,38 @@ export class Session implements SessionContext {
     // end the turn asked no matter which of the exits below the batch takes,
     // and the exits that run before any tool does read it as false anyway.
     let batchTerminatesTurn = false;
-    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
-      if (records.length === 0) return [];
-      const finalized = await finalizeToolResponses(
+    const finalizeRecords = (
+      records: PendingToolResultRecord[],
+      withHookContext: boolean,
+    ) =>
+      finalizeToolResponses(
         this.config,
         records.map((record) => ({
           callId: record.callId,
           toolName: record.toolName,
-          responseParts: record.responseParts,
+          responseParts: withHookContext
+            ? record.responseParts
+            : (record.responsePartsWithoutHookContext ?? record.responseParts),
           persistedOutputFiles: record.persistedOutputFiles,
           artifacts: record.metadata.artifacts,
         })),
         new Map(records.map((record) => [record.callId, promptId])),
       );
+    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
+      if (records.length === 0) return [];
+      // A turn aborted before the result is recorded (e.g. while the result
+      // notification or the finalizer's persistence was awaited) keeps the
+      // tool output but not the hook context. Redo the budget without it
+      // rather than cutting it out of already-budgeted text.
+      const withHookContext =
+        !abortSignal.aborted &&
+        records.some(
+          (record) => record.responsePartsWithoutHookContext !== undefined,
+        );
+      let finalized = await finalizeRecords(records, withHookContext);
+      if (withHookContext && abortSignal.aborted) {
+        finalized = await finalizeRecords(records, false);
+      }
       records.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
         // dangling on disk so a later load can re-hang it; only the
@@ -13466,6 +13491,9 @@ export class Session implements SessionContext {
         callId,
         toolName,
         responseParts: modelErrorParts,
+        ...(modelErrorParts !== errorParts
+          ? { responsePartsWithoutHookContext: errorParts }
+          : {}),
         persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
         toolType,
@@ -15727,6 +15755,9 @@ export class Session implements SessionContext {
             callId,
             toolName,
             responseParts: modelResponseParts,
+            ...(modelResponseParts !== responseParts
+              ? { responsePartsWithoutHookContext: responseParts }
+              : {}),
             persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
             toolType,

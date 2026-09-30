@@ -36977,6 +36977,7 @@ describe('Session', () => {
           messageBus: ReturnType<typeof contextBus>,
           execute: ReturnType<typeof vi.fn>,
           truncateThreshold = 25_000,
+          expectedModelRequests = 2,
         ) {
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -37015,9 +37016,11 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'read the file' }],
           });
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-          const message = vi.mocked(mockChat.sendMessageStream).mock.calls[1][1]
-            .message as Part[];
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(
+            expectedModelRequests,
+          );
+          const message = (vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1]?.[1].message ?? []) as Part[];
           const response = message.find(
             (part) => part.functionResponse?.id === 'call-ctx',
           )?.functionResponse?.response;
@@ -37261,6 +37264,75 @@ describe('Session', () => {
             JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls),
           ).not.toContain('P02A_PRE');
         });
+
+        it.each([
+          ['a completed result', {}, 'completed', 'success'],
+          [
+            'a denied result',
+            { permissionDecision: 'deny', permissionDecisionReason: 'no' },
+            'failed',
+            'error',
+          ],
+        ] as const)(
+          'drops PreToolUse context when the turn is cancelled while notifying %s',
+          async (_label, decision, updateStatus, recordedStatus) => {
+            const execute = vi.fn().mockResolvedValue({
+              llmContent: 'done',
+              returnDisplay: 'done',
+            });
+            let cancel: Promise<void> | undefined;
+            vi.mocked(mockClient.sessionUpdate).mockImplementation(
+              async (params) => {
+                const update = params.update as {
+                  sessionUpdate?: string;
+                  status?: string;
+                };
+                if (
+                  !cancel &&
+                  update.sessionUpdate === 'tool_call_update' &&
+                  update.status === updateStatus
+                ) {
+                  cancel = session.cancelPendingPrompt();
+                }
+              },
+            );
+            mockChat.addHistory = vi.fn();
+
+            // The cancelled turn sends no follow-up model request.
+            await runReadFile(
+              contextBus({ PreToolUse: preContext(decision) }),
+              execute,
+              25_000,
+              1,
+            );
+            await cancel;
+
+            expect(cancel).toBeDefined();
+            expect(execute).toHaveBeenCalledTimes(
+              recordedStatus === 'success' ? 1 : 0,
+            );
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).toHaveBeenCalledWith(
+              expect.anything(),
+              expect.objectContaining({
+                callId: 'call-ctx',
+                status: recordedStatus,
+              }),
+            );
+            expect(
+              JSON.stringify(
+                mockChatRecordingService.recordToolResult.mock.calls,
+              ),
+            ).not.toContain('P02A_PRE');
+            expect(
+              JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
+            ).not.toContain('P02A_PRE');
+            expect(
+              JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls),
+            ).not.toContain('P02A_PRE');
+          },
+        );
 
         it('leaves results unchanged when hooks return no context', async () => {
           const execute = vi.fn().mockResolvedValue({

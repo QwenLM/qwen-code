@@ -1338,6 +1338,41 @@ function withPostToolBatchArtifacts(
   return calls;
 }
 
+/**
+ * Appends each call's hook context to its functionResponse. The text is
+ * joined with a blank line and carries no marker, so every consumer of
+ * responseParts — including display and transcript projections — sees it as
+ * part of the tool output, as with PostToolUse/PostToolBatch context.
+ */
+function appendHookContexts(
+  completedCalls: CompletedToolCall[],
+  contexts: ReadonlyMap<string, string>,
+): CompletedToolCall[] {
+  if (contexts.size === 0) return completedCalls;
+  return completedCalls.map((call) => {
+    const callId = call.request.callId;
+    const responseParts = appendToolHookContextToParts(
+      call.response.responseParts,
+      callId,
+      contexts.get(callId),
+    );
+    if (responseParts === call.response.responseParts) return call;
+    return {
+      ...call,
+      response: {
+        ...call.response,
+        responseParts,
+        contentLength:
+          call.response.contentLength !== undefined
+            ? call.response.contentLength +
+              toolResponseTextLength(responseParts) -
+              toolResponseTextLength(call.response.responseParts)
+            : undefined,
+      },
+    } as CompletedToolCall;
+  });
+}
+
 function withPostToolBatchStop(
   completedCalls: CompletedToolCall[],
   stopReason: string,
@@ -7220,18 +7255,33 @@ export class CoreToolScheduler {
 
         // After PostToolBatch so a batch stop cannot erase it, and before the
         // final budget so the batch/send caps still bound it. A call whose
-        // turn was aborted by now (e.g. while PostToolBatch was awaited)
-        // keeps its output but not the context.
-        completedCalls = this.withHookContext(
+        // turn is aborted before its result is recorded keeps its output but
+        // not the context.
+        const isAborted = (callId: string) =>
+          callSignals.get(callId)?.aborted === true;
+        const hookContexts = this.takeHookContexts(
           completedCalls,
           (callId) =>
-            preToolUseContextCallIds.has(callId) &&
-            !callSignals.get(callId)?.aborted,
+            preToolUseContextCallIds.has(callId) && !isAborted(callId),
         );
+        const withoutHookContext = completedCalls;
 
         // Hooks may replace responses or append context, so enforce the same
         // final invariant again after PostToolBatch.
-        completedCalls = await this.applyBatchOutputBudget(completedCalls);
+        completedCalls = await this.applyBatchOutputBudget(
+          appendHookContexts(withoutHookContext, hookContexts),
+        );
+        // The budget can await persistence. If a call's turn was aborted
+        // meanwhile, redo the budget without that call's context rather than
+        // cutting it out of already-budgeted text.
+        while ([...hookContexts.keys()].some(isAborted)) {
+          for (const callId of [...hookContexts.keys()]) {
+            if (isAborted(callId)) hookContexts.delete(callId);
+          }
+          completedCalls = await this.applyBatchOutputBudget(
+            appendHookContexts(withoutHookContext, hookContexts),
+          );
+        }
 
         for (const call of completedCalls) {
           this.finalizeToolSpan(call.request.callId, true);
@@ -7349,25 +7399,24 @@ export class CoreToolScheduler {
   }
 
   /**
-   * Appends each deliverable call's stored hook context (PreToolUse, plus
-   * nested exec calls' context) to its functionResponse. The text is joined
-   * with a blank line and carries no marker, so every consumer of
-   * responseParts — including display and transcript projections — sees it
-   * as part of the tool output, as with PostToolUse/PostToolBatch context.
+   * Takes (and clears) each call's stored hook context — PreToolUse, plus
+   * nested exec calls' context — and returns the bounded text for the
+   * deliverable ones. A nested scheduler hands it to its parent instead.
    */
-  private withHookContext(
+  private takeHookContexts(
     completedCalls: CompletedToolCall[],
     isDeliverable: (callId: string) => boolean,
-  ): CompletedToolCall[] {
+  ): Map<string, string> {
+    const contexts = new Map<string, string>();
     if (
       this.preToolUseContexts.size === 0 &&
       this.nestedHookContexts.size === 0 &&
       this.failureContextsForParent.size === 0
     ) {
-      return completedCalls;
+      return contexts;
     }
     const maxChars = this.config.getTruncateToolOutputThreshold();
-    return completedCalls.map((call) => {
+    for (const call of completedCalls) {
       const callId = call.request.callId;
       const segments = [
         this.preToolUseContexts.get(callId),
@@ -7377,32 +7426,16 @@ export class CoreToolScheduler {
       this.preToolUseContexts.delete(callId);
       this.failureContextsForParent.delete(callId);
       this.nestedHookContexts.delete(callId);
-      if (!segments.some(Boolean) || !isDeliverable(callId)) return call;
+      if (!segments.some(Boolean) || !isDeliverable(callId)) continue;
       const context = boundToolHookContext(segments, maxChars);
+      if (!context) continue;
       if (this.hookContextSink) {
-        if (context) this.hookContextSink(call.request, context);
-        return call;
+        this.hookContextSink(call.request, context);
+      } else {
+        contexts.set(callId, context);
       }
-      const responseParts = appendToolHookContextToParts(
-        call.response.responseParts,
-        callId,
-        context,
-      );
-      if (responseParts === call.response.responseParts) return call;
-      return {
-        ...call,
-        response: {
-          ...call.response,
-          responseParts,
-          contentLength:
-            call.response.contentLength !== undefined
-              ? call.response.contentLength +
-                toolResponseTextLength(responseParts) -
-                toolResponseTextLength(call.response.responseParts)
-              : undefined,
-        },
-      } as CompletedToolCall;
-    });
+    }
+    return contexts;
   }
 
   private async applyBatchOutputBudget(

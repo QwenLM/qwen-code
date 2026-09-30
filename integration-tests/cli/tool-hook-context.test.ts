@@ -11,7 +11,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +31,7 @@ import {
   fakeModelLaunchArgs,
   makeWaitFor,
 } from '../helpers/gated-skill-fixture.js';
+import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
 const HOOK_SCRIPT = 'context-hook.mjs';
 const HITS_LOG = 'hook-hits.jsonl';
@@ -299,6 +301,9 @@ describe('tool hook additionalContext delivery', () => {
       'missing.txt',
       'call_fail',
     );
+    // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
+    // it out of rig.testDir, whose teardown would otherwise race those writes.
+    const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
     const child = spawn(
       'node',
       [
@@ -307,7 +312,18 @@ describe('tool hook additionalContext delivery', () => {
         '--no-chat-recording',
         ...fakeModelLaunchArgs(server),
       ],
-      { cwd: rig.testDir!, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] },
+      {
+        cwd: rig.testDir!,
+        env: {
+          ...process.env,
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: qwenHome,
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    const closed = new Promise<void>((resolve) =>
+      child.once('close', () => resolve()),
     );
     const pending = new Map<
       number,
@@ -387,6 +403,8 @@ describe('tool hook additionalContext delivery', () => {
     } finally {
       disposed = true;
       child.kill();
+      await closed;
+      await removeScratchDir(qwenHome);
     }
 
     expect(hookHits()).toEqual([

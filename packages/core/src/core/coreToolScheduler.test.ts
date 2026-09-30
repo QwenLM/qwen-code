@@ -13612,6 +13612,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     shouldObserveProducer?: (callId: string) => boolean;
+    configOverrides?: Record<string, unknown>;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -13687,6 +13688,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         options.includeSensitiveSpanAttributes ?? false,
       getTelemetrySensitiveSpanAttributeMaxLength: () =>
         options.sensitiveSpanAttributeMaxLength ?? 1024 * 1024,
+      ...options.configOverrides,
     } as unknown as Config;
 
     const onAllToolCallsComplete = vi.fn();
@@ -15729,6 +15731,58 @@ describe('CoreToolScheduler telemetry spans', () => {
     )?.functionResponse;
     expect(fr?.id).toBe('postbatch-call');
     expect(fr?.response?.['output']).toBe('done');
+  });
+
+  it('drops PreToolUse context when the turn is cancelled during the final output budget', async () => {
+    const body = 'x'.repeat(900);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: body,
+      returnDisplay: 'read',
+    });
+    const abortController = new AbortController();
+    const messageBus = preContextBus({
+      additionalContext: 'P02A_BUDGET_CANCEL'.padEnd(200, '-'),
+    });
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      execute,
+      messageBus,
+      disableHooks: false,
+      configOverrides: {
+        // Only the result with the context exceeds this, so only the final
+        // budget pass persists; abort the turn at that persistence boundary.
+        getToolOutputBatchBudget: () => 1_000,
+        getToolResultBytesWritten: () => {
+          abortController.abort();
+          return 0;
+        },
+        trackToolResultBytes: vi.fn(),
+      },
+    });
+    await scheduler.schedule(
+      [
+        {
+          callId: 'budget-call',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-budget',
+        },
+      ],
+      abortController.signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(abortController.signal.aborted).toBe(true);
+    const [call] = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as ToolCall[];
+    expect(call.status).toBe('success');
+    expect(execute).toHaveBeenCalledTimes(1);
+    const fr = (call as SuccessfulToolCall).response.responseParts.find(
+      (p) => p.functionResponse,
+    )?.functionResponse;
+    expect(fr?.id).toBe('budget-call');
+    expect(fr?.response?.['output']).toBe(body);
   });
 
   it('keeps PreToolUse context on its own call within a batch and bounds it', async () => {
