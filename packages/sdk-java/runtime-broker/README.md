@@ -90,6 +90,20 @@ For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
 
+## Trusted local recovery
+
+Durable local provisioning and trusted reboot recovery are separate opt-ins;
+see the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md)
+and [reboot cleanup design](../../../docs/design/2026-09-28-local-reboot-recovery.md).
+`recoverBinding(bindingId, expectedGeneration)` observes and cleans only the
+saved generation. It does not resolve current product authorization or create
+replacement workers. Managed Workspace embeddings must implement
+`RuntimeProvisioner.recoverResources` to clear their original physical holder;
+the default refuses managed cleanup. Only then may `finishLostRecovery` retire
+the saved binding. Custom binding repository implementations must implement the
+new bounded candidate query and cleanup finalization contract. There is no new
+public HTTP recovery endpoint or database migration in this slice.
+
 ## Fault gates
 
 The Stage F fault gates run the service in real Broker JVMs against the real

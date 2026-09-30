@@ -47,6 +47,17 @@ public final class InMemoryRuntimeBindingRepository
     public synchronized RuntimeBindingRecord recoverLost(
             RuntimeSessionRepository sessions, ToolExecutionRepository executions,
             RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, !expected.getRequest().isManagedContext());
+    }
+
+    @Override
+    public synchronized RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, true);
+    }
+
+    private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
         RuntimeBindingRecord current = findById(expected.getBindingId());
         if (current == null || !current.sameIdentity(expected)
                 || current.getVersion() != expected.getVersion()
@@ -65,7 +76,7 @@ public final class InMemoryRuntimeBindingRepository
         synchronized (memorySessions) {
             synchronized (memoryExecutions) {
                 memoryExecutions.abandonByBinding(current);
-                if (!current.hasStoppedWriters()
+                if (!holdersCleared || !current.hasStoppedWriters()
                         || executions.hasActiveByBinding(current.getBindingId(),
                                 current.getGeneration())) {
                     return current;
@@ -166,6 +177,25 @@ public final class InMemoryRuntimeBindingRepository
             return null;
         }
         return record;
+    }
+
+    @Override
+    public synchronized List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String afterBindingId, int limit) {
+        BrokerValues.requireId(kind, "provisionerKind");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Recovery batch must contain 1-100 bindings");
+        }
+        return records.values().stream()
+                .filter(record -> kind.equals(record.getRequest().getProvisionerKind())
+                        && record.getResourceHandle() != null && record.getResourceHandle().getVersion() == 2
+                        && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0)
+                        && (record.getState() == RuntimeBindingRecord.State.PROVISIONING
+                                || record.getState() == RuntimeBindingRecord.State.READY
+                                || record.getState() == RuntimeBindingRecord.State.DRAINING
+                                || record.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                                || record.getState() == RuntimeBindingRecord.State.LOST))
+                .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId))
+                .limit(limit).toList();
     }
 
     @Override

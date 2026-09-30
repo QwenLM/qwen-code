@@ -11,6 +11,16 @@ public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
 
+    /**
+     * Whether the original Runtime can still answer for this execution after
+     * its dispatch answer was lost: tool v3 and provider references can be
+     * observed and cancelled there, a tool v2 reference cannot.
+     */
+    boolean observableAfterLoss() {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                || ProviderRuntimeProtocol.isReference(reference);
+    }
+
     Map<String, Object> cancellationBeforeDispatch() {
         if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))) {
             return Map.of("executionStatus", "cancelled");
@@ -280,6 +290,18 @@ public final class ToolExecutionRecord {
         return isSettled() || state == State.ABANDONED;
     }
 
+    boolean needsReconciliation() {
+        return state == State.EXECUTING || state == State.CANCEL_REQUESTED
+                || state == State.UNKNOWN;
+    }
+
+    boolean belongsTo(RuntimeSessionRecord session) {
+        return bindingId.equals(session.getBindingId())
+                && runtimeGeneration == session.getRuntimeGeneration()
+                && harnessSessionId.equals(session.getSession().getHarnessSessionId())
+                && runtimeSessionId.equals(session.getRuntimeSessionId());
+    }
+
     ToolExecutionRecord abandon(RuntimeBindingRecord binding, Instant time) {
         if (isTerminal() || binding.getState() != RuntimeBindingRecord.State.LOST
                 || !bindingId.equals(binding.getBindingId())
@@ -337,6 +359,14 @@ public final class ToolExecutionRecord {
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         if (state != State.UNKNOWN) {
             throw new IllegalStateException("execution is not unknown");
+        }
+        return resolveUnsettled(resolutionResult, resolutionTime);
+    }
+
+    ToolExecutionRecord resolveUnsettled(
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        if (!needsReconciliation()) {
+            throw new IllegalStateException("execution does not require reconciliation");
         }
         if (resolutionTime == null) {
             throw new IllegalArgumentException("resolutionTime is required");

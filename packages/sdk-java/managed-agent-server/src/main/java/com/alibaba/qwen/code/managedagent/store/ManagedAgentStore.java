@@ -30,6 +30,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,6 +81,8 @@ public class ManagedAgentStore implements AgentStateStore {
     private final CommittedEventPublisher eventPublisher;
     private final ManagedWorkspaceRegistry workspaces;
     private final String agentRevision;
+    private final boolean workspaceFilesEnabled;
+    private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -193,6 +196,8 @@ public class ManagedAgentStore implements AgentStateStore {
         this.eventPublisher = eventPublisher;
         this.workspaces = workspaces;
         this.agentRevision = properties.getAgentRevision();
+        this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
+        this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         if (agentRevision == null || agentRevision.isBlank()
                 || agentRevision.length() > 128) {
             throw new IllegalArgumentException(
@@ -221,7 +226,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection) {
-        if (!input.isEmpty()) {
+        if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
@@ -234,6 +239,15 @@ public class ManagedAgentStore implements AgentStateStore {
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
+        if (!input.isEmpty()
+                && (!"qwen-code".equals(agentId)
+                        || !WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
+                        || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
+                        || workspaceMounts.stream().noneMatch(mount ->
+                                tenantId.equals(mount.tenantId())
+                                        && workspace.binding().getStorageId().equals(mount.storageId())))) {
+            throw workspaceExecutionUnavailable();
+        }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId);
