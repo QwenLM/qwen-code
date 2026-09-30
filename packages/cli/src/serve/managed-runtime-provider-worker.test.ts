@@ -603,6 +603,7 @@ describe('Managed Runtime provider worker', () => {
     for (const directory of [
       storage,
       `${path.join(workspace, 'link')}${path.sep}..`,
+      // An unresolved path fails the containment check closed, before execution.
       path.join(workspace, 'missing-directory'),
     ]) {
       const outside = await post({
@@ -1049,6 +1050,79 @@ const timer = setInterval(() => {
     );
   });
 
+  it('accepts a manifest whose full envelope exactly fits the wire limit', async () => {
+    await acquire();
+    const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({
+      kind: 'manifest',
+    });
+    const limit = managedRuntimeProviderLimit('manifest');
+    const envelope = {
+      protocolVersion: 1,
+      providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+      session: SESSION,
+      result: 0,
+    };
+    const overhead = Buffer.byteLength(JSON.stringify(envelope)) - 1;
+    manifest.tools[0] = { ...manifest.tools[0], description: '' };
+    const padding =
+      limit - overhead - Buffer.byteLength(JSON.stringify(manifest));
+    manifest.tools[0] = {
+      ...manifest.tools[0],
+      description: 'x'.repeat(padding),
+    };
+    manifest.capabilityDigest = managedToolDigest(manifest.tools, limit);
+    vi.spyOn(ManagedToolRuntime.prototype, 'manifest').mockReturnValue(
+      manifest,
+    );
+    const response = await post({ kind: 'manifest' });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBe(limit);
+    expect(JSON.parse(body)).toEqual({ ...envelope, result: manifest });
+  });
+
+  it('fits a status whose envelope is one byte over the wire limit', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    await execute(ref);
+    const status = await control<ManagedToolInvocationStatus>({
+      kind: 'status',
+      reference: ref,
+    });
+    const result = { llmContent: '', returnDisplay: '' };
+    status.result = { executionStatus: 'success', result };
+    const limit = managedRuntimeProviderLimit('status');
+    const overhead =
+      Buffer.byteLength(
+        JSON.stringify({
+          protocolVersion: 1,
+          providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+          session: SESSION,
+          result: 0,
+        }),
+      ) - 1;
+    result.llmContent = 'x'.repeat(
+      limit - overhead + 1 - Buffer.byteLength(JSON.stringify(status)),
+    );
+    expect(Buffer.byteLength(JSON.stringify(status)) + overhead).toBe(
+      limit + 1,
+    );
+    vi.spyOn(ManagedToolRuntime.prototype, 'status').mockReturnValue(status);
+    const response = await post({ kind: 'status', reference: ref });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(limit);
+    expect(JSON.parse(body).result).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'success' },
+    });
+    expect(body).toContain('Managed Runtime provider omitted');
+  });
+
   it('refuses an unfitted manifest whose envelope exceeds the wire limit', async () => {
     await acquire();
     const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({
@@ -1100,6 +1174,11 @@ const timer = setInterval(() => {
 
   it('rechecks pending controls that arrive while release preparation is waiting', async () => {
     await begin();
+    const ref = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
     const preparedRelease = hold(
       ManagedToolRuntime.prototype,
       'releasePrepared',
@@ -1115,6 +1194,12 @@ const timer = setInterval(() => {
     expect(await refused.json()).toEqual({
       code: 'managed_runtime_identity_conflict',
       error: 'Managed Runtime Session still owns unfinished work.',
+    });
+    // Preparation already cancelled pending work before this late refusal.
+    expect(await control({ kind: 'status', reference: ref })).toMatchObject({
+      state: 'settled',
+      cancelRequested: true,
+      result: { executionStatus: 'not_started' },
     });
     drain.release();
     await observed;
@@ -1275,6 +1360,7 @@ const timer = setInterval(() => {
         .map((config) => (config as Config).getSessionId())
         .sort(),
     ).toEqual(others.map((other) => other.runtimeSessionId).sort());
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   /**
@@ -1359,6 +1445,7 @@ const timer = setInterval(() => {
     expect(released).toBe(false);
     dispose.release();
     expect(await ninth).toBe(true);
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('waits in close() for a retirement in flight and shuts each Config down once', async () => {
@@ -1387,6 +1474,7 @@ const timer = setInterval(() => {
         .map((config) => (config as Config).getSessionId())
         .sort(),
     ).toEqual(sessions.map((session) => session.runtimeSessionId).sort());
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('waits in close() for an acquire in flight and shuts its Config down', async () => {
@@ -1456,6 +1544,7 @@ const timer = setInterval(() => {
     ).toEqual([sessions[0].runtimeSessionId]);
     drain.release();
     expect(await observed).toMatchObject({ revision: expect.any(Number) });
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('retires the Session just released when every retained one is being observed', async () => {
@@ -1493,6 +1582,7 @@ const timer = setInterval(() => {
     drain.release();
     for (const history of await Promise.all(observed))
       expect(history).toMatchObject({ revision: expect.any(Number) });
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('answers a release that came before any acquire with a forgetful tombstone', async () => {
