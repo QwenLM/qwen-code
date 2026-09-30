@@ -428,6 +428,13 @@ export function registerAgentHostTransportRoutes(
       }
       try {
         const deadline = Date.now() + waitMs;
+        // An empty poll backs off: every pickup scan walks the agent store
+        // under its transaction, so a fixed 250ms cadence makes each idle
+        // Host hammer that lock ~4x/second doing nothing. Doubling to a 2s
+        // cap still answers fresh work promptly while an idle Host costs
+        // about one scan every other second. The cadence resets per request,
+        // so a Host that just received work re-polls hot.
+        let pollIntervalMs = 250;
         for (;;) {
           // A Host that hung up must not have a run claimed for it here.
           if (req.socket.destroyed || res.writableEnded) return;
@@ -453,7 +460,8 @@ export function registerAgentHostTransportRoutes(
             res.status(204).end();
             return;
           }
-          await delay(Math.min(250, remaining));
+          await delay(Math.min(pollIntervalMs, remaining));
+          pollIntervalMs = Math.min(pollIntervalMs * 2, 2000);
         }
       } catch (error) {
         res.status(409).json({

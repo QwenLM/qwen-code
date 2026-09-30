@@ -64,11 +64,11 @@ function setup(initiallyEnabled = true) {
     remove: () => {
       active = false;
     },
-    poll: () =>
+    poll: (waitMs = 1_000) =>
       request(app)
         .post('/agent-hosts/workspace/host/pickup')
         .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
-        .send({ waitMs: 1_000 })
+        .send({ waitMs })
         .then((response) => response),
     beat: (input: Record<string, unknown>) =>
       request(app)
@@ -132,6 +132,18 @@ it('stops polling when the selected workspace becomes unavailable', async () => 
   expect((await response).status).toBe(404);
   expect(pickup).toHaveBeenCalledOnce();
 });
+
+it('backs off an idle pickup poll instead of scanning at a fixed cadence', async () => {
+  // Each empty scan walks the agent store under its transaction; a fixed
+  // 250ms cadence is ~12 scans over a 3s wait, the backoff is 5. The bound
+  // is an upper bound, so a slow runner only makes this greener.
+  pickup.mockResolvedValue(undefined);
+
+  const response = await setup().poll(3_000);
+
+  expect(response.status).toBe(204);
+  expect(pickup.mock.calls.length).toBeLessThanOrEqual(6);
+}, 15_000);
 
 it.each([false, true])(
   'returns a claimed assignment only while its workspace remains active (removed: %s)',
