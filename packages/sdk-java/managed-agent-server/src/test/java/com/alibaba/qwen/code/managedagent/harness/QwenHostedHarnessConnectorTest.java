@@ -3,9 +3,11 @@ package com.alibaba.qwen.code.managedagent.harness;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -25,6 +27,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import java.time.Duration;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
 class QwenHostedHarnessConnectorTest {
@@ -68,15 +71,30 @@ class QwenHostedHarnessConnectorTest {
                     .contains("toolProfile=hosted-workspace-files/1", "workspaceId=selected-workspace", "tenantId=tenant-a")
                     .doesNotContain("workspaceId=workspace-a");
         }
-        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
+        doThrow(refusal).when(execution).authorize(session);
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error).isSameAs(refusal);
                     assertThat(error.getStatusCode()).isEqualTo(409);
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
                     assertThat(error.isRetryable()).isFalse();
                 });
-        verify(client).createSession(any());
-        verify(client).loadSession(any());
+        verify(execution, times(2)).authorize(session);
+
+        QwenHostedHarnessConnector cold = new QwenHostedHarnessConnector(properties, sessions, execution);
+        ReflectionTestUtils.setField(cold, "client", client);
+        clearInvocations(client);
+        assertThatThrownBy(() -> cold.createOrLoad("tenant-a", SESSION_ID, true))
+                .isSameAs(refusal);
+        verify(client, never()).createSession(any());
+        verify(client, never()).loadSession(any());
+
+        DataAccessResourceFailureException transientFailure =
+                new DataAccessResourceFailureException("db unavailable");
+        doThrow(transientFailure).when(execution).authorize(session);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .isSameAs(transientFailure);
         properties.getHarness().setWorkspaceFilesEnabled(false);
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
                 .hasMessage("Hosted Workspace files are disabled");
