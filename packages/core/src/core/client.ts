@@ -2686,11 +2686,24 @@ export class LlmClient {
       profiler.timeSync('deferred_tool_preload', () => {
         this.preloadDeferredToolsWithinBudget();
       });
-      // Snapshot what this session declares once the registry is warm and the
-      // preload has settled, so the prompt built below can gate its
-      // tool-specific text on it and `/context` can report the same set
-      // (#12032). Mid-session reveals deliberately do not update this: they
-      // change only the tools block, keeping the cached system prefix stable.
+      const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
+        const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
+        this.rememberAnnouncedDeferredTools(resolved);
+        this.rememberAnnouncedMcpServerInstructions(
+          toolRegistry.getMcpServerInstructions(),
+        );
+        return resolved;
+      });
+      deferredReminderCount = deferredTools?.length ?? 0;
+      // Snapshot what this session declares once the registry is warm, the
+      // preload has settled, and the deferred-reminder resolution has run —
+      // its incomplete-bridge fallback eagerly reveals ordinary deferred
+      // tools into the declaration list, and the snapshot must include them
+      // so the prompt built below keeps the guidance for tools the model can
+      // actually call. The prompt gates its tool-specific text on this set
+      // and `/context` reports the same set (#12032). Mid-session reveals
+      // deliberately do not update this: they change only the tools block,
+      // keeping the cached system prefix stable.
       //
       // Not wrapped in a profiler stage: it is a map over declarations the
       // registry has already built, and the startup stage list is asserted in
@@ -2706,21 +2719,16 @@ export class LlmClient {
           .filter((name): name is string => Boolean(name)),
       );
       this.config.setPromptToolSnapshot?.(declaredTools);
+      // The bridge test mirrors resolveDeferredToolsForReminder's
+      // registration-based check: a permission-deferred Agent withheld from
+      // the eager reveal in an incomplete-bridge session is neither declared
+      // nor bridge-reachable, so it correctly reads unreachable here.
       this.config.setPromptAgentReachable?.(
         declaredTools.has(ToolNames.AGENT) ||
-          (declaredTools.has(ToolNames.TOOL_SEARCH) &&
-            declaredTools.has(ToolNames.TOOL_CALL) &&
+          (!!toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+            !!toolRegistry.getTool(ToolNames.TOOL_CALL) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
-      const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
-        const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
-        this.rememberAnnouncedDeferredTools(resolved);
-        this.rememberAnnouncedMcpServerInstructions(
-          toolRegistry.getMcpServerInstructions(),
-        );
-        return resolved;
-      });
-      deferredReminderCount = deferredTools?.length ?? 0;
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
         () => getInitialChatHistory(this.config, extraHistory),
@@ -4667,13 +4675,58 @@ export class LlmClient {
         // returned (#10953): real work advanced while the parent earned a
         // single tool turn, so the turn budget cannot come due on its own.
         // Force the reminder exactly where the progress information arrives.
-        const carriesAgentToolResult = requestToSend.some(
-          (part) =>
-            typeof part === 'object' &&
-            part !== null &&
-            canonicalToolName(part.functionResponse?.name ?? '') ===
-              ToolNames.AGENT,
-        );
+        // A bridged delegation returns under the tool_call envelope (the
+        // scheduler keeps the model-facing request name on the response
+        // part), so also correlate by call id with the functionCall recorded
+        // in history and unwrap the resolved target — the same correlation
+        // seedRecentCompletedToolNamesFromHistory uses. The force stays
+        // specific to calls that actually resolved to Agent: the goal tools
+        // are bridged too, and per-turn injection grows context linearly.
+        let bridgedResponseIds: Set<string> | undefined;
+        let carriesAgentToolResult = false;
+        for (const part of requestToSend) {
+          if (typeof part !== 'object' || part === null) {
+            continue;
+          }
+          const response = part.functionResponse;
+          if (!response) {
+            continue;
+          }
+          if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
+            carriesAgentToolResult = true;
+            break;
+          }
+          if (response.name === ToolNames.TOOL_CALL && response.id) {
+            (bridgedResponseIds ??= new Set<string>()).add(response.id);
+          }
+        }
+        if (!carriesAgentToolResult && bridgedResponseIds) {
+          for (const message of this.getHistoryShallow()) {
+            for (const historyPart of message.parts ?? []) {
+              const call = historyPart.functionCall;
+              if (
+                call?.name !== ToolNames.TOOL_CALL ||
+                !call.id ||
+                !bridgedResponseIds.has(call.id)
+              ) {
+                continue;
+              }
+              const bridgedName = (
+                call.args as Record<string, unknown> | undefined
+              )?.['name'];
+              if (
+                typeof bridgedName === 'string' &&
+                canonicalToolName(bridgedName) === ToolNames.AGENT
+              ) {
+                carriesAgentToolResult = true;
+                break;
+              }
+            }
+            if (carriesAgentToolResult) {
+              break;
+            }
+          }
+        }
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);

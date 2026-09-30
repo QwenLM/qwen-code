@@ -758,6 +758,14 @@ export function stampBackgroundPromptPolicy(
   config.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 }
 
+// The deferred-tool catalog renders `description.split('\n')[0]`, so this
+// first line is the tool's entire up-front surface until discovery. The
+// constructor serves it before `refreshSubagents()` resolves and
+// `updateDescriptionAndSchema()` rebuilds from it after — define it once so
+// the cold-start copy cannot drift away from the tested, assembled one.
+const AGENT_DESCRIPTION_FIRST_LINE =
+  'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.';
+
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
  * The tool dynamically loads available agents and includes them in its description
@@ -876,7 +884,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     super(
       AgentTool.Name,
       ToolDisplayNames.AGENT,
-      'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n',
+      `${AGENT_DESCRIPTION_FIRST_LINE}\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n`,
       Kind.Agent,
       initialSchema,
       true, // isOutputMarkdown
@@ -958,7 +966,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const delegationSection = buildAgentDelegationSection(
       this.delegationSurface,
     );
-    const baseDescription = `Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.
+    const baseDescription = `${AGENT_DESCRIPTION_FIRST_LINE}
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
