@@ -82,7 +82,10 @@ export function useManagedActions(
     return () => clearTimeout(timer);
   }, [pending]);
 
-  const actions = pending.sessionId === sessionId ? pending.actions : [];
+  const actions = useMemo(
+    () => (pending.sessionId === sessionId ? pending.actions : []),
+    [pending.sessionId, pending.actions, sessionId],
+  );
   const action = actions.find((entry) => !answered.has(entry.actionId));
 
   const respond = useCallback(
