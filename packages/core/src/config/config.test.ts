@@ -17088,11 +17088,24 @@ describe('applyWorkspaceAgentPersona', () => {
     await mkdir(outside);
     await writeFile(path.join(workspace, 'inside.txt'), 'inside');
     await writeFile(path.join(outside, 'secret.txt'), 'secret');
+    const escape = path.join(workspace, 'escape');
     fs.symlinkSync(
       outside,
-      path.join(workspace, 'escape'),
+      escape,
       process.platform === 'win32' ? 'junction' : 'dir',
     );
+    // The file-wide node:fs mock resolves realpathSync to the identity, so the
+    // symlink is only followed when this test maps it to its real target.
+    vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+      const resolvedPath = pathToResolve.toString();
+      if (resolvedPath === escape) {
+        return outside;
+      }
+      if (resolvedPath.startsWith(escape + path.sep)) {
+        return path.join(outside, resolvedPath.slice(escape.length + 1));
+      }
+      return resolvedPath;
+    });
 
     try {
       const config = new Config({
@@ -17152,6 +17165,9 @@ describe('applyWorkspaceAgentPersona', () => {
         }),
       ).resolves.toEqual(expect.objectContaining({ allowed: false }));
     } finally {
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+        pathToResolve.toString(),
+      );
       await rm(root, { recursive: true, force: true });
     }
   });

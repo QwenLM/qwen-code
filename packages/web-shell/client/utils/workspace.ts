@@ -16,7 +16,7 @@ export function isAgentCollaborationEnabledForWorkspace(
   capabilities: DaemonCapabilities | undefined,
   cwd: string | undefined,
 ): boolean {
-  if (!capabilities?.features.includes(AGENT_COLLABORATION_FEATURE)) {
+  if (!capabilities?.features?.includes(AGENT_COLLABORATION_FEATURE)) {
     return false;
   }
   const workspaces = capabilities.workspaces;

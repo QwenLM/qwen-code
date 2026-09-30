@@ -62,6 +62,19 @@ describe('isAgentCollaborationEnabledForWorkspace', () => {
     ).toBe(false);
   });
 
+  it('stays off when the daemon omits the feature list', () => {
+    const capabilities = {
+      v: 1,
+      mode: 'native',
+      modelServices: [],
+      workspaces: [ws('/workspace')],
+    } as unknown as DaemonCapabilities;
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(false);
+  });
+
   it('uses the per-workspace opt-in when the daemon advertises it', () => {
     const capabilities = caps([
       { ...ws('/enabled'), agentCollaborationEnabled: true },
