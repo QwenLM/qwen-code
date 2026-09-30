@@ -88,4 +88,29 @@ describe('keyToAnsi', () => {
       );
     }
   });
+
+  it('does not fold Ctrl + a single non-letter into a control byte', () => {
+    // What node's readline emits for Ctrl+Space / Ctrl+@ (`readline.emitKeypressEvents`
+    // in KeypressContext normalizes byte 0x00 to this key). The name is '`', one
+    // character and just below 'a', so only the a-z range in the Ctrl guard keeps it
+    // out of the Ctrl+letter arithmetic. Rewriting that branch as the usual
+    // "Ctrl = code mod 32" fold, or widening the bound, would otherwise write a raw
+    // NUL into the pty with this suite still green.
+    expect(
+      keyToAnsi(key({ name: '`', ctrl: true, sequence: '\u0000' })),
+    ).toBeNull();
+  });
+
+  it('ignores Shift when mapping Ctrl + a named key', () => {
+    // KeypressContext parses `\x1b[1;6D` into { name: 'left', ctrl: true, shift: true },
+    // and ShellInputPrompt claims only Ctrl+Shift+Up/Down before calling keyToAnsi, so
+    // these bytes reach this mapping. 'left' and 'delete' are used rather than 'up' or
+    // 'down' because the latter are intercepted earlier and never arrive here.
+    expect(keyToAnsi(key({ name: 'left', ctrl: true, shift: true }))).toBe(
+      '\x1b[D',
+    );
+    expect(keyToAnsi(key({ name: 'delete', ctrl: true, shift: true }))).toBe(
+      '\x1b[3~',
+    );
+  });
 });
