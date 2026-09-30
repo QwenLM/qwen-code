@@ -653,12 +653,6 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
-    // A retried attempt can reuse this same context object (see the
-    // executeAttempt() retry calls), so a truncation override parked by a
-    // previous stream that never reached its settle point must not be allowed
-    // to downgrade *this* stream's finish reason. The converter re-parks on
-    // this stream's own finish chunk when it has a rewrite to settle.
-    context.pendingTruncationOverride = undefined;
     // Whether any user-visible content (a non-thought part) has been yielded
     // on this stream. The error-path flush below consults it before
     // withholding a parked tool-call finish: it must mirror LlmChat's

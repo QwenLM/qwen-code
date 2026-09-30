@@ -20,7 +20,9 @@
  * a non-enumerable symbol on the `FunctionCall`, which survives
  * `GenerateContentResponse.functionCalls` because that getter returns the same
  * object references the converter assigned, and never reaches the wire, a log,
- * or `Object.keys`.
+ * or `Object.keys`. Being non-enumerable also means it does not survive an
+ * object spread, so every layer that rebuilds a call into a fresh literal must
+ * carry it across explicitly (`carryIncompleteArgumentsMarker`).
  */
 import type { FunctionCall, Part } from '@google/genai';
 
@@ -52,4 +54,23 @@ export function toolCallArgumentsWereIncomplete(
       INCOMPLETE_TOOL_CALL_ARGS
     ] === true
   );
+}
+
+/**
+ * Carries the marker from `source` onto `target`, a rebuilt copy of the same
+ * call. Object spread copies only *enumerable* own properties, so any layer
+ * that normalizes a `FunctionCall` into a fresh literal would silently drop
+ * the marker and disarm the guard — exactly the failure this module exists to
+ * prevent. `normalizeModelToolCallIds` calls this the same way it re-attaches
+ * `PROVIDER_TOOL_CALL_ID`.
+ */
+export function carryIncompleteArgumentsMarker(
+  source: FunctionCall,
+  target: FunctionCall,
+): void {
+  if (!toolCallArgumentsWereIncomplete(source)) return;
+  Object.defineProperty(target, INCOMPLETE_TOOL_CALL_ARGS, {
+    value: true,
+    enumerable: false,
+  });
 }

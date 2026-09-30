@@ -168,7 +168,12 @@ export class HostedWorkspaceToolTurn {
       if (
         !this.declarations.some((tool) => tool.name === call.name) ||
         ids.has(call.callId) ||
-        call.wasOutputTruncated === true
+        // Refuse a call whose arguments arrived unterminated even when the
+        // output token limit was not what cut them: this profile commits to a
+        // remote Workspace with no undo backup, so a repaired partial
+        // `content` or half-streamed command line is unrecoverable.
+        call.wasOutputTruncated === true ||
+        call.hadIncompleteArguments === true
       )
         throw new Error('Hosted Workspace profile refused a tool call.');
       ids.add(call.callId);
