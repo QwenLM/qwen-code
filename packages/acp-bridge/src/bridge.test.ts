@@ -17487,6 +17487,120 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('binds chunk uploads to registered clients and revokes them on detach', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const { uploadId } = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'test.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            uploadId,
+            0,
+            Buffer.from('abc'),
+          ),
+        ).toThrow(expect.objectContaining({ status: 404 }));
+        bridge.appendSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          0,
+          Buffer.from('abc'),
+          { clientId: session.clientId },
+        );
+        const reference = await bridge.completeSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          { clientId: session.clientId },
+        );
+        expect(
+          (
+            await bridge.readSessionAttachment(
+              session.sessionId,
+              reference.attachmentId,
+            )
+          )?.data.toString(),
+        ).toBe('abc');
+        const pending = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'pending.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        await bridge.detachClient(session.sessionId, session.clientId);
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            pending.uploadId,
+            0,
+            Buffer.from('abc'),
+            { clientId: session.clientId },
+          ),
+        ).toThrow();
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it("frees a detached client's staged uploads while another client keeps the session open", async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(second.sessionId).toBe(first.sessionId);
+        expect(first.clientId).toBeTruthy();
+        expect(second.clientId).toBeTruthy();
+        expect(second.clientId).not.toBe(first.clientId);
+        const create = (clientId: string | undefined) =>
+          bridge.createSessionAttachmentUpload(
+            first.sessionId,
+            {
+              name: 'staged.bin',
+              mimeType: 'application/octet-stream',
+              size: 1,
+            },
+            { clientId },
+          );
+        for (let i = 0; i < 8; i++) create(first.clientId);
+        expect(() => create(second.clientId)).toThrow(
+          expect.objectContaining({ status: 429 }),
+        );
+        await bridge.detachClient(first.sessionId, first.clientId);
+        for (let i = 0; i < 8; i++) {
+          expect(() => create(second.clientId)).not.toThrow();
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('closes captured attachment stores during bridge shutdown', async () => {
+      const close = vi.spyOn(SessionAttachmentStore.prototype, 'close');
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        bridge.createSessionAttachmentUpload(session.sessionId, {
+          name: 'test.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        });
+        close.mockClear();
+        await bridge.shutdown();
+        expect(close).toHaveBeenCalled();
+      } finally {
+        close.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('keeps attachment references on the event bus and resolves bytes for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const factory: ChannelFactory = async () =>

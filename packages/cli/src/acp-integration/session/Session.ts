@@ -119,6 +119,8 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  appendToolHookContextToParts,
+  boundToolHookContext,
   buildContextUsage,
   injectPermissionRulesIfMissing,
   NotificationType,
@@ -577,12 +579,17 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
 
 /**
  * ACP rewind's binding of the shared user-prompt classifier
- * (`isApiUserPrompt` in core). The two deltas from the TUI binding are
+ * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
  * deliberate:
  *
  * - The todo-stop-guard's synthetic continuation prompts are injected as user
  *   entries but are not turns a client can rewind to, so they must not
  *   consume an ordinal.
+ * - Delivered background-notification turns (`[...systemReminders,
+ *   ...notificationParts]` as one user entry) likewise never produced a
+ *   client-visible turn or a per-prompt file-history snapshot, so counting
+ *   them inflates the rewindable count and shifts every cut point after
+ *   them (#9608).
  * - Microcompaction media-clear placeholders stay COUNTED here, unlike the
  *   TUI binding. ACP rewind maps against per-prompt file-history snapshots,
  *   which ARE created for media-only prompts, so a cleared entry still owns
@@ -590,6 +597,7 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
  */
 const ACP_API_USER_PROMPT_OPTIONS = {
   excludeTextPart: isTodoStopGuardPromptText,
+  excludeTaskNotifications: true,
 };
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
@@ -647,6 +655,11 @@ type RunToolResult = {
    * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /**
+   * Hook additionalContext of a code-mode nested call. Its parts are a value
+   * for the exec script, so the parent exec delivers this to the model.
+   */
+  hookContext?: string;
 };
 
 type MidTurnDrainResult = {
@@ -767,6 +780,12 @@ type PendingToolResultRecord = {
   toolName: string;
   toolArgs: Record<string, unknown>;
   responseParts: Part[];
+  /**
+   * `responseParts` without the hook additionalContext appended to them;
+   * set only when context was appended. Used instead of `responseParts` if
+   * the turn is aborted before the result is recorded.
+   */
+  responsePartsWithoutHookContext?: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
   toolType?: 'native' | 'mcp';
@@ -12500,19 +12519,38 @@ export class Session implements SessionContext {
     // end the turn asked no matter which of the exits below the batch takes,
     // and the exits that run before any tool does read it as false anyway.
     let batchTerminatesTurn = false;
-    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
-      if (records.length === 0) return [];
-      const finalized = await finalizeToolResponses(
+    const finalizeRecords = (
+      records: PendingToolResultRecord[],
+      withHookContext: boolean,
+    ) =>
+      finalizeToolResponses(
         this.config,
         records.map((record) => ({
           callId: record.callId,
           toolName: record.toolName,
-          responseParts: record.responseParts,
+          responseParts: withHookContext
+            ? record.responseParts
+            : (record.responsePartsWithoutHookContext ?? record.responseParts),
           persistedOutputFiles: record.persistedOutputFiles,
           artifacts: record.metadata.artifacts,
         })),
         new Map(records.map((record) => [record.callId, promptId])),
       );
+    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
+      if (records.length === 0) return [];
+      // A turn aborted before the result is recorded (e.g. while the result
+      // notification or the finalizer's persistence was awaited) keeps the
+      // tool output but not the hook context. Redo the budget without it
+      // rather than cutting it out of already-budgeted text.
+      const withHookContext =
+        !abortSignal.aborted &&
+        records.some(
+          (record) => record.responsePartsWithoutHookContext !== undefined,
+        );
+      let finalized = await finalizeRecords(records, withHookContext);
+      if (withHookContext && abortSignal.aborted) {
+        finalized = await finalizeRecords(records, false);
+      }
       records.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
         // dangling on disk so a later load can re-hang it; only the
@@ -13346,6 +13384,40 @@ export class Session implements SessionContext {
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
     const guardContext: { policyToolName?: string } = {};
+    // Sanitized hook additionalContext for this call (and, for exec, its
+    // nested calls), appended to the model-facing functionResponse only —
+    // never to UI/error projections. A nested call hands it to its parent
+    // exec instead, and an MCP App call has no model consumer at all.
+    let preToolUseContext: string | undefined;
+    let failureContext: string | undefined;
+    // One slot per nested call, reserved in dispatch order: nested calls run
+    // concurrently, and truncation must not depend on completion order.
+    const nestedHookContexts: Array<string | undefined> = [];
+    const hookContextFor = (
+      status: 'success' | 'error' | 'cancelled',
+    ): string | undefined =>
+      status === 'cancelled' ||
+      (!preToolUseContext &&
+        !failureContext &&
+        !nestedHookContexts.some(Boolean))
+        ? undefined
+        : boundToolHookContext(
+            [preToolUseContext, failureContext, ...nestedHookContexts],
+            this.config.getTruncateToolOutputThreshold(),
+          );
+    const withHookContext = (
+      parts: Part[],
+      status: 'success' | 'error' | 'cancelled',
+    ): Part[] =>
+      codeModeContext || appExecution
+        ? parts
+        : appendToolHookContextToParts(parts, callId, hookContextFor(status));
+    const nestedHookContextField = (
+      status: 'success' | 'error' | 'cancelled',
+    ): Pick<RunToolResult, 'hookContext'> => {
+      const hookContext = codeModeContext ? hookContextFor(status) : undefined;
+      return hookContext ? { hookContext } : {};
+    };
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -13477,6 +13549,7 @@ export class Session implements SessionContext {
         opts.status,
         opts.errorType,
       );
+      const modelErrorParts = withHookContext(errorParts, opts.status);
       if (toolName !== ToolNames.TODO_WRITE) {
         try {
           if (opts.settledMetadata) {
@@ -13530,7 +13603,10 @@ export class Session implements SessionContext {
       queueToolResultRecord?.(fc, {
         callId,
         toolName,
-        responseParts: errorParts,
+        responseParts: modelErrorParts,
+        ...(modelErrorParts !== errorParts
+          ? { responsePartsWithoutHookContext: errorParts }
+          : {}),
         persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
         toolType,
@@ -13563,9 +13639,10 @@ export class Session implements SessionContext {
           error,
         );
       return {
-        parts: errorParts,
+        parts: modelErrorParts,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
         loopDetected,
+        ...nestedHookContextField(opts.status),
       };
     };
 
@@ -14921,6 +14998,7 @@ export class Session implements SessionContext {
               callId,
               hookOwner,
             );
+            preToolUseContext = preHookResult.additionalContext;
             const preHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (preHookCancellation) return preHookCancellation;
@@ -14947,15 +15025,6 @@ export class Session implements SessionContext {
                 errorType: ToolErrorType.EXECUTION_DENIED,
                 executionStatus: 'not_started',
               });
-            }
-
-            // Add additional context from PreToolUse hook if provided
-            // Note: This context would need to be passed to the tool invocation
-            // For now, we just log it as the tool execution proceeds
-            if (preHookResult.additionalContext) {
-              debugLogger.debug(
-                `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
-              );
             }
           }
 
@@ -15205,6 +15274,8 @@ export class Session implements SessionContext {
                   onResult?: (response: ToolCallResponseInfo) => void,
                 ): Promise<CodeModeToolResult> => {
                   const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
+                  const hookContextSlot =
+                    nestedHookContexts.push(undefined) - 1;
                   const signal = AbortSignal.any([
                     activeToolAbortSignal,
                     nestedSignal,
@@ -15237,6 +15308,7 @@ export class Session implements SessionContext {
                     if (nested.stopAfterPermissionCancel) {
                       stopNestedAfterPermissionCancel();
                     }
+                    nestedHookContexts[hookContextSlot] = nested.hookContext;
                     const nestedParts = finalizeCodeModeToolResult
                       ? await finalizeCodeModeToolResult(nestedCallId, nested)
                       : nested.parts;
@@ -15629,11 +15701,7 @@ export class Session implements SessionContext {
                 elapsedExecutionMs(),
                 hookOwner,
               );
-              if (failureHookResult.additionalContext) {
-                debugLogger.debug(
-                  `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
-                );
-              }
+              failureContext = failureHookResult.additionalContext;
               await this.emitHookArtifactsNotification({
                 hookEventName: 'PostToolUseFailure',
                 toolName,
@@ -15795,10 +15863,14 @@ export class Session implements SessionContext {
             );
           }
 
+          const modelResponseParts = withHookContext(responseParts, status);
           queueToolResultRecord?.(fc, {
             callId,
             toolName,
-            responseParts,
+            responseParts: modelResponseParts,
+            ...(modelResponseParts !== responseParts
+              ? { responsePartsWithoutHookContext: responseParts }
+              : {}),
             persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
             toolType,
@@ -15839,7 +15911,8 @@ export class Session implements SessionContext {
             spanError = toolResult.error.message;
           }
           return {
-            parts: responseParts,
+            parts: modelResponseParts,
+            ...nestedHookContextField(status),
             ...('modelOverride' in toolResult && succeeded
               ? { modelOverride: toolResult.modelOverride }
               : {}),
@@ -15887,11 +15960,7 @@ export class Session implements SessionContext {
                 elapsedExecutionMs(),
                 hookOwner,
               );
-              if (failureHookResult.additionalContext) {
-                debugLogger.debug(
-                  `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
-                );
-              }
+              failureContext = failureHookResult.additionalContext;
               await this.emitHookArtifactsNotification({
                 hookEventName: 'PostToolUseFailure',
                 toolName,

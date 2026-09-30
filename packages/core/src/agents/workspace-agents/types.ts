@@ -60,6 +60,23 @@ export interface A2AGrant {
   expiresAt?: number;
 }
 
+/**
+ * One external caller's permission to call one agent.
+ *
+ * Per agent, never per daemon: opening agent A says nothing about agent B, and
+ * a grant in one direction confers nothing in the other. The secret is stored
+ * only as a digest and never travels in a thread, a prompt, a tool argument
+ * or a log line.
+ */
+export interface A2AGrant {
+  callerId: string;
+  agentId: string;
+  secretHash: string;
+  createdAt: number;
+  /** Absent means it does not expire on its own; revocation still applies. */
+  expiresAt?: number;
+}
+
 export interface AgentWorkspaceState {
   schemaVersion: typeof AGENTS_SCHEMA_VERSION;
   workspaceId: string;
