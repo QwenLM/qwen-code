@@ -2,8 +2,7 @@
 
 [English](2026-09-30-managed-agent-actions.md) | [简体中文](2026-09-30-managed-agent-actions.zh-CN.md)
 
-Status: D6a (Hosted Harness) implemented; D6b (Java server) designed and lands
-separately.
+Status: D6a (Hosted Harness) and D6b (Java server) implemented.
 Date: 2026-09-30
 Issue: [#12867](https://github.com/QwenLM/qwen-code/issues/12867), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 Decisions: [#12867 comment](https://github.com/QwenLM/qwen-code/issues/12867#issuecomment-5895205811)
@@ -19,7 +18,7 @@ Harness requested can be answered through either surface and the Turn
 continues, a replayed response returns the original result, and a responder
 without the right gets `403`.
 
-`main` has the durable pieces but nothing that uses them:
+Before D6, `main` had the durable pieces but nothing that used them:
 
 - The Session authority has `requestToolAction`, a permission ticket only the
   current Harness activation may open, and `resolveAction`, the trusted
@@ -96,8 +95,8 @@ of which the Hosted path has. A timeout outside its range answers the same, and
 `yolo` ignores the timeout because it never waits. A Session without a tool
 profile keeps ignoring the mode, because it runs no tools.
 
-Java keeps refusing Workspace files with any mode but `yolo` until D6b can
-answer an Action, so no Session waits for an approval that nobody can answer.
+D6b enables `default` and `auto-edit` for Workspace files and serves their
+Actions. `yolo` remains the deployment default.
 
 ### 5.2 Where the Turn waits
 
@@ -211,8 +210,11 @@ H records. It also projects `action.changed` into a new Actions table in the
 same transaction, reading the options from the `optionsRef` resource that the
 Harness publishes before it commits the request, and appends an
 `action.updated` Session event. The table
-needs a Flyway migration; open pull requests hold V19 to V21, so its number is
-settled at merge.
+uses Flyway migration V22, reserving V20–V21 for the parallel slices.
+Projection validates the original options resource and immutable revision chain.
+Decision receipt IDs are opaque product handles derived from the recorded
+decision, never raw storage resource IDs. The public Turn ID is resolved from
+the Hosted prompt ID when a matching Java Turn exists.
 
 ### 6.2 Routes
 
@@ -237,7 +239,7 @@ settled at merge.
   decided with this response's decision (the decision bytes are
   deterministic, so Java compares their digest), and with its end state
   (`action_expired`, `action_cancelled` or `action_already_resolved`)
-  otherwise. A `400` from the Harness completes it with that error. While the
+  otherwise, exposed as `failure_code` (`failureCode` on WebShell). A `400` from the Harness completes it with that error. While the
   Action stays `requested`, for example on a recovery-blocked Session, the
   operation stays `running`. The WebShell request gains `requestId`.
 
@@ -250,7 +252,13 @@ settled at merge.
   `409 action_already_resolved`, and an unknown Action gets
   `404 action_not_found`. The contract gains these codes.
 - The Session capability `actions` reads `true` for a Session whose approval
-  mode can ask.
+  mode can ask. Java pins that mode on Workspace Session admission; migrated
+  Sessions default to `yolo`. Owner checks use the existing creator record
+  without adding grants or owners. Unknown creators fail closed.
+- `allow` and `deny` are stable option IDs. Actions expose both revisions, the
+  function call ID, tool name and expiry. Arguments come from Items. Only one
+  Hosted approval is pending per Turn; list returns requested Actions, newest
+  first, without locally expiring them.
 
 The Turn keeps reading `running` while it waits; its pending Actions are what
 tells a client that it is waiting.
@@ -258,8 +266,8 @@ tells a client that it is waiting.
 ### 6.4 Java configuration
 
 A deployment with Workspace files enabled may set `default` or `auto-edit`.
-Java sends a deployment-wide approval timeout with the mode, and `yolo` stays
-the default. For a Session with a tool profile, Java records the mode it sent
+Java sends `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` (default `10m`, between `1s`
+and `24h`) with the mode, and `yolo` stays the default. For a Session with a tool profile, Java records the mode it sent
 at creation and uses the Session only when the Harness reports that mode as
 `approvalMode` on create and on every load: a Harness from before D6a omits
 it, and would ignore the mode and run every call unasked.
@@ -277,10 +285,10 @@ it, and would ignore the mode and run every call unasked.
   once, a write failure elsewhere is noticed within a second, a
   recovery-blocked Session answers what it already recorded, a cancel request
   releases the Workspace, and a load keeps and reports the saved mode.
-- **D6b:** projection and route tests on H2 and MySQL, owner and non-owner
+- **D6b:** projection and route tests on H2 and MariaDB (MySQL driver), owner and non-owner
   responses, replay, expiry and the contract test's traffic on both surfaces,
   and a Hosted process test in which the owner answers through the public API
-  and the Turn completes.
+  and WebShell, and the Turn completes.
 
 ## 8. Risks and follow-up
 

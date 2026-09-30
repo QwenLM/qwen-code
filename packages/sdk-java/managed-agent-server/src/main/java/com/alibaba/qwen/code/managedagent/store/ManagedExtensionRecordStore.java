@@ -386,7 +386,7 @@ public class ManagedExtensionRecordStore {
     }
 
     /** A JSON object as the authority's reader parses it, or null. */
-    private static JsonNode parse(String text) {
+    static JsonNode parse(String text) {
         try {
             JsonNode node = JSON.readTree(text);
             return node != null && node.isObject() && finite(node) ? node

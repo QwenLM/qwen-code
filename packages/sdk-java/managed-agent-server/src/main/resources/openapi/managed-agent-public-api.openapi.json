@@ -1261,7 +1261,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "listSessionActions",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Authorized pending Actions; use original action lookup to query terminal state.",
@@ -1277,13 +1277,15 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "parameters": [
@@ -1293,7 +1295,8 @@
           {
             "$ref": "#/components/parameters/ListLimit"
           }
-        ]
+        ],
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}": {
@@ -1308,7 +1311,7 @@
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getSessionAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Current durable Action view, including terminal decisions.",
@@ -1324,15 +1327,18 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses": {
@@ -1347,7 +1353,7 @@
       "post": {
         "tags": ["Public Sessions"],
         "operationId": "respondToSessionAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Response durably queued for the original arbiter. 202 is not final approval.",
@@ -1363,13 +1369,16 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "parameters": [
@@ -1386,7 +1395,8 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/v1/agents/sessions/{sessionId}/close": {
@@ -1521,7 +1531,7 @@
       "post": {
         "tags": ["WebShell"],
         "operationId": "queryWebShellActions",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1537,13 +1547,15 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "requestBody": {
@@ -1555,14 +1567,15 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/get": {
       "post": {
         "tags": ["WebShell"],
         "operationId": "getWebShellAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "200": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1578,13 +1591,15 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "requestBody": {
@@ -1596,14 +1611,15 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/actions/respond": {
       "post": {
         "tags": ["WebShell"],
         "operationId": "respondWebShellAction",
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "implemented",
         "responses": {
           "202": {
             "description": "Same authorized operation semantics as the public API.",
@@ -1619,13 +1635,16 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "404": {
-            "$ref": "#/components/responses/NotFound"
+            "$ref": "#/components/responses/NotFound",
+            "description": "Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found)."
           },
           "409": {
-            "$ref": "#/components/responses/Conflict"
+            "$ref": "#/components/responses/Conflict",
+            "description": "Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved)."
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "$ref": "#/components/responses/Forbidden",
+            "description": "Responding requires the Session creator (action_forbidden)."
           }
         },
         "requestBody": {
@@ -1637,7 +1656,8 @@
               }
             }
           }
-        }
+        },
+        "description": "D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision."
       }
     },
     "/api/agent/web-shell/v1/sessions/close": {
@@ -2757,7 +2777,14 @@
       "SessionCapabilities": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "snapshots", "artifacts", "resync", "tasks"],
+        "required": [
+          "items",
+          "snapshots",
+          "artifacts",
+          "resync",
+          "tasks",
+          "actions"
+        ],
         "properties": {
           "items": {
             "type": "boolean"
@@ -2788,8 +2815,7 @@
           },
           "actions": {
             "type": "boolean",
-            "default": false,
-            "x-qwen-implementation-status": "planned"
+            "default": false
           },
           "session_lifecycle": {
             "type": "boolean",
@@ -3669,7 +3695,7 @@
       },
       "WebShellSessionCapabilities": {
         "type": "object",
-        "required": ["tasks"],
+        "required": ["tasks", "actions"],
         "properties": {
           "workspaceContext": {
             "type": "boolean",
@@ -3688,8 +3714,7 @@
           },
           "actions": {
             "type": "boolean",
-            "default": false,
-            "x-qwen-implementation-status": "planned"
+            "default": false
           },
           "sessionLifecycle": {
             "type": "boolean",
@@ -4517,8 +4542,7 @@
             "type": "string",
             "maxLength": 1024
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "ActionQuestion": {
         "type": "object",
@@ -4579,8 +4603,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "PermissionAction": {
         "type": "object",
@@ -4595,7 +4618,9 @@
           "policy_revision",
           "created_at",
           "expires_at",
-          "options"
+          "options",
+          "function_call_id",
+          "tool_name"
         ],
         "properties": {
           "id": {
@@ -4646,9 +4671,23 @@
             "items": {
               "$ref": "#/components/schemas/ActionOption"
             }
+          },
+          "turn_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "function_call_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -4663,7 +4702,8 @@
               "required": ["decision_receipt_id"]
             }
           }
-        ]
+        ],
+        "description": "At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs."
       },
       "QuestionAction": {
         "type": "object",
@@ -4757,7 +4797,7 @@
             "$ref": "#/components/schemas/QuestionAction"
           }
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "PublicActionList": {
         "type": "object",
@@ -4778,8 +4818,7 @@
             "type": ["string", "null"],
             "maxLength": 512
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "QuestionAnswer": {
         "type": "object",
@@ -4841,8 +4880,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "QuestionResponse": {
         "type": "object",
@@ -4882,7 +4920,7 @@
             "$ref": "#/components/schemas/QuestionResponse"
           }
         ],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Validate IDs, required answers, selection cardinality, text eligibility and current responder permission against the original Action. Unknown/expired/cancelled/conflicting revisions cannot grant execution."
       },
       "ActionResolution": {
@@ -4896,7 +4934,8 @@
             "maxLength": 128
           },
           "outcome": {
-            "enum": ["vote_recorded", "decided"]
+            "enum": ["vote_recorded", "decided"],
+            "description": "D6 supports decided only; vote_recorded is planned."
           },
           "receipt_id": {
             "type": "string",
@@ -4909,7 +4948,7 @@
             "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -4989,15 +5028,13 @@
             "maxLength": 128
           },
           "action_resolution": {
-            "$ref": "#/components/schemas/ActionResolution",
-            "x-qwen-implementation-status": "planned"
+            "$ref": "#/components/schemas/ActionResolution"
           },
           "failure_code": {
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "x-qwen-implementation-status": "planned",
-            "description": "Why the operation failed. Required for a failed task_cancel, which proves non-acceptance and no further delivery. Close, archive and delete retry until they complete, so they never report one."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
           },
           "replayed": {
             "type": "boolean"
@@ -5192,7 +5229,7 @@
             "$ref": "#/components/schemas/WebShellQuestionAction"
           }
         ],
-        "x-qwen-implementation-status": "planned"
+        "x-qwen-implementation-status": "partial"
       },
       "WebShellActionResolution": {
         "type": "object",
@@ -5205,7 +5242,8 @@
             "maxLength": 128
           },
           "outcome": {
-            "enum": ["vote_recorded", "decided"]
+            "enum": ["vote_recorded", "decided"],
+            "description": "D6 supports decided only; vote_recorded is planned."
           },
           "receiptId": {
             "type": "string",
@@ -5218,7 +5256,7 @@
             "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "allOf": [
           {
             "if": {
@@ -5376,15 +5414,13 @@
             "maxLength": 128
           },
           "actionResolution": {
-            "$ref": "#/components/schemas/WebShellActionResolution",
-            "x-qwen-implementation-status": "planned"
+            "$ref": "#/components/schemas/WebShellActionResolution"
           },
           "failureCode": {
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "x-qwen-implementation-status": "planned",
-            "description": "Why the operation failed. Required for a failed task_cancel, which proves non-acceptance and no further delivery. Close, archive and delete retry until they complete, so they never report one."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
           },
           "replayed": {
             "type": "boolean"
@@ -5655,7 +5691,9 @@
           "policyRevision",
           "createdAt",
           "expiresAt",
-          "options"
+          "options",
+          "functionCallId",
+          "toolName"
         ],
         "properties": {
           "actionId": {
@@ -5706,9 +5744,23 @@
             "items": {
               "$ref": "#/components/schemas/WebShellActionOption"
             }
+          },
+          "turnId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "functionCallId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "toolName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           }
         },
-        "x-qwen-implementation-status": "planned",
         "allOf": [
           {
             "if": {
@@ -5723,7 +5775,8 @@
               "required": ["decisionReceiptId"]
             }
           }
-        ]
+        ],
+        "description": "At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs."
       },
       "WebShellPermissionResponse": {
         "type": "object",
@@ -5748,8 +5801,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionPage": {
         "type": "object",
@@ -5770,8 +5822,7 @@
             "type": ["string", "null"],
             "maxLength": 512
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionSource": {
         "type": "object",
@@ -5791,8 +5842,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionResponseRequest": {
         "oneOf": [
@@ -5803,7 +5853,7 @@
             "$ref": "#/components/schemas/WebShellQuestionResponse"
           }
         ],
-        "x-qwen-implementation-status": "planned",
+        "x-qwen-implementation-status": "partial",
         "description": "Validate IDs, required answers, selection cardinality, text eligibility and current responder permission against the original Action. Unknown/expired/cancelled/conflicting revisions cannot grant execution."
       },
       "WebShellActionOption": {
@@ -5825,8 +5875,7 @@
             "type": "string",
             "maxLength": 1024
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellQuestionResponse": {
         "type": "object",
@@ -5887,8 +5936,7 @@
             "maximum": 100,
             "default": 20
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionGetRequest": {
         "type": "object",
@@ -5904,8 +5952,7 @@
             "minLength": 1,
             "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellActionRespondRequest": {
         "type": "object",
@@ -5928,9 +5975,12 @@
           },
           "response": {
             "$ref": "#/components/schemas/WebShellActionResponseRequest"
+          },
+          "requestId": {
+            "type": "string",
+            "maxLength": 128
           }
-        },
-        "x-qwen-implementation-status": "planned"
+        }
       },
       "WebShellLifecycleRequest": {
         "type": "object",

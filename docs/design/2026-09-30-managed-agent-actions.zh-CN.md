@@ -2,7 +2,7 @@
 
 [English](2026-09-30-managed-agent-actions.md) | [简体中文](2026-09-30-managed-agent-actions.zh-CN.md)
 
-状态：D6a（Hosted Harness）已实现；D6b（Java 服务端）已设计，单独合入。
+状态：D6a（Hosted Harness）与 D6b（Java 服务端）均已实现。
 日期：2026-09-30
 Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 决定：[#12867 评论](https://github.com/QwenLM/qwen-code/issues/12867#issuecomment-5895205811)
@@ -12,7 +12,7 @@ Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12
 
 [公共 API 契约][contract]第 10 节与[契约收敛][closure]第 3 节定义了 Action：需要人授权的工具调用会暂停，回答者通过任一入口回答，然后工具执行或被拒绝。#12867 为 D6 规定的验收条件是：Harness 发起的审批可以通过任一入口回答，Turn 随之继续；重复的回答返回原结果；无权的回答者得到 `403`。
 
-`main` 已经有持久化所需的部件，但没有任何代码使用它们：
+D6 之前，`main` 已经有持久化所需的部件，但没有任何代码使用它们：
 
 - Session authority 有 `requestToolAction`（只有当前 Harness activation 能开启的权限票据）和 `resolveAction`（可信仲裁者的最终决定），但没有代码调用它们。
 - Harness 句柄有 `commitDurableWait` 与 `resolveDurableWait`，审批未决期间保持一个 `await_action` 检查点，此时 Runtime 派发拒绝启动。
@@ -55,7 +55,7 @@ Harness 遵循 Java 创建 Hosted Session 时已经以 `approvalMode` 发送的�
 
 对于工具配置，`plan` 与 `auto` 返回 `400 invalid_hosted_approval`：plan 模式需要自己的规划语义，auto 模式需要分类器，而 Hosted 路径两者都没有。超出范围的超时也返回同样的错误；`yolo` 从不等待，因此忽略超时。没有工具配置的 Session 继续忽略该模式，因为它不运行工具。
 
-在 D6b 能够回答 Action 之前，Java 仍然拒绝 Workspace 文件与 `yolo` 以外的任何模式同时开启，因此不会有 Session 等待一个无人能回答的审批。
+D6b 为 Workspace 文件开启 `default` 与 `auto-edit`，并提供它们的审批入口。默认仍为 `yolo`。
 
 ### 5.2 Turn 在哪里等待
 
@@ -110,31 +110,32 @@ Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模�
 
 ### 6.1 投影
 
-Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记录。它还会在同一个事务中把 `action.changed` 投影到一张新的 Action 表，从 Harness 在提交请求之前发布的 `optionsRef` 资源中读取选项，并追加一个 `action.updated` Session 事件。这张表需要一个 Flyway 迁移；在飞的 PR 占用了 V19 至 V21，因此它的版本号在合入时确定。
+Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记录。它还会在同一个事务中把 `action.changed` 投影到一张新的 Action 表，从 Harness 在提交请求之前发布的 `optionsRef` 资源中读取选项，并追加一个 `action.updated` Session 事件。该表使用 Flyway V22，为并行工作保留 V20–V21。投影验证原始选项资源及不可变的版本链。决定回执 ID 是从已记录决定派生的不透明产品句柄，不暴露存储资源 ID。存在对应的 Java Turn 时，从 Hosted prompt ID 解析公共 Turn ID。
 
 ### 6.2 路由
 
 - **列表：** `GET …/actions` 与 WebShell `actions/query` 按从新到旧分页列出 Session 中 `requested` 的 Action，使用 Turn 列表的游标与 limit 规则。
 - **读取：** `GET …/actions/{actionId}` 与 WebShell `actions/get` 返回任何状态的 Action；已决定的 Action 带有 `decision_receipt_id`。
-- **回答：** `POST …/actions/{actionId}/responses` 与 WebShell `actions/respond` 以 `202` 返回 `action_response` command operation。受理前按 Action 的类型、版本、选项、状态与过期时间检查请求。该 operation 在 D4 的幂等域（租户、Session、类型、actor 与键）内幂等。worker 把它转发到 Harness 路由，失败的尝试按 dispatch 退避回到 pending；与 D4 一样，没有最后一次尝试。worker 以 Java 从 journal 投影出的 Action 为准判断结果，从不根据时钟或仅凭失败的调用推断：Harness 已记录的决定可能已经让调用运行，只是它的回答丢失了，或者 Harness 已经重启。Harness 在返回 `200` 之前已经提交了决定，因此投影中已经能看到它。投影出的 Action 进入终态后，该 operation 才完成：若为 `decided` 且决定与本次回答相同（决定字节是确定的，Java 比较其摘要），以 `action_resolution`（`decided`，带决定回执）完成；否则以其结束状态（`action_expired`、`action_cancelled` 或 `action_already_resolved`）完成。Harness 返回 `400` 时以该错误完成。Action 仍为 `requested` 时（例如在恢复阻塞的 Session 上），operation 保持 `running`。WebShell 请求增加 `requestId`。
+- **回答：** `POST …/actions/{actionId}/responses` 与 WebShell `actions/respond` 以 `202` 返回 `action_response` command operation。受理前按 Action 的类型、版本、选项、状态与过期时间检查请求。该 operation 在 D4 的幂等域（租户、Session、类型、actor 与键）内幂等。worker 把它转发到 Harness 路由，失败的尝试按 dispatch 退避回到 pending；与 D4 一样，没有最后一次尝试。worker 以 Java 从 journal 投影出的 Action 为准判断结果，从不根据时钟或仅凭失败的调用推断：Harness 已记录的决定可能已经让调用运行，只是它的回答丢失了，或者 Harness 已经重启。Harness 在返回 `200` 之前已经提交了决定，因此投影中已经能看到它。投影出的 Action 进入终态后，该 operation 才完成：若为 `decided` 且决定与本次回答相同（决定字节是确定的，Java 比较其摘要），以 `action_resolution`（`decided`，带决定回执）完成；否则以其结束状态（`action_expired`、`action_cancelled` 或 `action_already_resolved`）完成，并通过 `failure_code`（WebShell 为 `failureCode`）公开。Harness 返回 `400` 时以该错误完成。Action 仍为 `requested` 时（例如在恢复阻塞的 Session 上），operation 保持 `running`。WebShell 请求增加 `requestId`。
 
 ### 6.3 检查
 
 - 读取保持其他 Session 读取的检查。
 - 只有 Session 的 owner（记录为其创建者的可信 actor）可以回答。其他 actor 得到 `403 action_forbidden`。
 - 迟到的回答得到 `409 action_expired`、`409 action_cancelled` 或 `409 action_already_resolved`，未知的 Action 得到 `404 action_not_found`。契约会新增这些错误码。
-- 对于审批模式可能询问的 Session，Session 能力 `actions` 为 `true`。
+- 对于审批模式可能询问的 Session，Session 能力 `actions` 为 `true`。Java 在 Workspace Session 受理时固定模式；迁移前的 Session 默认为 `yolo`。owner 检查使用已有创建者记录，不新增授权或 owner；无法确定创建者时拒绝回答。
+- `allow` 与 `deny` 是稳定的选项 ID。Action 提供两个版本、function call ID、工具名称及过期时间；参数从 Items 读取。每个 Turn 同时最多有一个 Hosted 审批待处理。列表只返回 `requested` Action，按从新到旧排序，不在本地将它们标记为过期。
 
 Turn 在等待期间仍读作 `running`；让客户端知道它在等待的，是它未决的 Action。
 
 ### 6.4 Java 配置
 
-开启 Workspace 文件的部署可以设置 `default` 或 `auto-edit`。Java 随模式一起发送部署级的审批超时，默认仍为 `yolo`。对于带工具配置的 Session，Java 记录创建时发送的模式，只有当 Harness 在创建和每次加载的回答中都以 `approvalMode` 报告这个模式时才使用该 Session：D6a 之前的 Harness 不带这个字段，它会忽略模式，不经询问就运行每个调用。
+开启 Workspace 文件的部署可以设置 `default` 或 `auto-edit`。Java 随模式一起发送 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT`（默认 `10m`，范围 `1s` 至 `24h`），默认模式仍为 `yolo`。对于带工具配置的 Session，Java 记录创建时发送的模式，只有当 Harness 在创建和每次加载的回答中都以 `approvalMode` 报告这个模式时才使用该 Session：D6a 之前的 Harness 不带这个字段，它会忽略模式，不经询问就运行每个调用。
 
 ## 7. 测试
 
 - **D6a：** 针对第一轮审批 Turn 绑定的核心测试。使用假模型的 Hosted 测试：被允许的写入会执行；被拒绝的写入返回拒绝结果，模型继续；混合批次只执行被允许的调用；过期的审批拒绝该调用；被中止的 Turn 取消其 Action 且不再询问；重复同一决定返回同样的结果；其他决定与迟到的决定返回 `409`；`auto-edit` 模式下拒绝 Shell 调用后编辑仍会执行；过期的审批让该 Turn 不再询问；journal 写入失败会立即阻塞 Session；其他地方的写入失败会在一秒内被察觉；恢复阻塞的 Session 回答已记录的内容；取消请求会释放 Workspace；加载时保持并报告已保存的模式。
-- **D6b：** 在 H2 与 MySQL 上的投影与路由测试，owner 与非 owner 的回答、重放、过期，以及契约测试在两个入口上的请求；还有一个 Hosted 进程测试，由 owner 通过公共 API 回答，Turn 完成。
+- **D6b：** 在 H2 与 MariaDB（MySQL 驱动）上的投影与路由测试，owner 与非 owner 的回答、重放、过期，以及契约测试在两个入口上的请求；还有一个 Hosted 进程测试，由 owner 通过公共 API 与 WebShell 回答，Turn 完成。
 
 ## 8. 风险与后续工作
 
