@@ -8,7 +8,9 @@ import { describe, it, expect } from 'vitest';
 import {
   parseBooleanEnvFlag,
   parseTelemetryTargetValue,
+  resolveExtensionTelemetryProxy,
   resolveTelemetrySettings,
+  resolveUsageStatisticsEnabled,
 } from './config.js';
 import {
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
@@ -32,6 +34,98 @@ describe('telemetry/config helpers', () => {
       expect(parseBooleanEnvFlag('TRUE')).toBe(false);
       expect(parseBooleanEnvFlag('random')).toBe(false);
       expect(parseBooleanEnvFlag('')).toBe(false);
+    });
+  });
+
+  describe('resolveUsageStatisticsEnabled', () => {
+    it('defaults to true when neither env nor settings are set', () => {
+      expect(resolveUsageStatisticsEnabled(undefined, {})).toBe(true);
+    });
+
+    it('honors the settings value', () => {
+      expect(resolveUsageStatisticsEnabled(false, {})).toBe(false);
+      expect(resolveUsageStatisticsEnabled(true, {})).toBe(true);
+    });
+
+    it('prefers QWEN_USAGE_STATISTICS_ENABLED over settings', () => {
+      const env = { QWEN_USAGE_STATISTICS_ENABLED: '0' };
+      expect(resolveUsageStatisticsEnabled(true, env)).toBe(false);
+      expect(
+        resolveUsageStatisticsEnabled(false, {
+          QWEN_USAGE_STATISTICS_ENABLED: '1',
+        }),
+      ).toBe(true);
+    });
+
+    it('treats unrecognized env values as false (parseBooleanEnvFlag semantics)', () => {
+      expect(
+        resolveUsageStatisticsEnabled(true, {
+          QWEN_USAGE_STATISTICS_ENABLED: 'random',
+        }),
+      ).toBe(false);
+    });
+  });
+
+  describe('resolveExtensionTelemetryProxy', () => {
+    it('returns undefined when nothing is configured', () => {
+      expect(resolveExtensionTelemetryProxy(undefined, {})).toBeUndefined();
+    });
+
+    it('prefers settings.proxy over every env key', () => {
+      expect(
+        resolveExtensionTelemetryProxy('http://settings:1', {
+          HTTPS_PROXY: 'http://env:2',
+        }),
+      ).toBe('http://settings:1');
+    });
+
+    it('falls back to env keys in canonical order (uppercase first)', () => {
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          HTTPS_PROXY: 'http://upper-https:1',
+          https_proxy: 'http://lower-https:2',
+          HTTP_PROXY: 'http://upper-http:3',
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://upper-https:1');
+      // Each adjacent pair of the remaining terms is pinned on its own: this
+      // chain mirrors the session's (`packages/cli/src/config/config.ts`), so
+      // dropping or swapping a middle term has to red here instead of only
+      // changing which hosts reach the sanctioned egress.
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          https_proxy: 'http://lower-https:2',
+          HTTP_PROXY: 'http://upper-http:3',
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://lower-https:2');
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          HTTP_PROXY: 'http://upper-http:3',
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://upper-http:3');
+      // `HTTP_PROXY` alone is the corporate/CI shape that exports no
+      // `HTTPS_PROXY`: dropping that term sends the upload direct.
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          HTTP_PROXY: 'http://upper-http:3',
+        }),
+      ).toBe('http://upper-http:3');
+      expect(
+        resolveExtensionTelemetryProxy(undefined, {
+          http_proxy: 'http://lower-http:4',
+        }),
+      ).toBe('http://lower-http:4');
+    });
+
+    it('returns the raw value without normalizing (normalization lives in getTelemetryConfig)', () => {
+      // A SOCKS value must pass through untouched: getTelemetryConfig drops
+      // it in a try/catch so telemetry can never abort the mutation.
+      expect(resolveExtensionTelemetryProxy('socks5h://h:1', {})).toBe(
+        'socks5h://h:1',
+      );
+      expect(resolveExtensionTelemetryProxy('host:8080', {})).toBe('host:8080');
     });
   });
 
