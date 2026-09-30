@@ -68,7 +68,7 @@ D6b 为 Workspace 文件开启 `default` 与 `auto-edit`，并提供它们的审
 
 Runtime 绑定保持 `preapproved-workspace-tools/1`，因为决定在派发前由 Harness 作出：Runtime worker 以预批准方式运行 Workspace Session 的调用，也没有可以询问的人。
 
-Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模型在两轮之间思考时相同。审批的过期时间限制了这段等待。
+Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模型在两轮之间思考时相同。每次审批的过期时间只限制该次等待；累计等待见第 8 节。
 
 `commitDurableWait` 目前复制上一个检查点的 Turn 身份，因此 Turn 第一轮中的审批会让之后的 Runtime 批次拒绝更改未完成的 Turn。D6a 加上 `commitAwaitRuntimeBatch` 已经接受的 Turn 绑定。
 
@@ -96,9 +96,17 @@ Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模�
 - 对以过期或取消结束的 Action 返回 `409 action_expired` 或 `409 action_cancelled`，对已决定的 Action 给出不同决定时返回 `409 action_already_resolved`。在过期时间之后到达的回答会把 Action 结为过期，即使计时器还没有触发；
 - 否则把决定发布为确定性的字节，以 `decided` 调用 `resolveAction`，唤醒等待中的调用，并以 `200` 返回请求 ID、`decided` 与所选选项。重复同一个决定会返回同样的结果，因为 Harness 会把这些字节的摘要与已记录的决定比较。出于同样的原因，等待中的调用无需回读决定，就能从已记录的摘要判断是否为 `allow`。
 
+决定字节是 `JSON.stringify({ v: 1, optionId, inputRevision, policyRevision })` 的 UTF-8 编码，严格按此键顺序，不含空白或末尾换行。`v` 与 `inputRevision` 是 JSON 数字；`inputRevision` 使用 Action 记录自身的值，而非 checkpoint 中的字符串版本。`optionId` 与 `policyRevision` 是字符串。例如：
+
+```text
+{"v":1,"optionId":"allow","inputRevision":1,"policyRevision":"hosted-tool-approval/1"}
+```
+
+决定摘要是这些字节的 SHA-256，以不带 `sha256:` 前缀的小写十六进制表示。D6b 比较回答与投影出的 Action 决定摘要时，使用同一编码。
+
 在决定写入之前发生的失败返回 `503 action_resolution_failed`，Action 保持原状，调用方可以重试。journal 写入失败会停止该 Session 之后的所有写入，与任何写入失败一样；因此路由改为唤醒等待中的调用，由它立即（而不是等到过期）把 Session 置为恢复阻塞，并返回 `409 hosted_turn_recovery_required`。等待中的调用还会每秒检查一次该 Session 的写入是否因其他原因停止，因此在这种情况下也不必等到过期。
 
-处于恢复阻塞的 Session 仍按上述规则回答已经记录的内容：重复的决定、不同的决定与已结束的 Action。凡是需要写入的回答，它改为返回 `409 hosted_turn_recovery_required`。
+处于恢复阻塞的 Session 仍按上述规则回答已经记录的内容：重复的决定、不同的决定与已结束的 Action。凡是需要写入的回答，它改为返回 `409 hosted_turn_recovery_required`。决定和过期写入都会在 authority 的串行队列内重新检查该条件，因此写入排队期间发生阻塞时，不会受理新的结果。
 
 ### 5.5 过期与取消
 
@@ -110,13 +118,13 @@ Workspace 每个 Turn 获取一次，在 Turn 等待期间保持占用，与模�
 
 ### 6.1 投影
 
-Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记录。它还会在同一个事务中把 `action.changed` 投影到一张新的 Action 表，从 Harness 在提交请求之前发布的 `optionsRef` 资源中读取选项，并追加一个 `action.updated` Session 事件。该表使用 Flyway V22，为并行工作保留 V20–V21。投影验证原始选项资源及不可变的版本链。决定回执 ID 是从已记录决定派生的不透明产品句柄，不暴露存储资源 ID。存在对应的 Java Turn 时，从 Hosted prompt ID 解析公共 Turn ID。
+Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记录。它还会在同一个事务中把 `action.changed` 投影到一张新的 Action 表，从 Harness 在提交请求之前发布的 `optionsRef` 资源中读取选项，并追加一个 `action.updated` Session 事件。该表使用 Flyway V23；V20–V22 已由工具发布功能使用。投影验证原始选项资源及不可变的版本链。决定回执 ID 是从已记录决定派生的不透明产品句柄，不暴露存储资源 ID。存在对应的 Java Turn 时，从 Hosted prompt ID 解析公共 Turn ID。
 
 ### 6.2 路由
 
 - **列表：** `GET …/actions` 与 WebShell `actions/query` 按从新到旧分页列出 Session 中 `requested` 的 Action，使用 Turn 列表的游标与 limit 规则。
 - **读取：** `GET …/actions/{actionId}` 与 WebShell `actions/get` 返回任何状态的 Action；已决定的 Action 带有 `decision_receipt_id`。
-- **回答：** `POST …/actions/{actionId}/responses` 与 WebShell `actions/respond` 以 `202` 返回 `action_response` command operation。受理前按 Action 的类型、版本、选项、状态与过期时间检查请求。该 operation 在 D4 的幂等域（租户、Session、类型、actor 与键）内幂等。worker 把它转发到 Harness 路由，失败的尝试按 dispatch 退避回到 pending；与 D4 一样，没有最后一次尝试。worker 以 Java 从 journal 投影出的 Action 为准判断结果，从不根据时钟或仅凭失败的调用推断：Harness 已记录的决定可能已经让调用运行，只是它的回答丢失了，或者 Harness 已经重启。Harness 在返回 `200` 之前已经提交了决定，因此投影中已经能看到它。投影出的 Action 进入终态后，该 operation 才完成：若为 `decided` 且决定与本次回答相同（决定字节是确定的，Java 比较其摘要），以 `action_resolution`（`decided`，带决定回执）完成；否则以其结束状态（`action_expired`、`action_cancelled` 或 `action_already_resolved`）完成，并通过 `failure_code`（WebShell 为 `failureCode`）公开。Harness 返回 `400` 时以该错误完成。Action 仍为 `requested` 时（例如在恢复阻塞的 Session 上），operation 保持 `running`。WebShell 请求增加 `requestId`。
+- **回答：** `POST …/actions/{actionId}/responses` 与 WebShell `actions/respond` 以 `202` 返回 `action_response` command operation。受理前按 Action 的类型、版本、选项、状态与过期时间检查请求。该 operation 在 D4 的幂等域（租户、Session、类型、actor 与键）内幂等。worker 把它转发到 Harness 路由，失败的尝试按 dispatch 退避回到 pending；与 D4 一样，没有最后一次尝试。worker 以 Java 从 journal 投影出的 Action 为准判断结果，从不根据时钟或仅凭失败的调用推断：Harness 已记录的决定可能已经让调用运行，只是它的回答丢失了，或者 Harness 已经重启。Harness 在返回 `200` 之前已经提交了决定，因此投影中已经能看到它。投影出的 Action 进入终态后，该 operation 才完成：若为 `decided` 且决定与本次回答相同（Java 按第 5.4 节的确切决定编码比较摘要），以 `action_resolution`（`decided`，带决定回执）完成；否则以其结束状态（`action_expired`、`action_cancelled` 或 `action_already_resolved`）完成，并通过 `failure_code`（WebShell 为 `failureCode`）公开。Harness 返回 `400` 时以该错误完成。Action 仍为 `requested` 时（例如在恢复阻塞的 Session 上），operation 保持 `running`。WebShell 请求增加 `requestId`。
 
 ### 6.3 检查
 
@@ -134,12 +142,12 @@ Turn 在等待期间仍读作 `running`；让客户端知道它在等待的，�
 
 ## 7. 测试
 
-- **D6a：** 针对第一轮审批 Turn 绑定的核心测试。使用假模型的 Hosted 测试：被允许的写入会执行；被拒绝的写入返回拒绝结果，模型继续；混合批次只执行被允许的调用；过期的审批拒绝该调用；被中止的 Turn 取消其 Action 且不再询问；重复同一决定返回同样的结果；其他决定与迟到的决定返回 `409`；`auto-edit` 模式下拒绝 Shell 调用后编辑仍会执行；过期的审批让该 Turn 不再询问；journal 写入失败会立即阻塞 Session；其他地方的写入失败会在一秒内被察觉；恢复阻塞的 Session 回答已记录的内容；取消请求会释放 Workspace；加载时保持并报告已保存的模式。
+- **D6a：** 针对第一轮审批 Turn 绑定的核心测试。使用假模型的 Hosted 测试：被允许的写入会执行；被拒绝的写入返回拒绝结果，模型继续；混合批次只执行被允许的调用；过期的审批拒绝该调用；被中止的 Turn 取消其 Action 且不再询问；重复同一决定返回同样的结果；其他决定与迟到的决定返回 `409`；`auto-edit` 模式下拒绝 Shell 调用后编辑仍会执行；过期的审批让该 Turn 不再询问；journal 写入失败会立即阻塞 Session；其他地方的写入失败会在一秒内被察觉；恢复阻塞的 Session 回答已记录的内容，且不受理阻塞前已排队的决定或过期写入；取消请求会释放 Workspace；加载时保持并报告已保存的模式。
 - **D6b：** 在 H2 与 MariaDB（MySQL 驱动）上的投影与路由测试，owner 与非 owner 的回答、重放、过期，以及契约测试在两个入口上的请求；还有一个 Hosted 进程测试，由 owner 通过公共 API 与 WebShell 回答，Turn 完成。
 
 ## 8. 风险与后续工作
 
-- Turn 等待回答期间，Workspace 保持占用；对无人回答的 Turn，最长约为一个审批超时。
+- Turn 等待回答期间，Workspace 保持占用；对无人回答的 Turn，审批等待最长约为一个审批超时。如果 owner 每次都临近过期才回答，累计审批等待可接近询问次数乘以超时，跨越每个 Turn 最多 16 轮模型回复，还需加上模型和工具执行时间。目前没有累计审批等待预算；prompt 截止时间或取消可以提前结束等待。
 - Harness 重启会让等待中的审批悬空，直到 Stage G 能接管该 Session。
 - 回滚到 D6a 之前版本的 Harness 会忽略已保存的模式；D6b 能够察觉，因为这样的 Harness 不报告 `approvalMode`。
 - 在调用的输入能在等待期间改变之前，`input_revision` 始终为 `1`。

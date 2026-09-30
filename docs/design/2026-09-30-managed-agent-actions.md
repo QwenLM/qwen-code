@@ -124,8 +124,8 @@ decision is made in the Harness before dispatch: the Runtime worker runs a
 Workspace Session's calls pre-approved and has nobody to ask.
 
 The Workspace is acquired once per Turn and stays held while the Turn waits,
-as it does while the model thinks between rounds. The approval's expiry bounds
-that wait.
+as it does while the model thinks between rounds. Each approval's expiry bounds
+that individual wait; cumulative waiting is described in section 8.
 
 `commitDurableWait` today copies the previous checkpoint's Turn identity, so
 an approval in a Turn's first round would leave the next Runtime batch
@@ -173,6 +173,21 @@ Session routes. Its body names the option and both revisions. The Harness then:
   bytes with the recorded decision. For the same reason the waiting call tells
   `allow` from the recorded digest without reading the decision back.
 
+The decision bytes are the UTF-8 encoding of
+`JSON.stringify({ v: 1, optionId, inputRevision, policyRevision })`, in exactly
+that key order, without whitespace or a trailing newline. `v` and
+`inputRevision` are JSON numbers; `inputRevision` is the Action record's own
+value, not the checkpoint's string revision. `optionId` and `policyRevision`
+are strings. For example:
+
+```text
+{"v":1,"optionId":"allow","inputRevision":1,"policyRevision":"hosted-tool-approval/1"}
+```
+
+The decision digest is SHA-256 of those bytes, encoded as lowercase hexadecimal
+without a `sha256:` prefix. D6b uses this same encoding when comparing a
+response with the projected Action's decision digest.
+
 A failure before the decision is written answers `503 action_resolution_failed`
 and leaves the Action as it was, so the caller can retry. A failed journal
 write stops every later write of the Session, as any failed write does, so
@@ -184,6 +199,8 @@ stopped for another reason, so it does not wait for its expiry either.
 A recovery-blocked Session still answers what it has already recorded, as
 above: a repeated decision, a different decision and an ended Action. Where an
 answer would write, it answers `409 hosted_turn_recovery_required` instead.
+Both decision and expiry writes recheck this condition inside the authority's
+serial queue, so blocking while a write waits its turn admits no new outcome.
 
 ### 5.5 Expiry and cancellation
 
@@ -210,7 +227,7 @@ H records. It also projects `action.changed` into a new Actions table in the
 same transaction, reading the options from the `optionsRef` resource that the
 Harness publishes before it commits the request, and appends an
 `action.updated` Session event. The table
-uses Flyway migration V22, reserving V20–V21 for the parallel slices.
+uses Flyway migration V23; tool publication uses V20–V22.
 Projection validates the original options resource and immutable revision chain.
 Decision receipt IDs are opaque product handles derived from the recorded
 decision, never raw storage resource IDs. The public Turn ID is resolved from
@@ -236,8 +253,8 @@ the Hosted prompt ID when a matching Java Turn exists.
   commits the decision before it answers `200`, so the projection already
   shows it. The operation completes once the projected Action is final: with
   `action_resolution` (`decided`, with the decision receipt) when it is
-  decided with this response's decision (the decision bytes are
-  deterministic, so Java compares their digest), and with its end state
+  decided with this response's decision (Java compares the digest using the
+  exact decision encoding in section 5.4), and with its end state
   (`action_expired`, `action_cancelled` or `action_already_resolved`)
   otherwise, exposed as `failure_code` (`failureCode` on WebShell). A `400` from the Harness completes it with that error. While the
   Action stays `requested`, for example on a recovery-blocked Session, the
@@ -283,7 +300,8 @@ it, and would ignore the mode and run every call unasked.
   call in `auto-edit` mode leaves the edit to run, an expired approval stops
   later questions in the Turn, a failed journal write blocks the Session at
   once, a write failure elsewhere is noticed within a second, a
-  recovery-blocked Session answers what it already recorded, a cancel request
+  recovery-blocked Session answers what it already recorded and admits no
+  decision or expiry write that was queued before it blocked, a cancel request
   releases the Workspace, and a load keeps and reports the saved mode.
 - **D6b:** projection and route tests on H2 and MariaDB (MySQL driver), owner and non-owner
   responses, replay, expiry and the contract test's traffic on both surfaces,
@@ -293,7 +311,12 @@ it, and would ignore the mode and run every call unasked.
 ## 8. Risks and follow-up
 
 - The Workspace stays held while a Turn waits for an answer, up to about one
-  approval timeout for a Turn nobody answers.
+  approval timeout of waiting for a Turn nobody answers. If the owner keeps
+  answering near each expiry, cumulative approval waiting can approach the
+  number of asked calls times the timeout, across up to 16 model rounds per
+  Turn, in addition to model and tool execution time. There is no cumulative
+  approval-wait budget; a prompt deadline or cancellation can end the wait
+  earlier.
 - A Harness restart strands a waiting approval until Stage G can take the
   Session over.
 - A Harness rolled back to a build before D6a would ignore a saved mode; D6b

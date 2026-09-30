@@ -144,6 +144,33 @@ it('requires confirmation for the exact Shell receipt acknowledgement', async ()
   ).rejects.toThrow('acknowledge');
 });
 
+it('accepts the Broker acknowledgement envelope for a remote v3 receipt', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toEqual({
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        acknowledged: true,
+        status: { state: 'settled' },
+      },
+    };
+  });
+  await expect(
+    broker.acknowledgeV3('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    }),
+  ).resolves.toBeUndefined();
+});
+
 it('waits for original terminal evidence after a cancellation request', async () => {
   let cancelled = false;
   let stopped = false;
@@ -323,6 +350,66 @@ it('queries the original identity after an uncertain start failure', async () =>
     '/internal/runtime-broker/v1/executions/execution:start',
     '/internal/runtime-broker/v1/executions/execution',
   ]);
+});
+
+it('restarts the same Tool v3 reservation after an uncertain start leaves it prepared', async () => {
+  let starts = 0;
+  const broker = await fixture((path, body) => {
+    if (path.endsWith(':start')) {
+      starts++;
+      expect(body['payloadJson']).toBe(
+        '{"toolName":"run_shell_command","input":{}}',
+      );
+      if (starts === 1)
+        return { code: 503, body: { code: 'runtime_execution_failed' } };
+    }
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status:
+          starts < 2
+            ? { state: 'prepared' }
+            : {
+                state: 'settled',
+                result: { executionStatus: 'success', responseParts: [] },
+              },
+      },
+    };
+  });
+  await expect(
+    broker.executeV3(
+      'execution',
+      '{"toolName":"run_shell_command","input":{}}',
+      'publication',
+      'token',
+      new AbortController().signal,
+    ),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(starts).toBe(2);
+});
+
+it('preserves an explicit unsupported Tool v3 start rejection', async () => {
+  let statusReads = 0;
+  const broker = await fixture((path) => {
+    if (path.endsWith(':start'))
+      return { code: 501, body: { code: 'runtime_tool_v3_unsupported' } };
+    statusReads++;
+    return { body: { ...identity, status: { state: 'prepared' } } };
+  });
+  await expect(
+    broker.executeV3(
+      'execution',
+      '{"toolName":"run_shell_command","input":{}}',
+      'publication',
+      'token',
+      new AbortController().signal,
+    ),
+  ).rejects.toMatchObject({
+    status: 501,
+    code: 'runtime_tool_v3_unsupported',
+  });
+  expect(statusReads).toBe(0);
 });
 
 it('preserves a definite acquisition refusal from the HTTP response', async () => {

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.aliyun.oss.OSSException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.LinkedHashMap;
@@ -33,6 +34,18 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(AsyncRequestNotUsableException.class)
     public void disconnectedClient() {
+    }
+
+    @ExceptionHandler(OSSException.class)
+    public ResponseEntity<Map<String, Object>> objectStore(OSSException error,
+            HttpServletRequest request, HttpServletResponse response) {
+        LOG.warn("Tool publication object store rejected request", error);
+        if ("AccessDenied".equals(error.getErrorCode())) {
+            return response(request, response, HttpStatus.FORBIDDEN,
+                    "managed_tool_publication_storage_denied", "Tool publication storage rejected the request.");
+        }
+        return response(request, response, HttpStatus.INTERNAL_SERVER_ERROR,
+                "internal_error", "The Managed Agent request failed.");
     }
 
     // The client accepts no representation of the envelope.
