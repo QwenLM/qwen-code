@@ -62,7 +62,7 @@ describe('managed command admission', () => {
       launch: () => ({
         executable: process.execPath,
         args: [],
-        env: { PATH: '', LANG: 'C.UTF-8' },
+        env: { PATH: '', LANG: 'C.UTF-8', QWEN_HOOK_COMMAND_ENV: '{}' },
       }),
       empty: () => true,
       waitForEmpty,

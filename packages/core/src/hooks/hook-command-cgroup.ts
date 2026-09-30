@@ -29,7 +29,7 @@ export class HookCommandIsolationUnavailableError extends Error {
 const LAUNCHER = String.raw`
 const { writeFileSync, writeSync } = require('node:fs');
 const { spawn } = require('node:child_process');
-const [group, executable, args, env] = process.argv.slice(1);
+const [group, executable, args] = process.argv.slice(1);
 try {
   writeFileSync(group + '/cgroup.procs', String(process.pid));
 } catch {
@@ -38,7 +38,8 @@ try {
 }
 // No deployment command or environment is evaluated before membership.
 const child = spawn(executable, JSON.parse(args), {
-  env: JSON.parse(env), stdio: ['inherit', 'inherit', 'inherit'],
+  env: JSON.parse(process.env.QWEN_HOOK_COMMAND_ENV),
+  stdio: ['inherit', 'inherit', 'inherit'],
 });
 child.on('error', () => process.exit(1));
 child.on('exit', (code) => process.exit(code ?? 1));
@@ -90,9 +91,12 @@ export class HookCommandCgroup {
         this.directory,
         executable,
         JSON.stringify(args),
-        JSON.stringify(env),
       ],
-      env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+      env: {
+        PATH: '/usr/bin:/bin',
+        LANG: 'C.UTF-8',
+        QWEN_HOOK_COMMAND_ENV: JSON.stringify(env),
+      },
     };
   }
 
