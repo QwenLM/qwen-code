@@ -30,6 +30,7 @@ import {
 import type { Config } from '../config/config.js';
 import * as metadataMigration from './metadata-migration.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -1531,9 +1532,6 @@ describe('MemoryManager', () => {
         delete process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV];
       });
 
-      // The extractor sees only the last CACHE_SAFE_HISTORY_TAIL_ENTRIES, so
-      // skipped turns must leave room in that window for the run that ends
-      // the cooldown.
       const grownBy = (entries: number): Content[] => [
         ...history,
         ...Array.from(
@@ -1543,6 +1541,9 @@ describe('MemoryManager', () => {
       ];
 
       it('still skips while the turns since the no-op fit half the extractor window', async () => {
+        expect(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES * 2).toBeLessThanOrEqual(
+          CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+        );
         process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
         vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
         const mgr = new MemoryManager();
@@ -1554,7 +1555,11 @@ describe('MemoryManager', () => {
         });
 
         expect(next.skippedReason).toBe('cooldown');
+        expect(next.cursor.processedOffset).toBeUndefined();
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+        expect(runAutoMemoryExtract).toHaveBeenCalledWith(
+          expect.objectContaining({ preserveUnprocessedHistory: true }),
+        );
       });
 
       it.each([
@@ -1700,6 +1705,36 @@ describe('MemoryManager', () => {
 
         expect(next.skippedReason).toBeUndefined();
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
+      it('clears an armed cooldown when the queued extraction fails', async () => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        let complete!: (result: ReturnType<typeof completedNoop>) => void;
+        vi.mocked(runAutoMemoryExtract)
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                complete = resolve;
+              }),
+          )
+          .mockRejectedValueOnce(new Error('MAX_TURNS'))
+          .mockResolvedValueOnce(completedNoop());
+        const mgr = new MemoryManager();
+        const first = turn(mgr);
+        expect((await turn(mgr)).skippedReason).toBe('queued');
+        complete(completedNoop());
+        await first;
+        await mgr.drain();
+        expect(
+          mgr
+            .listTasksByType('extract', projectRoot)
+            .some((task) => task.status === 'failed'),
+        ).toBe(true);
+
+        const next = await turn(mgr);
+
+        expect(next.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
       });
 
       it.each([

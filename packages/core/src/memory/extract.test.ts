@@ -20,6 +20,7 @@ import {
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
+import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -122,6 +123,8 @@ describe('auto-memory extraction', () => {
 
     expect(first.touchedTopics).toEqual([]);
     expect(second.touchedTopics).toEqual([]);
+    expect(first.extractorRan).toBe(true);
+    expect(second.extractorRan).toBeUndefined();
     expect(refreshMemoryInstruction).not.toHaveBeenCalled();
 
     const cursor = JSON.parse(
@@ -150,6 +153,7 @@ describe('auto-memory extraction', () => {
 
     expect(result.skippedReason).toBe('session_mismatch');
     expect(result.cursor.processedOffset).toBeUndefined();
+    expect(result.extractorRan).toBeUndefined();
     expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
     expect(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
@@ -189,6 +193,110 @@ describe('auto-memory extraction', () => {
       }),
     ).rejects.toThrow('no cache-safe params');
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+  });
+
+  it('extracts skipped history before a large ending turn and leaves the remainder pending', async () => {
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+    });
+    const prefix: Content[] = [
+      { role: 'user', parts: [{ text: 'Already processed.' }] },
+    ];
+    const params = {
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      preserveUnprocessedHistory: true,
+    };
+    await runAutoMemoryExtract({ ...params, history: prefix });
+    const skippedFact: Content = {
+      role: 'user',
+      parts: [{ text: 'Remember: production uses pnpm.' }],
+    };
+    const history = [
+      ...prefix,
+      skippedFact,
+      ...Array.from(
+        { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
+        (_, i): Content =>
+          i % 2 === 0
+            ? {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: `read-${i / 2}`,
+                      name: 'read_file',
+                      args: {},
+                    },
+                  },
+                ],
+              }
+            : {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: `read-${(i - 1) / 2}`,
+                      name: 'read_file',
+                      response: { output: 'Read complete.' },
+                    },
+                  },
+                ],
+              },
+      ),
+      {
+        role: 'user',
+        parts: [{ text: 'Another durable fact in the remainder.' }],
+      },
+    ];
+    expect(history.slice(-CACHE_SAFE_HISTORY_TAIL_ENTRIES)).not.toContain(
+      skippedFact,
+    );
+
+    const first = await runAutoMemoryExtract({ ...params, history });
+    const boundary = prefix.length + CACHE_SAFE_HISTORY_TAIL_ENTRIES;
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+      mockConfig,
+      projectRoot,
+      history.slice(prefix.length, boundary),
+    );
+    expect(first.cursor.processedOffset).toBe(boundary);
+    const persisted = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    );
+    expect(persisted.processedOffset).toBe(boundary);
+
+    const second = await runAutoMemoryExtract({ ...params, history });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+      mockConfig,
+      projectRoot,
+      history.slice(boundary),
+    );
+    expect(second.cursor.processedOffset).toBe(history.length);
+  });
+
+  it('does not mark a user fact beyond an empty pending window processed', async () => {
+    const history: Content[] = [
+      ...Array.from(
+        { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
+        (): Content => ({ role: 'model', parts: [{ text: 'No user fact.' }] }),
+      ),
+      { role: 'user', parts: [{ text: 'Remember: use pnpm.' }] },
+    ];
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      preserveUnprocessedHistory: true,
+      history,
+    });
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+    expect(result.cursor.processedOffset).toBe(CACHE_SAFE_HISTORY_TAIL_ENTRIES);
+    expect(result.extractorRan).toBeUndefined();
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {
@@ -749,6 +857,7 @@ describe('auto-memory extraction', () => {
       });
 
       expect(result.cursor.processedOffset).toBe(1);
+      expect(result.extractorRan).toBe(true);
     });
   });
 });

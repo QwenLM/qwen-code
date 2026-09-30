@@ -180,11 +180,10 @@ export interface ScheduleExtractParams {
 
 /**
  * Internal experiment for #13004: after an extraction that ran, completed and
- * wrote nothing, skip this many following user turns. The extractor sees only
- * the last {@link CACHE_SAFE_HISTORY_TAIL_ENTRIES} history entries, so a turn
- * is skipped only while the entries accumulated since that extraction stay
- * within {@link MAX_COOLDOWN_PENDING_HISTORY_ENTRIES}, leaving the rest of the
- * window for the turn that ends the cooldown. Default 0 keeps today's
+ * wrote nothing, skip this many following user turns. Enabled runs process the
+ * oldest pending {@link CACHE_SAFE_HISTORY_TAIL_ENTRIES} entries and advance
+ * the cursor only through that window, so a larger ending turn cannot mark
+ * skipped facts unseen in the usual tail as processed. Default 0 keeps today's
  * once-per-turn cadence; not a user setting until a paired run shows memory
  * quality is unchanged.
  */
@@ -192,9 +191,8 @@ export const EXTRACT_NOOP_COOLDOWN_TURNS_ENV =
   'QWEN_CODE_MEMORY_EXTRACT_NOOP_COOLDOWN_TURNS';
 export const MAX_EXTRACT_NOOP_COOLDOWN_TURNS = 5;
 /**
- * Half the extractor's history window. A turn of up to this many entries can
- * still end the cooldown without pushing a skipped turn out of the window; a
- * single larger turn already loses its own start today, cooldown or not.
+ * Stop deferring extraction once pending history fills half a window. The
+ * extractor's bounded pending slice, not this cadence bound, prevents loss.
  */
 export const MAX_COOLDOWN_PENDING_HISTORY_ENTRIES = Math.floor(
   CACHE_SAFE_HISTORY_TAIL_ENTRIES / 2,
@@ -1427,7 +1425,11 @@ export class MemoryManager {
         };
       }
 
-      const result = await runAutoMemoryExtract(params);
+      const result = await runAutoMemoryExtract(
+        resolveExtractNoopCooldownTurns() > 0
+          ? { ...params, preserveUnprocessedHistory: true }
+          : params,
+      );
       this.updateExtractCooldown(params, result);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
@@ -1492,16 +1494,16 @@ export class MemoryManager {
     } finally {
       this.extractCurrentTaskId.delete(params.projectRoot);
       this.extractRunning.delete(params.projectRoot);
-      void this.startQueuedExtract(params.projectRoot);
+      this.startQueuedExtract(params.projectRoot);
     }
   }
 
-  private async startQueuedExtract(projectRoot: string): Promise<void> {
+  private startQueuedExtract(projectRoot: string): void {
     if (this.extractRunning.has(projectRoot)) return;
     const queued = this.extractQueued.get(projectRoot);
     if (!queued) return;
     this.extractQueued.delete(projectRoot);
-    await this.track(
+    void this.track(
       queued.taskId,
       this.runExtract(queued.taskId, queued.params),
     );

@@ -7,6 +7,7 @@
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
@@ -298,6 +299,7 @@ function touchedTopicsFromFilePaths(
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
+  history?: Content[],
 ): Promise<AutoMemoryExtractionExecutionResult> {
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
@@ -306,7 +308,11 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
-  const extraHistory = buildAgentHistory(cacheSafe.history);
+  const inputHistory = history
+    ? slimCompactionInput(history, config.getEffectiveInputModalities())
+        .slimmedHistory
+    : cacheSafe.history;
+  const extraHistory = buildAgentHistory(inputHistory);
 
   const { topicSummaries, keywordVocabularySnapshot } =
     await buildExistingMemoryContext(projectRoot);

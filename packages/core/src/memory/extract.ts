@@ -24,6 +24,7 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
+import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
@@ -137,6 +138,7 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
+  preserveUnprocessedHistory?: boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -177,20 +179,28 @@ export async function runAutoMemoryExtract(params: {
   // History may shrink between extract calls (compression). Clamp to length
   // so new messages after compression are not permanently skipped.
   const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
+  // With turn-skipping enabled, a large ending turn can evict skipped facts
+  // from the usual tail. Process the oldest pending window instead, and never
+  // mark its unseen remainder as processed.
+  const endOffset = params.preserveUnprocessedHistory
+    ? Math.min(
+        params.history.length,
+        startOffset + CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+      )
+    : params.history.length;
+  const pendingHistory = params.history.slice(startOffset, endOffset);
 
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. partToString runs only on this small slice and without the
   // global whitespace regex — the .trim().length check preserves the old
   // behaviour of ignoring empty-text user turns.
-  const hasNewUserMessages = params.history
-    .slice(startOffset)
-    .some(
-      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
-    );
+  const hasNewUserMessages = pendingHistory.some(
+    (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+  );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
-      processedOffset: params.history.length,
+      processedOffset: endOffset,
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
@@ -207,6 +217,7 @@ export async function runAutoMemoryExtract(params: {
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
+    params.preserveUnprocessedHistory ? pendingHistory : undefined,
   );
 
   if (agentResult.touchedTopics.length > 0) {
@@ -252,7 +263,7 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
+    processedOffset: madeGenuineProgress ? endOffset : startOffset,
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);

@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import type { Content } from '@google/genai';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './structured-scan.js';
 import {
@@ -49,6 +50,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
   const mockConfig = {
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    getEffectiveInputModalities: vi.fn().mockReturnValue({ image: false }),
     getApprovalMode: vi.fn(),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
@@ -118,6 +120,38 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect(systemPrompt).toContain(category);
     }
     expect(systemPrompt).toContain('at most 64 characters');
+  });
+
+  it('uses the pending extraction window with the same media filtering as the cached tail', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    const pending: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'Remember the skipped preference.' },
+          { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'Acknowledged.' }] },
+    ];
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', pending);
+
+    expect(vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory).toEqual([
+      {
+        role: 'user',
+        parts: [
+          pending[0]!.parts![0]!,
+          { text: expect.stringContaining('image/png') },
+        ],
+      },
+      pending[1],
+    ]);
   });
 
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {
