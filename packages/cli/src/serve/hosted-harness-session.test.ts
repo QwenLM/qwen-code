@@ -224,6 +224,11 @@ async function mcpApp(unknownConfigure = false, serverIds = ['demo']) {
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
     resetManagedRuntimeDispatchGatesForTest();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
+      ownerSessionId: SESSION_ID,
+      snapshots: [],
+      files: {},
+    });
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
     state.publicationRequest.mockReset();
@@ -235,6 +240,28 @@ describe('Hosted Harness no-tool session', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await rm(state.root, { recursive: true, force: true });
+  });
+
+  it('refuses file history APIs on the MCP profile without blocking its session', async () => {
+    const { server, authorize } = await mcpApp();
+    const history = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/files/history`),
+    );
+    expect(history.status).toBe(409);
+    expect(history.body.code).toBe('hosted_file_history_unavailable');
+    const undo = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+    ).send({ promptId: PROMPT_ID, requestId: randomUUID() });
+    expect(undo.status).toBe(409);
+    expect(undo.body.code).toBe('hosted_file_history_unavailable');
+    expect(HostedWorkspaceBroker.prototype.fileHistory).not.toHaveBeenCalled();
+    const status = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    );
+    expect(status.body.recoveryBlocked).toBe(false);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it.each([false, true])(
@@ -2637,6 +2664,11 @@ describe('Hosted Harness tool approvals', () => {
   beforeEach(async () => {
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
+      ownerSessionId: SESSION_ID,
+      snapshots: [],
+      files: {},
+    });
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockImplementation(
@@ -3186,4 +3218,184 @@ describe('Hosted Harness tool approvals', () => {
     await finished();
     expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
   });
+  it.each([false, true])(
+    'persists undo across reload and retains pending state on release failure (%s)',
+    async (releaseFails) => {
+      let writePromptId = PROMPT_ID;
+      const historyState = {
+        ownerSessionId: SESSION_ID,
+        snapshots: [
+          {
+            promptId: PROMPT_ID,
+            timestamp: '2026-09-30T00:00:00.000Z',
+            trackedFileBackups: {
+              'notes.txt': {
+                backupFileName: null,
+                version: 1,
+                backupTime: '2026-09-30T00:00:00.000Z',
+              },
+            },
+          },
+        ],
+        files: {
+          'notes.txt': { digest: `sha256:${'a'.repeat(64)}`, mode: 0o644 },
+        },
+      };
+      const control = vi
+        .mocked(HostedWorkspaceBroker.prototype.fileHistory)
+        .mockImplementation(async (operation) =>
+          operation.action === 'rewind'
+            ? {
+                state: { ...historyState, files: { 'notes.txt': null } },
+                filesChanged: ['notes.txt'],
+                filesFailed: [],
+                conflict: false,
+              }
+            : historyState,
+        );
+      state.model.mockImplementation(async ({ toolTurn, signal }) => {
+        const call = {
+          name: 'write_file',
+          callId: 'write',
+          args: { file_path: 'notes.txt', content: 'hello' },
+          isClientInitiated: false,
+          prompt_id: writePromptId,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'model',
+          signal,
+        );
+        await toolTurn!.consumeResults();
+        return { text: 'done', model: 'test' };
+      });
+      const server = app(true);
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: files,
+      });
+      expect(created.status).toBe(200);
+      let clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'write notes' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          prompt,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await waitFor(async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({})
+        .expect(204);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), toolProfile: files });
+      expect(loaded.status).toBe(200);
+      clientId = loaded.body.clientId as string;
+      const before = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/files/history`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(before.body.history.state).toEqual(historyState);
+      if (releaseFails)
+        vi.mocked(
+          HostedWorkspaceBroker.prototype.release,
+        ).mockRejectedValueOnce(new Error('release response lost'));
+      const request = { promptId: PROMPT_ID, requestId: randomUUID() };
+      const undo = () =>
+        headers(supertest(server).post(`/session/${SESSION_ID}/files/rewind`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send(request);
+      const response = await undo();
+      expect(response.status).toBe(releaseFails ? 503 : 200);
+      const after = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/files/history`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(after.body.history.pendingUndo).toEqual(
+        releaseFails ? request : null,
+      );
+      if (!releaseFails) {
+        expect((await undo()).body).toEqual(response.body);
+        expect(
+          control.mock.calls.filter(([op]) => op.action === 'rewind'),
+        ).toHaveLength(1);
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ promptId: PROMPT_ID, requestId: randomUUID() })
+          .expect(200);
+        const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+        const acquisitions = acquire.mock.calls.length;
+        expect((await undo()).body).toEqual(response.body);
+        expect(acquire).toHaveBeenCalledTimes(acquisitions);
+
+        writePromptId = randomUUID();
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            promptId: writePromptId,
+            prompt,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await waitFor(async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        });
+        expect((await undo()).body).toEqual(response.body);
+        expect(
+          control.mock.calls.filter(([op]) => op.action === 'rewind'),
+        ).toHaveLength(2);
+      }
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({})
+        .expect(204);
+      const reopened = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), toolProfile: files });
+      expect(reopened.status).toBe(releaseFails ? 409 : 200);
+      if (releaseFails)
+        expect(reopened.body.code).toBe(
+          'hosted_file_history_recovery_required',
+        );
+      else {
+        clientId = reopened.body.clientId as string;
+        const acquisitions = vi.mocked(HostedWorkspaceBroker.prototype.acquire)
+          .mock.calls.length;
+        expect((await undo()).body).toEqual(response.body);
+        expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledTimes(
+          acquisitions,
+        );
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+      }
+    },
+  );
 });

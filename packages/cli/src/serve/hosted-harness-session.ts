@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readHostedFileHistory,
+  commitHostedFileHistory,
+} from './hosted-file-history.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -735,6 +739,12 @@ export function registerHostedHarnessSessionRoutes(
       if (mcpServers && brokerOptions)
         session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
       if (pinned) session.approval = pinned;
+      const fileHistory = await readHostedFileHistory(managed);
+      if (fileHistory?.pendingTurn || fileHistory?.pendingUndo) {
+        await managed.close();
+        error(res, 409, 'hosted_file_history_recovery_required');
+        return;
+      }
       const restore = await managed.authority.restoreBundle();
       let resume: { promptId: string; text: string; parts: Part[] } | undefined;
       let settlePromptId: string | undefined;
@@ -1407,6 +1417,118 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 503, 'action_resolution_failed');
       },
     );
+  });
+  app.get('/session/:id/files/history', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.toolProfile || session.toolProfile === HOSTED_MCP_PROFILE)
+      return error(res, 409, 'hosted_file_history_unavailable');
+    void readHostedFileHistory(session.managed).then(
+      (history) =>
+        res.json({ sessionId: req.params['id'], history: history ?? null }),
+      () => error(res, 503, 'hosted_file_history_failed'),
+    );
+  });
+  app.post('/session/:id/files/rewind', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (
+      !session.toolProfile ||
+      session.toolProfile === HOSTED_MCP_PROFILE ||
+      !brokerOptions
+    )
+      return error(res, 409, 'hosted_file_history_unavailable');
+    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (session.blocked)
+      return error(res, 409, 'hosted_turn_recovery_required');
+    const body = object(req.body);
+    const requestId = body?.['requestId'];
+    const promptId = body?.['promptId'];
+    if (
+      typeof requestId !== 'string' ||
+      !UUID.test(requestId) ||
+      typeof promptId !== 'string' ||
+      !UUID.test(promptId)
+    )
+      return error(res, 400, 'invalid_file_rewind');
+    session.active = {
+      promptId: requestId,
+      digest: '',
+      abort: new AbortController(),
+    };
+    void (async () => {
+      const saved = await readHostedFileHistory(session.managed);
+      if (
+        !saved ||
+        !saved.state.snapshots.some(
+          (snapshot) => snapshot.promptId === promptId,
+        )
+      )
+        return error(res, 404, 'hosted_file_snapshot_not_found');
+      if (saved.pendingTurn || saved.pendingUndo)
+        return error(res, 409, 'hosted_file_history_recovery_required');
+      const priorUndo = saved.undoReceipts?.find(
+        (receipt) => receipt.requestId === requestId,
+      );
+      if (priorUndo) {
+        if (priorUndo.promptId !== promptId)
+          return error(res, 409, 'hosted_file_rewind_conflict');
+        return res.status(priorUndo.conflict ? 409 : 200).json(priorUndo);
+      }
+      const broker = new HostedWorkspaceBroker(
+        brokerOptions,
+        session.managed.authority.sessionHeader.sessionKey,
+        requestId,
+      );
+      await broker.warm();
+      await broker.acquire();
+      await broker.fileHistory({
+        kind: 'raw-file-history',
+        action: 'bind',
+        state: saved.state,
+      });
+      const pending = { ...saved, pendingUndo: { requestId, promptId } };
+      await commitHostedFileHistory(session.managed, pending);
+      const result = await broker.fileHistory({
+        kind: 'raw-file-history',
+        action: 'rewind',
+        promptId,
+      });
+      if (result.filesFailed.length)
+        throw new Error('Hosted file undo only partially completed.');
+      const undo = {
+        requestId,
+        promptId,
+        filesChanged: result.filesChanged,
+        conflict: result.conflict,
+      };
+      await commitHostedFileHistory(session.managed, {
+        schemaVersion: 1,
+        state: result.state,
+        pendingTurn: null,
+        pendingUndo: { requestId, promptId },
+        undoReceipts: [...(saved.undoReceipts ?? []), undo],
+      });
+      await broker.release();
+      await commitHostedFileHistory(session.managed, {
+        schemaVersion: 1,
+        state: result.state,
+        pendingTurn: null,
+        pendingUndo: null,
+        undoReceipts: [...(saved.undoReceipts ?? []), undo],
+      });
+      return res.status(result.conflict ? 409 : 200).json(undo);
+    })()
+      .catch((cause: unknown) => {
+        session.blocked = true;
+        writeStderrLineSafe(
+          `qwen serve: Hosted file undo requires recovery: ${String(cause)}`,
+        );
+        error(res, 503, 'hosted_file_history_recovery_required');
+      })
+      .finally(() => {
+        session.active = undefined;
+      });
   });
   app.post('/session/:id/title', (req, res) => {
     const session = identity(req, sessions);

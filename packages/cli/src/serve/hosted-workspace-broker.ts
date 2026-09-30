@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import type {
+  RawFileHistoryOperation,
+  HostedFileHistoryState,
+} from './hosted-file-history-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -64,6 +69,37 @@ export class HostedWorkspaceBroker {
   ) {
     this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(options.baseUrl);
     this.identity = { harnessSessionId: key.sessionId, runtimeSessionId };
+  }
+
+  async fileHistory(
+    operation: Exclude<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<HostedFileHistoryState>;
+  async fileHistory(
+    operation: Extract<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<{
+    state: HostedFileHistoryState;
+    filesChanged: string[];
+    filesFailed: string[];
+    conflict: boolean;
+  }>;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<
+    | HostedFileHistoryState
+    | {
+        state: HostedFileHistoryState;
+        filesChanged: string[];
+        filesFailed: string[];
+        conflict: boolean;
+      }
+  >;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<unknown> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    });
   }
 
   async warm(): Promise<void> {

@@ -10,6 +10,7 @@ import {
   mkdtemp,
   rm,
   stat,
+  utimes,
   writeFile,
   readFile,
 } from 'node:fs/promises';
@@ -51,6 +52,29 @@ describe('FileHistoryService', () => {
     await rm(projectDir, { recursive: true, force: true });
     await rm(storageDir, { recursive: true, force: true });
   });
+
+  it.each(['old mtime', 'invalid UTF-8'])(
+    'preserves exact backup bytes with %s',
+    async (scenario) => {
+      const file = join(projectDir, 'a');
+      const before =
+        scenario === 'old mtime'
+          ? Buffer.from('one')
+          : Buffer.from([0xf0, 0x9f, 0x92]);
+      const after = Buffer.from(scenario === 'old mtime' ? 'tri' : '\uFFFD');
+      await writeFile(file, before);
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, after);
+      if (scenario === 'old mtime') await utimes(file, 0, 0);
+      await service.makeSnapshot('p2');
+      await writeFile(file, 'new');
+      expect((await service.rewind('p2', false)).filesFailed).toEqual([]);
+      expect(await readFile(file)).toEqual(after);
+      expect((await service.rewind('p1', false)).filesFailed).toEqual([]);
+      expect(await readFile(file)).toEqual(before);
+    },
+  );
 
   describe('disabled service', () => {
     it('should no-op all operations when disabled', async () => {

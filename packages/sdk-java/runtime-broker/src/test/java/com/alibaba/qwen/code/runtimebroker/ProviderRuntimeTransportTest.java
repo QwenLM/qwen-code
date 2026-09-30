@@ -87,6 +87,23 @@ class ProviderRuntimeTransportTest {
                 + server.getAddress().getPort()), "secret", "lease", 3);
     }
 
+    @Test
+    void rawFileHistoryDoesNotAcquireAProviderSession() {
+        result = Map.of("ownerSessionId", HARNESS, "snapshots", List.of(), "files", Map.of());
+        Map<String, Object> bind = new LinkedHashMap<>();
+        bind.put("kind", "raw-file-history");
+        bind.put("action", "bind");
+        bind.put("state", null);
+        assertEquals(result, transport.control(lease, session, bind).toCompletableFuture().join());
+        assertEquals(1, requests.size());
+        assertEquals(bind, requests.getFirst().get("operation"));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "other", "paths", List.of("a"))));
+        assertThrows(RuntimeBrokerException.class, () -> transport.control(lease, session,
+                Map.of("kind", "raw-file-history", "action", "bind", "state", Map.of("ownerSessionId", "other"))));
+        assertEquals(1, requests.size());
+    }
+
     @AfterEach
     void stop() {
         server.stop(0);

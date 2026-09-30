@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readHostedFileHistory,
+  commitHostedFileHistory,
+} from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
@@ -131,7 +135,7 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   {
     name: 'write_file',
     description:
-      'Write a file in the remote Workspace. Read before overwriting an existing file. No undo backup is provided by this private profile.',
+      'Write a file in the remote Workspace. Read before overwriting an existing file.',
     parametersJsonSchema: {
       type: 'object',
       properties: { file_path: pathProperty, content: { type: 'string' } },
@@ -142,7 +146,7 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   {
     name: 'edit',
     description:
-      'Replace exact text in a remote Workspace file that you have read. No undo backup is provided by this private profile.',
+      'Replace exact text in a remote Workspace file that you have read.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -268,6 +272,16 @@ export class HostedWorkspaceToolTurn {
     try {
       await this.broker.acquire();
       this.acquired = true;
+      if (!this.mcp) {
+        const saved = await readHostedFileHistory(this.session);
+        if (saved?.pendingTurn || saved?.pendingUndo)
+          throw new Error('Hosted file history requires recovery.');
+        await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'bind',
+          state: saved?.state ?? null,
+        });
+      }
     } catch (cause) {
       if (isRetryableWorkspaceAcquisition(cause)) {
         this.uncertain = false;
@@ -481,6 +495,31 @@ export class HostedWorkspaceToolTurn {
       this.uncertain = false;
       signal.throwIfAborted();
       return responses;
+    }
+    const paths = requests.flatMap((request, index) =>
+      !this.mcp &&
+      refusals[index] === undefined &&
+      ['write_file', 'edit'].includes(request.call.name)
+        ? [request.input['file_path'] as string]
+        : [],
+    );
+    if (paths.length) {
+      try {
+        const state = await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'prepare',
+          promptId: this.promptId,
+          paths: [...new Set(paths)],
+        });
+        await commitHostedFileHistory(this.session, {
+          schemaVersion: 1,
+          state,
+          pendingTurn: this.promptId,
+          pendingUndo: null,
+        });
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
     }
     const reserved = new Map<number, string>();
     try {
@@ -905,6 +944,18 @@ export class HostedWorkspaceToolTurn {
         await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
         if (receipt) await this.broker.acknowledge(executionCallId, receipt);
         responses.push(...converted);
+      }
+      if (paths.length) {
+        const state = await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'snapshot',
+        });
+        await commitHostedFileHistory(this.session, {
+          schemaVersion: 1,
+          state,
+          pendingTurn: null,
+          pendingUndo: null,
+        });
       }
       this.uncertain = false;
       return responses;

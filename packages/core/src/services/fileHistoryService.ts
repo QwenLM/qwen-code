@@ -338,14 +338,12 @@ async function checkOriginFileChanged(
     return true;
   }
 
-  if (originalStats.mtimeMs < backupStats.mtimeMs) return false;
-
   try {
     const [originalContent, backupContent] = await Promise.all([
-      readFile(originalFile, 'utf-8'),
-      readFile(backupPath, 'utf-8'),
+      readFile(originalFile),
+      readFile(backupPath),
     ]);
-    return originalContent !== backupContent;
+    return !originalContent.equals(backupContent);
   } catch {
     return true;
   }
