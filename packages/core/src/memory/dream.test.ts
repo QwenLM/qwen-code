@@ -108,7 +108,7 @@ describe('managed auto-memory dream', () => {
     );
   });
 
-  it('attributes a replaced symlink index to the dreaming session and its signal', async () => {
+  it('attributes a replaced symlink index to the dreaming session', async () => {
     vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
     await fs.mkdir(path.join(projectRoot, '.git'));
     await ensureAutoMemoryScaffold(projectRoot);
@@ -158,7 +158,7 @@ describe('managed auto-memory dream', () => {
           operation: 'create',
           relativePaths: ['MEMORY.md'],
         }),
-        controller.signal,
+        undefined,
       );
     } finally {
       unregisterOwner();

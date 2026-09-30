@@ -8,9 +8,11 @@ import * as fs from 'node:fs/promises';
 import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { Mutex } from 'async-mutex';
 import {
   AUTO_MEMORY_DIRNAME,
   getAutoMemoryRoot,
+  getProjectAutoMemoryRoots,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   isMemoryDocumentFilename,
@@ -83,10 +85,11 @@ interface MemoryChangeWindow {
     projectRoot: string;
     changes: MemoryDocumentChange[];
     deliveryId?: symbol;
-    signal?: AbortSignal;
   }>;
 }
 const suppressDelivery = new AsyncLocalStorage<MemoryChangeWindow>();
+const memoryWindowMutex = new Mutex();
+const memoryWindowOwner = new AsyncLocalStorage<{ active: boolean }>();
 
 /**
  * Register a listener for one workspace. A write is delivered to the
@@ -165,9 +168,12 @@ function relativeInside(root: string, filePath: string): string | undefined {
 function isProjectRootAllowed(
   projectRoot: string,
   resolvedRoot: string,
+  root = getAutoMemoryRoot(projectRoot),
 ): boolean {
   return (
-    process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1' ||
+    (path.resolve(root) !==
+      path.resolve(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME) &&
+      process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1') ||
     resolvedRoot ===
       path.join(
         realpathNearestExisting(projectRoot),
@@ -209,10 +215,10 @@ export function describeMemoryFileChange(
       scope: 'user',
       root: getUserAutoMemoryRoot(),
     },
-    {
-      scope: 'project',
-      root: getAutoMemoryRoot(projectRoot),
-    },
+    ...getProjectAutoMemoryRoots(projectRoot, true).map((root) => ({
+      scope: 'project' as const,
+      root,
+    })),
     {
       scope: 'team',
       root: getTeamAutoMemoryRoot(projectRoot),
@@ -222,7 +228,7 @@ export function describeMemoryFileChange(
     const resolvedRoot = realpathNearestExisting(candidate.root);
     if (
       candidate.scope === 'project' &&
-      !isProjectRootAllowed(projectRoot, resolvedRoot)
+      !isProjectRootAllowed(projectRoot, resolvedRoot, candidate.root)
     )
       continue;
     if (candidate.scope === 'team') {
@@ -526,7 +532,6 @@ export async function notifyMemoryFileChange(
       projectRoot,
       changes: pending,
       deliveryId,
-      signal,
     });
   }
   // Record even when delivery is suppressed inside a coalesced window, so a
@@ -736,6 +741,28 @@ export async function withCoalescedMemoryChanges<T>(
   fn: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
+  if (memoryWindowOwner.getStore()?.active) return fn();
+  // Every window includes shared user memory. Serialize before taking either
+  // snapshot so raw shell writes retain their owning session.
+  return memoryWindowMutex.runExclusive(async () => {
+    signal?.throwIfAborted();
+    const owner = { active: true };
+    try {
+      return await memoryWindowOwner.run(owner, () =>
+        runMemoryChangeWindow(projectRoot, deliveryId, fn),
+      );
+    } finally {
+      owner.active = false;
+    }
+  });
+}
+
+async function runMemoryChangeWindow<T>(
+  projectRoot: string,
+  deliveryId: symbol | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
   const outside = new Map<string, ReportedMemoryContent>();
   outsideWindowEmits.add(outside);
   try {
@@ -772,12 +799,7 @@ export async function withCoalescedMemoryChanges<T>(
                   },
                 ];
           });
-          await emit(
-            pending.projectRoot,
-            changes,
-            pending.deliveryId,
-            pending.signal,
-          );
+          await emit(pending.projectRoot, changes, pending.deliveryId);
         }
       } else {
         const created: string[] = [];
@@ -841,21 +863,18 @@ export async function withCoalescedMemoryChanges<T>(
           projectRoot,
           'delete',
           deliveryId,
-          signal,
         );
         await notifyMemoryFileChange(
           updated,
           projectRoot,
           'update',
           deliveryId,
-          signal,
         );
         await notifyMemoryFileChange(
           created,
           projectRoot,
           'create',
           deliveryId,
-          signal,
         );
       }
     }

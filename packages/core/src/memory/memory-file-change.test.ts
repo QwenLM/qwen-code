@@ -449,12 +449,17 @@ describe('memory file change hook', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32').each(['.qwen', '.qwen/memory'])(
-    'ignores a relocated local project root through %s',
-    async (suffix) => {
+  it.skipIf(process.platform === 'win32').each([
+    ['.qwen', '1'],
+    ['.qwen/memory', '1'],
+    ['.qwen', '0'],
+    ['.qwen/memory', '0'],
+  ])(
+    'ignores a relocated local project root through %s (local=%s)',
+    async (suffix, local) => {
       const workspace = await setup();
       const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = local;
       const outside = path.join(tempDir!, 'outside');
       const link = path.join(workspace, suffix);
       const file = path.join(
@@ -479,7 +484,7 @@ describe('memory file change hook', () => {
         expect(describeMemoryFileChange(file, workspace)).toBeUndefined();
         expect(
           describeMemoryFileChange(
-            path.join(getAutoMemoryRoot(workspace), 'a.md'),
+            path.join(workspace, '.qwen', 'memory', 'a.md'),
             workspace,
           ),
         ).toBeUndefined();
@@ -990,6 +995,173 @@ describe('memory file change hook', () => {
     ]);
   });
 
+  it('attributes a raw shared-user delete to its owner across workspaces', async () => {
+    const projectRoot = await setup();
+    const otherRoot = path.join(tempDir!, 'other');
+    await fs.mkdir(otherRoot);
+    const file = path.join(getUserAutoMemoryRoot(), 'raw.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'before');
+    const owner = vi.fn();
+    const sibling = vi.fn();
+    const stopOwner = registerMemoryChangedListener(projectRoot, owner);
+    const stopSibling = registerMemoryChangedListener(otherRoot, sibling);
+    let entered!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const close = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = withCoalescedMemoryChanges(
+      projectRoot,
+      stopOwner.id,
+      async () => {
+        await fs.rm(file);
+        entered();
+        await close;
+      },
+    );
+    await opened;
+    const siblingFn = vi.fn(async () => {});
+    const next = withCoalescedMemoryChanges(
+      otherRoot,
+      stopSibling.id,
+      siblingFn,
+    );
+    try {
+      // Yield real I/O turns while the owning window is still open; the
+      // sibling must remain queued until its closing diff is delivered.
+      for (let i = 0; i < 10; i++) await fs.readdir(tempDir!);
+      expect(siblingFn).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await Promise.all([pending, next]);
+      stopOwner();
+      stopSibling();
+    }
+    expect(siblingFn).toHaveBeenCalledOnce();
+    expect(sibling).not.toHaveBeenCalled();
+    expect(owner).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        scope: 'user',
+        operation: 'delete',
+        paths: [
+          path.join(await fs.realpath(path.dirname(file)), path.basename(file)),
+        ],
+      }),
+      undefined,
+    );
+  });
+
+  it('releases a failed window and skips a queued cancelled callback', async () => {
+    const projectRoot = await setup();
+    let release!: () => void;
+    let entered!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      async () => {
+        entered();
+        await close;
+        throw new Error('task failed');
+      },
+    );
+    const failed = first.catch((error: unknown) => error);
+    await opened;
+    const controller = new AbortController();
+    const callback = vi.fn(async () => {});
+    const second = withCoalescedMemoryChanges(
+      projectRoot,
+      undefined,
+      callback,
+      controller.signal,
+    );
+    const cancelled = second.catch((error: unknown) => error);
+    controller.abort();
+    release();
+    await expect(failed).resolves.toMatchObject({ message: 'task failed' });
+    await expect(cancelled).resolves.toMatchObject({ name: 'AbortError' });
+    expect(callback).not.toHaveBeenCalled();
+    await expect(
+      withCoalescedMemoryChanges(projectRoot, undefined, async () => 42),
+    ).resolves.toBe(42);
+  });
+
+  it('coalesces nested work without waiting for its own window', async () => {
+    const projectRoot = await setup();
+    const file = path.join(getUserAutoMemoryRoot(), 'nested.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    try {
+      await withCoalescedMemoryChanges(projectRoot, stop.id, async () => {
+        await withCoalescedMemoryChanges(projectRoot, stop.id, () =>
+          fs.writeFile(file, 'nested'),
+        );
+      });
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'create',
+          paths: [
+            path.join(
+              await fs.realpath(path.dirname(file)),
+              path.basename(file),
+            ),
+          ],
+        }),
+        undefined,
+      );
+    } finally {
+      stop();
+    }
+  });
+
+  it('delivers committed raw deletes even when the task cancels', async () => {
+    const projectRoot = await setup();
+    const file = path.join(getUserAutoMemoryRoot(), 'cancelled.md');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'before');
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    const controller = new AbortController();
+    try {
+      await expect(
+        withCoalescedMemoryChanges(
+          projectRoot,
+          stop.id,
+          async () => {
+            await fs.rm(file);
+            controller.abort();
+            controller.signal.throwIfAborted();
+          },
+          controller.signal,
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          operation: 'delete',
+          paths: [
+            path.join(
+              await fs.realpath(path.dirname(file)),
+              path.basename(file),
+            ),
+          ],
+        }),
+        undefined,
+      );
+    } finally {
+      stop();
+    }
+  });
+
   it('does not cross-report a write made inside a sibling window', async () => {
     const projectRoot = await setup();
     const file = path.join(tempDir!, 'memories', 'user', 'sibling.md');
@@ -1016,14 +1188,6 @@ describe('memory file change hook', () => {
     const aCloseGate = new Promise<void>((resolve) => {
       closeA = resolve;
     });
-    let bWrote: () => void = () => {};
-    const bWriteGate = new Promise<void>((resolve) => {
-      bWrote = resolve;
-    });
-    let closeB: () => void = () => {};
-    const bCloseGate = new Promise<void>((resolve) => {
-      closeB = resolve;
-    });
     try {
       const aPending = withCoalescedMemoryChanges(
         projectRoot,
@@ -1047,16 +1211,10 @@ describe('memory file change hook', () => {
             'create',
             bRegistration.id,
           );
-          bWrote();
-          await bCloseGate;
         },
       );
-      await bWriteGate;
-      // A closes while B is still open: B's write was suppressed, so without
-      // the cross-window baseline A's diff reports B's write as A's own.
       closeA();
       await aPending;
-      closeB();
       await bPending;
     } finally {
       aRegistration();
@@ -1307,7 +1465,9 @@ describe('memory file change hook', () => {
             relativePaths: ['saved.md'],
           }),
         ]);
-        expect(signals).toEqual([controller.signal]);
+        expect(signals).toEqual([
+          failure === 'opening' ? controller.signal : undefined,
+        ]);
         expect(sibling).not.toHaveBeenCalled();
       } finally {
         stop();

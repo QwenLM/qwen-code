@@ -6,6 +6,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { registerMemoryChangedListener } from './memory-file-change.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -1034,6 +1036,64 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     await vi.waitFor(() => {
       expect(capturedSignal!.aborted).toBe(true);
     });
+  });
+
+  it('notifies a committed delete when cancellation stops the next deletion', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'forget-partial-abort-'),
+    );
+    const originalBase = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    clearAutoMemoryRootCache();
+    const projectRoot = path.join(tempDir, 'project');
+    const root = getUserAutoMemoryRoot();
+    await fs.mkdir(root, { recursive: true });
+    const first = path.join(root, 'first.md');
+    const second = path.join(root, 'second.md');
+    await fs.writeFile(first, 'first');
+    await fs.writeFile(second, 'second');
+    const controller = new AbortController();
+    const throwIfAborted = controller.signal.throwIfAborted.bind(
+      controller.signal,
+    );
+    const check = vi
+      .spyOn(controller.signal, 'throwIfAborted')
+      .mockImplementation(() => {
+        if (!existsSync(first)) controller.abort();
+        throwIfAborted();
+      });
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    try {
+      await expect(
+        forgetManagedAutoMemoryMatches(
+          projectRoot,
+          [
+            { topic: 'user', filePath: first, summary: 'first' },
+            { topic: 'user', filePath: second, summary: 'second' },
+          ],
+          undefined,
+          { abortSignal: controller.signal, memoryHookDeliveryId: stop.id },
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(existsSync(first)).toBe(false);
+      expect(await fs.readFile(second, 'utf8')).toBe('second');
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'delete',
+          paths: [path.join(await fs.realpath(root), 'first.md')],
+        }),
+        undefined,
+      );
+    } finally {
+      check.mockRestore();
+      stop();
+      if (originalBase === undefined)
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      else process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalBase;
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('does not delete matched files when cancelled before applying matches', async () => {

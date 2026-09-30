@@ -150,7 +150,7 @@ describe('memory metadata migration', () => {
             'MEMORY.md',
           ]),
         }),
-        controller.signal,
+        undefined,
       );
     } finally {
       unregisterOwner();
@@ -183,8 +183,11 @@ describe('memory metadata migration', () => {
     );
     try {
       await opened;
-      let generated = 0;
-      const result = await runMemoryMetadataMigration({
+      const generate = vi.fn(
+        async (_config: Config, candidate: MemoryMetadataMigrationCandidate) =>
+          metadata(candidate),
+      );
+      const pending = runMemoryMetadataMigration({
         config: {
           getMemoryHookDeliveryId: () => stopOwner.id,
           isTrustedFolder: () => true,
@@ -192,14 +195,13 @@ describe('memory metadata migration', () => {
         projectRoot,
         root: memoryRoot,
         scope: 'project',
-        generateMetadata: async (_config, candidate) => {
-          if (++generated === 2) {
-            closeSibling();
-            await siblingWindow;
-          }
-          return metadata(candidate);
-        },
+        generateMetadata: generate,
       });
+      for (let i = 0; i < 10; i++) await fs.readdir(memoryRoot);
+      expect(generate).not.toHaveBeenCalled();
+      closeSibling();
+      await siblingWindow;
+      const result = await pending;
       expect(result.committed).toBe(2);
       expect(sibling).not.toHaveBeenCalled();
       expect(owner).toHaveBeenCalledExactlyOnceWith(
@@ -220,6 +222,61 @@ describe('memory metadata migration', () => {
       stopSibling();
     }
   });
+
+  it.each([false, true])(
+    'notifies legacy local migration after commit (cancelled=%s)',
+    async (cancelled) => {
+      const file = await write('project/local.md', legacyContent());
+      await write('project/second.md', legacyContent());
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      clearAutoMemoryRootCache();
+      const listener = vi.fn();
+      const stop = registerMemoryChangedListener(projectRoot, listener);
+      const controller = new AbortController();
+      const config = {
+        getMemoryHookDeliveryId: () => stop.id,
+        isTrustedFolder: () => true,
+      } as unknown as Config;
+      let calls = 0;
+      try {
+        const pending = runMemoryMetadataMigration({
+          config,
+          projectRoot,
+          roots: [getAutoMemoryRoot(projectRoot), memoryRoot],
+          scope: 'project',
+          abortSignal: controller.signal,
+          generateMetadata: async (_config, candidate) => {
+            if (cancelled && ++calls === 2) {
+              controller.abort();
+              controller.signal.throwIfAborted();
+            }
+            return metadata(candidate);
+          },
+        });
+        if (cancelled)
+          await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+        else expect((await pending).committed).toBe(2);
+        expect(await fs.readFile(file, 'utf8')).toContain(
+          'name: Migrated memory',
+        );
+        expect(listener).toHaveBeenCalledWith(
+          expect.objectContaining({
+            operation: 'update',
+            paths: [await fs.realpath(file)],
+          }),
+          undefined,
+        );
+        expect(listener).toHaveBeenCalledWith(
+          expect.objectContaining({
+            paths: [await fs.realpath(path.join(memoryRoot, 'MEMORY.md'))],
+          }),
+          undefined,
+        );
+      } finally {
+        stop();
+      }
+    },
+  );
 
   it('selects only files missing the strict structured contract', async () => {
     await write('project/legacy.md', legacyContent());

@@ -627,7 +627,6 @@ export async function runMemoryMetadataMigration(params: {
         if (params.scope === 'team') {
           await rebuildTeamAutoMemoryIndex(params.projectRoot, {
             deliveryId: params.config.getMemoryHookDeliveryId?.(),
-            signal: params.abortSignal,
           });
         } else {
           await Promise.all(
@@ -635,7 +634,6 @@ export async function runMemoryMetadataMigration(params: {
               rebuildAutoMemoryIndexAtRoot(root, params.scope, {
                 projectRoot: params.projectRoot,
                 deliveryId: params.config.getMemoryHookDeliveryId?.(),
-                signal: params.abortSignal,
               }),
             ),
           );
@@ -733,7 +731,6 @@ export async function runMemoryMetadataMigration(params: {
               params.projectRoot,
               'update',
               params.config.getMemoryHookDeliveryId?.(),
-              params.abortSignal,
             );
             result.committed += 1;
             committedRoots.add(candidate.root);

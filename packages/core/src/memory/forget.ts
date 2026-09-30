@@ -517,7 +517,6 @@ export async function forgetManagedAutoMemoryMatches(
         projectRoot,
         'delete',
         options.memoryHookDeliveryId,
-        options.abortSignal,
       );
     }
     if (updatedPaths.length > 0) {
@@ -527,7 +526,6 @@ export async function forgetManagedAutoMemoryMatches(
         projectRoot,
         'update',
         options.memoryHookDeliveryId,
-        options.abortSignal,
       );
     }
   };

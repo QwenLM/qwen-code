@@ -322,7 +322,7 @@ describe('User Memory dream', () => {
           operation: 'delete',
           relativePaths: ['user/obsolete.md'],
         }),
-        controller.signal,
+        undefined,
       );
     } finally {
       unregisterOwner();
