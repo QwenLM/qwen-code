@@ -25,26 +25,11 @@ import {
   tryRecoverXmlToolCalls,
 } from './xml-tool-call-fallback.js';
 
-const READ_P = invoke('read_file', param('p', 'v'));
-const READ_A = invoke('read_file', param('file_path', 'a.ts'));
-const READ_A_CALL = { name: 'read_file', args: { file_path: 'a.ts' } };
-const RM_TMP = invoke('run_shell_command', param('command', 'rm -rf /tmp/x'));
-const ECHO_HI = invoke('run_shell_command', param('command', 'echo hi'));
-const ECHO_HELLO = invoke('run_shell_command', param('command', 'echo hello'));
-// Fenced invokes shared by the extract and recover cases.
-const FENCED_RM = '```xml\n' + RM_TMP + '\n```';
-const FENCED_ECHO_HELLO = '```xml\n' + ECHO_HELLO + '\n```';
-const SHORTER_FENCE_INSIDE = '````markdown\n```\n' + RM_TMP + '\n````';
-const INFO_STRING_CLOSE = '```markdown\n```xml\n' + RM_TMP + '\n```';
-const TRAILING_TEXT_CLOSE =
-  '~~~markdown\n~~~ end of examples\n' + ECHO_HI + '\n~~~';
-
-const expectExtract = (text: string, calls: unknown[]) =>
-  expect(extractXmlToolCalls(text)).toEqual(calls);
-
 describe('containsXmlToolCalls', () => {
   it('detects an invoke block', () => {
-    expect(containsXmlToolCalls(READ_P)).toBe(true);
+    expect(containsXmlToolCalls(invoke('read_file', param('p', 'v')))).toBe(
+      true,
+    );
   });
 
   it('returns false for plain text', () => {
@@ -52,33 +37,45 @@ describe('containsXmlToolCalls', () => {
   });
 
   it('is stable across repeated calls (no lastIndex leak)', () => {
-    expect(containsXmlToolCalls(READ_P)).toBe(true);
-    expect(containsXmlToolCalls(READ_P)).toBe(true);
-    expect(containsXmlToolCalls(READ_P)).toBe(true);
+    const text = invoke('read_file', param('p', 'v'));
+    expect(containsXmlToolCalls(text)).toBe(true);
+    expect(containsXmlToolCalls(text)).toBe(true);
+    expect(containsXmlToolCalls(text)).toBe(true);
   });
 });
 
 describe('extractXmlToolCalls', () => {
   it('extracts a single tool call', () => {
-    expectExtract(READ_A, [READ_A_CALL]);
+    const text = invoke('read_file', param('file_path', 'a.ts'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
   });
 
   it('extracts multiple tool calls', () => {
-    expectExtract(
-      READ_A + '\n' + invoke('run_shell_command', param('command', 'ls')),
-      [READ_A_CALL, { name: 'run_shell_command', args: { command: 'ls' } }],
-    );
+    const text =
+      invoke('read_file', param('file_path', 'a.ts')) +
+      '\n' +
+      invoke('run_shell_command', param('command', 'ls'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+      { name: 'run_shell_command', args: { command: 'ls' } },
+    ]);
   });
 
   it('extracts multiple parameters for one call', () => {
-    expectExtract(
-      invoke('edit', param('file_path', 'a.ts') + param('old_string', 'x')),
-      [{ name: 'edit', args: { file_path: 'a.ts', old_string: 'x' } }],
+    const text = invoke(
+      'edit',
+      param('file_path', 'a.ts') + param('old_string', 'x'),
     );
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'edit', args: { file_path: 'a.ts', old_string: 'x' } },
+    ]);
   });
 
   it('skips invoke blocks without parameters (conservative)', () => {
-    expectExtract(invoke('no_params', 'some body but no parameters'), []);
+    const text = invoke('no_params', 'some body but no parameters');
+    expect(extractXmlToolCalls(text)).toEqual([]);
   });
 
   it('parses structured JSON but preserves scalar strings', () => {
@@ -91,7 +88,7 @@ describe('extractXmlToolCalls', () => {
         param('plain', 'hello world') +
         param('nil', 'null'),
     );
-    expectExtract(text, [
+    expect(extractXmlToolCalls(text)).toEqual([
       {
         name: 'tool',
         args: {
@@ -107,10 +104,16 @@ describe('extractXmlToolCalls', () => {
   });
 
   it('preserves raw string for malformed JSON values', () => {
-    expectExtract(
-      invoke('tool', param('data', '{not valid json') + param('ok', 'yes')),
-      [{ name: 'tool', args: { data: '{not valid json', ok: 'yes' } }],
+    const text = invoke(
+      'tool',
+      param('data', '{not valid json') + param('ok', 'yes'),
     );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'tool',
+        args: { data: '{not valid json', ok: 'yes' },
+      },
+    ]);
   });
 
   it('extracts tool calls with multi-line parameter values (issue #8003 shape)', () => {
@@ -119,7 +122,7 @@ describe('extractXmlToolCalls', () => {
       param('file_path', '/some/path/file.tsx') +
         param('old_string', 'line1,\nline2,\nline3,'),
     );
-    expectExtract(text, [
+    expect(extractXmlToolCalls(text)).toEqual([
       {
         name: 'edit',
         args: {
@@ -131,7 +134,8 @@ describe('extractXmlToolCalls', () => {
   });
 
   it('strips only delimiting newlines, preserving significant whitespace', () => {
-    expectExtract(invoke('edit', param('old_string', '\n    return null;\n')), [
+    const text = invoke('edit', param('old_string', '\n    return null;\n'));
+    expect(extractXmlToolCalls(text)).toEqual([
       { name: 'edit', args: { old_string: '    return null;' } },
     ]);
   });
@@ -145,51 +149,84 @@ describe('extractXmlToolCalls', () => {
   });
 
   it('returns consistent results across repeated calls (no lastIndex leak)', () => {
-    const first = extractXmlToolCalls(READ_P);
-    const second = extractXmlToolCalls(READ_P);
+    const text = invoke('read_file', param('p', 'v'));
+    const first = extractXmlToolCalls(text);
+    const second = extractXmlToolCalls(text);
     expect(second).toEqual(first);
     expect(second).toHaveLength(1);
   });
 
   it('is safe against __proto__ parameter names', () => {
-    const result = extractXmlToolCalls(
-      invoke(
-        'tool',
-        param('__proto__', '{"polluted": true}') + param('safe', 'yes'),
-      ),
+    const text = invoke(
+      'tool',
+      param('__proto__', '{"polluted": true}') + param('safe', 'yes'),
     );
+    const result = extractXmlToolCalls(text);
     expect(result).toHaveLength(1);
     const args = result[0]!.args;
     expect(args['safe']).toBe('yes');
-    expect(args['__proto__']).toEqual({ polluted: true });
     expect(Object.getPrototypeOf(args)).toBeNull();
     expect((args as Record<string, unknown>)['polluted']).toBeUndefined();
   });
 
-  it.each([
-    ['skips invoke blocks inside fenced code blocks', FENCED_RM],
-    [
-      'skips invokes inside a ~~~ fence that contains ``` lines',
-      '~~~markdown\n```\n' + ECHO_HELLO + '\n~~~',
-    ],
-    [
-      'treats a shorter same-delimiter fence as content, not a close (CommonMark 4.5)',
-      SHORTER_FENCE_INSIDE,
-    ],
-    [
-      'treats a closing fence with an info string as content, not a close (CommonMark 4.5)',
-      INFO_STRING_CLOSE,
-    ],
-    [
-      'treats a closing fence with trailing text as content, not a close',
-      TRAILING_TEXT_CLOSE,
-    ],
-  ])('%s', (_title, text) => {
-    expectExtract(text, []);
+  it('skips invoke blocks inside fenced code blocks', () => {
+    const text =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```';
+    expect(extractXmlToolCalls(text)).toEqual([]);
   });
 
   it('extracts non-fenced invokes while skipping fenced ones', () => {
-    expectExtract(READ_A + '\n' + FENCED_ECHO_HELLO, [READ_A_CALL]);
+    const realCall = invoke('read_file', param('file_path', 'a.ts'));
+    const fencedExample =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hello')) +
+      '\n```';
+    const text = realCall + '\n' + fencedExample;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+  });
+
+  it('skips invokes inside a ~~~ fence that contains ``` lines', () => {
+    const text =
+      '~~~markdown\n' +
+      'Here is an example:\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hello')) +
+      '\n```\n' +
+      '~~~';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
+  it('treats a shorter same-delimiter fence as content, not a close (CommonMark 4.5)', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```\n' +
+      '````';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
+  it('treats a closing fence with an info string as content, not a close (CommonMark 4.5)', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```xml\n' +
+      '````';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+  });
+
+  it('treats a closing fence with trailing text as content, not a close', () => {
+    const text =
+      '~~~markdown\n' +
+      invoke('run_shell_command', param('command', 'echo hi')) +
+      '\n~~~ end of examples\n' +
+      '~~~';
+    expect(extractXmlToolCalls(text)).toEqual([]);
   });
 
   it('extracts a later invoke when an earlier parameter contains an unclosed fence', () => {
@@ -198,19 +235,22 @@ describe('extractXmlToolCalls', () => {
       param('file_path', 'docs.md') +
         param('old_string', '```ts\nconst x = 1;'),
     );
-    expectExtract(editWithFence + '\n' + READ_A, [
+    const readCall = invoke('read_file', param('file_path', 'a.ts'));
+    const text = editWithFence + '\n' + readCall;
+    expect(extractXmlToolCalls(text)).toEqual([
       {
         name: 'edit',
         args: { file_path: 'docs.md', old_string: '```ts\nconst x = 1;' },
       },
-      READ_A_CALL,
+      { name: 'read_file', args: { file_path: 'a.ts' } },
     ]);
   });
 
   it('extracts a later invoke when an earlier parameter contains a closed fence pair', () => {
     const editWithFence = invoke('edit', param('old_string', '```\ncode\n```'));
     const readCall = invoke('read_file', param('file_path', 'b.ts'));
-    expectExtract(editWithFence + '\n' + readCall, [
+    const text = editWithFence + '\n' + readCall;
+    expect(extractXmlToolCalls(text)).toEqual([
       { name: 'edit', args: { old_string: '```\ncode\n```' } },
       { name: 'read_file', args: { file_path: 'b.ts' } },
     ]);
@@ -222,7 +262,9 @@ describe('extractXmlToolCalls', () => {
       invoke('edit', param('old_string', '```\ninner\n```')) +
       '\n```\n' +
       invoke('read_file', param('file_path', 'c.ts'));
-    expectExtract(text, [{ name: 'read_file', args: { file_path: 'c.ts' } }]);
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'c.ts' } },
+    ]);
   });
 
   it('decodes XML entities in parameter values', () => {
@@ -231,7 +273,7 @@ describe('extractXmlToolCalls', () => {
       param('old_string', 'if (a &lt; b) &amp;&amp; c &gt; d') +
         param('new_string', 'x &apos;y&apos; &quot;z&quot;'),
     );
-    expectExtract(text, [
+    expect(extractXmlToolCalls(text)).toEqual([
       {
         name: 'edit',
         args: {
@@ -243,57 +285,40 @@ describe('extractXmlToolCalls', () => {
   });
 
   it('decodes &amp; last so &amp;lt; becomes literal &lt;', () => {
-    expectExtract(invoke('tool', param('v', '&amp;lt;')), [
+    const text = invoke('tool', param('v', '&amp;lt;'));
+    expect(extractXmlToolCalls(text)).toEqual([
       { name: 'tool', args: { v: '&lt;' } },
     ]);
   });
 
   it('leaves values without entities unchanged', () => {
-    expectExtract(invoke('tool', param('v', 'plain text')), [
+    const text = invoke('tool', param('v', 'plain text'));
+    expect(extractXmlToolCalls(text)).toEqual([
       { name: 'tool', args: { v: 'plain text' } },
     ]);
   });
 
   it('supports single-quoted attribute values', () => {
-    expectExtract(
-      "<invoke name='read_file'><parameter name='file_path'>a.ts</parameter></invoke>",
-      [READ_A_CALL],
-    );
+    const text =
+      "<invoke name='read_file'><parameter name='file_path'>a.ts</parameter></invoke>";
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
   });
 });
 
 describe('tryRecoverXmlToolCalls', () => {
-  it.each([
-    ['reports no recovery when there are no tool calls', 'plain text only'],
-    [
-      'does not recover an invoke example inside a fenced code block',
-      FENCED_RM,
-    ],
-    [
-      'does not recover an invoke inside a ~~~ fence containing ``` lines',
-      '~~~markdown\n```\n' + ECHO_HI + '\n~~~',
-    ],
-    [
-      'does not recover an invoke nested in a longer same-delimiter fence',
-      SHORTER_FENCE_INSIDE,
-    ],
-    [
-      'does not recover an invoke when the closing fence carries an info string',
-      INFO_STRING_CLOSE,
-    ],
-    [
-      'does not recover an invoke when the closing fence has trailing text',
-      TRAILING_TEXT_CLOSE,
-    ],
-  ])('%s', (_title, text) => {
-    const result = tryRecoverXmlToolCalls(text);
+  it('reports no recovery when there are no tool calls', () => {
+    const result = tryRecoverXmlToolCalls('plain text only');
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);
-    expect(result.remainingText).toBe(text);
+    expect(result.remainingText).toBe('plain text only');
   });
 
   it('recovers functionCall parts from XML content', () => {
-    const result = tryRecoverXmlToolCalls(READ_A);
+    const result = tryRecoverXmlToolCalls(
+      invoke('read_file', param('file_path', 'a.ts')),
+    );
     expect(result.recovered).toBe(true);
     expect(result.functionCallParts).toHaveLength(1);
     const call = result.functionCallParts[0]?.functionCall;
@@ -303,13 +328,16 @@ describe('tryRecoverXmlToolCalls', () => {
   });
 
   it('preserves short surrounding text in remainingText', () => {
-    const result = tryRecoverXmlToolCalls('Sure.\n' + READ_A);
+    const text = 'Sure.\n' + invoke('read_file', param('file_path', 'a.ts'));
+    const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
     expect(result.remainingText).toBe('Sure.');
   });
 
   it('returns empty remainingText when the content is only XML', () => {
-    const result = tryRecoverXmlToolCalls(READ_A);
+    const result = tryRecoverXmlToolCalls(
+      invoke('read_file', param('file_path', 'a.ts')),
+    );
     expect(result.recovered).toBe(true);
     expect(result.remainingText).toBe('');
   });
@@ -321,7 +349,8 @@ describe('tryRecoverXmlToolCalls', () => {
       'This is a documentation example for the read_file tool call format. ' +
       'You should never execute these examples directly. They are for illustration ' +
       'purposes only. The actual tool calls are made through the structured API.';
-    const result = tryRecoverXmlToolCalls(prose + '\n' + READ_A);
+    const text = prose + '\n' + invoke('read_file', param('file_path', 'a.ts'));
+    const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(false);
     expect(result.functionCallParts).toEqual([]);
   });
@@ -364,7 +393,8 @@ describe('tryRecoverXmlToolCalls', () => {
             '}',
         ),
     );
-    const result = tryRecoverXmlToolCalls(reasoning + '\n' + editBlock);
+    const text = reasoning + '\n' + editBlock;
+    const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
     expect(result.functionCallParts).toHaveLength(1);
     const call = result.functionCallParts[0]?.functionCall;
@@ -377,14 +407,33 @@ describe('tryRecoverXmlToolCalls', () => {
 
   it('preserves parameterless invoke blocks as plain text', () => {
     const parameterless = invoke('think', 'Let me reason about this problem');
-    const result = tryRecoverXmlToolCalls(READ_A + '\n' + parameterless);
+    const parameterized = invoke('read_file', param('file_path', 'a.ts'));
+    const text = parameterized + '\n' + parameterless;
+    const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
     expect(result.functionCallParts).toHaveLength(1);
     expect(result.remainingText).toContain(parameterless);
   });
 
+  it('does not recover an invoke example inside a fenced code block', () => {
+    const text =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
   it('recovers a real invoke while excluding a fenced example after it', () => {
-    const result = tryRecoverXmlToolCalls(READ_A + '\n' + FENCED_ECHO_HELLO);
+    const realCall = invoke('read_file', param('file_path', 'a.ts'));
+    const fencedExample =
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hello')) +
+      '\n```';
+    const text = realCall + '\n' + fencedExample;
+    const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
     expect(result.functionCallParts).toHaveLength(1);
     const call = result.functionCallParts[0]?.functionCall;
@@ -394,12 +443,66 @@ describe('tryRecoverXmlToolCalls', () => {
     expect(result.remainingText).toContain('echo hello');
   });
 
+  it('does not recover an invoke inside a ~~~ fence containing ``` lines', () => {
+    const text =
+      '~~~markdown\n' +
+      'Example:\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'echo hi')) +
+      '\n```\n' +
+      '~~~';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
+  it('does not recover an invoke nested in a longer same-delimiter fence', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```\n' +
+      '````';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
+  it('does not recover an invoke when the closing fence carries an info string', () => {
+    const text =
+      '````markdown\n' +
+      '```xml\n' +
+      invoke('run_shell_command', param('command', 'rm -rf /tmp/x')) +
+      '\n```xml\n' +
+      '````';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
+  it('does not recover an invoke when the closing fence has trailing text', () => {
+    const text =
+      '~~~markdown\n' +
+      invoke('run_shell_command', param('command', 'echo hi')) +
+      '\n~~~ end of examples\n' +
+      '~~~';
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(false);
+    expect(result.functionCallParts).toEqual([]);
+    expect(result.remainingText).toBe(text);
+  });
+
   it('recovers both invokes when the first has a fence-like parameter value', () => {
     const editWithFence = invoke(
       'edit',
       param('old_string', '```\nunclosed fence'),
     );
-    const result = tryRecoverXmlToolCalls(editWithFence + '\n' + READ_A);
+    const readCall = invoke('read_file', param('file_path', 'a.ts'));
+    const text = editWithFence + '\n' + readCall;
+    const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
     expect(result.functionCallParts).toHaveLength(2);
     expect(result.functionCallParts[0]?.functionCall?.name).toBe('edit');
@@ -407,7 +510,11 @@ describe('tryRecoverXmlToolCalls', () => {
   });
 
   it('strips an empty function_calls wrapper from remainingText', () => {
-    const text = '<function_calls>\n' + READ_A + '\n<' + '/function_calls>';
+    const text =
+      '<function_calls>\n' +
+      invoke('read_file', param('file_path', 'a.ts')) +
+      '\n<' +
+      '/function_calls>';
     const result = tryRecoverXmlToolCalls(text);
     expect(result.recovered).toBe(true);
     expect(result.remainingText).toBe('');
