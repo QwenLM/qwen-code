@@ -140,12 +140,25 @@ for (const module of modules) {
     );
     // Out-of-place files must not join the claimants: invisible to Flyway,
     // they cannot collide at runtime — they are the moved location's error,
-    // not a second claimant for their version. A location that EXISTS is not
-    // moved, however empty: the rename probe fires only when the location
-    // directory itself is gone and a migration* sibling took its place.
+    // not a second claimant for their version.
     const misplaced = outOfPlaceFiles(module, location);
-    if (
+    if (misplaced.length > 0 && files.length > 0) {
+      // The location IS populated, so nothing moved: a stray file sits
+      // outside the only place Flyway scans. Say that — claiming the
+      // location is empty would send the reader hunting a rename that never
+      // happened, and the consumer titles the issue from this line.
+      failed = true;
+      errored = true;
+      console.error(
+        `::error::${escapeWorkflowCommand(module)}: found migration files outside ` +
+          `${location.dir.join('/')}: ` +
+          `${misplaced.map(escapeWorkflowCommand).join(', ')}`,
+      );
+    } else if (
       misplaced.length > 0 ||
+      // A location that EXISTS is not moved, however empty: the rename
+      // probe fires only when the location directory itself is gone and a
+      // migration* sibling took its place.
       (files.length === 0 &&
         !existsSync(path.join(module, ...location.dir)) &&
         hasMigrationDir(module, location))

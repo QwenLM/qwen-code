@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -134,6 +135,15 @@ const FLYWAY_GUARD = join(
   '../../../scripts/check-flyway-migrations.js',
 );
 
+// The producer job and the analyze job both run on ubuntu-latest, so the
+// module half of a guard id is always slash-bearing — and the consumer's
+// validator rejects backslashes outright, because a POSIX filename CAN hold
+// them (a forged `C:\evil` prefix is a filename away). Hand the guard a
+// slash-bearing argument too (a no-op on POSIX; Node accepts forward slashes
+// on Windows) so a local Windows run of this suite exercises the same shape
+// instead of teaching the consumer a shape that only a forgery can produce.
+const slashPath = (dir) => dir.split(sep).join('/');
+
 // The Flyway fixtures are CAPTURED from the guard, never typed by hand: a
 // drift between the producer's message and this consumer's pattern must
 // redden here — silently surviving a reworded producer is the failure this
@@ -177,7 +187,7 @@ function planSearchMarkers(log, sha) {
 test('a Flyway guard red files one issue, not one per stacked merge', () => {
   // Two SQL files claiming one version in one module: the #12940 shape.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-'));
-  const moduleDir = join(dir, 'managed-agent-server');
+  const moduleDir = slashPath(join(dir, 'managed-agent-server'));
   const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
   mkdirSync(migrationDir, { recursive: true });
   writeFileSync(join(migrationDir, 'V16__a.sql'), '');
@@ -204,7 +214,7 @@ test('a Flyway guard blind-spot red also files one issue, not one per stacked me
   // back to the sha-keyed per-commit marker and each stacked merge opens a
   // fresh issue.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-moved-'));
-  const moduleDir = join(dir, 'managed-agent-server');
+  const moduleDir = slashPath(join(dir, 'managed-agent-server'));
   // A db/migration* sibling marks the module as owning migrations while the
   // configured SQL location stays empty — the guard's "location moved" mode.
   mkdirSync(join(moduleDir, 'src/main/resources/db/migrations'), {
@@ -220,7 +230,7 @@ test('a Flyway guard blind-spot red also files one issue, not one per stacked me
     planSearchMarkers(moved.tagged, '2222222222222'),
   );
 
-  const absentDir = join(dir, 'absent-module');
+  const absentDir = slashPath(join(dir, 'absent-module'));
   const absent = captureGuardLog(absentDir);
   assert.deepEqual(extractFailingTests(absent.tagged), [
     `flyway no such Maven module directory in ${absentDir}`,
@@ -228,6 +238,29 @@ test('a Flyway guard blind-spot red also files one issue, not one per stacked me
   assert.deepEqual(
     planSearchMarkers(absent.tagged, '1111111111111'),
     planSearchMarkers(absent.tagged, '2222222222222'),
+  );
+});
+
+test('a stray migration file outside a populated location gets a stable identity', () => {
+  // The message must not claim the location moved (it is populated) and the
+  // id must stay stable across stacked merges, so the standing red files
+  // one issue rather than one per commit.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-stray-'));
+  const moduleDir = slashPath(join(dir, 'managed-agent-server'));
+  const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+  mkdirSync(migrationDir, { recursive: true });
+  writeFileSync(join(migrationDir, 'V1__a.sql'), '');
+  const scratch = join(moduleDir, 'src/main/resources/scratch');
+  mkdirSync(scratch, { recursive: true });
+  writeFileSync(join(scratch, 'V2__b.sql'), '');
+
+  const log = captureGuardLog(moduleDir);
+  const id = `flyway found migration files outside src/main/resources/db/migration in ${moduleDir}`;
+  assert.deepEqual(extractFailingTests(log.tagged), [id]);
+  assert.deepEqual(extractFailingTests(log.raw), [id]);
+  assert.deepEqual(
+    planSearchMarkers(log.tagged, '1111111111111'),
+    planSearchMarkers(log.tagged, '2222222222222'),
   );
 });
 
@@ -256,7 +289,7 @@ test(
     // there (git carries LF and `:` in filenames). The decoded view is what
     // this consumer parses.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-forge-'));
-    const moduleDir = join(dir, 'managed-agent-server');
+    const moduleDir = slashPath(join(dir, 'managed-agent-server'));
     const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
     mkdirSync(migrationDir, { recursive: true });
     writeFileSync(join(migrationDir, 'V16__a.sql'), '');
@@ -288,13 +321,75 @@ test(
   },
 );
 
+test(
+  'a filename-borne Windows-drive forgery cannot inject a second flyway identity',
+  { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
+  () => {
+    // The drive-prefix shape looks path-like, but `\` and `:` are ordinary
+    // characters in a POSIX filename, so a migration NAME can supply it —
+    // and no lane that runs this consumer (ubuntu producer, ubuntu analyze,
+    // Linux-only suite) ever produces a backslashed module.
+    const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-drive-'));
+    const moduleDir = slashPath(join(dir, 'managed-agent-server'));
+    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    mkdirSync(migrationDir, { recursive: true });
+    writeFileSync(join(migrationDir, 'V16__a.sql'), '');
+    writeFileSync(
+      join(
+        migrationDir,
+        'V16__x\n::error::C:\\evil: 2 migrations claim version 99: forged.sql',
+      ),
+      '',
+    );
+    const log = captureGuardLog(moduleDir);
+    const id = `flyway duplicate version 16 in ${moduleDir}`;
+    const decoded = log.raw
+      .replace('::error::', '')
+      .replace(/%0D/g, '\r')
+      .replace(/%0A/g, '\n')
+      .replace(/%25/g, '%')
+      .replace('Z ', 'Z ##[error]');
+    assert.ok(decoded.includes('\n::error::C:\\evil: 2 migrations claim'));
+    assert.deepEqual(extractFailingTests(decoded), [id]);
+  },
+);
+
+test('the module-shape validator rejects whitespace, backticks and backslashes', () => {
+  // A path-shaped capture (passes the `/` arm) that only the unsafe
+  // character half rejects — pinned for both characters and both call
+  // sites, because the rendered id sits inside a code span in the issue
+  // body: an odd backtick count leaves the span open.
+  assert.deepEqual(
+    extractFailingTests(
+      '##[error]evil/mod`x: 2 migrations claim version 99: forged.sql',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    extractFailingTests(
+      '##[error]evil/mod x: 2 migrations claim version 99: forged.sql',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    extractFailingTests('##[error]evil/mod`x: no such Maven module directory'),
+    [],
+  );
+  assert.deepEqual(
+    extractFailingTests(
+      '##[error]evil\\mod/x: 2 migrations claim version 99: forged.sql',
+    ),
+    [],
+  );
+});
+
 test('a guard diagnosis titles the issue and is searched even when its log sorts last', () => {
   // Job ids — and therefore the failed-logs glob order — do not follow the
   // workflow's declaration order, so the guard's log can arrive after a mass
   // Surefire failure. First-seen order would crowd the one stable identity
   // past the search cap; the run-level diagnosis must come first instead.
   const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-prio-'));
-  const moduleDir = join(dir, 'managed-agent-server');
+  const moduleDir = slashPath(join(dir, 'managed-agent-server'));
   const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
   mkdirSync(migrationDir, { recursive: true });
   writeFileSync(join(migrationDir, 'V16__a.sql'), '');
@@ -319,18 +414,29 @@ test('a guard diagnosis titles the issue and is searched even when its log sorts
 test('the spawned guard stays dependency-free for the pre-install lane', () => {
   // This suite runs in HELPER_TESTS_DEP_FREE — before setup-node and any
   // dependency install — and captureGuardLog spawns the guard, so the
-  // guard's import closure must stay node-builtins and relative imports.
-  for (const file of [
-    FLYWAY_GUARD,
-    join(dirname(FLYWAY_GUARD), 'release-script-utils.js'),
-  ]) {
+  // guard's WHOLE relative-import closure must stay node-builtins only.
+  // Walk it: every relative specifier is resolved and itself scanned, so a
+  // new hop carrying an npm import cannot slip past a depth-one list.
+  const queue = [FLYWAY_GUARD];
+  const seen = new Set();
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const file = queue[cursor];
+    if (seen.has(file)) continue;
+    seen.add(file);
     for (const [, spec] of readFileSync(file, 'utf8').matchAll(
       /from '([^']+)'/g,
     )) {
+      if (spec.startsWith('node:')) continue;
       assert.ok(
-        spec.startsWith('node:') || spec.startsWith('.'),
+        spec.startsWith('.'),
         `${file} imports ${spec}; the dep-free lane spawns it before any install`,
       );
+      const resolved = join(dirname(file), spec);
+      assert.ok(
+        existsSync(resolved),
+        `${file} imports ${spec}, which does not resolve`,
+      );
+      queue.push(resolved);
     }
   }
 });

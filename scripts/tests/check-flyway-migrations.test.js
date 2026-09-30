@@ -251,6 +251,25 @@ describe('check-flyway-migrations', () => {
     expect(result.status).toBe(1);
   });
 
+  it('names a stray migration file without claiming the location is empty', () => {
+    // A populated location plus a migration-shaped stray elsewhere under the
+    // source root (a dev-seed or example SQL named like a migration): the
+    // error must name the stray as the cause, not assert the location has
+    // no migration — the consumer titles the auto-filed issue from this
+    // line.
+    const dir = module('server', { sql: ['V1__a.sql'] });
+    const scratch = join(dir, 'src/main/resources/scratch');
+    mkdirSync(scratch, { recursive: true });
+    writeFileSync(join(scratch, 'V2__b.sql'), '');
+    const result = check(dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain(
+      'found migration files outside src/main/resources/db/migration',
+    );
+    expect(result.output).toContain('scratch/V2__b.sql');
+    expect(result.output).not.toContain('found no migration under');
+  });
+
   it('scans a Java-only module for collisions instead of misreading it as moved', () => {
     // No src/main/resources at all: a module carrying only BaseJavaMigration
     // classes owns a sequence like any other, so one class passes and two

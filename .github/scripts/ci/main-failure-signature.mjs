@@ -69,25 +69,25 @@ const FLYWAY_FAIL_PATTERN =
 // a filename-borne payload smuggle spaces and backticks into an id that is
 // rendered inside a code span in the issue body.
 const FLYWAY_CONFIG_PATTERN =
-  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [\w./-]+)/;
+  /^(?:##\[error\]|::error::)(.+?): (no such Maven module directory|found no migration under [\w./-]+|found migration files outside [\w./-]+)/;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 // A Surefire id is a dotted `Class.method`, optionally with the parameter
 // types and invocation index of a parameterized case.
 const JAVA_ID_PATTERN = /^(?:[\w$]+\.)+[\w$]+(?:\([^)]*\))?(?:\[\d+])?$/;
 // The module half of a guard id is untrusted for the same reason: the line it
 // is parsed from may be a runner-decoded continuation of a migration FILENAME
-// (git carries LF and `:` in filenames). The genuine value always comes from
-// the invocation's paths, so it is path-shaped — a filename-borne forgery can
-// never contain `/`, and a Windows drive prefix is the only genuine leading
-// `X:\` shape — and whitespace and backticks are rejected outright because
-// the id is rendered inside a code span in the issue body.
-const GUARD_MODULE_UNSAFE = /[\s`]/;
+// (git carries LF, `:` and `\` in filenames). The genuine value always comes
+// from the invocation's repo-relative paths — the producer job and the
+// analyze job both run on ubuntu-latest, and this suite's fixtures normalize
+// their argument the same way — so it is slash-bearing with no whitespace or
+// backslashes; a filename-borne forgery can never contain `/`, and anything
+// backslash- or whitespace-shaped is a payload, including a forged Windows
+// drive prefix. Backticks are rejected outright because the id is rendered
+// inside a code span in the issue body.
+const GUARD_MODULE_UNSAFE = /[\s`\\]/;
 
 function guardModule(raw) {
-  return !GUARD_MODULE_UNSAFE.test(raw) &&
-    (raw.includes('/') || /^[A-Za-z]:[\\/]/.test(raw))
-    ? raw
-    : undefined;
+  return !GUARD_MODULE_UNSAFE.test(raw) && raw.includes('/') ? raw : undefined;
 }
 
 function cleanLine(line) {
