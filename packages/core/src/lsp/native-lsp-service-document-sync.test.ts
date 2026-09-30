@@ -2663,9 +2663,7 @@ describe('NativeLspService disk document synchronization', () => {
         connection.request.mockImplementation(async (method) =>
           method === 'workspace/diagnostic'
             ? {
-                items: [
-                  { uri, kind: 'full', items: [emptyMessageDiagnostic] },
-                ],
+                items: [{ uri, kind: 'full', items: [emptyMessageDiagnostic] }],
               }
             : { kind: 'full', items: [emptyMessageDiagnostic] },
         );
@@ -2691,15 +2689,16 @@ describe('NativeLspService disk document synchronization', () => {
                   },
                 ],
               }
-            : { kind: 'full', items: [{ range, severity: 2, message: 'real warning' }] },
+            : {
+                kind: 'full',
+                items: [{ range, severity: 2, message: 'real warning' }],
+              },
         );
         const healthyHandle: LspServerHandle = {
           ...handle,
           connection: healthyConnection,
         };
-        (
-          service as unknown as { serverManager: unknown }
-        ).serverManager = {
+        (service as unknown as { serverManager: unknown }).serverManager = {
           getHandles: () =>
             new Map([
               ['test', handle],
