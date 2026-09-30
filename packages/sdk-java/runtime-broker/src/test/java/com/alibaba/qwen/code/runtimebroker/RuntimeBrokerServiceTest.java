@@ -95,6 +95,52 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void failedAdoptedReleaseLeavesReclamationReachable() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            assertEquals(RuntimeSessionRecord.State.ACQUIRING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.provisioner.usable = false;
+            RuntimeBrokerException releaseFailure = failure(fixture.service.release("blocked", "blocked"));
+            assertEquals("runtime_reconciliation_required", releaseFailure.getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST, fixture.bindingRepository.findById("binding-1").getState());
+            fixture.provisioner.usable = true;
+            fixture.transport.acquireResult = CompletableFuture.completedFuture(null);
+            RuntimeBrokerException acquireFailure = failure(fixture.service.acquire("blocked", "blocked", "bootstrap"));
+            assertEquals("runtime_broker_runtime_lost", acquireFailure.getCode(),
+                    "missing durable stop proof must fail at reclamation, not a stale session admission guard");
+            assertEquals(1, fixture.provisioner.calls.get(), "without writer-stop proof no new Runtime may be provisioned");
+        }
+    }
+
+    @Test
+    void releasesAnIncompleteAcquisitionOnlyAfterOriginalTransportConfirmation() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            fixture.transport.releaseResult = CompletableFuture.failedFuture(new IllegalStateException("lost release"));
+            assertEquals("runtime_session_release_failed", failure(fixture.service.release("blocked", "blocked")).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.transport.releaseResult = CompletableFuture.completedFuture(true);
+            assertTrue(join(fixture.service.release("blocked", "blocked")));
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            assertEquals("blocked", fixture.transport.lastSession.getRuntimeSessionId());
+            assertEquals(2, fixture.transport.acquireCalls.get());
+            assertEquals(2, fixture.transport.releaseCalls.get());
+            assertEquals(1, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void failedAcquireCanRetryTheSameSessionIdentity() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             fixture.transport.acquireResult = CompletableFuture.failedFuture(
@@ -1091,6 +1137,74 @@ class RuntimeBrokerServiceTest {
                             Map.of("kind", "status")));
             assertEquals("runtime_control_operation_invalid",
                     error.getCode());
+        }
+    }
+
+    @Test
+    void mcpControlsStayWithTheAcquiredSessionAndNeverProvisionForLookup() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String kind : List.of("mcp-configure", "mcp-discover", "mcp-status", "mcp-cancel", "mcp-release")) {
+                Map<String, Object> operation = Map.of("kind", kind, "operationId", "operation",
+                        "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+                assertEquals("ok", join(fixture.service.control("harness", "runtime", operation)));
+                assertEquals(operation, fixture.transport.lastControl);
+            }
+            Map<String, Object> foreign = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "foreign", "sessionId", "harness"));
+            assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
+            assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+        }
+    }
+
+    @Test
+    void refusesIllFormedMcpStringsBeforeForwarding() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                for (Map<String, Object> request : List.of(
+                        Map.<String, Object>of("kind", "resource_read", "uri", "a" + surrogate + "b"),
+                        Map.<String, Object>of("kind", "prompt_get", "name", "prompt",
+                                "arguments", Map.of("a" + surrogate + "b", "value")))) {
+                    Map<String, Object> operation = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                            "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                            "request", request);
+                    RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime", operation));
+                    assertEquals(400, error.getStatusCode());
+                    assertEquals("runtime_control_operation_invalid", error.getCode());
+                    assertFalse(error.isRetryable());
+                    assertNull(fixture.transport.lastControl);
+                }
+            }
+            Map<String, Object> valid = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                    "request", Map.of("kind", "resource_read", "uri", "a\uD83D\uDE00b"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", valid)));
+            assertEquals(valid, fixture.transport.lastControl);
+        }
+    }
+
+    @Test
+    void observesTheOriginalOwnerAfterNewAdmissionIsRevoked() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.resolver.result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(403, "workspace_access_denied", "Access revoked", false));
+            assertEquals(original, join(fixture.service.acquire("harness", "runtime", "bootstrap")));
+            Map<String, Object> lookup = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "targetOperationId", "original-operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", lookup)));
+            assertEquals("workspace_access_denied", failure(fixture.service.acquire("harness", "new-runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("other", "runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("harness", "runtime", "continuation")).getCode());
+            RuntimeBindingRecord binding = fixture.bindingRepository.findById(original.getBindingId());
+            fixture.bindingRepository.compareAndSet(binding, binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), START));
+            assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "runtime", "bootstrap")).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(1, fixture.transport.acquireCalls.get());
         }
     }
 
