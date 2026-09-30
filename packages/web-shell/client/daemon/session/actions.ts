@@ -198,7 +198,7 @@ export interface CreateDaemonSessionActionsArgs {
   sessionConfigGeneration: WeakMap<DaemonSessionClient, number>;
   sessionRecoveryGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
-  manualSessionClearRef: RefBox<boolean>;
+  manualSessionClearRef: RefBox<boolean | Promise<void>>;
   pendingStrictDetachRef: RefBox<Promise<void> | undefined>;
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
@@ -2381,6 +2381,7 @@ export function createDaemonSessionActions({
     }) {
       const session = sessionRef.current;
       const requiredSessionId = options?.requireDetachSessionId;
+      let strictClearOwnsSession = false;
       if (!requiredSessionId) manualSessionClearRef.current = true;
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
@@ -2398,19 +2399,24 @@ export function createDaemonSessionActions({
         if (!session.clientId || connection.clientId !== session.clientId) {
           throw new Error('Current session attachment is not ready for detach');
         }
-        manualSessionClearRef.current = true;
         const detach = withActionTimeout(
           session.detach(),
           'Clear session timed out',
         );
+        // Recovery may discard the handle. Only this intent may undo itself;
+        // a later clear or navigation replaces it with its own boolean intent.
+        manualSessionClearRef.current = detach;
         pendingStrictDetachRef.current = detach;
         try {
           await detach;
+          strictClearOwnsSession =
+            manualSessionClearRef.current === detach &&
+            (!sessionRef.current || sessionRef.current === session);
+          if (manualSessionClearRef.current === detach) {
+            manualSessionClearRef.current = true;
+          }
         } catch (error) {
-          if (
-            sessionRef.current === session &&
-            pendingStrictDetachRef.current === detach
-          ) {
+          if (manualSessionClearRef.current === detach) {
             manualSessionClearRef.current = false;
           }
           throw error;
@@ -2420,7 +2426,11 @@ export function createDaemonSessionActions({
           }
         }
       }
-      if (sessionRef.current === session) {
+      if (
+        requiredSessionId
+          ? strictClearOwnsSession
+          : sessionRef.current === session
+      ) {
         const refreshStandaloneOptions =
           getConnection().sessionContext?.kind === 'standalone';
         clearActiveSessionState();

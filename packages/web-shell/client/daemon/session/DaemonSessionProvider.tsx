@@ -1253,7 +1253,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
   });
-  const manualSessionClearRef = useRef(false);
+  const manualSessionClearRef = useRef<boolean | Promise<void>>(false);
   const pendingStrictDetachRef = useRef<Promise<void> | undefined>(undefined);
   const skipNextCleanupDetachSessionRef = useRef<
     DaemonSessionClient | undefined
@@ -1799,6 +1799,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       while (!disposed && !abort.signal.aborted) {
         if (pendingStrictDetachRef.current) {
           await pendingStrictDetachRef.current.catch(() => undefined);
+          if (manualSessionClearRef.current) return;
         }
         if (
           disposed ||
@@ -3549,7 +3550,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             maxQueued,
             ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
-            if (sessionRef.current !== activeSession) {
+            if (
+              event.type === 'state_resync_required' &&
+              pendingStrictDetachRef.current
+            ) {
+              // Decide leave vs recovery before resync discards the attachment.
+              await pendingStrictDetachRef.current.catch(() => undefined);
+            }
+            if (
+              disposed ||
+              abort.signal.aborted ||
+              sessionRef.current !== activeSession
+            ) {
               break;
             }
             if (!sawEvent) {

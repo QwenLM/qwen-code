@@ -14350,6 +14350,344 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it.each([
+    ['effect', 'none'],
+    ['effect', 'failure'],
+    ['effect', 'success'],
+    ['heartbeat', 'none'],
+    ['heartbeat', 'failure'],
+  ] as const)(
+    'keeps recovery usable after %s interrupts strict detach (%s)',
+    async (path, detachOutcome) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/primary',
+        features: ['standalone_sessions_v1', 'client_heartbeat'],
+      });
+      const detach = createDeferred<void>();
+      const heartbeat = createDeferred<{ ok: boolean }>();
+      const closeRecovered = createDeferred<void>();
+      const metadata = {
+        sessionId: 'ownership-session',
+        workspaceCwd: '/private/ownership-session',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        workingDirectory: { state: 'ready' },
+      };
+      const original = createMockSession({
+        sessionId: 'ownership-session',
+        clientId: 'ownership-client',
+        session: metadata,
+        events: createIdleEvents(),
+        heartbeat: vi.fn(() => heartbeat.promise),
+        detach: vi.fn(() => detach.promise),
+      });
+      const recoveredEvents = vi.fn(async function* (
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        if (recoveredEvents.mock.calls.length === 1) {
+          await Promise.race([
+            closeRecovered.promise,
+            new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) resolve();
+              else
+                opts.signal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+            }),
+          ]);
+          return;
+        }
+        yield* createIdleEvents()(opts);
+      });
+      const submitPrompt = vi.fn(async () => ({
+        promptId: 'ownership-prompt',
+        lastEventId: 9,
+      }));
+      const recovered = createMockSession({
+        sessionId: 'ownership-session',
+        clientId: 'ownership-client',
+        session: metadata,
+        events: recoveredEvents,
+        submitPrompt,
+      });
+      sdkMocks.sessions.push(original, recovered);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        return null;
+      }
+      const baseProps = {
+        autoConnect: true,
+        sessionId: 'ownership-session',
+        sessionContext: { kind: 'standalone' } as const,
+        maxQueued: 10,
+        heartbeatIntervalMs: 20,
+        heartbeatFailureThreshold: 1,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      };
+      await renderWithProvider(<Harness />, baseProps);
+      expect(connection?.status).toBe('connected');
+      let clearing: Promise<{ error?: unknown }> | undefined;
+      if (detachOutcome !== 'none') {
+        act(() => {
+          clearing = requireActions(actions)
+            .clearSession({ requireDetachSessionId: 'ownership-session' })
+            .then(
+              () => ({}),
+              (error: unknown) => ({ error }),
+            );
+        });
+        await act(async () => {
+          await flushPromises();
+        });
+        expect(original.detach).toHaveBeenCalledOnce();
+      }
+      const rerender = async () => {
+        act(() =>
+          root?.render(
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              {...baseProps}
+              maxQueued={11}
+              token="recovered-token"
+            >
+              <Harness />
+            </DaemonSessionProvider>,
+          ),
+        );
+        await act(async () => {
+          await flushPromises();
+        });
+      };
+      if (path === 'heartbeat') {
+        await act(async () => {
+          await vi.waitFor(
+            () => expect(original.heartbeat).toHaveBeenCalled(),
+            { timeout: 1000 },
+          );
+        });
+        await act(async () => {
+          heartbeat.reject(
+            Object.assign(new Error('Unauthorized'), { status: 401 }),
+          );
+          await flushPromises();
+        });
+        expect(connection?.sessionId).toBeUndefined();
+        expect(connection?.errorStatus).toBe(401);
+      } else {
+        await rerender();
+      }
+      let clearResult: { error?: unknown } = {};
+      if (detachOutcome !== 'none') {
+        await act(async () => {
+          if (detachOutcome === 'failure')
+            detach.reject(new Error('detach failed'));
+          else detach.resolve();
+          clearResult = await clearing!;
+          await flushPromises();
+        });
+      }
+      if (path === 'heartbeat') await rerender();
+      if (detachOutcome === 'success') {
+        expect(clearResult.error).toBeUndefined();
+        expect(recoveredEvents).not.toHaveBeenCalled();
+        expect(
+          sdkMocks.MockDaemonSessionClient.loadStandalone,
+        ).toHaveBeenCalledOnce();
+        expect(connection?.sessionId).toBeUndefined();
+        expect(connection?.clientId).toBeUndefined();
+        return;
+      }
+      if (detachOutcome === 'failure') {
+        expect(clearResult.error).toEqual(new Error('detach failed'));
+      }
+      await act(async () => {
+        await vi.waitFor(() => expect(recoveredEvents).toHaveBeenCalledOnce());
+        closeRecovered.resolve();
+        await flushPromises();
+      });
+      await act(async () => {
+        await vi.waitFor(() =>
+          expect(recoveredEvents).toHaveBeenCalledTimes(2),
+        );
+        await flushPromises();
+      });
+      let promptError: unknown;
+      await act(async () => {
+        void requireActions(actions)
+          .sendPrompt('continue after delete failure')
+          .catch((error: unknown) => {
+            promptError = error;
+          });
+        await flushPromises();
+      });
+      expect(connection?.status).toBe('connected');
+      expect(submitPrompt).toHaveBeenCalledOnce();
+      expect(promptError).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['ring_evicted', 'failure'],
+    ['epoch_reset', 'failure'],
+    ['ring_evicted', 'success'],
+    ['epoch_reset', 'success'],
+  ] as const)('handles %s during strict detach %s', async (reason, outcome) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/primary',
+      features: ['standalone_sessions_v1'],
+    });
+    const releaseResync = createDeferred<void>();
+    const detach = createDeferred<void>();
+    const events = vi.fn(async function* resyncEvents() {
+      await releaseResync.promise;
+      yield {
+        v: 1,
+        type: 'state_resync_required',
+        data: { reason },
+      } satisfies DaemonEvent;
+    });
+    const sessionMetadata = {
+      sessionId: 'standalone-detach-resync',
+      workspaceCwd: '/private/standalone-detach-resync',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      workingDirectory: { state: 'ready' },
+    };
+    const firstSession = createMockSession({
+      sessionId: 'standalone-detach-resync',
+      clientId: 'client-detach-resync',
+      session: sessionMetadata,
+      replaySnapshot: createTextReplaySnapshot('old transcript'),
+      events,
+      detach: vi.fn(() => detach.promise),
+    });
+    const responseReleased = createDeferred<void>();
+    const reloadedEvents = vi.fn(async function* (
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      await responseReleased.promise;
+      yield {
+        v: 1,
+        id: 10,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'continued response' },
+          },
+        },
+      } satisfies DaemonEvent;
+      yield {
+        v: 1,
+        id: 11,
+        type: 'turn_complete',
+        data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+      } satisfies DaemonEvent;
+      yield* createIdleEvents()(opts);
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'standalone-detach-resync',
+      clientId: 'client-detach-resync',
+      session: sessionMetadata,
+      replaySnapshot: createTextReplaySnapshot('reloaded transcript'),
+      events: reloadedEvents,
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: firstSession.sessionId,
+      sessionContext: { kind: 'standalone' },
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    expect(events).toHaveBeenCalledOnce();
+    let clear!: Promise<{ error?: unknown }>;
+    act(() => {
+      clear = requireActions(actions)
+        .clearSession({ requireDetachSessionId: firstSession.sessionId })
+        .then(
+          () => ({}),
+          (error: unknown) => ({ error }),
+        );
+    });
+    expect(firstSession.detach).toHaveBeenCalledOnce();
+    await act(async () => {
+      releaseResync.resolve();
+      await flushPromises();
+    });
+    expect(reloadedEvents).not.toHaveBeenCalled();
+    let clearResult: { error?: unknown } = {};
+    await act(async () => {
+      if (outcome === 'failure') detach.reject(new Error('detach failed'));
+      else detach.resolve();
+      clearResult = await clear;
+      await flushPromises();
+    });
+    if (outcome === 'success') {
+      expect(clearResult.error).toBeUndefined();
+      expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.clientId).toBeUndefined();
+      expect(blocks).toEqual([]);
+      expect(reloadedEvents).not.toHaveBeenCalled();
+      return;
+    }
+    await act(async () => {
+      await vi.waitFor(() => expect(reloadedEvents).toHaveBeenCalledOnce());
+      await flushPromises();
+    });
+    expect(clearResult.error).toEqual(new Error('detach failed'));
+    expect(connection?.status).toBe('connected');
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'reloaded transcript',
+        }),
+      ]),
+    );
+    let prompt!: Promise<void>;
+    act(() => {
+      prompt = requireActions(actions).sendPrompt(
+        'continue after failed delete',
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+      expect(reloadedSession.submitPrompt).toHaveBeenCalledOnce();
+      responseReleased.resolve();
+      await prompt;
+    });
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'continued response',
+        }),
+      ]),
+    );
+  });
+
   it.each(['success', 'failure'] as const)(
     'handles stream completion before strict detach %s',
     async (outcome) => {

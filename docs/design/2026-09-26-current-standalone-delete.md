@@ -32,6 +32,8 @@ At the baseline, the Web Shell sidebar listed standalone sessions but disabled D
 - A listed `clientCount` may be stale, including for multi-tab use. A second tab can keep the session busy after this tab detaches; surface the batch `errors[]` result rather than assuming an HTTP error status or overriding the daemon guard.
 - The selected ID is fixed at confirmation. A session switch during the dialog or asynchronous leave must not redirect deletion to the newly active ID.
 
+- A pending strict clear carries its own intent identity until detach settles. Recovery may discard its attachment handle or connection ID; failure still releases that intent, but must not undo a newer clear or navigation. Resync waits before resetting the transcript and attachment, so failure can reload and continue the chat while success leaves the pane cleared. An effect restarted during detach also waits and must not reload the old session after successful leave.
+
 ## 5. Validation
 
 - On 2026-09-28, R4-2 review exposed a reconnect-backoff race: the runner could re-subscribe while strict detach was pending, or republish the old session after detach had already succeeded. Provider tests reproduced both failures before their respective guards and now pass for detach completing before or after backoff, plus failure followed by reconnection. Six related Web Shell test files passed 2013/2013 tests; repository build and typecheck, changed-file lint/format, and whitespace checks passed. The latest fix was not rerun against a real daemon in a browser.
