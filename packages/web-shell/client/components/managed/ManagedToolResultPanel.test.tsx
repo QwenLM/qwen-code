@@ -234,6 +234,16 @@ describe('ManagedToolResultPanel', () => {
     expect(reader.getResult).toHaveBeenCalledTimes(2);
   });
 
+  it('shows the localized denial text when a content read is forbidden', async () => {
+    vi.mocked(reader.readRange).mockRejectedValue(
+      new JavaManagedAgentHttpError(403, 'forbidden', 'forbidden'),
+    );
+    await render();
+    expect(document.body.textContent).toContain(
+      'Original output is not available to your account.',
+    );
+  });
+
   it('aborts pending reads on session change and discards their late response', async () => {
     let finish: (bytes: Uint8Array) => void = () => undefined;
     vi.mocked(reader.readRange).mockImplementationOnce(

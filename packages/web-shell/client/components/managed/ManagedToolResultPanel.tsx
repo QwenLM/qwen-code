@@ -301,6 +301,11 @@ function ManagedArtifactContent({
                 options,
               );
         const previous = cache.current.get(offset - MANAGED_OUTPUT_PAGE_BYTES);
+        // A UTF-8 character spans at most 4 bytes, so the previous page's last
+        // 3 bytes can be an incomplete character; they prime this page's
+        // TextDecoder (whose output for them is discarded — those bytes were
+        // already rendered with the previous page) so a character split across
+        // the page boundary stays whole.
         const prefix =
           offset === 0
             ? new Uint8Array()
@@ -442,9 +447,11 @@ function ResultError({ error }: { error: unknown }) {
       ? t('managed.result.expired')
       : error instanceof JavaManagedAgentHttpError && error.status === 412
         ? t('managed.result.changed')
-        : error instanceof Error
-          ? error.message
-          : String(error);
+        : error instanceof JavaManagedAgentHttpError && error.status === 403
+          ? t('managed.result.forbidden')
+          : error instanceof Error
+            ? error.message
+            : String(error);
   return (
     <p role="alert" className="text-destructive">
       {message}
