@@ -31,6 +31,36 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
   } as unknown as Response;
 }
 
+// The default gate endpoint is a loopback URL. When the test machine exports a
+// proxy, the gate switches from the global fetch to a real undici fetch for
+// loopback endpoints, which bypasses the fetch stub. These helpers clear the
+// proxy environment around the stubbed describes so the stub is always used,
+// and restore it afterwards.
+const PROXY_ENV_KEYS = [
+  'HTTPS_PROXY',
+  'https_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'NO_PROXY',
+  'no_proxy',
+] as const;
+
+function clearProxyEnv(): Record<string, string | undefined> {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of PROXY_ENV_KEYS) {
+    saved[key] = process.env[key];
+    delete process.env[key];
+  }
+  return saved;
+}
+
+function restoreProxyEnv(saved: Record<string, string | undefined>): void {
+  for (const key of PROXY_ENV_KEYS) {
+    if (saved[key] === undefined) delete process.env[key];
+    else process.env[key] = saved[key];
+  }
+}
+
 describe('resolveGateSettings', () => {
   it('returns defaults when no input is given', () => {
     expect(resolveGateSettings()).toEqual(DEFAULT_GATE_SETTINGS);
@@ -73,14 +103,17 @@ describe('resolveGateSettings', () => {
 
 describe('querySystemOne', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  let savedProxy: Record<string, string | undefined>;
 
   beforeEach(() => {
+    savedProxy = clearProxyEnv();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    restoreProxyEnv(savedProxy);
   });
 
   it('returns parsed answers on success', async () => {
@@ -187,14 +220,17 @@ describe('querySystemOne', () => {
 
 describe('classifyTurn', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  let savedProxy: Record<string, string | undefined>;
 
   beforeEach(() => {
+    savedProxy = clearProxyEnv();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    restoreProxyEnv(savedProxy);
   });
 
   it('returns null when disabled (no network call)', async () => {
@@ -274,14 +310,17 @@ describe('classifyTurn', () => {
 
 describe('probeBackend', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  let savedProxy: Record<string, string | undefined>;
 
   beforeEach(() => {
+    savedProxy = clearProxyEnv();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    restoreProxyEnv(savedProxy);
   });
 
   it('returns healthy when the endpoint answers a noul', async () => {
