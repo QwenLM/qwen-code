@@ -520,6 +520,7 @@ it('records a durable receipt for a proven unstarted Shell', async () => {
   const envelope = {
     executionStatus: 'not_started' as const,
     responseParts: [],
+    error: { message: 'Blocked: split the command into two calls.' },
     capture: null,
   };
   broker.prepareV3.mockResolvedValue({
@@ -554,7 +555,12 @@ it('records a durable receipt for a proven unstarted Shell', async () => {
   );
   expect(result[0]?.functionResponse?.response).toMatchObject({
     executionStatus: 'not_started',
+    error: envelope.error.message,
   });
+  expect(
+    (await session.sink.project()).at(-1)?.message?.parts?.[0]?.functionResponse
+      ?.response?.['error'],
+  ).toBe(envelope.error.message);
   const receipts = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .filter((event) => event.kind === 'tool.receipt');

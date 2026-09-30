@@ -928,11 +928,16 @@ export class HostedWorkspaceToolTurn {
         timestamp = history['timestamp'];
         model = history['model'];
       } else {
+        const errorMessage = brokerResult.error?.message;
+        const modelMessage =
+          errorMessage && errorMessage.length > 4096
+            ? `${errorMessage.slice(0, 2048)}\n[... error truncated ...]\n${errorMessage.slice(-2048)}`
+            : (errorMessage ?? 'Runtime Shell did not start.');
         converted = convertToFunctionErrorResponse(
           call.name,
           call.callId,
           [],
-          'Runtime Shell did not start.',
+          modelMessage,
         );
         const response = converted[0]?.functionResponse;
         if (!response || converted.length !== 1)
