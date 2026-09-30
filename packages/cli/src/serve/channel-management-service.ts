@@ -284,6 +284,22 @@ export function createChannelManagementService(
     throw runtimeOwnerMismatch(name, reason);
   };
 
+  // Whether a mid-transition manager may be bringing this channel up. It
+  // publishes neither a committed name nor a worker for a channel it is still
+  // starting, so any name in its candidate selection that this workspace does
+  // not already run is unknown until it settles. A channel this workspace
+  // runs is safe to act on — its stop queues behind the transition and
+  // rechecks the owner inside the manager's lane — and so is one the
+  // candidate selection leaves out.
+  const mayBeStarting = (name: string): boolean => {
+    const { transition, pendingSelection } = opts.manager.state();
+    if (transition === 'idle' || !pendingSelection) return false;
+    if (workspaceCommittedNames().includes(name)) return false;
+    return (
+      pendingSelection.mode === 'all' || pendingSelection.names.includes(name)
+    );
+  };
+
   const runtimeFor = (name: string): ChannelRuntimeState => {
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
@@ -510,11 +526,16 @@ export function createChannelManagementService(
       // workers and nothing committed, which reads as silent without being
       // it; the caller retries once the manager settles. Guarded above the
       // branch split because the configured branch reads the same
-      // mid-transition committed set.
-      if (opts.manager.state().transition !== 'idle') {
-        throw runtimeOwnerMismatch(
-          name,
-          'The channel runtime is mid-transition.',
+      // mid-transition committed set, but only for a channel the transition
+      // may be starting: `transition` is one value for the whole daemon.
+      if (
+        configured
+          ? mayBeStarting(name)
+          : opts.manager.state().transition !== 'idle'
+      ) {
+        throw new ChannelManagementError(
+          'channel_service_conflict',
+          'The channel runtime is mid-transition; retry shortly.',
         );
       }
       if (!configured) {

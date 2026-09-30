@@ -1016,7 +1016,7 @@ describe('createChannelManagementService', () => {
     await expect(
       service.remove('bot', { expectedRevision: 'rev-1' }),
     ).rejects.toMatchObject({
-      code: 'channel_runtime_owner_mismatch',
+      code: 'channel_service_conflict',
       message: expect.stringContaining('mid-transition'),
     });
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
@@ -1033,6 +1033,7 @@ describe('createChannelManagementService', () => {
     vi.mocked(manager.state).mockReturnValue({
       ...state,
       transition: 'starting',
+      pendingSelection: { mode: 'names', names: ['bot'] },
       workers: [
         {
           enabled: true,
@@ -1050,11 +1051,113 @@ describe('createChannelManagementService', () => {
     await expect(
       service.remove('bot', { expectedRevision: 'rev-1' }),
     ).rejects.toMatchObject({
-      code: 'channel_runtime_owner_mismatch',
+      code: 'channel_service_conflict',
       message: expect.stringContaining('mid-transition'),
     });
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('queues a configured deletion behind an unrelated transition instead of rejecting it', async () => {
+    // `transition` is one value for the whole daemon: another workspace
+    // starting its channel must not turn this workspace's ordinary delete of
+    // a channel it runs into a 409. The stop queues behind that transition,
+    // and the configuration is removed only once the stop has settled.
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'reconciling',
+      pendingSelection: { mode: 'names', names: ['bot', 'other'] },
+    });
+    let settleStop!: () => void;
+    vi.mocked(manager.setChannelEnabled).mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        settleStop = resolve;
+      }),
+    );
+
+    const removal = service.remove('bot', { expectedRevision: 'rev-1' });
+    await vi.waitFor(() =>
+      expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+        { name: 'bot', workspaceCwd: WORKSPACE },
+        false,
+      ),
+    );
+    expect(store.remove).not.toHaveBeenCalled();
+    settleStop();
+    await removal;
+    expect(store.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes a configured channel the in-flight transition leaves out without waiting', async () => {
+    const { service, store, manager } = setup({ committedNames: [] });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'reconciling',
+      pendingSelection: { mode: 'names', names: ['other'] },
+    });
+
+    await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(store.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a configured deletion of a name another workspace runs while a transition lists it', async () => {
+    // Selection names are not workspace-qualified, and a worker the
+    // transition is still starting is not visible yet, so a name another
+    // workspace runs cannot be told apart from one moving to this workspace.
+    const { service, store, manager } = setup({
+      committedNames: ['bot'],
+      workspaceCwd: '/tmp/other-workspace',
+    });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'reconciling',
+      pendingSelection: { mode: 'names', names: ['bot', 'other'] },
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_service_conflict' });
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('rejects a configured deletion while an all-channels selection is starting', async () => {
+    const { service, store, manager } = setup({ committedNames: [] });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'starting',
+      pendingSelection: { mode: 'all' },
+    });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_service_conflict' });
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('stops and deletes a configured channel while the manager is stopping everything', async () => {
+    // A stopping transition starts nothing, so it has no candidate
+    // selection; the stop queues behind it.
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      transition: 'stopping',
+    });
+
+    await service.remove('bot', { expectedRevision: 'rev-1' });
+
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+    expect(store.remove).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a missing-config deletion when the configuration reappears during the worker stop', async () => {
