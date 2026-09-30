@@ -1317,11 +1317,15 @@ describe('ProposeGoalTool', () => {
   });
 
   it('keeps what the Goal tools cost every request inside a budget', () => {
-    // get_goal and update_goal are registered in every session, Goal or not,
-    // so their schemas ride along with every model request. The figure is
-    // what the three tools cost today plus room for a sentence; growing past
-    // it should be a decision, not drift. (5 860 before the descriptions
-    // were trimmed.)
+    // get_goal and update_goal are registered in every session, Goal or not.
+    // Since this change they are natively deferred, so their schemas ride
+    // along with a model request only once they are revealed — `tools.eager`,
+    // `tools.visible`, or the incomplete-bridge fallback. The figure is what
+    // the three tools cost today plus room for a sentence; growing past it
+    // should be a decision, not drift. (5 860 before the descriptions were
+    // trimmed; raised from 3 800 for the short self-contained first line each
+    // one now needs in the deferred discovery catalog, which renders
+    // `description.split('\n')[0]` only.)
     const tools = [
       new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
       new UpdateGoalTool(makeConfig({})),
@@ -1334,7 +1338,31 @@ describe('ProposeGoalTool', () => {
       )
       .join('');
 
-    expect(advertised.length).toBeLessThan(3_800);
+    expect(advertised.length).toBeLessThan(4_200);
+  });
+
+  it('gives each Goal tool a catalog entry that is a whole first line', () => {
+    // A deferred tool's only up-front surface is its discovery-catalog entry,
+    // and `truncateDeferredToolDescription` (core/environmentContext.ts)
+    // renders that entry as `description.split('\n')[0]` capped at
+    // `MAX_DEFERRED_TOOL_DESC_LEN = 160`. A single-paragraph description would
+    // reach the model as a mid-clause slice dropping the clauses that gate the
+    // tool's use, so each one carries a short self-contained first line and
+    // keeps the full text below it, where `tool_search select:` still returns
+    // it verbatim.
+    const tools = [
+      new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
+      new UpdateGoalTool(makeConfig({})),
+      new ProposeGoalTool(proposeConfig(idleRuntime().runtime)),
+    ];
+    for (const tool of tools) {
+      const [firstLine, ...rest] = tool.description.split('\n');
+      // At or under the cap the catalog shows the line whole; over it the
+      // entry becomes the first 157 characters plus an ellipsis.
+      expect(firstLine!.length).toBeLessThanOrEqual(160);
+      expect(firstLine!.endsWith('.')).toBe(true);
+      expect(rest.join('\n').trim().length).toBeGreaterThan(0);
+    }
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {

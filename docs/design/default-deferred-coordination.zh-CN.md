@@ -16,9 +16,12 @@ Agent 和 Goal 的完整声明成本。此前显式配置 `tools.eager` 的实�
 
 常用文件工具保持不变。`tools.eager` 语义不变，在其中列出原生延迟工具不会强制
 常驻；`tools.visible` 可以强制提前声明。已有预加载逻辑，以及桥接缺少任意一端时
-的立即声明回退仍然适用。Code Mode 保持原有发现路径。已有基于声明工具的
-system prompt 指引过滤仍生效，不增加新的 prompt 裁剪策略。memory、history
-和子 Agent 收到的 schema 保持不变。
+的立即声明回退仍然适用。Code Mode 保持原有发现路径。基于声明工具的 system
+prompt 指引过滤仍生效，并新增一个输入：Agent 可达性。Subagent Delegation 与
+Codebase Search 两行在 `agent` 已声明、或已注册在桥接两端之后且出现在延迟摘要
+中时保留；桥接不完整的会话里被排除在立即声明之外的 Agent 两个条件都不满足，
+因此这两行会被裁掉。其余受控行不新增例外，也不增加其他 prompt 裁剪策略。
+memory、history 和子 Agent 收到的 schema 保持不变。
 
 ## 风险与验收
 

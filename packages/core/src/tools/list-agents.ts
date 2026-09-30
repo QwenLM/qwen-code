@@ -171,7 +171,8 @@ export class ListAgentsTool extends BaseDeclarativeTool<
     super(
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
-      'List addressable ordinary background subagents in the current ' +
+      'List addressable ordinary background subagents in this session and, when cross-session messaging is on, the other Qwen Code sessions on this machine.\n\n' +
+        'List addressable ordinary background subagents in the current ' +
         'session, including agents restored from a prior session run, and — ' +
         'when cross-session messaging is enabled — the other Qwen Code ' +
         "sessions running on this machine, plus this session's own name. " +

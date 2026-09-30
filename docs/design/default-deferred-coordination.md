@@ -19,9 +19,13 @@ Common file tools remain unchanged. `tools.eager` retains its existing meaning;
 listing a natively deferred tool there does not force it resident. `tools.visible`
 can force a declaration up front. Existing preload behavior and eager fallback
 when either bridge half is unavailable still apply. Code Mode keeps its existing
-discovery path. Existing declared-tool system-prompt gating still applies; no
-new prompt-trimming policy is added. Memory, history, and the schemas that
-subagents receive are unchanged.
+discovery path. Declared-tool system-prompt gating still applies, with one
+added input: Agent reachability. The Subagent Delegation and Codebase Search
+lines survive when `agent` is declared, or when it is registered behind both
+bridge halves and listed in the deferred summary; an Agent withheld from the
+eager reveal in an incomplete-bridge session is neither, so both lines drop. No
+other gated line gains an exception, and no further prompt-trimming policy is
+added. Memory, history, and the schemas that subagents receive are unchanged.
 
 ## Risks and acceptance
 
