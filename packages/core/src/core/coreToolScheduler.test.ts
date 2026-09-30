@@ -20534,7 +20534,47 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
-  it('preserves the last repeated error count across mixed-error batches', async () => {
+  it('accumulates differently-worded validation failures for the same tool into one counter (#13073)', async () => {
+    // The #12970 shape: each failure words the validation error differently,
+    // but the root cause is the same. The old per-message keying restarted
+    // the counter on every wording change (and deleted sibling keys), so the
+    // stop directive never fired and six failures burned ~15 tool calls.
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    // Turn 1: first validation failure.
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    // Turn 2: a differently-worded validation failure for the same tool.
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', {})],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    // Turn 3: the first wording repeats. Under the old per-message keying
+    // the turn-2 failure deleted the turn-1 counter, so this restart at 1
+    // and the directive never fired (the #12970 burn). Under the
+    // cause-class keying the counter accumulates to 3 and the directive
+    // fires.
+    await scheduler.schedule(
+      [makeRequest('c3', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('counts mixed-message validation failures once per batch and keeps the counter across batches', async () => {
+    // Under #13073 keying the counter is per (tool, cause class): the three
+    // calls in the first batch share one 'validation' counter (batch dedupe
+    // counts them once), and the counter persists across batches.
     const tool = new StrictStringTool();
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
 

@@ -2923,15 +2923,18 @@ export class CoreToolScheduler {
    */
   private recordRetryableToolError(
     toolName: string,
-    errorMessage: string,
+    causeClass: 'validation' | 'truncation',
   ): number {
-    const errorKey = `${toolName}:${errorMessage}`;
+    // #13073: key on the tool name plus a stable cause class instead of the
+    // verbatim error message. Differently-worded validation failures for the
+    // same tool and cause accumulate toward one counter, so a retry loop
+    // that cycles through message variants (the #12970 shape: three distinct
+    // messages from one root cause) still reaches the stop-directive
+    // threshold. The previous per-message keying restarted the counter on
+    // every wording change and deleted sibling keys, which is what let six
+    // failures burn ~15 tool calls without tripping the directive.
+    const errorKey = `${toolName}:${causeClass}`;
     const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
-    for (const key of this.validationRetryCounts.keys()) {
-      if (key.startsWith(`${toolName}:`) && key !== errorKey) {
-        this.validationRetryCounts.delete(key);
-      }
-    }
     this.validationRetryCounts.set(errorKey, count);
     return count;
   }
@@ -3009,20 +3012,14 @@ export class CoreToolScheduler {
       const retryErrorsRecordedInBatch = new Map<string, number>();
       const recordBatchRetryableToolError = (
         toolName: string,
-        errorMessage: string,
+        causeClass: 'validation' | 'truncation',
       ): number => {
-        const key = `${toolName}:${errorMessage}`;
+        const key = `${toolName}:${causeClass}`;
         const existingCount = retryErrorsRecordedInBatch.get(key);
         if (existingCount !== undefined) {
-          for (const trackedKey of this.validationRetryCounts.keys()) {
-            if (trackedKey.startsWith(`${toolName}:`)) {
-              this.validationRetryCounts.delete(trackedKey);
-            }
-          }
-          this.validationRetryCounts.set(key, existingCount);
           return existingCount;
         }
-        const count = this.recordRetryableToolError(toolName, errorMessage);
+        const count = this.recordRetryableToolError(toolName, causeClass);
         retryErrorsRecordedInBatch.set(key, count);
         return count;
       };
@@ -3077,7 +3074,7 @@ export class CoreToolScheduler {
             ) {
               const count = recordBatchRetryableToolError(
                 reqInfo.name,
-                bridgeError.message,
+                'validation',
               );
               if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {
                 bridgeError = new Error(
@@ -3234,7 +3231,7 @@ export class CoreToolScheduler {
           if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
             const count = recordBatchRetryableToolError(
               reqInfo.name,
-              TRUNCATION_EDIT_REJECTION,
+              'truncation',
             );
             const truncationError = new Error(
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
@@ -3308,12 +3305,14 @@ export class CoreToolScheduler {
                 )
               : invocationOrError;
 
-            // Track validation retry for loop detection. Counts accumulate per
-            // (tool, error message) pair so a different validation mistake on
-            // the same tool starts fresh rather than tripping the threshold.
+            // Track validation retry for loop detection. Counts accumulate
+            // per (tool, cause class) — differently-worded validation
+            // failures for the same tool share one counter (#13073), so a
+            // loop that cycles through message variants still trips the
+            // threshold.
             const count = recordBatchRetryableToolError(
               reqInfo.name,
-              invocationOrError.message,
+              'validation',
             );
 
             const finalError =
