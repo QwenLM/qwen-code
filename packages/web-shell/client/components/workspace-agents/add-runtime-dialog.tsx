@@ -42,7 +42,7 @@ export interface ConnectExistingInput {
   remoteToken: string;
   remoteCwd: string;
   serverUrl: string;
-  provider: 'qwen' | 'codex';
+  provider: 'qwen';
   allowHttp: boolean;
 }
 
@@ -56,16 +56,35 @@ function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
-function joinCommands(address: string, join: JoinToken) {
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function coordinatorUrl(address: string): URL {
   const url = new URL(address);
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error('Invalid coordinator address.');
+  }
+  return url;
+}
+
+export function joinCommands(address: string, join: JoinToken) {
+  const url = coordinatorUrl(address);
   const base = `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
-  const link = `${base}/join/${encodeURIComponent(join.workspaceId)}/${encodeURIComponent(join.token)}`;
+  const link = `${base}/join/${encodeURIComponent(join.workspaceId)}`;
   // A host refuses plain HTTP off loopback unless told the network is trusted.
   const insecure = url.protocol === 'http:' && !LOOPBACK.has(url.hostname);
-  const args = `serve --no-web --port 0 --join '${link}'${insecure ? ' --agent-host-allow-http' : ''}`;
+  const enrollment = `QWEN_AGENT_HOST_ENROLLMENT_TOKEN=${shellQuote(join.token)}`;
+  const args = `serve --no-web --port 0 --join ${shellQuote(link)}${insecure ? ' --agent-host-allow-http' : ''}`;
   return {
-    qwen: `qwen ${args}`,
-    npx: `npx -y @qwen-code/qwen-code@latest ${args}`,
+    qwen: `${enrollment} qwen ${args}`,
+    npx: `${enrollment} npx -y @qwen-code/qwen-code@latest ${args}`,
     insecure,
   };
 }
@@ -190,7 +209,7 @@ export function AddRuntimeDialog({
         remoteToken: String(data.get('remoteToken')),
         remoteCwd: String(data.get('remoteCwd')),
         serverUrl: address,
-        provider: data.get('provider') === 'codex' ? 'codex' : 'qwen',
+        provider: 'qwen',
         allowHttp: data.get('allowHttp') === 'on',
       });
       if (ok) setWatch({ at: Date.now(), known });
@@ -354,16 +373,6 @@ export function AddRuntimeDialog({
                     placeholder="/home/me/project"
                   />
                 </label>
-                <label className="flex flex-col gap-1.5">
-                  {t('collab.runtime.program')}
-                  <select
-                    name="provider"
-                    className="h-9 rounded-md border border-input bg-transparent px-2"
-                  >
-                    <option value="qwen">Qwen Code</option>
-                    <option value="codex">Codex</option>
-                  </select>
-                </label>
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <input type="checkbox" name="allowHttp" />
                   {t('collab.runtime.allowHttp')}
@@ -423,7 +432,7 @@ export function AddRuntimeDialog({
 
 function safeHost(address: string): string {
   try {
-    return new URL(address).hostname;
+    return coordinatorUrl(address).hostname;
   } catch {
     return '';
   }

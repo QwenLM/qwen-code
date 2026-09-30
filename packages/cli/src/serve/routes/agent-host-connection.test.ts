@@ -7,7 +7,10 @@
 import express from 'express';
 import request from 'supertest';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { WorkspaceRuntime } from '../workspace-registry.js';
+import {
+  createWorkspaceGenerationGuard,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
 
 const { issueEnrollment } = vi.hoisted(() => ({
@@ -31,6 +34,7 @@ it.each(['service', 'enrollment'] as const)(
     const original = {
       workspaceId: 'workspace',
       workspaceCwd: '/selected',
+      generationGuard: createWorkspaceGenerationGuard(),
     } as WorkspaceRuntime;
     let current = original;
     const fetch = vi.fn(async () => {
@@ -64,3 +68,27 @@ it.each(['service', 'enrollment'] as const)(
     expect(issueEnrollment).toHaveBeenCalledTimes(stage === 'service' ? 0 : 1);
   },
 );
+
+it('rejects a Host connection when the runtime has no generation guard', async () => {
+  const runtime = {
+    workspaceId: 'workspace',
+    workspaceCwd: '/selected',
+  } as WorkspaceRuntime;
+  const app = express();
+  app.use(express.json());
+  registerAgentHostConnectionRoutes(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+
+  const response = await request(app).post('/agent/hosts/connect').send({
+    serverUrl: 'https://coordinator.example',
+    workspaceId: 'workspace',
+    enrollmentToken: 'fresh-token',
+    provider: 'qwen',
+  });
+
+  expect(response.status).toBe(409);
+});

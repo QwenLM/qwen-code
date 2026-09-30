@@ -179,6 +179,8 @@ export interface DaemonWorkspaceCapability {
   ssh?: { host: string; port?: number; directory: string };
   primary: boolean;
   trusted: boolean;
+  /** Whether persistent Agent collaboration is enabled for this workspace. */
+  agentCollaborationEnabled?: boolean;
   /** Whether new sessions in this workspace can use Workflow. */
   workflowsEnabled?: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */

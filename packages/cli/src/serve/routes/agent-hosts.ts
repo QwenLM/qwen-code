@@ -320,13 +320,15 @@ export function registerAgentHostTransportRoutes(
       const input = body(req);
       const workspaceCwd = input['workspaceCwd'];
       const providers = input['providers'];
+      const enrollmentToken = input['enrollmentToken'];
       if (
         !workspaceId ||
         !hostId ||
         !secret ||
         typeof workspaceCwd !== 'string' ||
         !Array.isArray(providers) ||
-        !providers.every((provider) => typeof provider === 'string')
+        !providers.every((provider) => typeof provider === 'string') ||
+        (enrollmentToken !== undefined && typeof enrollmentToken !== 'string')
       ) {
         res.status(401).json({ error: 'Invalid Agent Host credential.' });
         return;
@@ -343,7 +345,11 @@ export function registerAgentHostTransportRoutes(
           runtime.workspaceCwd,
           hostId,
           secret,
-          { workspaceCwd, providers },
+          {
+            workspaceCwd,
+            providers,
+            ...(typeof enrollmentToken === 'string' ? { enrollmentToken } : {}),
+          },
         );
         if (!host) {
           res.status(401).json({ error: 'Invalid Agent Host credential.' });

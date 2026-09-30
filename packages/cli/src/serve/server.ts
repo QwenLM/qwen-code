@@ -164,7 +164,6 @@ import {
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
-import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -1129,8 +1128,8 @@ export function createServeApp(
   };
   // The collaboration flag is resolved per workspace at request time (see
   // `isAgentCollaborationEnabledFor` below). One boot-time decision remains:
-  // when no registered workspace has it on, the routes and the recovery sweep
-  // are never registered, so enabling it for the first time still needs a
+  // when no registered workspace has it on, the routes and recovery are never
+  // registered, so enabling it for the first time still needs a
   // daemon restart — the setting keeps `requiresRestart: true` for that case.
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
@@ -1615,8 +1614,8 @@ export function createServeApp(
       return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
     }
   };
-  // Whether the routes and the recovery sweep exist at all. Evaluated at
-  // call time over the registry rather than snapshotted at boot.
+  // Whether the routes and recovery exist at all. Evaluated at call time over
+  // the registry rather than snapshotted at boot.
   let agentCollaborationRoutesMounted = false;
   // Only trusted workspaces count: an untrusted one cannot use collaboration,
   // and reading its settings is itself something untrusted access must not do
@@ -2652,6 +2651,9 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    agentCollaborationEnabledFor: (workspaceCwd) =>
+      agentCollaborationRoutesMounted &&
+      isAgentCollaborationEnabledFor(workspaceCwd),
   });
   registerBrandRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -3599,37 +3601,6 @@ export function createServeApp(
       isAgentCollaborationEnabledFor,
     });
     agentCollaborationRoutesMounted = true;
-  } else if (!opts.agentHostWorker) {
-    // Close out runs the switch left mid-flight. Recovery cannot tell "the
-    // daemon crashed" from "the operator turned this off" — both look like a
-    // live run whose body is gone — so if these were left as they are,
-    // opting back in would silently re-dispatch work nobody asked to resume.
-    // Marking them terminal here means recovery later finds a closed run, and
-    // a person decides whether the work happens again.
-    //
-    // A one-shot, not a scanner: no timer, no routes, nothing created in a
-    // workspace that never used collaboration, and untrusted workspaces are
-    // not touched at all. Failures are logged and dropped — this must never
-    // be able to stop a daemon whose operator opted out from starting.
-    void (async () => {
-      for (const runtime of workspaceRegistry.listAll()) {
-        if (!runtime.trusted) continue;
-        try {
-          const { runsStranded } = await strandLocalRuns(runtime.workspaceCwd);
-          if (runsStranded > 0) {
-            writeStderrLine(
-              `qwen serve: agent collaboration is off; ${runsStranded} run(s) in ${runtime.workspaceCwd} marked stranded for review`,
-            );
-          }
-        } catch (error) {
-          writeStderrLine(
-            `qwen serve: could not close stranded agent runs in ${runtime.workspaceCwd}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      }
-    })();
   }
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell

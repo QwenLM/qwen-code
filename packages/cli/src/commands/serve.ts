@@ -223,7 +223,6 @@ interface ServeArgs {
   'agent-host-workspace-id'?: string;
   join?: string;
   'agent-host-name'?: string;
-  'agent-host-provider': 'qwen' | 'codex';
   'agent-host-allow-http'?: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
@@ -455,11 +454,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('agent-host-name', {
         type: 'string',
         description: 'Display name advertised for this Agent Host.',
-      })
-      .option('agent-host-provider', {
-        choices: ['qwen', 'codex'] as const,
-        default: 'qwen' as const,
-        description: 'Agent runtime launched for work claimed by this Host.',
       })
       .option('agent-host-allow-http', {
         type: 'boolean',
@@ -1156,7 +1150,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       });
       const joined = argv['join'] ? parseJoinLink(argv['join']) : undefined;
       const hostTarget = joined
-        ? joined
+        ? { ...joined, token: agentHostEnrollmentToken }
         : argv['agent-host-server'] && argv['agent-host-workspace-id']
           ? {
               serverUrl: argv['agent-host-server'],
@@ -1166,16 +1160,27 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : undefined;
       if (hostTarget) {
         try {
+          await handle.runtimeReady;
+          const runtime = handle.getPrimaryWorkspaceRuntime();
+          if (
+            !runtime?.trusted ||
+            !runtime.generationGuard ||
+            runtime.generationGuard.closed
+          ) {
+            throw new Error(
+              'Agent Host join requires a trusted active workspace.',
+            );
+          }
           const { startAgentHostConnection } = await import(
             '../serve/agent-host-client.js'
           );
           await startAgentHostConnection({
-            bridge: handle.bridge,
+            bridge: runtime.bridge,
             serverUrl: hostTarget.serverUrl,
             workspaceId: hostTarget.workspaceId,
-            workspaceCwd: primaryWorkspaceArg(argv.workspace) ?? process.cwd(),
-            provider: argv['agent-host-provider'],
+            workspaceCwd: runtime.workspaceCwd,
             allowHttp: argv['agent-host-allow-http'] === true,
+            generationGuard: runtime.generationGuard,
             ...(hostTarget.token ? { enrollmentToken: hostTarget.token } : {}),
             ...(argv['agent-host-name']
               ? { name: argv['agent-host-name'] }

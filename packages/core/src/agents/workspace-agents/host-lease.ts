@@ -726,11 +726,7 @@ export async function applyHostRunResult(
         ),
       })),
     );
-    if (
-      run.status === 'running' &&
-      input.status === 'completed' &&
-      input.close
-    ) {
+    if (run.status === 'running') {
       await rebookUndeliveredTriggersInTransaction(
         transaction,
         current.id,
@@ -738,6 +734,12 @@ export async function applyHostRunResult(
         run.attempts,
         now,
       );
+    }
+    if (
+      run.status === 'running' &&
+      input.status === 'completed' &&
+      input.close
+    ) {
       await closeRunInTransaction(transaction, {
         context: {
           workspaceId: transaction.workspaceId,

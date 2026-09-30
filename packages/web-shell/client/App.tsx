@@ -333,7 +333,11 @@ import {
   type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
-import { workspaceLabel, workspaceLabelForCwd } from './utils/workspace';
+import {
+  isAgentCollaborationEnabledForWorkspace,
+  workspaceLabel,
+  workspaceLabelForCwd,
+} from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
@@ -5005,9 +5009,10 @@ export function App({
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
-  const collaborationAvailable =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
-    true;
+  const collaborationAvailable = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    legacyWorkspaceContextCwd,
+  );
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -9206,7 +9211,10 @@ export function App({
     }
   });
   const collaborationThreadId =
-    workspace.capabilities?.features?.includes('agent_collaboration_v1') &&
+    isAgentCollaborationEnabledForWorkspace(
+      workspace.capabilities,
+      collaborationThread?.cwd,
+    ) &&
     collaborationThread !== undefined &&
     collaborationThread.server === workspace.baseUrl
       ? collaborationThread.id
@@ -18695,9 +18703,7 @@ export function App({
     [],
   );
   const agentChatEntry = useAgentChatEntry({
-    enabled: Boolean(
-      workspace.capabilities?.features?.includes('agent_collaboration_v1'),
-    ),
+    enabled: collaborationAvailable,
     getContext: getMentionContext,
     t,
     cwd: legacyWorkspaceContextCwd,
@@ -20567,6 +20573,7 @@ export function App({
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
                         key={agentsNav.request}
+                        workspaceCwd={legacyWorkspaceContextCwd}
                         initialAgentView={agentsNav.view}
                         onOpenThreadChat={(threadId, cwd) => {
                           setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });

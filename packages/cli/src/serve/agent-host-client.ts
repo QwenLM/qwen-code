@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isCommandAvailable } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -21,15 +20,9 @@ import { DEFAULT_RUN_LEASE_MS } from '@qwen-code/qwen-code-core/agents/workspace
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { WorkspaceGenerationGuard } from './workspace-registry.js';
-import { runCodexAppServer } from '../external-agents/codex-subagent-executor.js';
 import { selectRejectOption } from '../external-agents/acp-subagent-executor.js';
 import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
 import type { AgentRunStep } from './workspace-agents/agent-events.js';
-import { codexHostSession } from './workspace-agents/codex-host-session.js';
-import {
-  CLAUDE_ACP_COMMAND,
-  runClaudeHostTurn,
-} from './workspace-agents/claude-host-session.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
@@ -43,33 +36,8 @@ import {
 const HEARTBEAT_MS = 5_000;
 const LEASE_RENEW_MS = 20_000;
 const RETRY_MS = 2_000;
-type AgentHostProvider = AgentProgram;
-
-let detectedProviders: AgentHostProvider[] | undefined;
-
-/**
- * What this host can run: Qwen Code always (it is this process), Codex when
- * its CLI is installed or was asked for, Claude Code when its ACP adapter is. Advertised as a list so one machine
- * shows up as one runtime offering several programs.
- */
-function hostProviders(preferred: AgentHostProvider): string[] {
-  // Neither external program can be started from a Windows host yet (the
-  // Claude path refuses win32, and `codex` is spawned without a shell, which
-  // misses npm's .cmd shim), so offering them would only bind runs that fail.
-  if (!detectedProviders) {
-    const external = process.platform !== 'win32';
-    const codex =
-      external &&
-      (preferred === 'codex' || isCommandAvailable('codex').available);
-    const claude = external && isCommandAvailable(CLAUDE_ACP_COMMAND).available;
-    detectedProviders = [
-      'qwen',
-      ...(codex ? (['codex'] as const) : []),
-      ...(claude ? (['claude'] as const) : []),
-    ];
-  }
-  return detectedProviders.map((provider) => AGENT_PROGRAM_LABELS[provider]);
-}
+const HOST_PROVIDER: AgentProgram = 'qwen';
+const HOST_PROVIDERS = [AGENT_PROGRAM_LABELS[HOST_PROVIDER]];
 
 interface AgentHostCredential {
   schemaVersion: 1;
@@ -84,7 +52,6 @@ export interface AgentHostConnectionOptions {
   serverUrl: string;
   workspaceId: string;
   workspaceCwd: string;
-  provider: AgentProgram;
   enrollmentToken?: string;
   allowHttp?: boolean;
   name?: string;
@@ -96,7 +63,9 @@ function normalizeServerUrl(value: string, allowHttp = false): string {
   if (
     (url.protocol !== 'http:' && url.protocol !== 'https:') ||
     url.username ||
-    url.password
+    url.password ||
+    url.search ||
+    url.hash
   ) {
     throw new Error('--agent-host-server must be an HTTP(S) URL.');
   }
@@ -190,6 +159,7 @@ function isPermanentRejection(error: unknown): boolean {
 async function pickup(
   credential: AgentHostCredential,
   waitMs = 25_000,
+  stopSignal?: AbortSignal,
 ): Promise<HostRunAssignment | undefined> {
   const response = await fetch(
     `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/pickup`,
@@ -200,7 +170,9 @@ async function pickup(
         'content-type': 'application/json',
       },
       body: JSON.stringify({ waitMs }),
-      signal: AbortSignal.timeout(waitMs + 10_000),
+      signal: stopSignal
+        ? AbortSignal.any([stopSignal, AbortSignal.timeout(waitMs + 10_000)])
+        : AbortSignal.timeout(waitMs + 10_000),
       redirect: 'error',
     },
   );
@@ -210,8 +182,11 @@ async function pickup(
     error?: string;
   };
   if (!response.ok || !result.assignment) {
-    throw new Error(
-      result.error ?? `Agent Host pickup failed (${response.status}).`,
+    throw Object.assign(
+      new Error(
+        result.error ?? `Agent Host pickup failed (${response.status}).`,
+      ),
+      { status: response.status },
     );
   }
   return result.assignment;
@@ -229,28 +204,27 @@ function modelPrompt(assignment: HostRunAssignment): string {
     .join('\n\n');
 }
 
-/**
- * The program an assignment asks for: the one its agent is bound to when this
- * host offers it, else the host's default. Lets one machine run a Qwen Code
- * agent and a Codex agent side by side.
- */
-function providerFor(
-  assignment: HostRunAssignment,
-  fallback: AgentHostProvider,
-): AgentHostProvider {
-  const execution = assignment.agent.execution;
-  const wanted =
-    execution?.mode === 'managed-host' ? execution.provider : undefined;
-  return wanted && detectedProviders?.includes(wanted) ? wanted : fallback;
-}
-
 async function executeAssignment(
   options: AgentHostConnectionOptions,
   credential: AgentHostCredential,
   assignment: HostRunAssignment,
+  stopSignal?: AbortSignal,
 ): Promise<HostRunResult> {
+  const requestedProvider =
+    assignment.agent.execution?.mode === 'managed-host'
+      ? assignment.agent.execution.provider
+      : undefined;
+  if (requestedProvider && requestedProvider !== HOST_PROVIDER) {
+    throw new Error(
+      `This Agent Host cannot run the requested ${requestedProvider} provider.`,
+    );
+  }
   const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
   const execution = new AbortController();
+  const stopExecution = () => execution.abort(stopSignal?.reason);
+  if (stopSignal?.aborted) stopExecution();
+  else stopSignal?.addEventListener('abort', stopExecution, { once: true });
+  execution.signal.throwIfAborted();
   let finished = false;
   // Measured on this host's clock: the coordinator's may disagree. A held
   // lease re-picked keeps its first `acquiredAt`, so the span is capped at
@@ -267,14 +241,17 @@ async function executeAssignment(
         `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/heartbeat`,
         {
           method: 'POST',
-          signal: AbortSignal.timeout(10_000),
+          signal: AbortSignal.any([
+            execution.signal,
+            AbortSignal.timeout(10_000),
+          ]),
           headers: {
             authorization: `AgentHost ${credential.secret}`,
             'content-type': 'application/json',
           },
           body: JSON.stringify({
             workspaceCwd: options.workspaceCwd,
-            providers: hostProviders(options.provider),
+            providers: HOST_PROVIDERS,
             run: {
               threadId: assignment.threadId,
               runId: assignment.runId,
@@ -311,6 +288,9 @@ async function executeAssignment(
     }
   };
   await renewLease();
+  if (execution.signal.aborted) {
+    stopSignal?.removeEventListener('abort', stopExecution);
+  }
   execution.signal.throwIfAborted();
   const renew = setInterval(() => void renewLease(), LEASE_RENEW_MS);
   const updates = new AbortController();
@@ -329,22 +309,25 @@ async function executeAssignment(
     outputText: '',
     thoughtText: '',
   };
-  // Set once a program that can measure its spend (Qwen Code, through the
-  // session's stats) has started; Codex and Claude report none. Without it the
+  // Set once Qwen Code's session stats are available. Without it the
   // coordinator never charged a remote run, and a tree could spend past its
   // budget on another machine.
   let measureTokens: (() => Promise<number | undefined>) | undefined;
   let sending = false;
   const flush = async () => {
-    if (sending) return;
+    if (sending || execution.signal.aborted) return;
     sending = true;
     try {
       const tokens = await measureTokens?.();
+      execution.signal.throwIfAborted();
       await requestJson(
         `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/progress`,
         {
           method: 'POST',
-          signal: AbortSignal.timeout(4000),
+          signal: AbortSignal.any([
+            execution.signal,
+            AbortSignal.timeout(4000),
+          ]),
           headers: {
             authorization: `AgentHost ${credential.secret}`,
             'content-type': 'application/json',
@@ -387,180 +370,121 @@ async function executeAssignment(
   renew.unref?.();
   let summary: string | undefined;
   try {
-    const program = providerFor(assignment, options.provider);
-    if (program === 'claude') {
-      summary = await runClaudeHostTurn({
-        cwd: options.workspaceCwd,
-        prompt: modelPrompt(assignment),
-        signal: execution.signal,
-        onUpdate: (update) =>
-          report(
-            update.stage,
-            update.detail ?? '',
-            update.outputText,
-            update.thoughtText,
-            update.steps,
-          ),
-      });
-    } else if (program === 'codex') {
-      const session = await codexHostSession(
-        path.join(Storage.getGlobalQwenDir(), 'agent-hosts', 'codex-sessions'),
-        [
-          credential.serverUrl,
-          credential.workspaceId,
-          credential.hostId,
-          options.workspaceCwd,
-          assignment.agent.id,
-          assignment.threadId,
-        ],
-      );
-      if (session.threadId) report('resuming', '正在继续原 Codex 会话');
-      const messages = new Map<string, string>();
-      summary = await runCodexAppServer(
-        {
-          command: 'codex',
-          cwd: options.workspaceCwd,
-          session,
-          keepAlive: true,
-          onMessage: (id, text) => {
-            messages.set(id, text);
-            report(
-              'responding',
-              '正在回复',
-              [...messages.values()].join('\n\n'),
-            );
-          },
-          onActivity: report,
-          onThought: (delta) =>
-            report(
-              'thinking',
-              'Codex 正在思考',
-              undefined,
-              progress.thoughtText + delta,
-            ),
-        },
-        modelPrompt(assignment),
-        'read-only',
-        execution.signal,
-      );
-    } else {
-      void flush();
-      const sessionId = agentThreadSessionId(
-        `${credential.hostId}:${assignment.agent.id}`,
-        assignment.threadId,
-      );
-      const sourceId = `${credential.hostId}:${assignment.agent.id}`;
-      const sessions = new SessionService(options.workspaceCwd);
-      const live = options.bridge
-        .listWorkspaceSessions(options.workspaceCwd)
-        .find((session) => session.sessionId === sessionId);
-      if (!live) {
-        const request = {
-          workspaceCwd: options.workspaceCwd,
-          sessionId,
-          sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
-          sourceId,
-          approvalMode: ApprovalMode.PLAN,
-        };
-        if (await sessions.sessionExists(sessionId)) {
-          await options.bridge.resumeSession(request);
-        } else {
-          await options.bridge.spawnOrAttach({
-            ...request,
-            sessionScope: 'thread',
-          });
-        }
-      }
-      stream = streamAgentTurn(
-        options.bridge,
+    void flush();
+    const sessionId = agentThreadSessionId(
+      `${credential.hostId}:${assignment.agent.id}`,
+      assignment.threadId,
+    );
+    const sourceId = `${credential.hostId}:${assignment.agent.id}`;
+    const sessions = new SessionService(options.workspaceCwd);
+    const live = options.bridge
+      .listWorkspaceSessions(options.workspaceCwd)
+      .find((session) => session.sessionId === sessionId);
+    if (!live) {
+      const request = {
+        workspaceCwd: options.workspaceCwd,
         sessionId,
-        promptId,
-        AbortSignal.any([updates.signal, execution.signal]),
-        (update) => {
-          if (update.permission) {
-            // Nobody on this host can approve, and the turn would wait on it
-            // for good. Refuse, as the Codex and Claude paths do.
-            const optionId = selectRejectOption(
-              update.permission.options.map((option) => ({
-                optionId: option.optionId,
-                kind: option.kind,
-              })),
-            );
-            options.bridge.respondToSessionPermission(
-              sessionId,
-              update.permission.requestId,
-              optionId
-                ? { outcome: { outcome: 'selected', optionId } }
-                : { outcome: { outcome: 'cancelled' } },
-            );
-            return;
-          }
-          report(
-            update.stage,
-            update.detail ?? '',
-            update.outputText,
-            update.thoughtText,
-            update.steps,
-          );
-        },
-      ).catch((error: unknown) => {
-        if (!updates.signal.aborted) execution.abort(error);
-      });
-      const sessionTotal = async (): Promise<number | undefined> => {
-        try {
-          const stats = await options.bridge.getSessionStatsStatus(sessionId);
-          return Object.values(stats.models).reduce(
-            (total, model) => total + (model.tokens?.total ?? 0),
-            0,
-          );
-        } catch {
-          return undefined;
-        }
+        sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+        sourceId,
+        approvalMode: ApprovalMode.PLAN,
       };
-      // The session carries earlier turns on this thread; only what this
-      // attempt adds is its spend.
-      const baseline = await sessionTotal();
-      if (baseline !== undefined) {
-        measureTokens = async () => {
-          const total = await sessionTotal();
-          return total === undefined
-            ? undefined
-            : Math.max(0, total - baseline);
-        };
+      if (await sessions.sessionExists(sessionId)) {
+        await options.bridge.resumeSession(request);
+      } else {
+        await options.bridge.spawnOrAttach({
+          ...request,
+          sessionScope: 'thread',
+        });
       }
-      report('waiting', 'Qwen Code 已接单，等待模型回复');
-      await options.bridge.sendPrompt(
-        sessionId,
-        {
-          sessionId,
-          prompt: [{ type: 'text', text: assignment.prompt }],
-        },
-        execution.signal,
-        { promptId, modelPrompt: modelPrompt(assignment) },
-      );
-      for (;;) {
-        execution.signal.throwIfAborted();
-        const turn = await options.bridge.getSessionTurnStatus(
-          sessionId,
-          undefined,
-          promptId,
-        );
-        if (turn?.promptId === promptId) {
-          if (turn.state === 'error' || turn.state === 'cancelled') {
-            throw new Error(turn.error?.message ?? 'Managed Agent cancelled.');
-          }
-          if (turn.state === 'completed') {
-            summary = turn.resultText?.trim();
-            break;
-          }
+    }
+    stream = streamAgentTurn(
+      options.bridge,
+      sessionId,
+      promptId,
+      AbortSignal.any([updates.signal, execution.signal]),
+      (update) => {
+        if (update.permission) {
+          // Nobody on this host can approve, and the turn would wait on it
+          // for good.
+          const optionId = selectRejectOption(
+            update.permission.options.map((option) => ({
+              optionId: option.optionId,
+              kind: option.kind,
+            })),
+          );
+          options.bridge.respondToSessionPermission(
+            sessionId,
+            update.permission.requestId,
+            optionId
+              ? { outcome: { outcome: 'selected', optionId } }
+              : { outcome: { outcome: 'cancelled' } },
+          );
+          return;
         }
-        await delay(250, undefined, { signal: execution.signal });
+        report(
+          update.stage,
+          update.detail ?? '',
+          update.outputText,
+          update.thoughtText,
+          update.steps,
+        );
+      },
+    ).catch((error: unknown) => {
+      if (!updates.signal.aborted) execution.abort(error);
+    });
+    const sessionTotal = async (): Promise<number | undefined> => {
+      try {
+        const stats = await options.bridge.getSessionStatsStatus(sessionId);
+        return Object.values(stats.models).reduce(
+          (total, model) => total + (model.tokens?.total ?? 0),
+          0,
+        );
+      } catch {
+        return undefined;
       }
+    };
+    // The session carries earlier turns on this thread; only what this
+    // attempt adds is its spend.
+    const baseline = await sessionTotal();
+    if (baseline !== undefined) {
+      measureTokens = async () => {
+        const total = await sessionTotal();
+        return total === undefined ? undefined : Math.max(0, total - baseline);
+      };
+    }
+    report('waiting', 'Qwen Code 已接单，等待模型回复');
+    await options.bridge.sendPrompt(
+      sessionId,
+      {
+        sessionId,
+        prompt: [{ type: 'text', text: assignment.prompt }],
+      },
+      execution.signal,
+      { promptId, modelPrompt: modelPrompt(assignment) },
+    );
+    for (;;) {
+      execution.signal.throwIfAborted();
+      const turn = await options.bridge.getSessionTurnStatus(
+        sessionId,
+        undefined,
+        promptId,
+      );
+      if (turn?.promptId === promptId) {
+        if (turn.state === 'error' || turn.state === 'cancelled') {
+          throw new Error(turn.error?.message ?? 'Managed Agent cancelled.');
+        }
+        if (turn.state === 'completed') {
+          summary = turn.resultText?.trim();
+          break;
+        }
+      }
+      await delay(250, undefined, { signal: execution.signal });
     }
     execution.signal.throwIfAborted();
   } catch (error) {
     throw execution.signal.aborted ? execution.signal.reason : error;
   } finally {
+    stopSignal?.removeEventListener('abort', stopExecution);
     finished = true;
     clearInterval(renew);
     clearInterval(progressHeartbeat);
@@ -590,10 +514,12 @@ async function returnResult(
   credential: AgentHostCredential,
   initial: HostRunResult,
   generationGuard?: WorkspaceGenerationGuard,
+  stopSignal?: AbortSignal,
 ): Promise<void> {
   let result = initial;
   for (;;) {
     generationGuard?.assertOpen();
+    stopSignal?.throwIfAborted();
     try {
       await requestJson(
         `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/result`,
@@ -604,11 +530,18 @@ async function returnResult(
             'content-type': 'application/json',
           },
           body: JSON.stringify(result),
-          signal: AbortSignal.timeout(DEFAULT_RUN_LEASE_MS),
+          signal: stopSignal
+            ? AbortSignal.any([
+                stopSignal,
+                AbortSignal.timeout(DEFAULT_RUN_LEASE_MS),
+              ])
+            : AbortSignal.timeout(DEFAULT_RUN_LEASE_MS),
         },
       );
       return;
     } catch (error) {
+      stopSignal?.throwIfAborted();
+      if ((error as { status?: number }).status === 401) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (message === 'stale_lease' || message === 'attempt_moved_on') {
         writeStderrLine(
@@ -645,9 +578,9 @@ async function returnResult(
 const activeConnections = new Map<
   string,
   {
-    provider: string;
     bridge: AcpSessionBridge;
     generationGuard?: WorkspaceGenerationGuard;
+    stop: AbortController;
     start: Promise<void>;
   }
 >();
@@ -664,23 +597,21 @@ export async function startAgentHostConnection(
   if (existing) {
     if (
       existing.bridge === options.bridge &&
-      existing.generationGuard === options.generationGuard
+      existing.generationGuard === options.generationGuard &&
+      !options.enrollmentToken &&
+      !existing.stop.signal.aborted
     ) {
-      if (existing.provider !== options.provider)
-        throw new Error(
-          'This workspace already has a Host connection using another provider.',
-        );
       return existing.start;
     }
-    // Not stopped here: a different bridge or generation means the old one's
-    // generation guard is already closed, and that is what ends its loop.
+    existing.stop.abort(new Error('Agent Host connection replaced.'));
     activeConnections.delete(key);
   }
-  const start = connectAgentHost(options);
+  const stop = new AbortController();
+  const start = connectAgentHost(options, stop);
   activeConnections.set(key, {
-    provider: options.provider,
     bridge: options.bridge,
     generationGuard: options.generationGuard,
+    stop,
     start,
   });
   try {
@@ -694,9 +625,14 @@ export async function startAgentHostConnection(
 
 async function connectAgentHost(
   options: AgentHostConnectionOptions,
+  stop: AbortController,
 ): Promise<void> {
-  options.generationGuard?.assertOpen();
-  const providers = hostProviders(options.provider);
+  const assertOpen = () => {
+    options.generationGuard?.assertOpen();
+    stop.signal.throwIfAborted();
+  };
+  assertOpen();
+  const providers = HOST_PROVIDERS;
   const serverUrl = normalizeServerUrl(options.serverUrl, options.allowHttp);
   if (
     new URL(serverUrl).protocol === 'http:' &&
@@ -712,7 +648,47 @@ async function connectAgentHost(
     options.workspaceCwd,
   );
   let credential = await readCredential(filePath);
-  options.generationGuard?.assertOpen();
+  assertOpen();
+  const sendHeartbeat = async (
+    target: AgentHostCredential,
+    enrollmentToken?: string,
+  ): Promise<void> => {
+    await requestJson(
+      `${serverUrl}/agent-hosts/${encodeURIComponent(target.workspaceId)}/${encodeURIComponent(target.hostId)}/heartbeat`,
+      {
+        method: 'POST',
+        signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
+        headers: {
+          authorization: `AgentHost ${target.secret}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          workspaceCwd: options.workspaceCwd,
+          providers,
+          ...(enrollmentToken ? { enrollmentToken } : {}),
+        }),
+      },
+    );
+  };
+  if (credential && options.enrollmentToken) {
+    const savedCredential = credential;
+    try {
+      await sendHeartbeat(savedCredential, options.enrollmentToken);
+    } catch (error) {
+      if ((error as { status?: number }).status !== 401) throw error;
+      try {
+        await sendHeartbeat(savedCredential);
+        throw new Error('Invalid or expired Agent Host enrollment token.');
+      } catch (credentialError) {
+        if ((credentialError as { status?: number }).status !== 401) {
+          throw credentialError;
+        }
+        await fs.rm(filePath, { force: true });
+        credential = undefined;
+      }
+    }
+    assertOpen();
+  }
   if (!credential) {
     if (!options.enrollmentToken) {
       throw new Error(
@@ -724,6 +700,7 @@ async function connectAgentHost(
       secret: string;
     }>(`${serverUrl}/agent-hosts/enroll`, {
       method: 'POST',
+      signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         workspaceId: options.workspaceId,
@@ -733,7 +710,7 @@ async function connectAgentHost(
         providers,
       }),
     });
-    options.generationGuard?.assertOpen();
+    assertOpen();
     credential = {
       schemaVersion: 1,
       serverUrl,
@@ -746,41 +723,38 @@ async function connectAgentHost(
   const activeCredential = credential;
 
   let offline = false;
-  const heartbeat = async (): Promise<void> => {
+  const heartbeat = async (): Promise<boolean> => {
     try {
-      options.generationGuard?.assertOpen();
-      await requestJson(
-        `${serverUrl}/agent-hosts/${encodeURIComponent(activeCredential.workspaceId)}/${encodeURIComponent(activeCredential.hostId)}/heartbeat`,
-        {
-          method: 'POST',
-          headers: {
-            authorization: `AgentHost ${activeCredential.secret}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            workspaceCwd: options.workspaceCwd,
-            providers,
-          }),
-        },
-      );
+      assertOpen();
+      await sendHeartbeat(activeCredential);
       if (offline) {
         writeStderrLine(
           `qwen serve: Agent Host ${activeCredential.hostId} reconnected.`,
         );
       }
       offline = false;
+      return true;
     } catch (error) {
+      const unauthorized = (error as { status?: number }).status === 401;
+      if (unauthorized) {
+        await fs.rm(filePath, { force: true }).catch(() => undefined);
+      }
+      if (unauthorized || options.generationGuard?.closed) {
+        stop.abort(error);
+      }
+      if (stop.signal.aborted) return false;
       if (!offline) {
         writeStderrLine(
           `qwen serve: Agent Host heartbeat failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       offline = true;
+      return false;
     }
   };
 
-  await heartbeat();
-  if (offline) {
+  if (!(await heartbeat())) {
+    stop.signal.throwIfAborted();
     throw new Error(
       'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential.',
     );
@@ -794,10 +768,14 @@ async function connectAgentHost(
   void (async () => {
     try {
       for (;;) {
-        options.generationGuard?.assertOpen();
+        assertOpen();
         try {
-          const assignment = await pickup(activeCredential);
-          options.generationGuard?.assertOpen();
+          const assignment = await pickup(
+            activeCredential,
+            undefined,
+            stop.signal,
+          );
+          assertOpen();
           if (!assignment) continue;
           writeStderrLine(
             `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
@@ -808,6 +786,7 @@ async function connectAgentHost(
               options,
               activeCredential,
               assignment,
+              stop.signal,
             );
           } catch (error) {
             result = {
@@ -823,9 +802,24 @@ async function connectAgentHost(
               error: error instanceof Error ? error.message : String(error),
             };
           }
-          await returnResult(activeCredential, result, options.generationGuard);
+          await returnResult(
+            activeCredential,
+            result,
+            options.generationGuard,
+            stop.signal,
+          );
         } catch (error) {
-          if (options.generationGuard?.closed) return;
+          if (
+            options.generationGuard?.closed ||
+            stop.signal.aborted ||
+            (error as { status?: number }).status === 401
+          ) {
+            if ((error as { status?: number }).status === 401) {
+              await fs.rm(filePath, { force: true }).catch(() => undefined);
+              stop.abort(error);
+            }
+            return;
+          }
           writeStderrLine(
             `qwen serve: Agent Host pickup failed: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -833,7 +827,7 @@ async function connectAgentHost(
         }
       }
     } catch (error) {
-      if (!options.generationGuard?.closed) {
+      if (!options.generationGuard?.closed && !stop.signal.aborted) {
         writeStderrLine(
           `qwen serve: Agent Host connection stopped: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -845,7 +839,8 @@ async function connectAgentHost(
       );
       if (
         active?.bridge === options.bridge &&
-        active.generationGuard === options.generationGuard
+        active.generationGuard === options.generationGuard &&
+        active.stop === stop
       ) {
         activeConnections.delete(
           JSON.stringify([

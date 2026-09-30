@@ -107,6 +107,8 @@ flowchart TB
 
 ## 5. Codex 与其他 runtime
 
+首个 Host 增量只交付 Qwen Code。Codex、Claude 及其他外部 provider 在启动路径能够排除用户环境配置与凭据、并证明读取范围限定在工作区之前继续延后。协议保留 provider 身份用于后续扩展，但内置 Host 不探测、也不广告这些程序。
+
 Codex 适配器放在 Codex 执行机器上，负责本地任务映射到 `thread/start`、`thread/resume`、`turn/start`、`turn/steer`、`turn/interrupt` 和事件。按实际安装版本协商支持范围，不能把 App Server 全部管理能力直接暴露给调用方。
 
 第一条异构路径先做到接活、续聊、结果和审批。主动委派是下一档：通过 runtime 支持的受限协作工具接入，不要求它原生理解六个 `thread_*`，也不从正文随意解析 `@` 触发远端动作。适配器不是另一个负责推理的 Qwen Agent。

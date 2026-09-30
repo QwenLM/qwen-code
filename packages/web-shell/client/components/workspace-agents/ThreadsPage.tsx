@@ -93,7 +93,7 @@ export interface ThreadsPageProps {
     remoteToken: string;
     remoteCwd: string;
     serverUrl: string;
-    provider: 'qwen' | 'codex';
+    provider: 'qwen';
     allowHttp: boolean;
   }) => Promise<boolean>;
   createError?: string;

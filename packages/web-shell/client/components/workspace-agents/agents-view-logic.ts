@@ -27,7 +27,7 @@ import type {
 } from './agent-events';
 
 /** The programs an agent can be bound to on a joined runtime. */
-export const AGENT_PROGRAMS = ['qwen', 'codex', 'claude'] as const;
+export const AGENT_PROGRAMS = ['qwen'] as const;
 export type AgentProgramView = (typeof AGENT_PROGRAMS)[number];
 
 export function programLabel(program: string | undefined): string {

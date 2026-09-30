@@ -107,6 +107,8 @@ Three mechanisms jointly maintain the current local run-frame trust boundary: th
 
 ## 5. Codex and Other Runtimes
 
+The first Host increment ships Qwen Code only. Codex, Claude, and other external providers stay deferred until their launch path can exclude ambient user configuration and credentials and can prove workspace-confined reads. The protocol keeps provider identity for that future extension, but the built-in Host neither detects nor advertises those programs.
+
 The Codex adapter lives on the machine executing Codex and maps local tasks to `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`, and events. Negotiate supported capabilities against the installed version rather than exposing all App Server management capabilities to callers.
 
 The first heterogeneous path covers intake, follow-up conversation, results, and approval. Active delegation comes later through restricted collaboration tools supported by the runtime. It does not require native understanding of the six `thread_*` tools or trigger remote actions by arbitrarily parsing `@` from message text. The adapter is not another reasoning Qwen Agent.

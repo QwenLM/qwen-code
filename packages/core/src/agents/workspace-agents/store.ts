@@ -1356,9 +1356,11 @@ async function writeAgentHostsUnlocked(
   if (!isValidAgentHostsFile(registry)) {
     throw new Error('Refusing to write malformed Agent Host registry.');
   }
-  await atomicWriteJSON(getAgentHostsFilePath(projectRoot), registry, {
-    noFollow: true,
-  });
+  await atomicWriteJSON(
+    getAgentHostsFilePath(projectRoot),
+    registry,
+    STORE_FILE_OPTIONS,
+  );
 }
 
 export async function readAgentHosts(
@@ -1444,13 +1446,28 @@ export async function heartbeatAgentHost(
   projectRoot: string,
   hostId: string,
   secret: string,
-  input: { workspaceCwd: string; providers: string[] },
+  input: {
+    workspaceCwd: string;
+    providers: string[];
+    enrollmentToken?: string;
+  },
 ): Promise<AgentHostView | undefined> {
   return withWorkspaceLock(projectRoot, async () => {
     await ensureMigratedUnlocked(projectRoot);
     const registry = await readAgentHostsUnlocked(projectRoot);
     const current = registry.hosts.find((host) => host.id === hostId);
     if (!current || !matchesAgentHostSecret(secret, current.secretHash)) {
+      return undefined;
+    }
+    if (
+      input.enrollmentToken !== undefined &&
+      (!registry.enrollment ||
+        registry.enrollment.expiresAt < Date.now() ||
+        !matchesAgentHostSecret(
+          input.enrollmentToken,
+          registry.enrollment.tokenHash,
+        ))
+    ) {
       return undefined;
     }
     const workspaceCwd = input.workspaceCwd.trim();
@@ -1472,8 +1489,9 @@ export async function heartbeatAgentHost(
       providers,
       lastSeenAt: Date.now(),
     };
+    const { enrollment: _used, ...withoutEnrollment } = registry;
     await writeAgentHostsUnlocked(projectRoot, {
-      ...registry,
+      ...(input.enrollmentToken === undefined ? registry : withoutEnrollment),
       hosts: registry.hosts.map((host) =>
         host.id === current.id ? next : host,
       ),

@@ -23,6 +23,7 @@ import { ThreadChat } from './ThreadChat';
 import { Button } from '../ui/button';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import { useI18n } from '../../i18n';
+import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import type {
   RoutingPreviewTarget,
   ThreadSummaryView,
@@ -105,11 +106,31 @@ export function ThreadsRoute({
   const workspace = useWorkspace();
   const connection = useConnection();
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<string>();
-  const workspaceCwd =
+  const collaborationWorkspaces = useMemo(
+    () =>
+      (workspace.capabilities?.workspaces ?? []).filter((entry) =>
+        isAgentCollaborationEnabledForWorkspace(
+          workspace.capabilities,
+          entry.cwd,
+        ),
+      ),
+    [workspace.capabilities],
+  );
+  const requestedWorkspaceCwd =
     boundWorkspaceCwd ??
     selectedWorkspaceCwd ??
     connection.workspaceCwd ??
-    workspace.capabilities?.workspaces?.find((entry) => entry.primary)?.cwd;
+    collaborationWorkspaces.find((entry) => entry.primary)?.cwd ??
+    collaborationWorkspaces[0]?.cwd;
+  const workspaceCwd = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    requestedWorkspaceCwd,
+  )
+    ? requestedWorkspaceCwd
+    : boundWorkspaceCwd
+      ? undefined
+      : (collaborationWorkspaces.find((entry) => entry.primary)?.cwd ??
+        collaborationWorkspaces[0]?.cwd);
   const client = useMemo(
     () =>
       workspaceCwd
@@ -478,7 +499,7 @@ export function ThreadsRoute({
         {...(capabilities ? { capabilities } : {})}
         workspaceCwd={workspaceCwd}
         hostServerUrl={workspace.baseUrl}
-        workspaces={workspace.capabilities?.workspaces ?? []}
+        workspaces={collaborationWorkspaces}
         onWorkspaceChange={(cwd) => {
           setSelectedWorkspaceCwd(cwd);
           setAgents([]);

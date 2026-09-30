@@ -1693,6 +1693,8 @@ export async function loadCliConfig(
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
+    /** Daemon-owned remote-runtime session with no ambient executable inputs. */
+    agentHostReadOnly?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1704,17 +1706,17 @@ export async function loadCliConfig(
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
-  const sshWorkspace = readSshWorkspace(cwd);
+  const agentHostReadOnly = hostPolicy?.agentHostReadOnly === true;
+  const sshWorkspace = agentHostReadOnly ? undefined : readSshWorkspace(cwd);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
-  const executionSandboxSettings = validateExecutionSandboxSelection(
-    settings,
-    argv,
-  );
+  const executionSandboxSettings = agentHostReadOnly
+    ? undefined
+    : validateExecutionSandboxSelection(settings, argv);
   const sandboxEnabled = Boolean(
     executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
   );
@@ -1743,7 +1745,8 @@ export async function loadCliConfig(
     );
   }
   const safeMode =
-    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+    agentHostReadOnly ||
+    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
 
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
@@ -1839,14 +1842,19 @@ export async function loadCliConfig(
         settings.context?.fileFiltering?.customIgnoreFiles,
       );
 
-  const includeDirectories = provisionalWorkspace
-    ? []
-    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
-        .map(resolvePath)
-        .concat((argv.includeDirectories || []).map(resolvePath));
+  const includeDirectories =
+    provisionalWorkspace || agentHostReadOnly
+      ? []
+      : (bareMode || safeMode
+          ? []
+          : (settings.context?.includeDirectories ?? [])
+        )
+          .map(resolvePath)
+          .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
   const lspEnabled =
+    !agentHostReadOnly &&
     !sshWorkspace &&
     !provisionalWorkspace &&
     !bareMode &&
@@ -2225,10 +2233,12 @@ export async function loadCliConfig(
     }
   }
 
-  const sandboxConfig = await loadSandboxConfig(
-    bareMode || safeMode ? ({} as Settings) : settings,
-    argv,
-  );
+  const sandboxConfig = agentHostReadOnly
+    ? undefined
+    : await loadSandboxConfig(
+        bareMode || safeMode ? ({} as Settings) : settings,
+        argv,
+      );
   if (shellExecutionSandbox && sandboxConfig) {
     throw new Error(
       'Tool execution sandbox cannot be combined with a whole-CLI sandbox.',
@@ -2388,7 +2398,9 @@ export async function loadCliConfig(
   // Top tier = bundled Mem0, session-injected (ACP/IDE), and `--mcp-config`.
   // CLI wins over the session source. All sit above settings/`.mcp.json`
   // and are never gated (#4615).
-  const cliMcpServers = parseMcpConfig(argv.mcpConfig);
+  const cliMcpServers = agentHostReadOnly
+    ? undefined
+    : parseMcpConfig(argv.mcpConfig);
   const mem0Server =
     bareMode ||
     safeMode ||
@@ -2403,7 +2415,7 @@ export async function loadCliConfig(
           interactive && !isAcpMode && !settings.disableAllHooks,
         );
   const topTierMcpServers =
-    sessionMcpServers || cliMcpServers || mem0Server
+    !agentHostReadOnly && (sessionMcpServers || cliMcpServers || mem0Server)
       ? {
           ...(mem0Server ? { 'external-context': mem0Server } : {}),
           ...sessionMcpServers,
@@ -2859,6 +2871,20 @@ export async function loadCliConfig(
     agentExecutionBackend: agentExecutionBackend(),
     executionEnvironmentFactory: agentExecutionFactory(),
   };
+
+  if (agentHostReadOnly) {
+    configParams.disableAllHooks = true;
+    configParams.mcpServers = {};
+    configParams.topTierMcpServers = undefined;
+    configParams.pendingMcpServers = undefined;
+    configParams.overrideExtensions = [];
+    configParams.workflowsEnabled = false;
+    configParams.sessionWorkflowEnabled = false;
+    configParams.fileCheckpointingEnabled = false;
+    configParams.cronEnabled = false;
+    configParams.artifactEnabled = false;
+    configParams.omniEnabled = false;
+  }
 
   if (sshWorkspace) {
     configParams.executionEnvironment = new SshExecutionEnvironment(

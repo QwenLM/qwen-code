@@ -389,11 +389,7 @@ for (const theme of THEMES) {
   });
 }
 
-/**
- * Runtimes: this computer plus two joined machines, one offering only Qwen
- * Code and one offering all three programs, so the program picker shows both
- * an available and an unavailable choice.
- */
+/** Runtimes: this computer plus two joined Qwen Code machines. */
 async function setupRuntimes(page: Page, baseURL: string): Promise<void> {
   const scenario = createWebShellDaemonScenario({
     capabilities: { features: ['session_events', 'agent_collaboration_v1'] },
@@ -424,8 +420,8 @@ async function setupRuntimes(page: Page, baseURL: string): Promise<void> {
     id: 'host_mac',
     kind: 'external',
     label: 'mac-mini',
-    provider: 'Qwen Code ACP, Codex CLI, Claude Code ACP',
-    programs: ['qwen', 'codex', 'claude'],
+    provider: 'Qwen Code ACP',
+    programs: ['qwen'],
     status: 'offline',
     workspaceCwd: '/Users/dev/qwen-code',
     agentCount: 0,
@@ -534,15 +530,14 @@ for (const theme of THEMES) {
       .first()
       .click();
     await page.getByRole('button', { name: 'New agent', exact: true }).click();
-    // A machine with only Qwen Code: Codex and Claude Code are offered but
-    // unavailable, which is the state the picker has to explain.
+    // The first Host increment offers Qwen Code only.
     await page
       .locator('label', { hasText: '/srv/checkout/qwen-code' })
       .first()
       .click();
-    const claude = page.locator('label', { hasText: 'Claude Code' }).first();
-    await claude.scrollIntoViewIfNeeded();
-    await expect(claude).toBeVisible();
+    const qwen = page.locator('input[name="agent-execution-provider"]');
+    await qwen.scrollIntoViewIfNeeded();
+    await expect(qwen).toBeChecked();
     await clearFocus(page);
     await captureScreenshot(page, `collab-new-agent-runtime-${theme}`);
   });

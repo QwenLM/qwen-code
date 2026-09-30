@@ -1,8 +1,5 @@
 import type { Application, Request, RequestHandler, Response } from 'express';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { issueAgentHostEnrollment } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
-import { startAgentHostConnection } from '../agent-host-client.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 
@@ -27,14 +24,7 @@ function serverUrl(value: unknown, allowHttp: boolean): string {
   return url.toString().replace(/\/+$/, '');
 }
 
-async function providers(): Promise<string[]> {
-  try {
-    await promisify(execFile)('codex', ['--version'], { timeout: 5000 });
-    return ['qwen', 'codex'];
-  } catch {
-    return ['qwen'];
-  }
-}
+const PROVIDERS = ['qwen'];
 
 export function registerAgentHostConnectionRoutes(
   app: Application,
@@ -63,7 +53,7 @@ export function registerAgentHostConnectionRoutes(
     res.json({
       protocol: 1,
       workspaceCwd: runtime.workspaceCwd,
-      providers: await providers(),
+      providers: PROVIDERS,
     });
   });
 
@@ -71,6 +61,12 @@ export function registerAgentHostConnectionRoutes(
     const runtime = runtimeFor(req, res);
     if (!runtime) return;
     try {
+      if (!runtime.generationGuard || runtime.generationGuard.closed) {
+        res
+          .status(409)
+          .json({ error: 'Workspace runtime changed; retry the request.' });
+        return;
+      }
       const input = req.body ?? {};
       const url = serverUrl(input.serverUrl, input.allowHttp === true);
       if (
@@ -78,24 +74,22 @@ export function registerAgentHostConnectionRoutes(
         !input.workspaceId ||
         typeof input.enrollmentToken !== 'string' ||
         !input.enrollmentToken ||
-        !['qwen', 'codex'].includes(input.provider)
+        input.provider !== 'qwen'
       ) {
         throw new Error('接入参数不完整。');
       }
-      if (!(await providers()).includes(input.provider))
-        throw new Error('此服务环境未安装所选执行程序。');
       if (!isCurrent(req, res, runtime)) return;
+      const { startAgentHostConnection } = await import(
+        '../agent-host-client.js'
+      );
       await startAgentHostConnection({
         bridge: runtime.bridge,
         workspaceCwd: runtime.workspaceCwd,
         serverUrl: url,
         workspaceId: input.workspaceId,
         enrollmentToken: input.enrollmentToken,
-        provider: input.provider,
         allowHttp: input.allowHttp === true,
-        ...(runtime.generationGuard
-          ? { generationGuard: runtime.generationGuard }
-          : {}),
+        generationGuard: runtime.generationGuard,
       });
       if (!isCurrent(req, res, runtime)) return;
       res.json({
@@ -114,6 +108,12 @@ export function registerAgentHostConnectionRoutes(
     const runtime = runtimeFor(req, res);
     if (!runtime) return;
     try {
+      if (!runtime.generationGuard || runtime.generationGuard.closed) {
+        res
+          .status(409)
+          .json({ error: 'Workspace runtime changed; retry the request.' });
+        return;
+      }
       const input = req.body ?? {};
       const remote = serverUrl(input.remoteUrl, input.allowHttp === true);
       const callback = serverUrl(input.serverUrl, input.allowHttp === true);
@@ -122,7 +122,7 @@ export function registerAgentHostConnectionRoutes(
         !input.remoteCwd.trim() ||
         typeof input.remoteToken !== 'string' ||
         !input.remoteToken.trim() ||
-        !['qwen', 'codex'].includes(input.provider)
+        input.provider !== 'qwen'
       )
         throw new Error('请填写远程服务凭证、远程执行目录和执行程序。');
       const endpoint = `${remote}/workspaces/${encodeURIComponent(input.remoteCwd)}/agent/hosts`;

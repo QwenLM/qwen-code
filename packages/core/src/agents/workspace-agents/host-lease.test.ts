@@ -244,6 +244,44 @@ describe('leases', () => {
       ),
     ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
   });
+
+  it('requeues a follow-up that a failed Host turn never received', async () => {
+    const mine = await host('mine', ['qwen']);
+    const agent = await placeAgent([mine]);
+    const { thread: created } = await createAssignedThread(PROJECT_ROOT, {
+      title: 'Inspect requests',
+      assignee: agent,
+      message: 'Inspect the initial request.',
+    });
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    const followup = await postMessage(PROJECT_ROOT, created.id, {
+      from: 'user',
+      text: '@remote Also inspect the follow-up.',
+    });
+
+    await applyHostRunResult(
+      PROJECT_ROOT,
+      {
+        threadId: created.id,
+        runId: assignment.runId,
+        hostId: mine,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+        status: 'failed',
+        error: 'Host execution failed.',
+      },
+      T0 + 1,
+    );
+
+    const thread = (await readThread(PROJECT_ROOT, created.id))!;
+    const successor = thread.runs.find((run) => run.status === 'queued');
+    expect(successor?.triggerMessageIds).toContain(followup.message.id);
+    expect(
+      thread.messages
+        .find((message) => message.id === followup.message.id)
+        ?.outcomes.find((outcome) => outcome.targetAgentId === agent.id)?.runId,
+    ).toBe(successor?.id);
+  });
 });
 
 describe('host progress steps', () => {

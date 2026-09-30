@@ -70,8 +70,35 @@ function setup(initiallyEnabled = true) {
         .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
         .send({ waitMs: 1_000 })
         .then((response) => response),
+    beat: (input: Record<string, unknown>) =>
+      request(app)
+        .post('/agent-hosts/workspace/host/heartbeat')
+        .set('Authorization', `AgentHost ${'a'.repeat(32)}`)
+        .send(input),
   };
 }
+
+it('forwards a fresh enrollment token through an authenticated heartbeat', async () => {
+  heartbeat.mockResolvedValue({ id: 'host' });
+
+  const response = await setup().beat({
+    workspaceCwd: '/remote',
+    providers: ['Qwen Code ACP'],
+    enrollmentToken: 'fresh-token',
+  });
+
+  expect(response.status).toBe(200);
+  expect(heartbeat).toHaveBeenCalledWith(
+    '/work/selected',
+    'host',
+    'a'.repeat(32),
+    {
+      workspaceCwd: '/remote',
+      providers: ['Qwen Code ACP'],
+      enrollmentToken: 'fresh-token',
+    },
+  );
+});
 
 it('does not expose host work for a collaboration-disabled workspace', async () => {
   const response = await setup(false).poll();

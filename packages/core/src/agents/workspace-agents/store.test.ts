@@ -64,6 +64,7 @@ import {
   updateWorkspaceAgent,
   issueAgentHostEnrollment,
   enrollAgentHost,
+  heartbeatAgentHost,
   isAgentAddressable,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
@@ -610,6 +611,59 @@ describe('agent versioned store', () => {
       { agents: [ALICE, BOB] },
     );
     expect(fromAgent.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
+  });
+  it('consumes a fresh enrollment token without replacing a valid host', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const fresh = await issueAgentHostEnrollment(PROJECT_ROOT);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, enrolled.host.id, enrolled.secret, {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: fresh.token,
+      }),
+    ).resolves.toMatchObject({ id: enrolled.host.id });
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: fresh.token,
+        name: 'other',
+        workspaceCwd: '/other',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+  });
+
+  it('keeps a fresh enrollment token when the saved credential is invalid', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'worker',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    const fresh = await issueAgentHostEnrollment(PROJECT_ROOT);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, enrolled.host.id, 'invalid', {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: fresh.token,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: fresh.token,
+        name: 'replacement',
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).resolves.toMatchObject({ host: { name: 'replacement' } });
   });
 });
 

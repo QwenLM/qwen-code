@@ -512,6 +512,8 @@ export interface CapabilitiesEnvelope {
     ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
+    /** Whether persistent Agent collaboration is enabled for this workspace. */
+    agentCollaborationEnabled?: boolean;
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';

@@ -783,9 +783,8 @@ describe('serve fast path argument parsing', () => {
       ['agent-host-server', ['--agent-host-server', 'https://example.invalid']],
       ['agent-host-workspace-id', ['--agent-host-workspace-id', 'ws_1']],
       ['agent-host-name', ['--agent-host-name', 'builder']],
-      ['agent-host-provider', ['--agent-host-provider', 'codex']],
       ['agent-host-allow-http', ['--agent-host-allow-http']],
-      ['join', ['--join', 'https://example.invalid/join/ws_1/token']],
+      ['join', ['--join', 'https://example.invalid/join/ws_1']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
@@ -796,7 +795,6 @@ describe('serve fast path argument parsing', () => {
       // the fast path.
       'agent-host-allow-http',
       'agent-host-name',
-      'agent-host-provider',
       'agent-host-server',
       'agent-host-workspace-id',
       'channel',
