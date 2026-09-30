@@ -2058,18 +2058,26 @@ type CdResolution =
   | { kind: 'dynamic' }
   | { kind: 'static'; cwd: string; cwdUnknown: boolean };
 
-function isDynamicShellPath(word: string): boolean {
-  // A `cd` target carrying shell metacharacters can only be a quoting
-  // artifact of the segment split — no real directory argument arrives
-  // with them — so it must escalate like a `$`/backtick target instead of
-  // becoming a concrete cwd writes get attributed to (#12246 variant).
-  return word.includes('$') || word.includes('`') || /[;|&><]/.test(word);
+function isDynamicShellPath(
+  word: string,
+  splitArtifactPossible: boolean,
+): boolean {
+  if (word.includes('$') || word.includes('`')) return true;
+  // A `cd` target carrying operator metacharacters is a quoting artifact of
+  // the segment split, not a real directory, so it must escalate like a
+  // `$`/backtick target instead of becoming a concrete cwd writes get
+  // attributed to (#12246 variant). Only apply this when a backslash forced
+  // the dual-reading walk: in the single self-consistent reading a quoted
+  // metacharacter arrives as a bare word after tokenize strips the quotes,
+  // and `cd 'foo;bar'` / `cd 'a&b'` are legal POSIX directory names.
+  return splitArtifactPossible && /[;|&><]/.test(word);
 }
 
 function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  splitArtifactPossible = false,
 ): CdResolution {
   const words = tokenize(command);
   extractRedirects(words, cwd);
@@ -2099,7 +2107,11 @@ function resolveCdTargetCwd(
   }
 
   const target = words[targetIndex] ?? process.env['HOME'];
-  if (!target || target === '-' || isDynamicShellPath(target)) {
+  if (
+    !target ||
+    target === '-' ||
+    isDynamicShellPath(target, splitArtifactPossible)
+  ) {
     return { kind: 'dynamic' };
   }
 
@@ -2315,7 +2327,12 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    const cdTarget = resolveCdTargetCwd(
+      sub,
+      effectiveCwd,
+      cwdUnknown,
+      reading !== undefined,
+    );
     if (cdTarget.kind === 'static') {
       if (!backgrounded) {
         effectiveCwd = cdTarget.cwd;

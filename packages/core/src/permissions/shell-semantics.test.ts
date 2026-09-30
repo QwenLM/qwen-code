@@ -770,6 +770,24 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  // Quoted shell metacharacters are legal in real directory names
+  // (`mkdir 'foo;bar'` is valid POSIX). tokenize strips the quotes before the
+  // cd target is classified, so the metacharacter escalation must only fire
+  // when a backslash forced the dual-reading walk; in the single consistent
+  // reading a quoted `;`/`&` is a name, not a split artifact.
+  it.each([
+    ["cd 'foo;bar' && echo {} > settings.json", '/repo/foo;bar/settings.json'],
+    ["cd 'a&b' && echo {} > settings.json", '/repo/a&b/settings.json'],
+    ['cd "foo;bar" && echo {} > settings.json', '/repo/foo;bar/settings.json'],
+  ])(
+    'resolves the quoted metacharacter directory in %s without escalating',
+    (command, expectedPath) => {
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        { virtualTool: 'write_file', filePath: expectedPath },
+      ]);
+    },
+  );
+
   it('does not mark later paths uncertain for a backgrounded dynamic `cd`', () => {
     // The foreground form below cannot know where it landed; the backgrounded
     // one can, because it did not move the cwd at all.
