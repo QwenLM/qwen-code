@@ -180,7 +180,7 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        requireLegacyWorkspace(tenantId, actorId, sessionId);
+        requireSubmitter(tenantId, actorId, sessionId);
         requireHarness();
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
@@ -635,6 +635,23 @@ public class ManagedAgentService {
     String lifecycleDigest(String sessionId, String operation) {
         return digests.digest(Map.of(
                 "sessionId", sessionId, "operation", operation));
+    }
+
+    // Later Turns of a Workspace-bound Session run under the creator's
+    // Workspace grants (WorkspaceExecutionStore.authorize), so only the
+    // creator may submit them, and only with Workspace files enabled.
+    // Everyone else keeps the existing refusal.
+    private void requireSubmitter(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if (session.workspace() != null
+                && harness.isWorkspaceFilesAvailable()
+                && workspaces.canRead(tenantId, actorId,
+                        session.workspace().getWorkspaceId())
+                && workspaces.createdSession(tenantId, actorId, sessionId)) {
+            return;
+        }
+        requireLegacyWorkspace(tenantId, actorId, sessionId);
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

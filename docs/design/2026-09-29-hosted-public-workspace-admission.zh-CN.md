@@ -10,6 +10,8 @@ Hosted Read/Write/Edit 已能经过生产 Broker 和 worker 执行，但目前�
 
 G0 开放随创建会话准入的一次初始文件工具轮次，使用现有公开 REST 路由及共享 service 的 WebShell 创建适配器。后续提交、取消、重命名、生命周期与 cwd 操作保持现有 Workspace 门禁。发现接口仍仅广播 Workspace 绑定能力，不宣称完整的 Workspace 执行支持。无需修改 UI。
 
+后续改动在同一开关下为会话创建者开放后续 Turn。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有的 `workspace_unavailable` 拒绝。取消、重命名、生命周期与 cwd 操作仍保持门禁。
+
 ## 决策
 
 - 部署显式启用 `harness.workspace-files-enabled`（环境变量 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`），默认关闭。它要求 Hosted Harness、HTTP Session Store，以及同机、会话隔离的 local-process Broker。原有无绑定的无工具会话行为不变。关闭开关后拒绝携带输入的创建请求（包括重试）；空输入的绑定会话创建和读取保持可用。
@@ -42,4 +44,4 @@ SDK 序列化、connector、store/准入及 coordinator 的定向测试覆盖 cr
 
 ## 边界与待定事项
 
-本次实现把 G0 放在 #12952 下；以后调整到 D 或 W 跟踪不改变契约，也不决定 G3 的范围。Shell、审批、D8 AgentDefinition、公开 profile 选择、后续 Turn、生命周期开放、分布式供给及 W0e/G1–G3 恢复均另行推进。现有 `EmbeddedRuntimeBroker` 是生产组件，可以继续使用；E2E 不得替换它或通过直接调用 store 绕过准入。
+本次实现把 G0 放在 #12952 下；以后调整到 D 或 W 跟踪不改变契约，也不决定 G3 的范围。Shell、审批、D8 AgentDefinition、公开 profile 选择、后续 Turn（此后已对创建者开放，见上文）、生命周期开放、分布式供给及 W0e/G1–G3 恢复均另行推进。现有 `EmbeddedRuntimeBroker` 是生产组件，可以继续使用；E2E 不得替换它或通过直接调用 store 绕过准入。

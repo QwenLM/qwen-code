@@ -142,10 +142,39 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, changed, workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("idempotency_conflict");
             request("GET", "/v1/agents/sessions/" + session, null, null, "other", 404);
-            request("POST", "/v1/agents/sessions/" + session + "/events",
-                    Map.of("type", "agent.session.input.message", "input", List.of(input)), "later", "actor", 409);
+            // A later Turn runs under the creator's grants: another actor who can read the
+            // Session keeps the refusal, and the creator's second Turn runs the file tools again.
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read,"
+                    + " can_create) VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace,
+                    "reader".getBytes(StandardCharsets.UTF_8));
+            Map<String, Object> later = Map.of("type", "agent.session.input.message", "input",
+                    List.of(Map.of("type", "input_text", "text", "G0_AGAIN")));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "reader-later-" + workspace, "reader", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            String laterTurn = request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "later-" + workspace, "actor", 202).path("turn_id").asText();
+            assertThat(laterTurn).isNotBlank();
+            await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+                String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                        + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn);
+                if ("FAILED".equals(status)) {
+                    throw new AssertionError("Later Turn failed. Harness: "
+                            + Files.readString(temporary.resolve("harness.log")));
+                }
+            }).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                        + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn))
+                        .isEqualTo("COMPLETED");
+            });
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 2);
+            assertThat(modelRequests).hasSize(requests + 4);
+            assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
+            assertThat(decoy.resolve("proof.txt")).doesNotExist();
         }
-        assertThat(modelRequests).hasSize(8);
+        assertThat(modelRequests).hasSize(16);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -178,7 +207,7 @@ class HostedPublicWorkspaceIT {
         request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(8);
+        assertThat(modelRequests).hasSize(16);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -287,9 +316,17 @@ class HostedPublicWorkspaceIT {
             List<String> tools = new ArrayList<>();
             body.path("tools").forEach(tool -> tools.add(tool.path("function").path("name").asText()));
             assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
+            // Count only this Turn's tool results, after the latest fixture prompt, so a later
+            // Turn in the same Session runs the same write, edit and read sequence. Other user
+            // messages the Harness may add do not restart the count.
             List<JsonNode> results = new ArrayList<>();
             body.path("messages").forEach(message -> {
-                if ("tool".equals(message.path("role").asText())) results.add(message);
+                String role = message.path("role").asText();
+                if ("user".equals(role) && message.path("content").toString().contains("G0_")) {
+                    results.clear();
+                } else if ("tool".equals(role)) {
+                    results.add(message);
+                }
             });
             int step = results.size();
             if (step == 3) assertThat(results.get(2).toString()).contains("after");

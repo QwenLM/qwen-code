@@ -410,7 +410,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
-        if (session.workspace() != null) {
+        // A bound Session's later Turn needs the same deployment opt-in as
+        // its initial one; the service admits only the Session's creator.
+        if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,

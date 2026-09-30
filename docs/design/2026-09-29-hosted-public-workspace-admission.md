@@ -18,6 +18,12 @@ service. Later submit, cancel, rename, lifecycle and cwd operations retain their
 existing Workspace gates. Discovery continues to advertise only Workspace
 binding, not complete Workspace execution support. No UI changes are required.
 
+A follow-up admits later Turns for the Session's creator under the same opt-in.
+Execution authorizes every Turn against the creator's Workspace grants, so any
+other actor, and every deployment without the opt-in, keeps the existing
+`workspace_unavailable` refusal. Cancel, rename, lifecycle and cwd operations
+remain gated.
+
 ## Decisions
 
 - A deployment explicitly enables `harness.workspace-files-enabled` (environment
@@ -85,7 +91,8 @@ bundle, focused tests and two clean diff audits precede completion.
 
 G0 lives under #12952 for this implementation; moving its tracking to D or W does
 not change the contract. This does not settle G3 scope. Shell, approvals, D8
-AgentDefinition, public profile selection, later Turns, lifecycle enablement,
+AgentDefinition, public profile selection, later Turns (since admitted for the
+creator, above), lifecycle enablement,
 distributed provisioning and W0e/G1–G3 recovery remain separate. The existing
 `EmbeddedRuntimeBroker` is a production component and remains allowed; the E2E
 must not replace it or bypass admission with direct store calls.

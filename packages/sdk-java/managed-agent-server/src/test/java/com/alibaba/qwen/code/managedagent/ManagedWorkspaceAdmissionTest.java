@@ -36,6 +36,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-admission;MODE=MySQL;"
@@ -64,6 +66,9 @@ class ManagedWorkspaceAdmissionTest {
 
     @Autowired
     private ManagedWorkspaceRegistry registry;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @Test
     void discoveryFiltersBeforePagingAndKeepsDefaultOutsidePage()
@@ -521,6 +526,46 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_command WHERE tenant_id = ?",
                 Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void enabledStoreAdmitsALaterTurnForTheBoundSessionCreator() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String digest = "sha256:" + "a".repeat(64);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        List<Map<String, Object>> input = List.of(
+                Map.of("type", "text", "text", "again"));
+
+        // The creator lookup gates the service; other readers are not creators.
+        assertThat(registry.createdSession(tenant, "actor-a", sessionId))
+                .isTrue();
+        assertThat(registry.createdSession(tenant, "actor-b", sessionId))
+                .isFalse();
+        assertThat(registry.createdSession("tenant-" + UUID.randomUUID(),
+                "actor-a", sessionId)).isFalse();
+
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, enabled);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        var admission = transaction.execute(status ->
+                gated.insertTurnCommand(tenant, "SUBMIT", "later", digest,
+                        sessionId, input, digest));
+        assertThat(admission.sessionId()).isEqualTo(sessionId);
+        assertThat(admission.turnId()).isNotBlank();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_turn WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
     }
 
     @Test

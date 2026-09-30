@@ -425,8 +425,11 @@ Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The opt-in W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above. Later public submit, cancel and lifecycle operations remain gated;
-the private Shell profile is not enabled through public creation.
+in G0 above and to later Turns submitted by the Session's creator under the same
+opt-in. Later Turns run under the creator's Workspace grants, so any other actor
+keeps the `workspace_unavailable` refusal. Public cancel and lifecycle
+operations remain gated; the private Shell profile is not enabled through
+public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
