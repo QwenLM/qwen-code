@@ -389,6 +389,13 @@ export class LspServerManager {
       debugLogger.warn(
         `LSP server ${name} requires trusted workspace, skipping startup`,
       );
+      // The admission early-returns precede the `try` that assigns
+      // handle.error, so record the cause here — a bare FAILED state gives
+      // the diagnostics surfaces nothing to render. processDiagnostics is
+      // cleared alongside so a stderr tail from an earlier attempt is not
+      // mistaken for the cause of this refusal.
+      handle.error = new Error('server requires a trusted workspace');
+      handle.processDiagnostics = undefined;
       handle.status = 'FAILED';
       this.serverConfigHashes.delete(name);
       return;
@@ -404,6 +411,8 @@ export class LspServerManager {
       debugLogger.warn(
         `Workspace trust check failed, not starting LSP server ${name}`,
       );
+      handle.error = new Error('workspace is not trusted');
+      handle.processDiagnostics = undefined;
       handle.status = 'FAILED';
       this.serverConfigHashes.delete(name);
       return;
@@ -420,6 +429,10 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
+        handle.error = new Error(
+          `command path is unsafe: ${handle.config.command}`,
+        );
+        handle.processDiagnostics = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
@@ -435,6 +448,8 @@ export class LspServerManager {
         debugLogger.warn(
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
+        handle.error = new Error(`command not found: ${handle.config.command}`);
+        handle.processDiagnostics = undefined;
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
