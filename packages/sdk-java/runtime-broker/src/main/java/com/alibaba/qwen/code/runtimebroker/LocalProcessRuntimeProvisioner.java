@@ -284,7 +284,7 @@ public final class LocalProcessRuntimeProvisioner
                 }
                 return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
                         binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now());
-            }));
+            }), executor);
     }
 
     private static void waitForStop(LocalRuntimeStore.Registration registration, int seconds) {
