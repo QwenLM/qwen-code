@@ -74,6 +74,61 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  it('re-encodes Freeform exec history as Chat function messages', () => {
+    const source = String.raw`text("one\\ntwo");`;
+    const messages = converter.convertLlmRequestToOpenAI(
+      {
+        model: 'test-model',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_exec',
+                  name: 'exec',
+                  args: { source },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_exec',
+                  name: 'exec',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      requestContext,
+    );
+
+    expect(messages).toEqual([
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_exec',
+            type: 'function',
+            function: { name: 'exec', arguments: JSON.stringify({ source }) },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_exec',
+        content: [{ type: 'text', text: 'done' }],
+      },
+    ]);
+  });
+
   function withQwen3TaggedThinkingStreamParser(): RequestContext {
     return {
       ...withStreamParser(),

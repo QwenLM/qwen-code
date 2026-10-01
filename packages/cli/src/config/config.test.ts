@@ -4216,6 +4216,28 @@ describe('mergeExcludeTools', () => {
     expect(codeMode.getToolMode()).toBe('code_mode_only');
   });
 
+  it('should only enable tools.freeform inside CodeModeOnly', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig(
+      { tools: { freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(direct.getFreeform()).toBe(false);
+    expect(codeMode.getFreeform()).toBe(true);
+  });
+
   it.each(['--safe-mode', '--bare'])(
     'should disable CodeModeOnly in %s mode',
     async (flag) => {
