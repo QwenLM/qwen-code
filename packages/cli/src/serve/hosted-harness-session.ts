@@ -223,7 +223,7 @@ function hasUnsettledInput(
   return accepted.size > 0;
 }
 
-async function settleCancelledPromptHook(
+async function settleCancelledPreModelHook(
   session: HostedSession,
 ): Promise<void> {
   if (
@@ -247,19 +247,7 @@ async function settleCancelledPromptHook(
   }
   if (pending.size !== 1) return;
   const [promptId, sequence] = [...pending][0];
-  const occurrenceId = hostedHookOccurrenceId(
-    HookEventName.UserPromptSubmit,
-    promptId,
-  );
   if (
-    !authority.extensionRecordsInDomain('hook_execution').some(({ record }) => {
-      const execution = parseHookExecution(record);
-      return (
-        execution.occurrenceId === occurrenceId &&
-        execution.run.state === 'cancelled' &&
-        execution.run.execution === 'not_started_proven'
-      );
-    }) ||
     events.some(
       (event) =>
         event.sequence > sequence &&
@@ -271,6 +259,35 @@ async function settleCancelledPromptHook(
     )
   )
     return;
+  const occurrenceIds = new Set([
+    hostedHookOccurrenceId(HookEventName.UserPromptSubmit, promptId),
+    hostedHookOccurrenceId(
+      HookEventName.SessionStart,
+      `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
+    ),
+  ]);
+  let cancelled = false;
+  for (const { record } of authority.extensionRecordsInDomain(
+    'hook_execution',
+  )) {
+    const execution = parseHookExecution(record);
+    if (
+      !occurrenceIds.has(execution.occurrenceId) ||
+      execution.run.state !== 'cancelled' ||
+      execution.run.execution !== 'not_started_proven'
+    )
+      continue;
+    const input = object(
+      JSON.parse(
+        (await session.managed.resources.read(execution.inputRef)).toString(),
+      ),
+    );
+    if (input?.['prompt_id'] === promptId) {
+      cancelled = true;
+      break;
+    }
+  }
+  if (!cancelled) return;
   await session.managed.sink.write(
     record(
       session,
@@ -1304,7 +1321,7 @@ export function registerHostedHarnessSessionRoutes(
         !settlePromptId
       )
         session.blocked = true;
-      await settleCancelledPromptHook(session);
+      await settleCancelledPreModelHook(session);
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -1702,7 +1719,7 @@ export function registerHostedHarnessSessionRoutes(
       .then(async (execution) => {
         if (execution.hookId !== '__plan__')
           await session.hooks!.status(execution.occurrenceId);
-        await settleCancelledPromptHook(session);
+        await settleCancelledPreModelHook(session);
         res.json({
           operationId: execution.hookExecutionId,
           state: execution.run.state,
@@ -2127,7 +2144,7 @@ export function registerHostedHarnessSessionRoutes(
           session,
           HookEventName.SessionDelete,
           `session-delete:${req.params['id']}`,
-          {},
+          { deleted_session_id: req.params['id'] },
         );
       }
       await session.hooks?.close();
