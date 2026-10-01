@@ -482,9 +482,9 @@ export interface RunNonInteractiveOptions {
  * Partition headless tool-call requests into consecutive batches by
  * concurrency safety, mirroring the interactive scheduler
  * (CoreToolScheduler). Consecutive concurrency-safe calls (independent
- * sub-agents, read-only shells, pure reads, and Code Mode Bash calls) merge
- * into a single parallel batch; every unsafe call forms its own sequential
- * batch. Request order is preserved.
+ * sub-agents, read-only shells, pure reads) merge into a single parallel
+ * batch; every unsafe call (edits, writes, mutating shells) forms its own
+ * sequential batch. Request order is preserved.
  *
  * Reuses core's `partitionByConcurrencySafety` so the headless and
  * interactive runtimes share one partition algorithm and can't diverge on
@@ -507,7 +507,6 @@ function partitionHeadlessToolCalls(
       config.getToolRegistry().getTool(canonicalToolName(executionRequest.name))
         ?.kind,
       executionRequest.args,
-      executionRequest.source,
     );
   });
 }
@@ -2012,9 +2011,9 @@ export async function runNonInteractive(
 
         // Partition this batch by concurrency safety, then run each
         // partition. Tools that are safe to run concurrently (agent
-        // sub-agents, read-only shell, pure reads, and Code Mode Bash) run
-        // in parallel; everything else runs sequentially in original order.
-        // This mirrors the
+        // sub-agents, read-only shell, pure reads) run in parallel;
+        // everything with side effects (edits, writes, mutating shell)
+        // runs sequentially in original order. This mirrors the
         // interactive CoreToolScheduler (partitionToolCalls /
         // runConcurrently) via the shared isToolCallConcurrencySafe rule,
         // so `qwen -p` and the TUI agree on which tools parallelise — a
