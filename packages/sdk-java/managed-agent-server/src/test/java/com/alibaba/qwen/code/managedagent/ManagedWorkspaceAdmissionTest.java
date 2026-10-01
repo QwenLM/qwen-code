@@ -842,8 +842,9 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(jsonPath("$.workspace.workspaceId")
                         .value("ws-a"))
                 .andExpect(jsonPath("$.workspace.cwdRelative").value("services/api"))
-                // The opt-in is off, so even the creator may not send later
-                // Turns; this pins the isWorkspaceFilesAvailable clause.
+                // The opt-in is off and the 3-arg registration's profile
+                // refs are drifted, so the refusal is over-determined and
+                // cannot isolate the isWorkspaceFilesAvailable clause.
                 .andExpect(jsonPath("$.capabilities.workspaceTurns")
                         .value(false));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
