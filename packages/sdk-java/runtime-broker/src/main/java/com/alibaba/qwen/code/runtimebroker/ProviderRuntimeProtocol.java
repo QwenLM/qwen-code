@@ -55,6 +55,32 @@ final class ProviderRuntimeProtocol {
         Set<String> required;
         Set<String> optional = Set.of();
         switch (kind) {
+            case "raw-file-history" -> {
+                String action = string(operation, "action");
+                switch (action) {
+                    case "bind" -> {
+                        required = Set.of("kind", "action", "state");
+                        if (operation.get("state") != null
+                                && !harnessSessionId.equals(object(operation.get("state")).get("ownerSessionId"))) {
+                            throw invalid();
+                        }
+                    }
+                    case "prepare" -> {
+                        required = Set.of("kind", "action", "promptId", "paths");
+                        if (!sessionId.equals(string(operation, "promptId"))
+                                || !(operation.get("paths") instanceof List<?> paths)
+                                || paths.isEmpty() || paths.stream().anyMatch(value -> !(value instanceof String))) {
+                            throw invalid();
+                        }
+                    }
+                    case "rewind" -> {
+                        required = Set.of("kind", "action", "promptId");
+                        string(operation, "promptId");
+                    }
+                    case "snapshot" -> required = Set.of("kind", "action");
+                    default -> throw invalid();
+                }
+            }
             case "manifest", "history" -> required = Set.of("kind");
             case "begin-turn" -> required = Set.of("kind", "identity");
             case "prepare" -> {

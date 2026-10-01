@@ -190,6 +190,8 @@ export interface CliArgs {
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
+  /** Set only by the daemon's Managed engine factory; see `llm.tsx`. */
+  acpExecutionEngine?: 'managed' | undefined;
   experimentalLsp: boolean | undefined;
   restoreAskUserQuestion: boolean | undefined;
   extensions: string[] | undefined;
@@ -644,6 +646,13 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean' as const,
           description:
             'Starts the agent in ACP mode (deprecated, use --acp instead)',
+          hidden: true,
+        })
+        .option('acp-execution-engine', {
+          type: 'string' as const,
+          choices: ['managed'] as const,
+          description:
+            'Private to qwen serve: the execution engine this ACP host runs',
           hidden: true,
         })
         .option('experimental-skills', {

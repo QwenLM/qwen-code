@@ -279,9 +279,11 @@ export interface PromptToolSurface {
  * Which tools each gated line of `## Using Your Tools` talks about. A line
  * survives only when every tool it names is declared: a line that named a
  * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. Lines absent from this table are policy
- * that holds regardless of the tool surface (tool fallback, parallel calls,
- * respecting denials) and are never dropped.
+ * the defect this gating exists to fix. A deferred tool is reachable but not
+ * declared, so its line drops too; its selection rule travels in the first
+ * description line the deferred-tool reminder shows instead (#12702). Lines
+ * absent from this table are policy that holds regardless of the tool surface
+ * (tool fallback, parallel calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;

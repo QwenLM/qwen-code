@@ -1195,6 +1195,48 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('lets the activation that consumed a taken-over batch commit the next one', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    await previous.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    await previous.detach();
+    await session.replaceActivation();
+    const next = createManagedHarnessHandle(session);
+    await next.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    const consumed = await next.consumeRuntimeResults();
+    expect(consumed?.identity.activationId).toBe(
+      session.activation.activationId,
+    );
+
+    await expect(
+      next.commitAwaitRuntimeBatch(
+        [
+          {
+            ...(await runtimeCommit(session)),
+            functionCallId: 'fc-2',
+            executionCallId: 'ex-2',
+            invocationBindingId: 'bind-2',
+            modelMessageId: 'msg-2',
+            attemptId: 'att-fc-2',
+          },
+        ],
+        turn,
+      ),
+    ).resolves.toMatchObject({ kind: 'durable_wait' });
+    await session.close();
+  });
+
   it('refuses an approval in an unfinished turn from another activation', async () => {
     const session = await open(await createWorkspace());
     const previous = createManagedHarnessHandle(session);

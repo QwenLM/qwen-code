@@ -54,6 +54,40 @@ Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queri
 Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
 [简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
+## Managed tool results (O3)
+
+O3 publishes durable Hosted foreground Shell outcomes to Items, events and
+Managed WebShell. Downloads read immutable stdout/stderr after the writer is
+sealed, without reviving a Harness. The API requires a trusted actor and a
+current Workspace read grant; a tenant header alone cannot authorize it.
+
+O3 requires O2 publication to be configured, including
+`qwen.managed-agent.tool-publication.verification-bytes-per-second` and
+`qwen.managed-agent.tool-publication.max-verification-timeout`. These required
+O2 verification settings are separate from the O3 content-read timeout below.
+
+All settings below use the `qwen.managed-agent.artifacts` prefix:
+
+| Setting                | Default | Meaning                                                                                                                    |
+| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled. |
+| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                     |
+| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                    |
+| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                 |
+| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks; storage requests also use the storage client's timeouts.                |
+
+A product can replace `ManagedArtifactPolicy` for narrower publication or
+actor rules. Published previews persist in shared events. Policy changes do
+not automatically reproject historical results; content requests always use
+the current read policy. Configure the policy before enabling projection.
+Original reads are capped at 1 MiB per Range request; full downloads use
+bounded segment buffers and stream with backpressure. Deployments must retain
+O2 roots and validate real OSS and slow-reader limits before enabling this
+feature. O3 does not enable public Shell execution or garbage collection.
+
+Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-projection.md) |
+[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md).
+
 ## Prerequisites
 
 - Java 21
@@ -283,7 +317,11 @@ Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
-header alone does not authenticate an actor.
+header alone does not authenticate an actor. For local runs and the
+packaged-stack E2E, which have no ingress,
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` names a request header whose value is
+then trusted as the actor for the request's tenant. It is disabled by default;
+never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, the Session creator can list, inspect and answer pending permission
@@ -438,6 +476,25 @@ the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
+Hosted files/Shell file history additionally requires persistent worker backup
+storage. Configure an absolute `QWEN_HOME` in the Broker/worker environment and
+mount it as durable storage writable by the worker OS user. Backups are stored
+at `$QWEN_HOME/file-history/<Harness Session ID>/`; without the override they
+use the worker user's `~/.qwen/file-history/`. Preserve this directory alongside
+the Workspace and SQL database. A Workspace mount alone does not preserve these
+backup bytes, and referenced backups must survive worker/container restarts.
+The stock image runs as UID 10001; derived images must provision appropriate
+write access for their worker user.
+
+Roll out the Broker and worker bundle before the Hosted Harness. An older
+Broker rejects raw-history control, including the bind before a read-only tool
+turn. The Harness releases a definite rejected bind and ends the turn with an
+error; it does not run unbacked writes. Missing backups also refuse tool turns
+until the original backup data is restored. Unknown or partial effects still
+require operator recovery. See the bilingual
+[file-history design](../../../docs/design/2026-09-30-hosted-file-history.md)
+for record capacity and rewind semantics.
+
 ### Verified original-mount recovery (W1a)
 
 W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
@@ -564,23 +621,34 @@ Hosted Harness process trees, deletes their old local homes, starts replacement
 owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
-The in-flight and continuation variants are not yet runnable. Both drive their
-assertion through a physical tool execution, and the Hosted Harness no-tool
-slice refuses every tool call by design, so the modes exit immediately with a
-not-yet-enabled error until the tool-capable Hosted turn tracked in #12380
-lands:
+The in-flight and continuation variants run the same replacement-owner proof
+through a physical Workspace file tool execution. The runner seeds the
+Workspace registry and access grant as deployment data, enables the G0 file
+admission, and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local
+actor, so the Session is created through the public route like any other
+Workspace-bound Session:
 
 ```bash
-npm run test:e2e:managed-inflight-failover       # gated: exits not-yet-enabled
-npm run test:e2e:managed-continuation-failover   # gated: exits not-yet-enabled
+npm run test:e2e:managed-inflight-failover
+npm run test:e2e:managed-continuation-failover
 ```
 
-Once enabled, the in-flight mode holds the first Broker `:start` request after
-the Harness has durably committed its `await_runtime` checkpoint, kills the
-original Spring and Hosted Harness process trees, deletes their homes, and
-starts replacement owners. It requires the replacement Harness to use the
-original `executionCallId`, execute the physical tool exactly once, continue
-the original Prompt without replay, and commit one public terminal event.
+Both modes require Linux: the replacement owner retires the dead worker's
+Runtime binding through the durable local-Worker reclaim (#12380 W0e), which
+runs on Linux only. The runner enables `durable-local-process` for these modes
+and refuses other platforms with an explicit error; the Hosted MySQL CI job
+runs both.
+
+The in-flight mode holds the first Broker `:start` request after the Harness
+has durably committed its `await_runtime` checkpoint, kills the original
+Spring and Hosted Harness process trees, deletes their homes, and starts
+replacement owners. It requires the replacement Harness to use the original
+`executionCallId`, execute the physical tool exactly once, continue the
+original Prompt without replay, and commit one public terminal event. The
+continuation mode kills the Harness after the first published text chunk and
+requires one tool execution, one further continuation, only the replacement's
+answer in the public transcript, and one terminal event. Both modes run in the
+Hosted MySQL CI job.
 
 Once the missing integration lands, a zero-delay run can check the real-model
 path. A controlled cold-start delay can then test output before Runtime

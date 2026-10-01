@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import type {
+  RawFileHistoryOperation,
+  HostedFileHistoryState,
+} from './hosted-file-history-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -36,9 +41,22 @@ export class HostedWorkspaceBrokerRejection extends Error {
     readonly status: number,
     readonly code: unknown,
     readonly details?: Record<string, unknown>,
+    readonly reason?: string,
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
+}
+
+export function isHostedFileHistoryRefusal(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      cause.code === 'managed_runtime_provider_operation_failed') ||
+      (cause.status === 400 &&
+        cause.code === 'runtime_control_operation_invalid'))
+  );
 }
 
 export class HostedWorkspaceBroker {
@@ -64,6 +82,37 @@ export class HostedWorkspaceBroker {
   ) {
     this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(options.baseUrl);
     this.identity = { harnessSessionId: key.sessionId, runtimeSessionId };
+  }
+
+  async fileHistory(
+    operation: Exclude<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<HostedFileHistoryState>;
+  async fileHistory(
+    operation: Extract<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<{
+    state: HostedFileHistoryState;
+    filesChanged: string[];
+    filesFailed: string[];
+    conflict: boolean;
+  }>;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<
+    | HostedFileHistoryState
+    | {
+        state: HostedFileHistoryState;
+        filesChanged: string[];
+        filesFailed: string[];
+        conflict: boolean;
+      }
+  >;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<unknown> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    });
   }
 
   async warm(): Promise<void> {
@@ -428,6 +477,42 @@ export class HostedWorkspaceBroker {
       throw new Error('Original Tool v3 ACK was not confirmed.');
   }
 
+  /**
+   * Read-only execution state for recovery reports. A definitive not-found or
+   * a definitive unknown/abandoned answer resolves to undefined; anything else
+   * fails the caller — a recovery report must never read "unknown" from a
+   * transient error.
+   */
+  async status(id: string): Promise<{ state: string } | undefined> {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        ((cause.status === 404 &&
+          cause.code === 'runtime_execution_not_found') ||
+          // The Broker answers UNKNOWN/ABANDONED records with this definitive
+          // terminal state, which the recovery report carries as outcome
+          // 'unknown' — that is a state to report, not a read failure.
+          (cause.status === 409 &&
+            cause.code === 'runtime_broker_execution_unknown'))
+      )
+        return undefined;
+      throw cause;
+    }
+    if (response['executionCallId'] !== id)
+      throw new Error('Runtime execution identity changed.');
+    const status = object(response['status']);
+    const state = status['state'];
+    if (
+      typeof state !== 'string' ||
+      !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
+    )
+      throw new Error('Runtime execution outcome is unknown.');
+    return { state };
+  }
+
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
     const response = await this.request(
       `/executions/${encodeURIComponent(id)}:acknowledge`,
@@ -510,6 +595,7 @@ export class HostedWorkspaceBroker {
         details && typeof details === 'object' && !Array.isArray(details)
           ? (details as Record<string, unknown>)
           : undefined,
+        typeof parsed['error'] === 'string' ? parsed['error'] : undefined,
       );
     }
     if (

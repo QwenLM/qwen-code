@@ -45,7 +45,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
     static final String V3_ACKNOWLEDGE_PATH = "/internal/managed-runtime/v3/acknowledge";
     static final String PUBLICATION_INSTALL_PATH = "/internal/managed-runtime/v3/publications:install";
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
             "leaseId", "epoch", "provisionRequestId", "tenantId",
@@ -665,7 +665,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, immutable));
         }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
-        if ("history".equals(immutable.get("kind"))) {
+        if ("history".equals(immutable.get("kind")) || "raw-file-history".equals(immutable.get("kind"))) {
             return provider(lease, session, immutable);
         }
         return provider(lease, session, Map.of("kind", "acquire"))
