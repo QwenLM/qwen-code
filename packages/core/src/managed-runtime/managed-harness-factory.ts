@@ -546,6 +546,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           'approval wait must resolve before Runtime dispatch.',
         );
       }
+      if (
+        turn &&
+        (turn.turnId !== previous.identity.turnId ||
+          turn.promptId !== previous.identity.promptId) &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot change the current unfinished turn.',
+        );
+      }
 
       if (
         turn &&

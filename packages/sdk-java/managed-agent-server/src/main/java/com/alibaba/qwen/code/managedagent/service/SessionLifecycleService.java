@@ -12,6 +12,7 @@ import java.util.Locale;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * Admits the durable close, archive and delete operations and reads them
@@ -26,6 +27,13 @@ public class SessionLifecycleService {
             OperationKind.ARCHIVE, "ARCHIVE_SESSION",
             OperationKind.DELETE, "DELETE_SESSION");
     private final AgentStateStore store;
+    private ManagedActionService actions;
+
+    @Autowired
+    void setActions(ManagedActionService actions) {
+        this.actions = actions;
+    }
+
     private final ManagedAgentService sessions;
     private final RequestDigests digests;
     private final SessionLifecycleCoordinator coordinator;
@@ -106,8 +114,10 @@ public class SessionLifecycleService {
                 : digests.digest(Map.of("actorId", actorId));
     }
 
-    private static PublicCommandOperation publicOperation(
-            OperationRecord operation, boolean replayed) {
+    public PublicCommandOperation publicOperation(OperationRecord operation, boolean replayed) {
+        if (operation.kind() == OperationKind.ACTION_RESPONSE) {
+            return actions.publicOperation(operation, replayed);
+        }
         return new PublicCommandOperation(operation.operationId(),
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
@@ -115,8 +125,10 @@ public class SessionLifecycleService {
                 replayed);
     }
 
-    private static WebShellCommandOperation webShellOperation(
-            OperationRecord operation, boolean replayed) {
+    public WebShellCommandOperation webShellOperation(OperationRecord operation, boolean replayed) {
+        if (operation.kind() == OperationKind.ACTION_RESPONSE) {
+            return actions.webOperation(operation, replayed);
+        }
         return new WebShellCommandOperation(operation.operationId(),
                 operation.sessionId(), lower(operation.kind().name()),
                 lower(operation.state()), lower(operation.admissionStage()),
