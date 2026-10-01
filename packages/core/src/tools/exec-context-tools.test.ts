@@ -85,40 +85,44 @@ function outputText(result: ToolResult): string {
 }
 
 describe('exec context tool results', () => {
-  it('does not add nested skill results without explicit text output', async () => {
-    const body = 'skill instruction '.repeat(4000);
-    const { run } = setup(
-      ToolNames.SKILL,
-      { modelOverride: 'skill-model' },
-      body,
-    );
-    const result = await run("await tools.skill({skill: 'test'});");
-    expect(outputText(result)).toBe('');
-    expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
-    expect(result.modelOverride).toBe('skill-model');
-    expect(result.error).toBeUndefined();
-  });
+  it.each([false, true])(
+    'does not add nested skill results without explicit text output, including later failure: %s',
+    async (fail) => {
+      const body = 'skill instruction '.repeat(4000);
+      const { run, registry } = setup(
+        ToolNames.SKILL,
+        { modelOverride: 'skill-model' },
+        body,
+      );
+      const clearLoadedSkills = vi.fn();
+      Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+      const result = await run(
+        `await tools.skill({skill: 'test'}); ${fail ? 'throw new Error("later failure");' : ''}`,
+      );
+      if (fail) expect(outputText(result)).toContain('later failure');
+      else expect(outputText(result)).toBe('');
+      expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
+      expect(result.modelOverride).toBe('skill-model');
+      expect(result.error).toBeUndefined();
+      expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    },
+  );
 
-  it('returns nested skill output only through text()', async () => {
-    const body = 'skill instruction '.repeat(20);
-    const { run } = setup(ToolNames.SKILL, {}, body);
-    const result = await run(
-      "text((await tools.skill({skill: 'test'})).output);",
-    );
-    expect(outputText(result)).toBe(body);
-    expect(outputText(result).match(/skill instruction/g)).toHaveLength(20);
-    expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
-  });
-
-  it('reports a later script failure when nested skill output is not emitted', async () => {
-    const { run } = setup(ToolNames.SKILL, {}, 'skill body');
-    const result = await run(
-      "await tools.skill({skill: 'test'}); throw new Error('later failure');",
-    );
-    expect(outputText(result)).toContain('Script error:');
-    expect(outputText(result)).toContain('later failure');
-    expect(result.error?.message).toBe(outputText(result));
-  });
+  it.each(['text(r.output);', 'text({ output: r.output });'])(
+    'returns nested skill output only through text(): %s',
+    async (emit) => {
+      const body = 'skill instruction\n'.repeat(20);
+      const { run, registry } = setup(ToolNames.SKILL, {}, body);
+      const clearLoadedSkills = vi.fn();
+      Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+      const result = await run(
+        `const r = await tools.skill({skill: 'test'}); ${emit}`,
+      );
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
+      expect(outputText(result).match(/skill instruction/g)).toHaveLength(20);
+      expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
+    },
+  );
 
   it('preserves an explicit undefined model override', async () => {
     const { run } = setup(

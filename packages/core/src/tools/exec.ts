@@ -59,7 +59,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
     let retainedOmniMedia = false;
     const metadata: Pick<ToolResult, 'modelOverride' | 'terminateTurn'> = {};
     let skillAttempted = false;
-    let skillSucceeded = false;
+    const skillOutputs: string[] = [];
     const clearSkillTracking = () => {
       const skill = this.config.getToolRegistry().getTool(ToolNames.SKILL);
       if (
@@ -113,7 +113,6 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
               if ('modelOverride' in response)
                 metadata.modelOverride = response.modelOverride;
               if (response.terminateTurn) metadata.terminateTurn = true;
-              if (name === ToolNames.SKILL) skillSucceeded = true;
               const nestedParts = (native?.parts ?? []) as Part[];
               const hasOmniMedia =
                 this.config.isOmniEnabled() &&
@@ -133,6 +132,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
             },
           );
           if (metadata.terminateTurn) throw new CodeModeTurnTerminated();
+          if (name === ToolNames.SKILL) skillOutputs.push(result.output);
           if (name === 'capture_screen_context') {
             const { content: _content, ...textResult } = result;
             return textResult;
@@ -162,7 +162,7 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         signal,
       );
     } catch (error) {
-      if (skillAttempted && (signal.aborted || !skillSucceeded)) {
+      if (skillAttempted && (signal.aborted || skillOutputs.length === 0)) {
         clearSkillTracking();
       }
       if (signal.aborted) throw error;
@@ -177,6 +177,18 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       sections.join('\n'),
       EXEC_MAX_OUTPUT_CHARS,
     );
+    // A skill result the script never printed did not reach the model, so
+    // the skill must stay reloadable instead of answering "already loaded".
+    // text() prints objects as JSON, which escapes the body.
+    if (
+      skillOutputs.some(
+        (skillOutput) =>
+          !output.includes(skillOutput) &&
+          !output.includes(JSON.stringify(skillOutput).slice(1, -1)),
+      )
+    ) {
+      clearSkillTracking();
+    }
     const display = output;
     const llmContent: Part[] = [{ text: display }, ...media];
     for (const item of result.content ?? []) {
@@ -203,7 +215,10 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
       returnDisplay: display,
       ...metadata,
       persistedOutputFiles: [],
-      ...(failure === undefined || media.length > 0
+      // The error path would drop native media and the nested turn metadata.
+      ...(failure === undefined ||
+      media.length > 0 ||
+      Object.keys(metadata).length > 0
         ? {}
         : {
             error: { message: output, type: ToolErrorType.EXECUTION_FAILED },
