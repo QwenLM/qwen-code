@@ -187,7 +187,10 @@
                                 <include>**/Hosted*IT.java</include>
                             </includes>
                             <failIfNoTests>true</failIfNoTests>
-                            <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+                            <!-- The Hosted*IT classes share one fork; the file
+                                 history control calls roughly doubled the
+                                 ToolTurn driver's runtime. -->
+                            <forkedProcessTimeoutInSeconds>900</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

@@ -30,16 +30,22 @@ describe('monitor-tool', () => {
 
   it('should call monitor tool when asked to watch a command', async () => {
     rig = new TestRig();
-    await rig.setup('monitor-tool-call');
+    await rig.setup('monitor-tool-call', {
+      settings: {
+        // Cut real-model round trips from the critical path: tools.visible
+        // skips the tool_search discovery call, and the background extractor
+        // adds a post-turn request before exit; provider TTFT spikes
+        // (30-45s observed) otherwise push the run past the timeout (#13001).
+        tools: { visible: ['monitor'] },
+        memory: { enableManagedAutoMemory: false },
+      },
+    });
 
     const resultPromise = rig.run(
       'Use the monitor tool to watch this command: for i in 1 2 3; do echo "EVENT_$i"; sleep 0.3; done. ' +
         'Set description to "test events". After starting the monitor, just say "Monitor launched."',
     );
 
-    // The monitor call typically sits behind a ToolSearch roundtrip, so the
-    // model needs two chained turns before the tool call lands in telemetry.
-    // On a loaded Docker leg that exceeds the 60s CI default (#12962).
     const [result, foundMonitor] = await Promise.all([
       resultPromise,
       rig.waitForToolCall('monitor', 180_000),

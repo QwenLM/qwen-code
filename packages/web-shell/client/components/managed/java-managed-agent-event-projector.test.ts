@@ -151,6 +151,28 @@ describe('java managed agent event projector', () => {
     ).toBe('tool_completed');
   });
 
+  it('maps an approval update, which carries no Turn', () => {
+    expect(
+      projectJavaAgentEvent({
+        sequence: 9,
+        eventId: 'evt_9',
+        sessionId: 'session-1',
+        turnId: null,
+        type: 'action.updated',
+        createdAt: 9,
+        data: { actionId: 'tool_approval_1', state: 'decided' },
+        terminal: false,
+      }),
+    ).toEqual({
+      id: 9,
+      at: 9,
+      type: 'action_updated',
+      sessionId: 'session-1',
+      turnId: '',
+      data: { actionId: 'tool_approval_1', state: 'decided' },
+    });
+  });
+
   it('keeps failed tool status and identity in live events', () => {
     expect(
       projectJavaAgentEvent({

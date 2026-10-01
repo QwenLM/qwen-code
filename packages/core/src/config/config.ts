@@ -6068,6 +6068,9 @@ export class Config {
       if (skillTool && 'clearLoadedSkills' in skillTool) {
         (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
       }
+      // Reviews belong to the previous history. The new primary chat restores
+      // its own schema evidence when loading its history (#12569).
+      this.toolRegistry?.clearReviewedDeclarations?.();
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
