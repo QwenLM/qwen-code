@@ -59,6 +59,13 @@ and prompts on the base and candidate, with no `tools.eager` override:
 5. ACP direct and bridged Agent calls: verify concurrent delegation and the
    immediate todo reminder. Non-Agent bridge calls remain sequential and do not
    force that reminder. Goal keyword search must follow turn-key availability.
+6. A settings file with a nonzero `tools.toolSearch.threshold`, shaped like a
+   real deployment: record `/context` and the first request's schemas on the
+   base and the candidate, and state whether the deferred pool still fits the
+   preload budget (the whole pool is revealed) or now reveals none of it, since
+   the preload is all-or-nothing over the whole pool and this change adds five
+   large declarations to it. Report this separately from the discovery-overhead
+   line below.
 
 Keep raw requests and task outcomes, not only declaration character counts.
 Report regressions and discovery overhead separately; do not claim a percentage
