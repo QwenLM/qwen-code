@@ -1510,11 +1510,11 @@ export class QQChannel extends ChannelBase {
     // record may only go once no chain can still consult it. The guard above
     // parks whenever a live stream entry has a marker, so this teardown sees
     // flushInFlight=true only when a chain holds the marker with no streamState
-    // entry of its own. That chain's handOffSealedPre can still read the
-    // record, so it is kept here; the delete below also clears the marker, so
-    // the chain's own .finally returns on its ownership check and never reaches
-    // deleteTurnGenerationIfOwned. The next onPromptStart, onSessionDied, or
-    // disconnect drops the record instead.
+    // entry of its own. The deletes below clear that marker, so by the time the
+    // chain settles its handOffSealedPre fails the ownsSession gate and never
+    // reaches the record; the record is kept while the marker was live rather
+    // than deleted beneath a settling chain, and the next onPromptStart,
+    // onSessionDied, or disconnect drops it.
     const flushInFlight = this.flushingSessions.has(sessionId);
     this.releaseSessionReplyAnchor(sessionId);
     this.streamState.delete(sessionId);
@@ -2056,14 +2056,16 @@ export class QQChannel extends ChannelBase {
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED = permanent failure.
           // Drop everything — including any residual buffer that arrived concurrently.
           const current = this.streamState.get(sessionId);
-          // Hand the sealed pre-boundary head off BEFORE any delete and
-          // OUTSIDE the ownership guard (R12-2): this entry carries the only
-          // copy, and the boundary cleared the bridge's collection so it is
-          // absent from fullText. A superseded state reached here precisely
-          // because the superseded branch left the head in place for the
-          // in-flight owner — when this send is that owner and it fails
-          // permanently, this arm is the only remaining chance to re-stash
-          // it; a parked turn with no successor delivers it on its own
+          // Hand the sealed pre-boundary head off BEFORE any delete and outside
+          // the identity guard below (R12-2): this entry carries the only copy,
+          // and the boundary cleared the bridge's collection so it is absent
+          // from fullText. The handoff is itself gated on session ownership
+          // inside handOffSealedPre (ownsSession), which drops the seal when the
+          // session was torn down or replaced outright. A superseded state
+          // reached here precisely because the superseded branch left the head
+          // in place for the in-flight owner — when this send is that owner and
+          // it fails permanently, this arm is the only remaining chance to
+          // re-stash it; a parked turn with no successor delivers it on its own
           // anchor. handOffSealedPre is idempotent (it clears sealedPre at
           // its top), so a state that already handed off is a no-op. The seal
           // this send carried is passed too: a boundary may have re-sealed the
@@ -2076,7 +2078,7 @@ export class QQChannel extends ChannelBase {
           // be injected into a successor's reply (R9-1).
           if (
             state.boundaryClearedInFlight !== undefined &&
-            state.turn === (this.turnCounter.get(sessionId) ?? 0)
+            this.ownsLiveTurn(sessionId, state)
           ) {
             state.sealedPre = this.sealClearedPayload(
               buffer,
@@ -2098,7 +2100,7 @@ export class QQChannel extends ChannelBase {
           // a pair QQ already accepted, which it dedupes and silently drops.
           // onResponseComplete's terminal release reclaims it at turn end.
           const turnStillLive =
-            state.turn === (this.turnCounter.get(sessionId) ?? 0) &&
+            this.ownsLiveTurn(sessionId, state) &&
             !this.pendingStreamDelete.has(sessionId);
           if (!turnStillLive && state.msgId !== undefined) {
             this.releaseSessionReplyAnchor(sessionId, state.msgId);
@@ -2151,19 +2153,24 @@ export class QQChannel extends ChannelBase {
             // was in flight removed the payload's whole text from fullText —
             // the seal it carried may cover only a prefix — so the whole
             // payload is re-sealed, plus the residual it sealed itself (flagged
-            // deterministically, not by comparing seal text). The carried-seal
+            // deterministically, not by comparing seal text). Only a chain that
+            // still owns the live turn may write the seal: a superseded
+            // entry's payload is abandoned with its failure and must not be
+            // injected into a successor's reply (R21-6). The carried-seal
             // branch is the backstop for a re-seal whose boundary marker was
             // missed.
-            if (state.boundaryClearedInFlight !== undefined) {
-              current.sealedPre = this.sealClearedPayload(
-                buffer,
-                this.capturedResidual(state),
-              );
-            } else if (
-              carriedSeal !== undefined &&
-              current.sealedPre !== carriedSeal
-            ) {
-              current.sealedPre = carriedSeal + (current.sealedPre ?? '');
+            if (this.ownsLiveTurn(sessionId, state)) {
+              if (state.boundaryClearedInFlight !== undefined) {
+                current.sealedPre = this.sealClearedPayload(
+                  buffer,
+                  this.capturedResidual(state),
+                );
+              } else if (
+                carriedSeal !== undefined &&
+                current.sealedPre !== carriedSeal
+              ) {
+                current.sealedPre = carriedSeal + (current.sealedPre ?? '');
+              }
             }
             current.retryCount++;
             if (
@@ -2210,18 +2217,22 @@ export class QQChannel extends ChannelBase {
           // #6: Identity guard — only operate on the same state reference
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
-            // Same re-seal as the parked branch above: a boundary during the
-            // flight strips the whole payload from fullText.
-            if (state.boundaryClearedInFlight !== undefined) {
-              current.sealedPre = this.sealClearedPayload(
-                buffer,
-                this.capturedResidual(state),
-              );
-            } else if (
-              carriedSeal !== undefined &&
-              current.sealedPre !== carriedSeal
-            ) {
-              current.sealedPre = carriedSeal + (current.sealedPre ?? '');
+            // Same re-seal as the parked branch above, under the same
+            // turn-ownership gate: a boundary during the flight strips the
+            // whole payload from fullText, but only the live turn may seal it
+            // (R21-6).
+            if (this.ownsLiveTurn(sessionId, state)) {
+              if (state.boundaryClearedInFlight !== undefined) {
+                current.sealedPre = this.sealClearedPayload(
+                  buffer,
+                  this.capturedResidual(state),
+                );
+              } else if (
+                carriedSeal !== undefined &&
+                current.sealedPre !== carriedSeal
+              ) {
+                current.sealedPre = carriedSeal + (current.sealedPre ?? '');
+              }
             }
             // #3: If re-buffer exceeds max length, flush immediately
             if (current.buffer.length >= this.streamBufferLimit(current)) {
@@ -2726,6 +2737,30 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * Whether a settling flush chain still owns the session: its entry is the
+   * live streamState entry, or the chain still holds the flush marker. The
+   * marker is cleared only by `.finally()` after the settle arms, so this stays
+   * true while those arms hand state off; a session torn down by onSessionDied
+   * (or replaced outright) owns neither, and its chain must not write shared
+   * per-session state (R21-1).
+   */
+  private ownsSession(sessionId: string, state: QQStreamState): boolean {
+    return (
+      this.streamState.get(sessionId) === state ||
+      this.flushingSessions.get(sessionId) === state
+    );
+  }
+
+  /**
+   * Whether this entry is still the turn that owns the session's counter. A
+   * superseded entry's text is abandoned with its failure and must not be
+   * sealed into a successor's reply (R21-6, R9-1).
+   */
+  private ownsLiveTurn(sessionId: string, state: QQStreamState): boolean {
+    return state.turn === (this.turnCounter.get(sessionId) ?? 0);
+  }
+
+  /**
    * Hand a doomed entry's sealed pre-boundary head to whatever can still
    * deliver it, before the entry carrying the only copy is dropped. The
    * boundary cleared the bridge's chunk collection, so this text is absent
@@ -2770,6 +2805,21 @@ export class QQChannel extends ChannelBase {
     turnIsOver = this.pendingStreamDelete.has(sessionId),
     carriedSeal?: string,
   ): void {
+    // A chain whose session was torn down (onSessionDied) or replaced outright
+    // owns neither map: its seal has no consumer left, and re-writing the side
+    // buffer here would later prepend a dead turn's head to an unrelated
+    // successor reply (R21-1). A superseded chain that still holds the flush
+    // marker legitimately hands off, which is why both maps are consulted.
+    if (!this.ownsSession(sessionId, state)) {
+      // The seal is dropped here, so log it like every other loss: nothing else
+      // observes this path.
+      if (state.sealedPre !== undefined) {
+        process.stderr.write(
+          `[QQ:${this.name}] dropping ${state.sealedPre.length} chars of sealed head for unowned session ${sanitizeLogText(sessionId, 64)}\n`,
+        );
+      }
+      return;
+    }
     const liveSeal = state.sealedPre;
     const sealed =
       carriedSeal !== undefined && carriedSeal !== liveSeal

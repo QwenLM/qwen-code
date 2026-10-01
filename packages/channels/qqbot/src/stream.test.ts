@@ -5660,6 +5660,106 @@ describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () 
     expect(sentContents().at(-1)).toBe('DE');
   });
 
+  it('widens the carried seal when a re-seal marker was missed', async () => {
+    const ch = makeChannel({ maxFlushRetries: 2 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      { sealedPre?: string; boundaryClearedInFlight?: string }
+    >;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // 'HEAD' buffers, a boundary seals it, and the drain takes it with the send
+    // still unresolved.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Direct state for a boundary re-seal whose marker was missed: every live
+    // boundary sets boundaryClearedInFlight, so no public path produces this
+    // pair. It pins the carried-seal backstop at the re-buffer arms.
+    const state = stateMap.get('s1')!;
+    expect(state.boundaryClearedInFlight).toBeUndefined();
+    state.sealedPre = 'RESID';
+    state.buffer = 'RESID';
+
+    mockSendQQMessage.mockRejectedValue(new Error('transient'));
+    rejectSend(new Error('transient'));
+    await drain();
+    // The carried head is widened onto the seal written during the flight.
+    expect(state.sealedPre).toBe('HEADRESID');
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+    await drain();
+    // And the head rides that payload exactly once.
+    expect(sentContents().at(-1)).toBe('HEADRESID');
+  });
+
+  it('recovers the carried seal when a permanent re-seal marker was missed', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      { sealedPre?: string; boundaryClearedInFlight?: string }
+    >;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // 'HEAD' buffers, a boundary seals it, and the drain takes it with the send
+    // still unresolved.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Direct state for a boundary re-seal whose marker was missed: every live
+    // boundary sets boundaryClearedInFlight, so no public path produces this
+    // pair. It pins the carried-seal argument the permanent arm passes to
+    // handOffSealedPre.
+    const state = stateMap.get('s1')!;
+    expect(state.boundaryClearedInFlight).toBeUndefined();
+    state.sealedPre = 'RESID';
+    state.buffer = 'RESID';
+
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+    // The permanent arm hands the carried head and the live seal off together,
+    // head first: the merged stash is the only copy left.
+    expect(state.sealedPre).toBeUndefined();
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 1,
+      text: 'HEADRESID',
+      pre: 'HEADRESID',
+    });
+
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+    await drain();
+    // The recovered head is delivered exactly once, not duplicated.
+    expect(sentContents().at(-1)).toBe('HEADRESID');
+  });
+
   it('seals the residual a hook-suppressed boundary stripped from a flush in flight', async () => {
     // ChannelBase suppresses onResponseBoundary while a cancel is pending, but
     // the bridge still clears its chunk collection and emits the boundary, so
@@ -5749,6 +5849,179 @@ describe('R14-1 acceptance: an in-flight flush must not clear a newer seal', () 
     ).get('s1');
     expect(orphan?.text).toBe('HEAD');
     expect(orphan?.text).not.toContain('HBHEAD');
+  });
+});
+
+// A settling flush chain must not write shared per-session state once it no
+// longer owns the session (onSessionDied tore it down) or the turn (a
+// successor replaced it): the dead or superseded text would be prepended to
+// an unrelated successor reply.
+describe('R21 acceptance: ownership gates for a settling flush chain', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not re-stash a sealed head for a session onSessionDied tore down', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<string, { sealedPre?: string }>;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<string, unknown>;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // A chunk streams, a boundary seals it, and the idle flush takes it with
+    // the send still unresolved.
+    onResponseChunk(ch, 'test-chat', 'DEAD-TURN-HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+    expect(stateMap.get('s1')!.sealedPre).toBe('DEAD-TURN-HEAD');
+
+    // The session dies while that send is in flight: every map the handoff
+    // consults is torn down, but the chain still holds the seal.
+    ch.onSessionDied('s1');
+    expect(orphanBuffer.size).toBe(0);
+
+    mockSendQQMessage.mockRejectedValue(new Error('transient'));
+    rejectSend(new Error('transient'));
+    await drain();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+
+    // Nothing may be stashed for the dead session: a successor turn would
+    // drain it and prepend the dead head to its reply.
+    expect(orphanBuffer.size).toBe(0);
+    // The drop is observable, like every other loss in this file.
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'dropping 14 chars of sealed head for unowned session s1',
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('does not re-seal a superseded payload into a successor stash', async () => {
+    const ch = makeChannel({ maxFlushRetries: 2 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      { turn: number; sealedPre?: string }
+    >;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // Turn 1 streams 'P' and the drain takes it with the send unresolved.
+    onResponseChunk(ch, 'test-chat', 'P', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // 'Q' buffers during the flight, completion parks turn 1, and turn 2
+    // starts: its chunks divert into the stash under turn 2.
+    onResponseChunk(ch, 'test-chat', 'Q', 's1');
+    await onResponseComplete(ch, 'test-chat', 'P', 's1');
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    onResponseChunk(ch, 'test-chat', 'T2', 's1');
+    expect(orphanBuffer.get('s1')!.text).toBe('T2');
+
+    // A boundary during turn 1's flight marks that superseded entry 'payload',
+    // but must not seal anything: a superseded turn's payload is abandoned.
+    onResponseBoundary(ch, 'test-chat', 's1');
+    const superseded = stateMap.get('s1')!;
+    expect(superseded.turn).toBe(1);
+
+    // Turn 1's send now fails transiently: the re-seal must not touch a
+    // superseded entry, and on exhaustion nothing of it may reach turn 2's
+    // stash.
+    mockSendQQMessage.mockRejectedValue(new Error('transient'));
+    rejectSend(new Error('transient'));
+    await drain();
+    expect(superseded.sealedPre).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+
+    expect(orphanBuffer.get('s1')).toEqual({
+      turn: 2,
+      text: 'T2',
+      pre: 'T2',
+    });
+
+    // Completion then delivers turn 2's text alone: the superseded 'P' payload
+    // must never reach the wire.
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    await onResponseComplete(ch, 'test-chat', '', 's1');
+    await drain();
+    expect(sentContents().at(-1)).toBe('T2');
+  });
+
+  it('does not re-seal a superseded payload in the non-parked arm either', async () => {
+    const ch = makeChannel({ maxFlushRetries: 2 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      { turn: number; sealedPre?: string; boundaryClearedInFlight?: string }
+    >;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<string, unknown>;
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    onResponseChunk(ch, 'test-chat', 'P', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    onResponseChunk(ch, 'test-chat', 'Q', 's1');
+    // Turn 2 starts without a chunk of its own, so turn 1's entry stays in
+    // streamState (no park flag): its settlement takes the non-parked arm.
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    const superseded = stateMap.get('s1')!;
+    expect(superseded.turn).toBe(1);
+    expect(superseded.boundaryClearedInFlight).toBe('payload');
+
+    mockSendQQMessage.mockRejectedValue(new Error('transient'));
+    rejectSend(new Error('transient'));
+    await drain();
+
+    // A superseded entry must not be re-sealed even when its own chain
+    // re-buffers it instead of parking.
+    expect(superseded.sealedPre).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await drain();
+    // Exhaustion leaves nothing of the superseded turn behind.
+    expect(stateMap.has('s1')).toBe(false);
+    expect(orphanBuffer.size).toBe(0);
   });
 });
 
