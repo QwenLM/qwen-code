@@ -486,7 +486,8 @@ export class HostedMcpSession {
       this.configurations().some(
         (entry) =>
           !['settled', 'failed', 'cancelled'].includes(entry.run.state) ||
-          entry.releaseState === 'releasing',
+          entry.releaseState === 'releasing' ||
+          entry.releaseState === 'drained',
       )
     );
   }
@@ -782,15 +783,29 @@ export class HostedMcpSession {
     );
     if (!this.acquired && !configurations.length) return;
     if (
-      configurations.length &&
-      configurations.every((entry) => entry.releaseState === 'releasing')
+      configurations.some(
+        (entry) =>
+          entry.releaseState === 'releasing' &&
+          entry.connectionGeneration !== null,
+      ) &&
+      configurations.every((entry) => entry.releaseState !== 'active')
     ) {
       try {
+        await this.acquireOwner();
+      } catch (cause) {
+        // Older writers did not persist drain receipts before owner release.
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 409 ||
+          ![
+            'runtime_session_not_ready',
+            'runtime_session_not_acquirable',
+          ].includes(String(cause.code))
+        )
+          throw cause;
         await this.broker.release();
         await this.markReleased(configurations);
         return;
-      } catch {
-        // A lost release reply can be confirmed only by the original owner.
       }
     }
     if (
@@ -804,6 +819,7 @@ export class HostedMcpSession {
       await this.acquireOwner();
     }
     for (let configuration of configurations) {
+      if (configuration.releaseState === 'drained') continue;
       if (
         (configuration.run.state === 'failed' &&
           configuration.run.execution === 'settled') ||
@@ -814,6 +830,10 @@ export class HostedMcpSession {
             ...configuration,
             releaseState: 'releasing',
           });
+        await this.commitConfiguration({
+          ...configuration,
+          releaseState: 'drained',
+        });
         continue;
       }
       if (
@@ -843,6 +863,10 @@ export class HostedMcpSession {
       }
       if (response.state !== 'settled' || response.error)
         throw new HostedMcpRecoveryRequiredError();
+      await this.commitConfiguration({
+        ...configuration,
+        releaseState: 'drained',
+      });
     }
     await this.broker.release();
     await this.markReleased(configurations);
