@@ -1,0 +1,324 @@
+/* A collaboration conversation is an ordinary Web Shell chat with agents in
+   it. Everything here either borrows a transcript component's look or sits
+   where the chat already has a slot; nothing introduces a second style. */
+
+/* Aligns with the transcript column the message list lays out. */
+.context {
+  padding: 8px 20px 4px;
+}
+
+/* The transcript's own fold rows show their chevron; this one does too. */
+.context .chevronShown {
+  opacity: 1;
+}
+
+.contextBody {
+  max-height: 12rem;
+  overflow-y: auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The strip between the transcript and the composer, where the main chat
+   shows its own streaming status and approvals. */
+.dock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 20px 20px;
+}
+
+/* Live rows are read, not clicked: keep the group's row geometry, drop its
+   pointer affordance. */
+.row {
+  cursor: default;
+}
+
+.row:hover {
+  background: transparent;
+}
+
+.rowText {
+  color: var(--foreground);
+}
+
+.attention {
+  color: var(--status-attention-fg);
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 4px 26px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.step {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.stepText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.approvalCaption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.note:has(> svg) {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Sits in the composer toolbar's start slot, where a session shows its mode
+   and model: it says who the draft will reach. */
+.composerHint {
+  min-width: 0;
+  overflow: hidden;
+  padding-inline-start: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Team panel */
+
+.team {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.teamHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+
+.teamTitle {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teamReason,
+.muted {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.teamLink {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.teamLink:hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+.sectionTitle {
+  margin: 12px 0 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.criteria {
+  margin-bottom: 4px;
+}
+
+.criteriaText {
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.memberList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.member {
+  border-radius: var(--radius);
+}
+
+.memberHead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.memberToggle,
+.childRow {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.childRow {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.memberToggle:disabled {
+  cursor: default;
+}
+
+.memberToggle:not(:disabled):hover,
+.childRow:hover {
+  background: var(--secondary);
+}
+
+.memberText {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.memberName {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberStatus {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tones live in this sheet rather than in utility classes so they beat
+   `.memberStatus`'s own `color` by source order instead of losing a
+   single-class specificity tie to whichever sheet was injected last. */
+.memberStatusAttention {
+  color: var(--status-attention-fg);
+}
+
+.memberStatusRunning {
+  color: var(--status-running-fg);
+}
+
+.leadBadge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.memberChevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .memberChevron {
+    transition: transform 120ms ease;
+  }
+}
+
+.memberToggle[aria-expanded='true'] .memberChevron {
+  transform: rotate(90deg);
+}
+
+/* Indented to the name, past the avatar, so the detail reads as the
+   member's. */
+.memberDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 8px 8px 38px;
+}
+
+.history > summary {
+  cursor: pointer;
+}
+
+.budget {
+  display: flex;
+  flex-direction: column;
+  margin-top: auto;
+  padding-top: 16px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}

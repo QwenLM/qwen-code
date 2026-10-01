@@ -12,6 +12,7 @@ import os from 'node:os';
 import sharp from 'sharp';
 import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
+import type { ReadManyFilesOptions } from './readManyFiles.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { Config } from '../config/config.js';
@@ -56,8 +57,8 @@ function findInlineDataPart(parts: PartListUnion): Part | undefined {
 describe('readManyFiles', () => {
   let tempRootDir: string;
 
-  // Helper to create mock config
-  const createMockConfig = (rootDir: string): Config =>
+  // Helper to create mock config; `overrides` replace individual methods.
+  const createMockConfig = (rootDir: string, overrides: object = {}): Config =>
     ({
       getFileService: () => new FileDiscoveryService(rootDir),
       getFileFilteringOptions: () => ({
@@ -72,6 +73,7 @@ describe('readManyFiles', () => {
       getFileSystemService: () => new StandardFileSystemService(),
       getContentGeneratorConfig: () => ({ modalities: {} }),
       getModel: () => 'text-only-model',
+      ...overrides,
     }) as unknown as Config;
 
   // Variant of createMockConfig wired to a live FileReadCache so the
@@ -80,12 +82,34 @@ describe('readManyFiles', () => {
     rootDir: string,
     cache: FileReadCache,
     fileReadCacheDisabled = false,
+    overrides: object = {},
   ): Config =>
-    ({
-      ...createMockConfig(rootDir),
+    createMockConfig(rootDir, {
       getFileReadCache: () => cache,
       getFileReadCacheDisabled: () => fileReadCacheDisabled,
-    }) as unknown as Config;
+      ...overrides,
+    });
+  const withFs = (fileSystemService: unknown) => ({
+    getFileSystemService: () => fileSystemService,
+  });
+
+  // Runs readManyFiles (default mock config unless given) and flattens parts.
+  async function read(
+    options: ReadManyFilesOptions | string[],
+    config = createMockConfig(tempRootDir),
+  ) {
+    const result = await readManyFiles(
+      config,
+      Array.isArray(options) ? { paths: options } : options,
+    );
+    return { result, content: contentToString(result.contentParts) };
+  }
+
+  // The identity map a caller builds after validating `absolutePath`.
+  const pin = (absolutePath: string, stats: { dev: number; ino: number }) =>
+    new Map([[absolutePath, { dev: stats.dev, ino: stats.ino }]]);
+  const pinNow = async (absolutePath: string) =>
+    pin(absolutePath, await fs.stat(absolutePath));
 
   async function createTestFile(
     ...pathSegments: string[]
@@ -97,7 +121,32 @@ describe('readManyFiles', () => {
     return { relativePath, absolutePath };
   }
 
-  function mockZeroInodeForPath(absolutePath: string): { restore(): void } {
+  // Writes `data` at `relativePath` under the temp root; returns its path.
+  async function writeRaw(relativePath: string, data: string | Buffer) {
+    const absolutePath = path.join(tempRootDir, relativePath);
+    await fs.writeFile(absolutePath, data);
+    return absolutePath;
+  }
+
+  // Writes a real 20x10 PNG at `relativePath`; returns its path.
+  async function writePng(relativePath: string) {
+    const absolutePath = path.join(tempRootDir, relativePath);
+    await sharp({
+      create: { width: 20, height: 10, channels: 3, background: '#306090' },
+    })
+      .png()
+      .toFile(absolutePath);
+    return absolutePath;
+  }
+
+  // Just the PNG signature: an image the pipeline cannot decode.
+  const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+  // Reads `copies` references to a file pinned with ino 0 while the
+  // filesystem (path and handle stats) reports ino 0 for it.
+  async function readZeroInode(name: string, copies: number) {
+    const { relativePath, absolutePath } = await createTestFile(name);
+    const approvedStats = await fs.stat(absolutePath);
     const originalStat = fs.stat.bind(fs);
     const originalOpen = fs.open.bind(fs);
     const statSpy = vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
@@ -117,18 +166,17 @@ describe('readManyFiles', () => {
       });
       return handle;
     });
-    return {
-      restore: () => {
-        statSpy.mockRestore();
-        openSpy.mockRestore();
-      },
-    };
-  }
-
-  async function createTestDir(...pathSegments: string[]): Promise<string> {
-    const absolutePath = path.join(tempRootDir, ...pathSegments);
-    await fs.mkdir(absolutePath, { recursive: true });
-    return absolutePath;
+    try {
+      return await read({
+        paths: Array(copies).fill(relativePath),
+        validatedPathIdentities: new Map([
+          [absolutePath, { dev: approvedStats.dev, ino: 0 }],
+        ]),
+      });
+    } finally {
+      statSpy.mockRestore();
+      openSpy.mockRestore();
+    }
   }
 
   beforeEach(async () => {
@@ -148,11 +196,9 @@ describe('readManyFiles', () => {
   describe('file reading', () => {
     it('should read a single file', async () => {
       await createTestFile('file1.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: ['file1.txt'] });
+      const { content } = await read(['file1.txt']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('--- Content from referenced files ---');
       expect(content).toContain('Content from');
       expect(content).toContain('file1.txt');
@@ -162,14 +208,12 @@ describe('readManyFiles', () => {
 
     it('uses display paths for canonical reads', async () => {
       const { absolutePath } = await createTestFile('target.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
+      const { result, content } = await read({
         paths: [absolutePath],
         displayPaths: new Map([[absolutePath, 'alias.txt']]),
       });
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('Content from alias.txt');
       expect(content).not.toContain(`Content from ${absolutePath}`);
       expect(result.files[0]!.filePath).toBe('alias.txt');
@@ -178,13 +222,9 @@ describe('readManyFiles', () => {
     it('should read multiple files', async () => {
       await createTestFile('file1.txt');
       await createTestFile('file2.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
-        paths: ['file1.txt', 'file2.txt'],
-      });
+      const { content } = await read(['file1.txt', 'file2.txt']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('--- Content from referenced files ---');
       expect(content).toContain('Content of file1.txt');
       expect(content).toContain('Content of file2.txt');
@@ -194,110 +234,69 @@ describe('readManyFiles', () => {
     it('drops a validated path when its file identity changes before reading', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
-      const approvedStats = await fs.stat(absolutePath);
+      const validatedPathIdentities = await pinNow(absolutePath);
       await fs.rename(absolutePath, `${absolutePath}.original`);
       await fs.writeFile(absolutePath, 'replacement secret');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
+      const { result, content } = await read({
         paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-        ]),
+        validatedPathIdentities,
       });
 
-      expect(contentToString(result.contentParts)).not.toContain(
-        'replacement secret',
-      );
+      expect(content).not.toContain('replacement secret');
       expect(result.files).toHaveLength(0);
     });
 
     it('surfaces an error when validated inode identity is unverifiable', async () => {
-      const { relativePath, absolutePath } =
-        await createTestFile('zero-inode.txt');
-      const approvedStats = await fs.stat(absolutePath);
-      const zeroInodeMock = mockZeroInodeForPath(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
+      const { result, content } = await readZeroInode('zero-inode.txt', 1);
 
-      try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: 0 }],
-          ]),
-        });
-
-        expect(contentToString(result.contentParts)).not.toContain(
-          'Content of zero-inode.txt',
-        );
-        expect(contentToString(result.contentParts)).toContain(
-          'Validated file identity is unavailable on this filesystem',
-        );
-        expect(result.files).toHaveLength(1);
-        expect(result.files[0]!.error).toContain(
-          'Validated file identity is unavailable on this filesystem',
-        );
-      } finally {
-        zeroInodeMock.restore();
-      }
+      expect(content).not.toContain('Content of zero-inode.txt');
+      expect(content).toContain(
+        'Validated file identity is unavailable on this filesystem',
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toContain(
+        'Validated file identity is unavailable on this filesystem',
+      );
     });
 
     it('deduplicates unverifiable validated inode errors for repeated paths', async () => {
-      const { relativePath, absolutePath } = await createTestFile(
+      const { result, content } = await readZeroInode(
         'zero-inode-duplicate.txt',
+        2,
       );
-      const approvedStats = await fs.stat(absolutePath);
-      const zeroInodeMock = mockZeroInodeForPath(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
 
-      try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath, relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: 0 }],
-          ]),
-        });
-        const content = contentToString(result.contentParts);
-
-        expect(content).not.toContain('Content of zero-inode-duplicate.txt');
-        expect(
-          content.match(/Validated file identity is unavailable/g),
-        ).toHaveLength(1);
-        expect(result.files).toHaveLength(1);
-        expect(result.files[0]!.error).toContain(
-          'Validated file identity is unavailable',
-        );
-      } finally {
-        zeroInodeMock.restore();
-      }
+      expect(content).not.toContain('Content of zero-inode-duplicate.txt');
+      expect(
+        content.match(/Validated file identity is unavailable/g),
+      ).toHaveLength(1);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toContain(
+        'Validated file identity is unavailable',
+      );
     });
 
     it('drops a validated read when the identity map has no matching path key', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
       const approvedStats = await fs.stat(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
+      const { result, content } = await read({
         paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [
-            path.join(tempRootDir, 'other.txt'),
-            { dev: approvedStats.dev, ino: approvedStats.ino },
-          ],
-        ]),
+        validatedPathIdentities: pin(
+          path.join(tempRootDir, 'other.txt'),
+          approvedStats,
+        ),
       });
 
-      expect(contentToString(result.contentParts)).not.toContain(
-        'Content of approved.txt',
-      );
+      expect(content).not.toContain('Content of approved.txt');
       expect(result.files).toHaveLength(0);
     });
 
     it('reads a validated file from its approved handle during an ABA path swap', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
-      const approvedStats = await fs.stat(absolutePath);
+      const validatedPathIdentities = await pinNow(absolutePath);
       const backupPath = `${absolutePath}.approved`;
       const outsideDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'read-many-files-outside-'),
@@ -319,19 +318,12 @@ describe('readManyFiles', () => {
           }
         },
       );
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getFileSystemService: () => fileSystemService,
-      } as unknown as Config;
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-          ]),
-        });
-        const content = contentToString(result.contentParts);
+        const { content } = await read(
+          { paths: [relativePath], validatedPathIdentities },
+          createMockConfig(tempRootDir, withFs(fileSystemService)),
+        );
 
         expect(content).toContain('Content of approved.txt');
         expect(content).not.toContain('outside secret');
@@ -341,15 +333,12 @@ describe('readManyFiles', () => {
     });
 
     it('reads validated large text through a bounded handle without snapshotting', async () => {
-      const relativePath = 'large-approved.log';
-      const absolutePath = path.join(tempRootDir, relativePath);
       const line = `${'x'.repeat(20)}\n`;
-      await fs.writeFile(
-        absolutePath,
+      const absolutePath = await writeRaw(
+        'large-approved.log',
         line.repeat(Math.ceil((11 * 1024 * 1024) / line.length)),
-        'utf-8',
       );
-      const approvedStats = await fs.stat(absolutePath);
+      const validatedPathIdentities = await pinNow(absolutePath);
       const fileSystemService = new StandardFileSystemService();
       const readTextFileSpy = vi.spyOn(fileSystemService, 'readTextFile');
       const readTextFileFromHandleSpy = vi.spyOn(
@@ -357,19 +346,12 @@ describe('readManyFiles', () => {
         'readTextFileFromHandle',
       );
       const mkdtempSpy = vi.spyOn(fs, 'mkdtemp');
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getFileSystemService: () => fileSystemService,
-      } as unknown as Config;
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-          ]),
-        });
-        const content = contentToString(result.contentParts);
+        const { result, content } = await read(
+          { paths: ['large-approved.log'], validatedPathIdentities },
+          createMockConfig(tempRootDir, withFs(fileSystemService)),
+        );
 
         expect(content).toContain('Showing lines 1-');
         expect(content).toContain('... [truncated]');
@@ -388,29 +370,24 @@ describe('readManyFiles', () => {
     });
 
     it('reads validated text behind an image extension through the pinned handle', async () => {
-      const relativePath = 'validated-screenshot.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
       const jsonContent = '{"json": true}';
-      await fs.writeFile(absolutePath, jsonContent);
-      const approvedStats = await fs.stat(absolutePath);
+      const absolutePath = await writeRaw(
+        'validated-screenshot.png',
+        jsonContent,
+      );
+      const validatedPathIdentities = await pinNow(absolutePath);
       const fileSystemService = new StandardFileSystemService();
       const readTextFileFromHandleSpy = vi.spyOn(
         fileSystemService,
         'readTextFileFromHandle',
       );
       const mkdtempSpy = vi.spyOn(fs, 'mkdtemp');
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getFileSystemService: () => fileSystemService,
-      } as unknown as Config;
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-          ]),
-        });
+        const { result } = await read(
+          { paths: ['validated-screenshot.png'], validatedPathIdentities },
+          createMockConfig(tempRootDir, withFs(fileSystemService)),
+        );
 
         expect(result.files).toHaveLength(1);
         expect(result.files[0]!.content).toBe(jsonContent);
@@ -434,22 +411,19 @@ describe('readManyFiles', () => {
         fileSystemService,
         'readTextFileFromHandle',
       );
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
-        getFileSystemService: () => fileSystemService,
-      } as unknown as Config;
 
-      const result = await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-        ]),
-      });
-
-      expect(contentToString(result.contentParts)).toContain(
-        'Content of approved.txt',
+      const { content } = await read(
+        {
+          paths: [relativePath],
+          validatedPathIdentities: pin(absolutePath, approvedStats),
+        },
+        createMockConfig(tempRootDir, {
+          getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+          ...withFs(fileSystemService),
+        }),
       );
+
+      expect(content).toContain('Content of approved.txt');
       expect(readTextFileFromHandleSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           maxOutputBytes: Number.MAX_SAFE_INTEGER,
@@ -461,8 +435,10 @@ describe('readManyFiles', () => {
     it('keeps sibling files when one validated text file fails to open', async () => {
       const good = await createTestFile('good.txt');
       const bad = await createTestFile('bad.txt');
-      const goodStats = await fs.stat(good.absolutePath);
-      const badStats = await fs.stat(bad.absolutePath);
+      const validatedPathIdentities = new Map([
+        ...(await pinNow(good.absolutePath)),
+        ...(await pinNow(bad.absolutePath)),
+      ]);
       const fileSystemService = new StandardFileSystemService();
       const originalOpen = fs.open.bind(fs);
       const openSpy = vi
@@ -477,20 +453,15 @@ describe('readManyFiles', () => {
           }
           return originalOpen(...args);
         });
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getFileSystemService: () => fileSystemService,
-      } as unknown as Config;
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [good.relativePath, bad.relativePath],
-          validatedPathIdentities: new Map([
-            [good.absolutePath, { dev: goodStats.dev, ino: goodStats.ino }],
-            [bad.absolutePath, { dev: badStats.dev, ino: badStats.ino }],
-          ]),
-        });
-        const text = contentToString(result.contentParts);
+        const { result, content: text } = await read(
+          {
+            paths: [good.relativePath, bad.relativePath],
+            validatedPathIdentities,
+          },
+          createMockConfig(tempRootDir, withFs(fileSystemService)),
+        );
 
         expect(text).toContain('Content of good.txt');
         expect(text).toContain('Error reading');
@@ -504,74 +475,59 @@ describe('readManyFiles', () => {
       }
     });
 
+    // A custom (e.g. IDE) file system that serves an unsaved buffer.
+    const customFs = (readTextFile: () => Promise<unknown>) => ({
+      getFileSystemService: () => ({
+        readTextFile,
+        writeTextFile: vi.fn(),
+        findFiles: vi.fn(),
+      }),
+    });
+    const unsavedBuffer = () => ({
+      content: 'unsaved buffer',
+      _meta: { originalLineCount: 1, originalLineCountExact: true },
+    });
+
     it('keeps validated text reads on custom file systems on the original path', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
-      const stats = await fs.stat(absolutePath);
-      const readTextFile = vi.fn(async () => ({
-        content: 'unsaved buffer',
-        _meta: {
-          originalLineCount: 1,
-          originalLineCountExact: true,
-        },
-      }));
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getFileSystemService: () => ({
-          readTextFile,
-          writeTextFile: vi.fn(),
-          findFiles: vi.fn(),
-        }),
-      } as unknown as Config;
+      const validatedPathIdentities = await pinNow(absolutePath);
+      const readTextFile = vi.fn(async () => unsavedBuffer());
 
-      const result = await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: stats.dev, ino: stats.ino }],
-        ]),
-      });
+      const { content } = await read(
+        { paths: [relativePath], validatedPathIdentities },
+        createMockConfig(tempRootDir, customFs(readTextFile)),
+      );
 
       expect(readTextFile).toHaveBeenCalledWith(
         expect.objectContaining({ path: absolutePath }),
       );
-      expect(contentToString(result.contentParts)).toContain('unsaved buffer');
+      expect(content).toContain('unsaved buffer');
     });
 
     it('does not cache a validated custom-fs read dropped after identity drift', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('approved.txt');
       const backupPath = `${absolutePath}.approved`;
-      const stats = await fs.stat(absolutePath);
+      const validatedPathIdentities = await pinNow(absolutePath);
       const cache = new FileReadCache();
       const readTextFile = vi.fn(async () => {
         await fs.rename(absolutePath, backupPath);
         await fs.writeFile(absolutePath, 'replacement secret');
-        return {
-          content: 'unsaved buffer',
-          _meta: {
-            originalLineCount: 1,
-            originalLineCountExact: true,
-          },
-        };
+        return unsavedBuffer();
       });
-      const mockConfig = {
-        ...createMockConfigWithCache(tempRootDir, cache),
-        getFileSystemService: () => ({
-          readTextFile,
-          writeTextFile: vi.fn(),
-          findFiles: vi.fn(),
-        }),
-      } as unknown as Config;
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: stats.dev, ino: stats.ino }],
-          ]),
-        });
+        const { result, content } = await read(
+          { paths: [relativePath], validatedPathIdentities },
+          createMockConfigWithCache(
+            tempRootDir,
+            cache,
+            false,
+            customFs(readTextFile),
+          ),
+        );
 
-        const content = contentToString(result.contentParts);
         expect(content).not.toContain('unsaved buffer');
         expect(content).not.toContain('replacement secret');
         expect(result.files).toHaveLength(0);
@@ -585,14 +541,13 @@ describe('readManyFiles', () => {
     });
 
     it('should include truncated large text files instead of reporting a size error', async () => {
-      const relativePath = 'large.log';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(absolutePath, 'x'.repeat(11 * 1024 * 1024), 'utf-8');
-      const mockConfig = createMockConfig(tempRootDir);
+      const absolutePath = await writeRaw(
+        'large.log',
+        'x'.repeat(11 * 1024 * 1024),
+      );
 
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const { result, content } = await read(['large.log']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('Showing lines 1-1 of at least 1 total lines');
       expect(content).toContain('... [truncated]');
       expect(result.files).toHaveLength(1);
@@ -601,8 +556,6 @@ describe('readManyFiles', () => {
     });
 
     it('should include truncated notebooks that do not expose text line ranges', async () => {
-      const relativePath = 'large.ipynb';
-      const absolutePath = path.join(tempRootDir, relativePath);
       const cells = Array.from({ length: 30 }, (_, index) => ({
         cell_type: 'code',
         id: `large-cell-${index}`,
@@ -610,16 +563,13 @@ describe('readManyFiles', () => {
         metadata: {},
         outputs: [],
       }));
-      await fs.writeFile(
-        absolutePath,
+      const absolutePath = await writeRaw(
+        'large.ipynb',
         JSON.stringify({ cells, metadata: {} }),
-        'utf-8',
       );
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const { result, content } = await read(['large.ipynb']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('Jupyter Notebook');
       expect(content).toContain('remaining cells truncated');
       expect(content).not.toContain(
@@ -630,22 +580,10 @@ describe('readManyFiles', () => {
     });
 
     it('renders canonical images through the overview pipeline even when the bridge handoff flag is set', async () => {
-      const relativePath = 'screenshot.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await sharp({
-        create: {
-          width: 20,
-          height: 10,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png()
-        .toFile(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
+      const absolutePath = await writePng('screenshot.png');
 
-      const result = await readManyFiles(mockConfig, {
-        paths: [relativePath],
+      const { result } = await read({
+        paths: ['screenshot.png'],
         preserveUnsupportedImageForBridge: true,
       });
 
@@ -675,19 +613,8 @@ describe('readManyFiles', () => {
     });
 
     it('reads a validated image from its approved snapshot during a path swap', async () => {
-      const relativePath = 'approved.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await sharp({
-        create: {
-          width: 20,
-          height: 10,
-          channels: 3,
-          background: '#306090',
-        },
-      })
-        .png()
-        .toFile(absolutePath);
-      const approvedStats = await fs.stat(absolutePath);
+      const absolutePath = await writePng('approved.png');
+      const validatedPathIdentities = await pinNow(absolutePath);
       const backupPath = `${absolutePath}.approved`;
       const outsideDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'read-many-files-outside-'),
@@ -709,23 +636,17 @@ describe('readManyFiles', () => {
           }
           return result;
         });
-      const mockConfig = createMockConfig(tempRootDir);
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
+        const { result, content } = await read({
+          paths: ['approved.png'],
           preserveUnsupportedImageForBridge: true,
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-          ]),
+          validatedPathIdentities,
         });
-        const imagePart = findInlineDataPart(result.contentParts);
 
-        expect(imagePart).toBeDefined();
+        expect(findInlineDataPart(result.contentParts)).toBeDefined();
         expect(swappedAfterSnapshotRead).toBe(true);
-        expect(contentToString(result.contentParts)).not.toContain(
-          'outside secret',
-        );
+        expect(content).not.toContain('outside secret');
       } finally {
         readFileSpy.mockRestore();
         await fs.rm(absolutePath, { force: true });
@@ -741,7 +662,7 @@ describe('readManyFiles', () => {
       const visiblePath = path.join(absolutePath, 'visible.txt');
       await fs.mkdir(absolutePath);
       await fs.writeFile(visiblePath, 'visible');
-      const approvedStats = await fs.stat(absolutePath);
+      const validatedPathIdentities = await pinNow(absolutePath);
       const fileService = new FileDiscoveryService(tempRootDir);
       let swapped = false;
       const ignoreSpy = vi
@@ -754,23 +675,15 @@ describe('readManyFiles', () => {
           }
           return false;
         });
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getFileService: () => fileService,
-      } as Config;
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-          ]),
-        });
+        const { result, content } = await read(
+          { paths: [relativePath], validatedPathIdentities },
+          createMockConfig(tempRootDir, { getFileService: () => fileService }),
+        );
 
         expect(swapped).toBe(true);
-        expect(contentToString(result.contentParts)).not.toContain(
-          'visible.txt',
-        );
+        expect(content).not.toContain('visible.txt');
         expect(result.files).toHaveLength(0);
       } finally {
         ignoreSpy.mockRestore();
@@ -782,9 +695,10 @@ describe('readManyFiles', () => {
     });
 
     it('drops a validated snapshot when the source grows during copying', async () => {
-      const relativePath = 'approved.bin';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(absolutePath, Buffer.alloc(8, 0x01));
+      const absolutePath = await writeRaw(
+        'approved.bin',
+        Buffer.alloc(8, 0x01),
+      );
       const approvedStats = await fs.stat(absolutePath);
       const originalOpen = fs.open.bind(fs);
       const openSpy = vi
@@ -809,40 +723,27 @@ describe('readManyFiles', () => {
           }
           return handle;
         });
-      const mockConfig = createMockConfig(tempRootDir);
 
       try {
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-          validatedPathIdentities: new Map([
-            [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-          ]),
+        const { result, content } = await read({
+          paths: ['approved.bin'],
+          validatedPathIdentities: pin(absolutePath, approvedStats),
         });
 
         expect(result.files).toHaveLength(0);
-        expect(contentToString(result.contentParts)).not.toContain(
-          'approved.bin',
-        );
+        expect(content).not.toContain('approved.bin');
       } finally {
         openSpy.mockRestore();
       }
     });
 
     it('skips unsupported images when the bridge handoff flag is absent', async () => {
-      const relativePath = 'screenshot.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(
-        absolutePath,
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      );
-      const mockConfig = createMockConfig(tempRootDir);
+      await writeRaw('screenshot.png', Buffer.from(PNG_SIGNATURE));
 
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const { result, content } = await read(['screenshot.png']);
 
       expect(findInlineDataPart(result.contentParts)).toBeUndefined();
-      expect(contentToString(result.contentParts)).toContain(
-        'Unsupported image file',
-      );
+      expect(content).toContain('Unsupported image file');
       expect(result.files).toHaveLength(1);
       expect(result.files[0]!.content).toContain('Unsupported image file');
     });
@@ -855,18 +756,13 @@ describe('readManyFiles', () => {
     ])(
       'reads text content behind a .$extension extension as text',
       async ({ extension }) => {
-        const relativePath = `screenshot.${extension}`;
-        const absolutePath = path.join(tempRootDir, relativePath);
         const jsonContent = '{"json": true}';
-        await fs.writeFile(absolutePath, Buffer.from(jsonContent));
-        const mockConfig = createMockConfig(tempRootDir);
+        await writeRaw(`screenshot.${extension}`, Buffer.from(jsonContent));
 
-        const result = await readManyFiles(mockConfig, {
-          paths: [relativePath],
-        });
+        const { result, content } = await read([`screenshot.${extension}`]);
 
         expect(findInlineDataPart(result.contentParts)).toBeUndefined();
-        expect(contentToString(result.contentParts)).toContain('json');
+        expect(content).toContain('json');
         expect(result.files).toHaveLength(1);
         expect(result.files[0]!.content).toBe(jsonContent);
         expect(result.files[0]!.error).toBeUndefined();
@@ -874,15 +770,17 @@ describe('readManyFiles', () => {
     );
 
     it('references large PDFs instead of inlining extracted text for @ attachments', async () => {
-      const relativePath = 'paper.pdf';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(absolutePath, Buffer.alloc(2 * 1024 * 1024));
+      const absolutePath = await writeRaw(
+        'paper.pdf',
+        Buffer.alloc(2 * 1024 * 1024),
+      );
       mockGetPDFPageCount.mockResolvedValueOnce(31);
       const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 
-      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
-      const content = contentToString(result.contentParts);
+      const { result, content } = await read(
+        ['paper.pdf'],
+        createMockConfigWithCache(tempRootDir, cache),
+      );
 
       expect(result.files).toHaveLength(1);
       expect(result.files[0]!.error).toBeUndefined();
@@ -901,15 +799,8 @@ describe('readManyFiles', () => {
     });
 
     it('should return message when no files found', async () => {
-      const mockConfig = createMockConfig(tempRootDir);
-
-      const result = await readManyFiles(mockConfig, {
-        paths: ['nonexistent.txt'],
-      });
-
-      expect(contentToString(result.contentParts)).toContain(
-        'No files matching the criteria were found',
-      );
+      const { content } = await read(['nonexistent.txt']);
+      expect(content).toContain('No files matching the criteria were found');
     });
   });
 
@@ -917,11 +808,9 @@ describe('readManyFiles', () => {
     it('should return directory structure when path is a directory', async () => {
       await createTestFile('mydir', 'file1.txt');
       await createTestFile('mydir', 'file2.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: ['mydir'] });
+      const { content } = await read(['mydir']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('--- Content from referenced files ---');
       expect(content).toContain('Content from');
       expect(content).toContain('mydir');
@@ -933,36 +822,28 @@ describe('readManyFiles', () => {
 
     it('should propagate aborts before reading a directory', async () => {
       await createTestFile('mydir', 'file1.txt');
-      const mockConfig = createMockConfig(tempRootDir);
       const controller = new AbortController();
       controller.abort();
 
       await expect(
-        readManyFiles(mockConfig, {
-          paths: ['mydir'],
-          signal: controller.signal,
-        }),
+        read({ paths: ['mydir'], signal: controller.signal }),
       ).rejects.toThrow(/abort/i);
     });
 
     it('should handle directory with trailing slash', async () => {
       await createTestFile('mydir', 'file1.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: ['mydir/'] });
+      const { content } = await read(['mydir/']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('Content from');
       expect(content).toContain('mydir');
     });
 
     it('should handle empty directory', async () => {
-      await createTestDir('emptydir');
-      const mockConfig = createMockConfig(tempRootDir);
+      await fs.mkdir(path.join(tempRootDir, 'emptydir'), { recursive: true });
 
-      const result = await readManyFiles(mockConfig, { paths: ['emptydir'] });
+      const { content } = await read(['emptydir']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('Content from');
       expect(content).toContain('emptydir');
     });
@@ -972,13 +853,9 @@ describe('readManyFiles', () => {
     it('should handle mix of files and directories', async () => {
       await createTestFile('file.txt');
       await createTestFile('mydir', 'nested.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
-        paths: ['file.txt', 'mydir'],
-      });
+      const { content } = await read(['file.txt', 'mydir']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('--- Content from referenced files ---');
       // File content should be present
       expect(content).toContain('Content of file.txt');
@@ -992,13 +869,9 @@ describe('readManyFiles', () => {
   describe('edge cases', () => {
     it('should handle paths with special characters', async () => {
       await createTestFile('dir-with-dash', 'file.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
-        paths: ['dir-with-dash'],
-      });
+      const { content } = await read(['dir-with-dash']);
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('Content from');
       expect(content).toContain('dir-with-dash');
     });
@@ -1010,14 +883,11 @@ describe('readManyFiles', () => {
       );
       await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'secret');
 
-      const mockConfig = createMockConfig(tempRootDir);
-
-      const result = await readManyFiles(mockConfig, { paths: [outsideDir] });
+      const { content } = await read([outsideDir]);
 
       // Should include the outside directory listing
-      expect(contentToString(result.contentParts)).toContain('secret.txt');
+      expect(content).toContain('secret.txt');
 
-      // Cleanup
       await fs.rm(outsideDir, { recursive: true, force: true });
     });
   });
@@ -1025,9 +895,8 @@ describe('readManyFiles', () => {
   describe('files array', () => {
     it('should populate files array for single file', async () => {
       const { absolutePath } = await createTestFile('file1.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: ['file1.txt'] });
+      const { result } = await read(['file1.txt']);
 
       expect(result.files).toHaveLength(1);
       expect(result.files[0].filePath).toBe(absolutePath);
@@ -1038,11 +907,8 @@ describe('readManyFiles', () => {
     it('should populate files array for multiple files', async () => {
       const file1 = await createTestFile('file1.txt');
       const file2 = await createTestFile('file2.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
-        paths: ['file1.txt', 'file2.txt'],
-      });
+      const { result } = await read(['file1.txt', 'file2.txt']);
 
       expect(result.files).toHaveLength(2);
       const filePaths = result.files.map((f) => f.filePath);
@@ -1052,9 +918,8 @@ describe('readManyFiles', () => {
 
     it('should mark directories in files array', async () => {
       await createTestFile('mydir', 'nested.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, { paths: ['mydir'] });
+      const { result } = await read(['mydir']);
 
       expect(result.files).toHaveLength(1);
       expect(result.files[0].isDirectory).toBe(true);
@@ -1064,43 +929,32 @@ describe('readManyFiles', () => {
     it('should include both files and directories in files array', async () => {
       const file = await createTestFile('file.txt');
       await createTestFile('mydir', 'nested.txt');
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
-        paths: ['file.txt', 'mydir'],
-      });
+      const { result } = await read(['file.txt', 'mydir']);
 
       expect(result.files).toHaveLength(2);
-
       const fileEntry = result.files.find((f) => !f.isDirectory);
       const dirEntry = result.files.find((f) => f.isDirectory);
-
       expect(fileEntry).toBeDefined();
       expect(fileEntry!.filePath).toBe(file.absolutePath);
-
       expect(dirEntry).toBeDefined();
       expect(dirEntry!.filePath).toContain('mydir');
     });
 
     it('should return empty files array when no files found', async () => {
-      const mockConfig = createMockConfig(tempRootDir);
-
-      const result = await readManyFiles(mockConfig, {
-        paths: ['nonexistent.txt'],
-      });
-
+      const { result } = await read(['nonexistent.txt']);
       expect(result.files).toHaveLength(0);
     });
 
     it('should return empty files array on error', async () => {
-      const mockConfig = {
-        ...createMockConfig(tempRootDir),
-        getProjectRoot: () => {
-          throw new Error('Test error');
-        },
-      } as unknown as Config;
-
-      const result = await readManyFiles(mockConfig, { paths: ['file.txt'] });
+      const { result } = await read(
+        ['file.txt'],
+        createMockConfig(tempRootDir, {
+          getProjectRoot: () => {
+            throw new Error('Test error');
+          },
+        }),
+      );
 
       expect(result.files).toHaveLength(0);
       expect(result.error).toBeDefined();
@@ -1110,35 +964,27 @@ describe('readManyFiles', () => {
   describe('per-file error surfacing', () => {
     it('should propagate aborts from file reads instead of returning an error message', async () => {
       const { relativePath } = await createTestFile('cancel.txt');
-      const mockConfig = createMockConfig(tempRootDir);
       const controller = new AbortController();
       controller.abort();
 
       await expect(
-        readManyFiles(mockConfig, {
-          paths: [relativePath],
-          signal: controller.signal,
-        }),
+        read({ paths: [relativePath], signal: controller.signal }),
       ).rejects.toThrow(/abort/i);
     });
 
     it('should surface processSingleFileContent errors instead of silently skipping the file', async () => {
-      // Trigger the >10MB file-size error path in processSingleFileContent.
-      const relativePath = 'huge.bin';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      // 10MB + 1 byte to cross the 9.9MB threshold.
-      await fs.writeFile(absolutePath, Buffer.alloc(10 * 1024 * 1024 + 1));
-      const stats = await fs.stat(absolutePath);
+      // Trigger the >10MB file-size error path in processSingleFileContent:
+      // 10MB + 1 byte crosses the 9.9MB threshold.
+      const absolutePath = await writeRaw(
+        'huge.bin',
+        Buffer.alloc(10 * 1024 * 1024 + 1),
+      );
 
-      const mockConfig = createMockConfig(tempRootDir);
-      const result = await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: stats.dev, ino: stats.ino }],
-        ]),
+      const { result, content } = await read({
+        paths: ['huge.bin'],
+        validatedPathIdentities: await pinNow(absolutePath),
       });
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain('File size exceeds the 10MB limit');
       expect(content).toContain('huge.bin');
       expect(content).not.toContain('qwen-validated-read-');
@@ -1154,21 +1000,17 @@ describe('readManyFiles', () => {
     });
 
     it('uses display paths for validated binary-file messages', async () => {
-      const relativePath = 'blob.bin';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(absolutePath, Buffer.from([0x00, 0x01]));
-      const stats = await fs.stat(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
+      const absolutePath = await writeRaw(
+        'blob.bin',
+        Buffer.from([0x00, 0x01]),
+      );
 
-      const result = await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: stats.dev, ino: stats.ino }],
-        ]),
+      const { content } = await read({
+        paths: ['blob.bin'],
+        validatedPathIdentities: await pinNow(absolutePath),
         displayPaths: new Map([[absolutePath, 'alias.bin']]),
       });
 
-      const content = contentToString(result.contentParts);
       expect(content).toContain(
         'Cannot display content of binary file: alias.bin',
       );
@@ -1176,22 +1018,16 @@ describe('readManyFiles', () => {
     });
 
     it('surfaces a size error for a validated file too large to snapshot', async () => {
-      const relativePath = 'huge-image.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
+      const absolutePath = path.join(tempRootDir, 'huge-image.png');
       const handle = await fs.open(absolutePath, 'w');
       await handle.truncate(101 * 1024 * 1024 + 1);
       await handle.close();
-      const stats = await fs.stat(absolutePath);
-      const mockConfig = createMockConfig(tempRootDir);
 
-      const result = await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: stats.dev, ino: stats.ino }],
-        ]),
+      const { result, content } = await read({
+        paths: ['huge-image.png'],
+        validatedPathIdentities: await pinNow(absolutePath),
       });
 
-      const content = contentToString(result.contentParts);
       expect(result.files).toHaveLength(1);
       expect(result.files[0]!.error).toMatch(/exceeds/i);
       expect(content).not.toContain(
@@ -1205,56 +1041,59 @@ describe('readManyFiles', () => {
   // Edit / WriteFile was rejected with EDIT_REQUIRES_PRIOR_READ until the
   // model redundantly re-read the file with read_file.
   describe('prior-read enforcement (issue #6289)', () => {
+    // Reads `paths` with a live cache; returns the cache.
+    async function readCached(paths: string[], fileReadCacheDisabled = false) {
+      const cache = new FileReadCache();
+      await read(
+        paths,
+        createMockConfigWithCache(tempRootDir, cache, fileReadCacheDisabled),
+      );
+      return cache;
+    }
+    const priorReadOk = async (cache: FileReadCache, absolutePath: string) =>
+      (await checkPriorRead(cache, absolutePath, 'editing')).ok;
+
     it('records an @-attached text file so a later edit passes prior-read enforcement', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('attached.ts');
       const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 
       // Precondition: the file has never been read this session, so the
       // enforcement helper rejects an edit.
-      const before = await checkPriorRead(cache, absolutePath, 'editing');
-      expect(before.ok).toBe(false);
+      expect(await priorReadOk(cache, absolutePath)).toBe(false);
 
-      await readManyFiles(mockConfig, { paths: [relativePath] });
+      await read([relativePath], createMockConfigWithCache(tempRootDir, cache));
 
       // The @-mention read must now satisfy prior-read enforcement without
       // a redundant read_file.
-      const after = await checkPriorRead(cache, absolutePath, 'editing');
-      expect(after.ok).toBe(true);
+      expect(await priorReadOk(cache, absolutePath)).toBe(true);
     });
 
     it('records a validated text read by canonical path for prior-read enforcement', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('validated.ts');
-      const approvedStats = await fs.stat(absolutePath);
+      const validatedPathIdentities = await pinNow(absolutePath);
       const cache = new FileReadCache();
-      const fileSystemService = new StandardFileSystemService();
-      const mockConfig = {
-        ...createMockConfigWithCache(tempRootDir, cache),
-        getFileSystemService: () => fileSystemService,
-      } as unknown as Config;
 
-      await readManyFiles(mockConfig, {
-        paths: [relativePath],
-        validatedPathIdentities: new Map([
-          [absolutePath, { dev: approvedStats.dev, ino: approvedStats.ino }],
-        ]),
-      });
+      await read(
+        { paths: [relativePath], validatedPathIdentities },
+        createMockConfigWithCache(
+          tempRootDir,
+          cache,
+          false,
+          withFs(new StandardFileSystemService()),
+        ),
+      );
 
-      const decision = await checkPriorRead(cache, absolutePath, 'editing');
-      expect(decision.ok).toBe(true);
+      expect(await priorReadOk(cache, absolutePath)).toBe(true);
     });
 
     it('records the read as fresh and cacheable in the FileReadCache', async () => {
       const { relativePath, absolutePath } = await createTestFile('notes.md');
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 
-      await readManyFiles(mockConfig, { paths: [relativePath] });
+      const cache = await readCached([relativePath]);
 
-      const stats = nodeFs.statSync(absolutePath);
-      const status = cache.check(stats);
+      const status = cache.check(nodeFs.statSync(absolutePath));
       expect(status.state).toBe('fresh');
       if (status.state === 'fresh') {
         expect(status.entry.lastReadAt).toBeDefined();
@@ -1265,43 +1104,30 @@ describe('readManyFiles', () => {
     it('does not record reads when fileReadCacheDisabled is set', async () => {
       const { relativePath, absolutePath } =
         await createTestFile('attached.ts');
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache, true);
 
-      await readManyFiles(mockConfig, { paths: [relativePath] });
+      const cache = await readCached([relativePath], true);
 
       expect(cache.size()).toBe(0);
-      const decision = await checkPriorRead(cache, absolutePath, 'editing');
-      expect(decision.ok).toBe(false);
+      expect(await priorReadOk(cache, absolutePath)).toBe(false);
     });
 
     it('does not record directories (edit enforcement still rejects them)', async () => {
       await createTestFile('mydir', 'nested.txt');
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
-
-      await readManyFiles(mockConfig, { paths: ['mydir'] });
-
-      expect(cache.size()).toBe(0);
+      expect((await readCached(['mydir'])).size()).toBe(0);
     });
 
     it('does not let a binary image attachment satisfy text-edit enforcement', async () => {
-      const relativePath = 'screenshot.png';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(
-        absolutePath,
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      const absolutePath = await writeRaw(
+        'screenshot.png',
+        Buffer.from(PNG_SIGNATURE),
       );
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 
-      await readManyFiles(mockConfig, { paths: [relativePath] });
+      const cache = await readCached(['screenshot.png']);
 
       // A binary payload cannot be mutated as text by Edit / WriteFile, so
       // enforcement must still reject it rather than being cleared by the
       // attachment.
-      const decision = await checkPriorRead(cache, absolutePath, 'editing');
-      expect(decision.ok).toBe(false);
+      expect(await priorReadOk(cache, absolutePath)).toBe(false);
     });
 
     it('records a binary file as a full but non-cacheable read', async () => {
@@ -1311,19 +1137,14 @@ describe('readManyFiles', () => {
       // `originalLineCount !== undefined` clause of the cacheable derivation
       // — dropping it would wrongly let a non-text payload clear prior-read
       // enforcement for Edit / WriteFile.
-      const relativePath = 'payload.bin';
-      const absolutePath = path.join(tempRootDir, relativePath);
-      await fs.writeFile(
-        absolutePath,
+      const absolutePath = await writeRaw(
+        'payload.bin',
         Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]),
       );
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
 
-      await readManyFiles(mockConfig, { paths: [relativePath] });
+      const cache = await readCached(['payload.bin']);
 
-      const stats = nodeFs.statSync(absolutePath);
-      const status = cache.check(stats);
+      const status = cache.check(nodeFs.statSync(absolutePath));
       expect(status.state).toBe('fresh');
       if (status.state === 'fresh') {
         expect(status.entry.lastReadCacheable).toBe(false);
@@ -1341,20 +1162,15 @@ describe('readManyFiles', () => {
       // truncated attachment as `full: true` would silently clear Edit /
       // WriteFile prior-read enforcement for a file the model only partly saw.
       // The file is still cacheable (text with a known `originalLineCount`).
-      const relativePath = 'big.ts';
-      const absolutePath = path.join(tempRootDir, relativePath);
       const big = Array.from(
         { length: 1500 },
         (_, i) => `const x${i} = ${i};`,
       ).join('\n');
-      await fs.writeFile(absolutePath, big);
-      const cache = new FileReadCache();
-      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+      const absolutePath = await writeRaw('big.ts', big);
 
-      await readManyFiles(mockConfig, { paths: [relativePath] });
+      const cache = await readCached(['big.ts']);
 
-      const stats = nodeFs.statSync(absolutePath);
-      const status = cache.check(stats);
+      const status = cache.check(nodeFs.statSync(absolutePath));
       expect(status.state).toBe('fresh');
       if (status.state === 'fresh') {
         expect(status.entry.lastReadWasFull).toBe(false);

@@ -36,6 +36,101 @@ public final class InMemoryRuntimeBindingRepository
     }
 
     @Override
+    public synchronized RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
+            RuntimeSessionRecord expected) {
+        RuntimeAdmission.requireRelease(findById(expected.getBindingId()), expected);
+        return sessions.compareAndSet(expected,
+                expected.withState(RuntimeSessionRecord.State.RELEASED, clock.instant()));
+    }
+
+    @Override
+    public synchronized RuntimeBindingRecord recoverLost(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, !expected.getRequest().isManagedContext());
+    }
+
+    @Override
+    public synchronized RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected) {
+        return recoverLost(sessions, executions, expected, true);
+    }
+
+    private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
+        RuntimeBindingRecord current = findById(expected.getBindingId());
+        if (current == null || !current.sameIdentity(expected)
+                || current.getVersion() != expected.getVersion()
+                || !current.sameOperation(expected)
+                || !current.hasLiveOperationAt(clock.instant())
+                || current.getState() != RuntimeBindingRecord.State.LOST) {
+            return null;
+        }
+        if (current.getLossEvidence() == null) {
+            return current;
+        }
+        if (!(sessions instanceof InMemoryRuntimeSessionRepository memorySessions)
+                || !(executions instanceof InMemoryToolExecutionRepository memoryExecutions)) {
+            throw new IllegalArgumentException("Recovery requires matching in-memory repositories");
+        }
+        synchronized (memorySessions) {
+            synchronized (memoryExecutions) {
+                memoryExecutions.abandonByBinding(current);
+                if (!holdersCleared || !current.hasStoppedWriters()
+                        || executions.hasActiveByBinding(current.getBindingId(),
+                                current.getGeneration())) {
+                    return current;
+                }
+                memorySessions.releaseLost(current, clock.instant());
+                if (sessions.countActiveByBinding(current.getBindingId(),
+                        current.getGeneration()) != 0) {
+                    return current;
+                }
+                if (!current.hasLiveOperationAt(clock.instant())) {
+                    return null;
+                }
+                RuntimeBindingRecord released = current.withState(
+                        RuntimeBindingRecord.State.RELEASED, current.getLease(), clock.instant())
+                        .withVersion(current.getVersion() + 1);
+                records.put(released.getBindingId(), released);
+                active.remove(released.getRequest(), released.getBindingId());
+                return released;
+            }
+        }
+    }
+
+    @Override
+    public synchronized RuntimeSessionRecord admitSession(
+            RuntimeSessionRepository sessions, RuntimeSessionRecord candidate) {
+        RuntimeBindingRecord binding = findById(candidate.getBindingId());
+        RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
+        if (!binding.getRequest().getScope().equals(
+                candidate.getSession().getScope())) {
+            throw new IllegalArgumentException("Session scope differs from binding");
+        }
+        return sessions.findOrCreate(candidate);
+    }
+
+    @Override
+    public synchronized ToolExecutionRecord admitExecution(
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            ToolExecutionRecord candidate) {
+        ToolExecutionRecord existing = executions.findByIdempotencyKey(
+                candidate.getIdempotencyKey());
+        if (existing != null) {
+            return existing;
+        }
+        RuntimeBindingRecord binding = findById(candidate.getBindingId());
+        RuntimeAdmission.requireReady(binding, candidate.getRuntimeGeneration());
+        synchronized (sessions) {
+            RuntimeAdmission.requireSession(sessions.findById(
+                    binding.getRequest().getScope(),
+                    candidate.getRuntimeSessionId()), candidate);
+            return executions.findOrCreate(candidate);
+        }
+    }
+
+    @Override
     public synchronized RuntimeBindingRecord findOrCreate(
             RuntimeProvisionRequest request) {
         if (request == null) {
@@ -45,6 +140,10 @@ public final class InMemoryRuntimeBindingRepository
         if (existing != null) {
             return existing;
         }
+        if (records.values().stream().anyMatch(record -> record.blocksPlacement(request))) {
+            throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",
+                    "An earlier runtime placement still requires physical recovery", false);
+        }
         String bindingId = BrokerValues.requireId(idSupplier.get(),
                 "bindingId");
         if (records.containsKey(bindingId)) {
@@ -52,8 +151,10 @@ public final class InMemoryRuntimeBindingRepository
         }
         long generation = generations.getOrDefault(request, 0L) + 1;
         Instant now = clock.instant();
+        RuntimeProvisionSeed seed = request.requiresDurableIdentity()
+                ? RuntimeProvisionSeed.create(bindingId, generation) : null;
         RuntimeBindingRecord created = new RuntimeBindingRecord(
-                bindingId, request, generation,
+                bindingId, request, seed, generation,
                 RuntimeBindingRecord.State.PROVISIONING, null, false, null,
                 null, 0, 0, null, now);
         generations.put(request, generation);
@@ -76,6 +177,25 @@ public final class InMemoryRuntimeBindingRepository
             return null;
         }
         return record;
+    }
+
+    @Override
+    public synchronized List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String afterBindingId, int limit) {
+        BrokerValues.requireId(kind, "provisionerKind");
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Recovery batch must contain 1-100 bindings");
+        }
+        return records.values().stream()
+                .filter(record -> kind.equals(record.getRequest().getProvisionerKind())
+                        && record.getResourceHandle() != null && record.getResourceHandle().getVersion() == 2
+                        && (afterBindingId == null || record.getBindingId().compareTo(afterBindingId) > 0)
+                        && (record.getState() == RuntimeBindingRecord.State.PROVISIONING
+                                || record.getState() == RuntimeBindingRecord.State.READY
+                                || record.getState() == RuntimeBindingRecord.State.DRAINING
+                                || record.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                                || record.getState() == RuntimeBindingRecord.State.LOST))
+                .sorted(java.util.Comparator.comparing(RuntimeBindingRecord::getBindingId))
+                .limit(limit).toList();
     }
 
     @Override
@@ -118,6 +238,7 @@ public final class InMemoryRuntimeBindingRepository
             throw new IllegalArgumentException(
                     "terminal binding cannot be reactivated");
         }
+        current.requireSafeReplacement(replacement);
         RuntimeBindingRecord updated = replacement.withVersion(
                 expected.getVersion() + 1);
         records.put(updated.getBindingId(), updated);
@@ -174,6 +295,24 @@ public final class InMemoryRuntimeBindingRepository
                 .withVersion(current.getVersion() + 1);
         records.put(bindingId, renewed);
         return renewed;
+    }
+
+    @Override
+    public synchronized RuntimeBindingRecord releaseOperation(
+            String bindingId, String owner, long operationGeneration) {
+        RuntimeBindingRecord current = requireRecord(bindingId);
+        if (current == null) {
+            return null;
+        }
+        String ownerId = BrokerValues.requireId(owner, "owner");
+        if (!ownerId.equals(current.getOperationOwner())
+                || operationGeneration != current.getOperationGeneration()) {
+            return null;
+        }
+        RuntimeBindingRecord released = current.withOperation(null, null,
+                operationGeneration).withVersion(current.getVersion() + 1);
+        records.put(bindingId, released);
+        return released;
     }
 
     private RuntimeBindingRecord requireRecord(String bindingId) {

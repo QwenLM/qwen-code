@@ -9,6 +9,86 @@ public interface RuntimeProvisioner extends AutoCloseable {
     CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request);
 
     /**
+     * Stable kind identifier persisted next to the resource handle so a
+     * restored binding is never reconciled by a different provisioner. The
+     * default marks a placement without durable identity.
+     */
+    default String kind() {
+        return "legacy";
+    }
+
+    /** Creates placement identity from trusted embedding configuration. */
+    default RuntimeProvisionRequest createRequest(RuntimeScope scope,
+            String isolationKey) {
+        return new RuntimeProvisionRequest(scope, isolationKey, kind());
+    }
+
+    /**
+     * Provisions with credentials the Broker created and persisted, so a
+     * later Broker process can prove the same identity. The default ignores
+     * the seed; such a provisioner can never pass reconciliation.
+     */
+    default CompletionStage<RuntimeLease> provision(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return provision(request);
+    }
+
+    /**
+     * Ensures the physical resource for a durable placement and returns its
+     * scheduler handle. The default fails: a provisioner that opts into a
+     * durable kind must implement the durable provisioning path.
+     */
+    default CompletionStage<RuntimeResourceHandle> ensureResource(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle knownHandle) {
+        CompletableFuture<RuntimeResourceHandle> failed =
+                new CompletableFuture<>();
+        failed.completeExceptionally(new UnsupportedOperationException(
+                "Provisioner does not support durable recovery"));
+        return failed;
+    }
+
+    /**
+     * Observes the physical resource behind a restored binding without
+     * creating or replacing it. The default proves nothing, so a restored
+     * binding waits and never guesses.
+     * <p>
+     * The broker keeps the recovery claim renewed for the duration of the
+     * call, so a slow observation may take as long as the provisioner's own
+     * declared waits. A call that never answers at all is backstopped well
+     * past those waits and surfaces as a retryable
+     * {@code runtime_broker_reconcile_timeout}. Implementations must not
+     * block the calling thread: the renewal ticks share a single-thread
+     * scheduler with the caller on some paths, so a synchronous wait can
+     * starve the renewal that keeps the claim alive — hand long waits to
+     * another executor and return a pending stage.
+     */
+    default CompletionStage<RuntimeObservation> reconcile(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, RuntimeLease lastLease) {
+        return CompletableFuture.completedFuture(
+                RuntimeObservation.unknown(handle));
+    }
+
+    /**
+     * Clears only physical holders of the saved generation after durable stop proof.
+     * The same backstop as {@link #reconcile} applies: the claim stays
+     * renewed for the call, and a never-answering call is retried later.
+     */
+    default CompletionStage<Void> recoverResources(RuntimeBindingRecord binding) {
+        if (binding.getRequest().isManagedContext()) {
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(409,
+                    "runtime_broker_recovery_blocked", "Workspace recovery cleanup is unavailable.", false));
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /** Whether saved startup identity can be observed without relaunching it. */
+    default boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+        return false;
+    }
+
+    /**
      * Proves a lease this process already treats as ready still answers
      * attestation. The default accepts the in-memory lease.
      */
@@ -18,8 +98,16 @@ public interface RuntimeProvisioner extends AutoCloseable {
     }
 
     /**
+     * Whether a failed confirmation can be retried against the same owned,
+     * still-live resource. Unknown implementations keep the binding fenced.
+     */
+    default boolean canRetryFailedConfirm(RuntimeLease lease) {
+        return false;
+    }
+
+    /**
      * Tears down the resource behind a lease the caller has decided to
-     * discard, keyed by the lease's runtime instance so a fenced loser can
+     * discard, keyed by the complete lease identity so a fenced loser can
      * never kill the winning resource for the same request. The default
      * has nothing to release.
      */

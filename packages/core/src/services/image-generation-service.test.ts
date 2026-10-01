@@ -9,6 +9,7 @@ import {
   generateImage,
   normalizeImageGenerationBaseUrl,
 } from './image-generation-service.js';
+import type { ImageGenerationRequest } from './image-generation-service.js';
 
 const networkPolicyMocks = vi.hoisted(() => ({
   resolveNetworkTarget: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock('../extension/network-policy.js', () => networkPolicyMocks);
 const PNG_BYTES = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const CDN_IMAGE = 'https://cdn.example.com/image.png';
 
 beforeEach(() => {
   networkPolicyMocks.resolveNetworkTarget.mockImplementation(
@@ -28,6 +30,55 @@ beforeEach(() => {
   );
 });
 
+/** A 200 JSON response without a content-type header. */
+const bare = (body: unknown) =>
+  new Response(JSON.stringify(body), { status: 200 });
+/** A JSON response with an `application/json` content-type. */
+const typed = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+/** A 200 download response with an `image/png` content-type. */
+const pngResponse = (bytes: BodyInit = PNG_BYTES) =>
+  new Response(bytes, {
+    status: 200,
+    headers: { 'content-type': 'image/png' },
+  });
+const redirect = (location: string) =>
+  new Response(null, { status: 302, headers: { location } });
+
+/** A DashScope multimodal-generation result naming one image URL. */
+const dashscope = (image: string, requestId?: string) => ({
+  ...(requestId !== undefined ? { request_id: requestId } : {}),
+  output: { choices: [{ message: { content: [{ image }] } }] },
+});
+
+/** A fetch mock answering each call in turn (an Error rejects). */
+function fetchSeq(...answers: Array<Response | Error>) {
+  const fetchFn = vi.fn<typeof fetch>();
+  for (const answer of answers) {
+    if (answer instanceof Error) fetchFn.mockRejectedValueOnce(answer);
+    else fetchFn.mockResolvedValueOnce(answer);
+  }
+  return fetchFn;
+}
+
+/** generateImage against the DashScope defaults, with `over` applied. */
+const run = (
+  fetchFn: typeof fetch,
+  over: Partial<ImageGenerationRequest> = {},
+) =>
+  generateImage({
+    baseUrl: 'https://images.example.com/api/v1',
+    apiKey: 'secret',
+    model: 'qwen-image-2.0',
+    prompt: 'poster',
+    signal: new AbortController().signal,
+    fetchFn,
+    ...over,
+  });
+
 describe('normalizeImageGenerationBaseUrl', () => {
   it('accepts a user-configured HTTPS endpoint', () => {
     expect(
@@ -36,13 +87,9 @@ describe('normalizeImageGenerationBaseUrl', () => {
   });
 
   it('accepts a full multimodal generation endpoint', () => {
-    expect(
-      normalizeImageGenerationBaseUrl(
-        'https://gateway.example.com/api/v1/services/aigc/multimodal-generation/generation',
-      ),
-    ).toBe(
-      'https://gateway.example.com/api/v1/services/aigc/multimodal-generation/generation',
-    );
+    const endpoint =
+      'https://gateway.example.com/api/v1/services/aigc/multimodal-generation/generation';
+    expect(normalizeImageGenerationBaseUrl(endpoint)).toBe(endpoint);
   });
 
   it('removes repeated trailing slashes from the configured endpoint', () => {
@@ -65,47 +112,16 @@ describe('normalizeImageGenerationBaseUrl', () => {
 
 describe('generateImage', () => {
   it('returns verified image bytes from a synchronous image endpoint', async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            request_id: 'request-1',
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [
-                      {
-                        image: 'https://cdn.example.com/generated/image.png',
-                      },
-                    ],
-                  },
-                },
-              ],
-            },
-          }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(PNG_BYTES, {
-          status: 200,
-          headers: { 'content-type': 'image/png' },
-        }),
-      );
+    const fetchFn = fetchSeq(
+      typed(
+        dashscope('https://cdn.example.com/generated/image.png', 'request-1'),
+      ),
+      pngResponse(),
+    );
 
-    const result = await generateImage({
-      baseUrl: 'https://images.example.com/api/v1',
-      apiKey: 'secret',
-      model: 'qwen-image-2.0',
+    const result = await run(fetchFn, {
       prompt: 'A Qwen Code poster',
       size: '1536*864',
-      signal: new AbortController().signal,
-      fetchFn,
     });
 
     expect(result).toEqual({
@@ -129,12 +145,7 @@ describe('generateImage', () => {
     expect(JSON.parse(String(requestInit?.body))).toEqual({
       model: 'qwen-image-2.0',
       input: {
-        messages: [
-          {
-            role: 'user',
-            content: [{ text: 'A Qwen Code poster' }],
-          },
-        ],
+        messages: [{ role: 'user', content: [{ text: 'A Qwen Code poster' }] }],
       },
       parameters: {
         n: 1,
@@ -146,33 +157,20 @@ describe('generateImage', () => {
   });
 
   it('uses the MiniMax image generation schema for regional base URLs', async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            base_resp: { request_id: 'request-3', status_code: 0 },
-            data: { image_urls: ['https://cdn.example.com/generated/mm.png'] },
-            metadata: { success_count: 1, failed_count: 0 },
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(PNG_BYTES, {
-          status: 200,
-          headers: { 'content-type': 'image/png' },
-        }),
-      );
+    const fetchFn = fetchSeq(
+      typed({
+        base_resp: { request_id: 'request-3', status_code: 0 },
+        data: { image_urls: ['https://cdn.example.com/generated/mm.png'] },
+        metadata: { success_count: 1, failed_count: 0 },
+      }),
+      pngResponse(),
+    );
 
-    const result = await generateImage({
+    const result = await run(fetchFn, {
       baseUrl: 'https://api.minimax.io/v1',
-      apiKey: 'secret',
       model: 'image-01',
       prompt: 'A product card',
       size: '1024*1024',
-      signal: new AbortController().signal,
-      fetchFn,
     });
 
     expect(result).toEqual({
@@ -195,25 +193,16 @@ describe('generateImage', () => {
   });
 
   it('accepts a full MiniMax image generation endpoint', async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            data: { image_urls: ['https://cdn.example.com/generated/mm.png'] },
-          }),
-          { status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(new Response(PNG_BYTES, { status: 200 }));
+    const fetchFn = fetchSeq(
+      bare({
+        data: { image_urls: ['https://cdn.example.com/generated/mm.png'] },
+      }),
+      new Response(PNG_BYTES, { status: 200 }),
+    );
 
-    await generateImage({
+    await run(fetchFn, {
       baseUrl: 'https://api.minimaxi.com/v1/image_generation',
-      apiKey: 'secret',
       model: 'image-01-live',
-      prompt: 'poster',
-      signal: new AbortController().signal,
-      fetchFn,
     });
 
     expect(fetchFn.mock.calls[0]?.[0]).toBe(
@@ -223,22 +212,13 @@ describe('generateImage', () => {
 
   it('decodes MiniMax base64 image responses without downloading', async () => {
     const base64Png = Buffer.from(PNG_BYTES).toString('base64');
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          data: { image_urls: [`data:image/png;base64,${base64Png}`] },
-        }),
-        { status: 200 },
-      ),
+    const fetchFn = fetchSeq(
+      bare({ data: { image_urls: [`data:image/png;base64,${base64Png}`] } }),
     );
 
-    const result = await generateImage({
+    const result = await run(fetchFn, {
       baseUrl: 'https://api.minimaxi.com/v1',
-      apiKey: 'secret',
       model: 'image-01',
-      prompt: 'poster',
-      signal: new AbortController().signal,
-      fetchFn,
     });
 
     expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
@@ -246,27 +226,14 @@ describe('generateImage', () => {
   });
 
   it('surfaces MiniMax application errors returned with HTTP 200', async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          base_resp: {
-            status_code: 1008,
-            status_msg: 'insufficient balance',
-          },
-        }),
-        { status: 200 },
-      ),
+    const fetchFn = fetchSeq(
+      bare({
+        base_resp: { status_code: 1008, status_msg: 'insufficient balance' },
+      }),
     );
 
     await expect(
-      generateImage({
-        baseUrl: 'https://api.minimax.io/v1',
-        apiKey: 'secret',
-        model: 'image-01',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
+      run(fetchFn, { baseUrl: 'https://api.minimax.io/v1', model: 'image-01' }),
     ).rejects.toThrow('Image generation failed (1008: insufficient balance).');
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
@@ -277,38 +244,12 @@ describe('generateImage', () => {
       url: new URL('https://cdn.example.com/generated/image.png'),
       lookup,
     });
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [
-                      {
-                        image: 'https://cdn.example.com/generated/image.png',
-                      },
-                    ],
-                  },
-                },
-              ],
-            },
-          }),
-          { status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(new Response(PNG_BYTES, { status: 200 }));
+    const fetchFn = fetchSeq(
+      bare(dashscope('https://cdn.example.com/generated/image.png')),
+      new Response(PNG_BYTES, { status: 200 }),
+    );
 
-    await generateImage({
-      baseUrl: 'https://images.example.com/api/v1',
-      apiKey: 'secret',
-      model: 'qwen-image-2.0',
-      prompt: 'poster',
-      signal: new AbortController().signal,
-      fetchFn,
-    });
+    await run(fetchFn);
 
     expect(fetchFn.mock.calls[1]?.[1]).toEqual(
       expect.objectContaining({ dispatcher: expect.anything() }),
@@ -317,63 +258,26 @@ describe('generateImage', () => {
 
   it('reports throttling without attempting a download', async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
+      typed(
+        {
           code: 'Throttling',
           message: 'Requests rate limit exceeded',
           request_id: 'request-2',
-        }),
-        {
-          status: 429,
-          headers: { 'content-type': 'application/json' },
         },
+        429,
       ),
     );
 
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/rate limit/i);
+    await expect(run(fetchFn)).rejects.toThrow(/rate limit/i);
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an unsafe result URL before downloading it', async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          output: {
-            choices: [
-              {
-                message: {
-                  content: [{ image: 'http://127.0.0.1/private.png' }],
-                },
-              },
-            ],
-          },
-        }),
-        {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        },
-      ),
-    );
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(typed(dashscope('http://127.0.0.1/private.png')));
 
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/safe public HTTPS/i);
+    await expect(run(fetchFn)).rejects.toThrow(/safe public HTTPS/i);
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
@@ -381,149 +285,34 @@ describe('generateImage', () => {
     networkPolicyMocks.resolveNetworkTarget.mockRejectedValueOnce(
       new Error('host resolved to 169.254.169.254'),
     );
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          output: {
-            choices: [
-              {
-                message: {
-                  content: [
-                    { image: 'https://images.example.com/private.png' },
-                  ],
-                },
-              },
-            ],
-          },
-        }),
-        {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        },
-      ),
-    );
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        typed(dashscope('https://images.example.com/private.png')),
+      );
 
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/safe public HTTPS/i);
+    await expect(run(fetchFn)).rejects.toThrow(/safe public HTTPS/i);
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects a download that is not a PNG image', async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: 'https://cdn.example.com/image.png' }],
-                  },
-                },
-              ],
-            },
-          }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(
+  it.each<[string, () => Response, RegExp]>([
+    [
+      'rejects a download that is not a PNG image',
+      () =>
         new Response('not an image', {
           status: 200,
           headers: { 'content-type': 'text/plain' },
         }),
-      );
-
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/valid PNG/i);
-  });
-
-  it('rejects a download with only a partial PNG signature', async () => {
-    const partialPngSignature = new Uint8Array([
-      0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0,
-    ]);
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: 'https://cdn.example.com/image.png' }],
-                  },
-                },
-              ],
-            },
-          }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(partialPngSignature, {
-          status: 200,
-          headers: { 'content-type': 'image/png' },
-        }),
-      );
-
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/valid PNG/i);
-  });
-
-  it('rejects an image response above the download byte limit', async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: 'https://cdn.example.com/image.png' }],
-                  },
-                },
-              ],
-            },
-          }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(
+      /valid PNG/i,
+    ],
+    [
+      'rejects a download with only a partial PNG signature',
+      () => pngResponse(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0])),
+      /valid PNG/i,
+    ],
+    [
+      'rejects an image response above the download byte limit',
+      () =>
         new Response(null, {
           status: 200,
           headers: {
@@ -531,194 +320,66 @@ describe('generateImage', () => {
             'content-type': 'image/png',
           },
         }),
-      );
+      /byte limit/i,
+    ],
+  ])('%s', async (_title, download, error) => {
+    const fetchFn = fetchSeq(typed(dashscope(CDN_IMAGE)), download());
 
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/byte limit/i);
+    await expect(run(fetchFn)).rejects.toThrow(error);
   });
 
-  it('does not expose a signed result URL when its download fails', async () => {
-    const signedUrl =
-      'https://cdn.example.com/image.png?signature=temporary-secret';
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: signedUrl }],
-                  },
-                },
-              ],
-            },
-          }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-      )
-      .mockRejectedValueOnce(new Error(`Failed to fetch ${signedUrl}`));
+  const signedUrl = `${CDN_IMAGE}?signature=temporary-secret`;
 
-    const request = generateImage({
-      baseUrl: 'https://images.example.com/api/v1',
-      apiKey: 'secret',
-      model: 'qwen-image-2.0',
-      prompt: 'poster',
-      signal: new AbortController().signal,
-      fetchFn,
-    });
+  /** The download failure is reported without the signed URL. */
+  async function expectSignedUrlHidden(download: Response | Error) {
+    const request = run(fetchSeq(typed(dashscope(signedUrl)), download));
 
     await expect(request).rejects.toThrow(
       'Generated image download failed before completion.',
     );
     await expect(request).rejects.not.toThrow(signedUrl);
-  });
+  }
 
-  it('does not expose a signed result URL when its response stream fails', async () => {
-    const signedUrl =
-      'https://cdn.example.com/image.png?signature=temporary-secret';
+  it('does not expose a signed result URL when its download fails', () =>
+    expectSignedUrlHidden(new Error(`Failed to fetch ${signedUrl}`)));
+
+  it('does not expose a signed result URL when its response stream fails', () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.error(new Error(`Failed to read ${signedUrl}`));
       },
     });
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: signedUrl }],
-                  },
-                },
-              ],
-            },
-          }),
-          {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          },
-        ),
-      )
-      .mockResolvedValueOnce(new Response(body, { status: 200 }));
-
-    const request = generateImage({
-      baseUrl: 'https://images.example.com/api/v1',
-      apiKey: 'secret',
-      model: 'qwen-image-2.0',
-      prompt: 'poster',
-      signal: new AbortController().signal,
-      fetchFn,
-    });
-
-    await expect(request).rejects.toThrow(
-      'Generated image download failed before completion.',
-    );
-    await expect(request).rejects.not.toThrow(signedUrl);
+    return expectSignedUrlHidden(new Response(body, { status: 200 }));
   });
 });
 
 describe('generateImage redirect handling', () => {
-  it('follows a valid 302 → 200 redirect chain and returns the PNG', async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: 'https://api.example.com/image.png' }],
-                  },
-                },
-              ],
-            },
-          }),
-          { status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(null, {
-          status: 302,
-          headers: { location: 'https://cdn.example.com/final.png' },
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(PNG_BYTES, {
-          status: 200,
-          headers: { 'content-type': 'image/png' },
-        }),
-      );
+  const dashscopeResult = () =>
+    bare(dashscope('https://api.example.com/image.png'));
 
-    const result = await generateImage({
-      baseUrl: 'https://images.example.com/api/v1',
-      apiKey: 'secret',
-      model: 'qwen-image-2.0',
-      prompt: 'poster',
-      signal: new AbortController().signal,
-      fetchFn,
-    });
+  it('follows a valid 302 → 200 redirect chain and returns the PNG', async () => {
+    const fetchFn = fetchSeq(
+      dashscopeResult(),
+      redirect('https://cdn.example.com/final.png'),
+      pngResponse(),
+    );
+
+    const result = await run(fetchFn);
 
     expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
   it('rejects when redirects exceed the maximum allowed', async () => {
-    const redirectResponse = () =>
-      new Response(null, {
-        status: 302,
-        headers: { location: 'https://cdn.example.com/next.png' },
-      });
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            output: {
-              choices: [
-                {
-                  message: {
-                    content: [{ image: 'https://api.example.com/image.png' }],
-                  },
-                },
-              ],
-            },
-          }),
-          { status: 200 },
-        ),
-      )
+    const fetchFn = fetchSeq(
+      dashscopeResult(),
       // MAX_DOWNLOAD_REDIRECTS + 1 consecutive redirects
-      .mockResolvedValueOnce(redirectResponse())
-      .mockResolvedValueOnce(redirectResponse())
-      .mockResolvedValueOnce(redirectResponse())
-      .mockResolvedValueOnce(redirectResponse());
+      ...Array.from({ length: 4 }, () =>
+        redirect('https://cdn.example.com/next.png'),
+      ),
+    );
 
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/exceeded.*redirects/i);
+    await expect(run(fetchFn)).rejects.toThrow(/exceeded.*redirects/i);
   });
 });
 
@@ -731,15 +392,6 @@ describe('generateImage error body handling', () => {
       }),
     );
 
-    await expect(
-      generateImage({
-        baseUrl: 'https://images.example.com/api/v1',
-        apiKey: 'secret',
-        model: 'qwen-image-2.0',
-        prompt: 'poster',
-        signal: new AbortController().signal,
-        fetchFn,
-      }),
-    ).rejects.toThrow(/HTTP 502/);
+    await expect(run(fetchFn)).rejects.toThrow(/HTTP 502/);
   });
 });

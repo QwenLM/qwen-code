@@ -32,7 +32,6 @@ import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 const { Terminal } = pkg;
 
-// Hoisted Mocks
 const mockGetSystemEncoding = vi.hoisted(() =>
   vi.fn().mockReturnValue('utf-8'),
 );
@@ -72,7 +71,6 @@ const mockGetShellConfiguration = vi.hoisted(() =>
   }),
 );
 
-// Top-level Mocks
 vi.mock('@lydell/node-pty', () => ({
   spawn: mockPtySpawn,
 }));
@@ -123,12 +121,62 @@ const mockProcessKill = vi
   .spyOn(process, 'kill')
   .mockImplementation(() => true);
 
-// Production resolves taskkill by absolute System32 path (never the bare name)
-// to avoid PATH/CWD binary planting. Compute the expected path the same way so
-// assertions stay in sync across platforms (SystemRoot is unset off Windows).
+// Production runs taskkill by absolute System32 path (the bare name invites
+// PATH/CWD binary planting); SystemRoot is unset off Windows, so derive alike.
 const TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 const HIDDEN_WINDOW = { windowsHide: true };
 const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
+const CAP_NOTICE = 'Output exceeded the maximum captured size';
+
+// taskkill spawn arguments: tree-kill (/t) by default, shell pid only otherwise.
+const taskkill = (pid: number | undefined, tree = true) => [
+  TASKKILL,
+  tree ? ['/f', '/t', '/pid', String(pid)] : ['/f', '/pid', String(pid)],
+  HIDDEN_WINDOW,
+];
+const expectNoTaskkill = () =>
+  expect(mockCpSpawn).not.toHaveBeenCalledWith(
+    TASKKILL,
+    expect.anything(),
+    HIDDEN_WINDOW,
+  );
+
+// Runs `run` while the liveness probe process.kill(pid, 0) throws ESRCH (shell
+// gone), then restores the alive default: clearAllMocks() keeps impls.
+const withDeadShell = async (run: () => unknown) => {
+  mockProcessKill.mockImplementation((_pid, signal) => {
+    if (signal === 0) throw new Error('ESRCH');
+    return true;
+  });
+  try {
+    await run();
+  } finally {
+    mockProcessKill.mockImplementation(() => true);
+  }
+};
+
+// Shells as [executable, shell, ...argsPrefix].
+const BASH_SHELL = ['bash', 'bash', '-c'];
+const CMD_SHELL = ['cmd.exe', 'cmd', '/d', '/s', '/c'];
+const GIT_BASH_SHELL = ['bash.exe', 'bash', '-c'];
+const POWERSHELL_SHELL = [
+  'powershell.exe',
+  'powershell',
+  '-NoProfile',
+  '-Command',
+];
+const useShell = ([executable, shell, ...argsPrefix]: string[]) =>
+  mockGetShellConfiguration.mockReturnValue({ executable, argsPrefix, shell });
+// PowerShell commands on Windows are prefixed with UTF-8 output encoding.
+const PS_COMMAND = 'Test-Path "C:\\Temp\\"';
+const PS_UTF8_ARGS = [
+  '-NoProfile',
+  '-Command',
+  `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;${PS_COMMAND}`,
+];
+
+const bg = (shellId: string) =>
+  ({ kind: 'background', shellId }) satisfies ShellAbortReason;
 
 const shellExecutionConfig = {
   terminalWidth: 80,
@@ -138,12 +186,8 @@ const shellExecutionConfig = {
   disableDynamicLineTrimming: true,
 } satisfies ShellExecutionConfig;
 
-const shellExecutionConfigWithoutPager = {
-  terminalWidth: 80,
-  terminalHeight: 24,
-  showColor: false,
-  disableDynamicLineTrimming: true,
-} satisfies ShellExecutionConfig;
+const { pager: _pager, ...shellExecutionConfigWithoutPager } =
+  shellExecutionConfig;
 
 const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
 const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
@@ -151,40 +195,111 @@ const EXPECTED_MERGED_WINDOWS_PATH =
   'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin';
 
 let originalProcessEnv: NodeJS.ProcessEnv;
+let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
 
-async function withoutGitPagerEnv(run: () => Promise<unknown>): Promise<void> {
-  const originalGitPager = process.env['GIT_PAGER'];
-  delete process.env['GIT_PAGER'];
-  try {
-    await run();
-  } finally {
-    if (originalGitPager === undefined) {
-      delete process.env['GIT_PAGER'];
-    } else {
-      process.env['GIT_PAGER'] = originalGitPager;
+beforeEach(() => {
+  originalProcessEnv = process.env;
+});
+
+afterEach(() => {
+  process.env = originalProcessEnv;
+  vi.unstubAllEnvs();
+});
+
+const exec = (
+  command: string,
+  {
+    signal = new AbortController().signal,
+    usePty = true,
+    config = shellExecutionConfig,
+    options,
+  }: {
+    signal?: AbortSignal;
+    usePty?: boolean;
+    config?: ShellExecutionConfig;
+    options?: ShellExecuteOptions;
+  } = {},
+) =>
+  ShellExecutionService.execute(
+    command,
+    '/test/dir',
+    onOutputEventMock,
+    signal,
+    usePty,
+    config,
+    options,
+  );
+
+// onData/onExit return a disposable stub, like node-pty's IDisposable: the
+// background-promote path calls .dispose() on them to detach its listeners.
+const makePty = () =>
+  Object.assign(new EventEmitter(), {
+    pid: 12345,
+    kill: vi.fn(),
+    onData: vi.fn().mockReturnValue({ dispose: vi.fn() }),
+    onExit: vi.fn().mockReturnValue({ dispose: vi.fn() }),
+    write: vi.fn(),
+    resize: vi.fn(),
+  });
+
+// Like a live Node ChildProcess, exitCode / signalCode are null: the promote
+// liveness guard reads them to catch an exit racing the abort handler, and
+// `undefined` would look terminal and skip the promote.
+const makeChild = (pid: number, withExitState = true) => {
+  const child = new EventEmitter() as EventEmitter & Partial<ChildProcess>;
+  child.stdout = new EventEmitter() as Readable;
+  child.stderr = new EventEmitter() as Readable;
+  child.kill = vi.fn();
+  Object.defineProperty(child, 'pid', { value: pid, configurable: true });
+  if (withExitState) {
+    for (const key of ['exitCode', 'signalCode']) {
+      Object.defineProperty(child, key, {
+        value: null,
+        writable: true,
+        configurable: true,
+      });
     }
   }
-}
-
-const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
-  const lines = Array.isArray(text) ? text : text.split('\n');
-  const expected: AnsiOutput = Array.from(
-    { length: shellExecutionConfig.terminalHeight },
-    (_, i) => [
-      {
-        text: expect.stringMatching((lines[i] || '').trim()),
-        bold: false,
-        italic: false,
-        underline: false,
-        dim: false,
-        inverse: false,
-        fg: '',
-        bg: '',
-      },
-    ],
-  );
-  return expected;
+  return child;
 };
+type MockChild = ReturnType<typeof makeChild>;
+
+// Replace (not mutate in place): this file restores process.env by reference
+// in afterEach, so in-place keys would leak to later tests.
+const setSecretEnv = () => {
+  process.env = {
+    ...originalProcessEnv,
+    QWEN_SERVER_TOKEN: 'serve-secret',
+    QWEN_DAEMON_TOKEN: 'daemon-secret',
+    GH_TOKEN: 'gh-abc',
+    PATH: '/usr/bin',
+  };
+};
+
+const expectSanitizedEnv = (spawn: Mock) => {
+  const spawnEnv = (spawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env;
+  // Internal daemon secrets must not leak into agent-run commands.
+  expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+  expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+  // Benign vars + third-party credentials user commands rely on are kept.
+  expect(spawnEnv['PATH']).toContain('/usr/bin');
+  expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+  // The shell tool's own marker is still applied on top.
+  expect(spawnEnv['QWEN_CODE']).toBe('1');
+};
+
+const dataEvent = (chunk: unknown) => ({ type: 'data', chunk });
+const stdoutEvent = (chunk: unknown) => ({
+  type: 'data',
+  chunk,
+  stream: 'stdout',
+});
+const expectDataEvent = (chunk: unknown) =>
+  expect(onOutputEventMock).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'data', chunk }),
+  );
+const emittedData = () =>
+  onOutputEventMock.mock.calls.filter(([event]) => event.type === 'data');
 
 const createAnsiToken = (text: string) => ({
   text,
@@ -196,6 +311,16 @@ const createAnsiToken = (text: string) => ({
   fg: '',
   bg: '',
 });
+
+const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
+  const lines = Array.isArray(text) ? text : text.split('\n');
+  return Array.from({ length: shellExecutionConfig.terminalHeight }, (_, i) => [
+    {
+      ...createAnsiToken(''),
+      text: expect.stringMatching((lines[i] || '').trim()),
+    },
+  ]);
+};
 
 const setupConflictingPathEnv = () => {
   process.env = {
@@ -210,47 +335,13 @@ const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
   expect(env['Path']).toBeUndefined();
 };
 
-const waitForDataEventCount = async (
-  onOutputEventMock: Mock<(event: ShellOutputEvent) => void>,
-  expectedCount: number,
-) => {
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const dataEvents = onOutputEventMock.mock.calls.filter(
-      ([event]) => event.type === 'data',
-    );
-    if (dataEvents.length >= expectedCount) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-};
-
 describe('ShellExecutionService', () => {
-  let mockPtyProcess: EventEmitter & {
-    pid: number;
-    kill: Mock;
-    onData: Mock;
-    onExit: Mock;
-    write: Mock;
-    resize: Mock;
-  };
-  let mockHeadlessTerminal: {
-    resize: Mock;
-    scrollLines: Mock;
-    buffer: {
-      active: {
-        viewportY: number;
-      };
-    };
-  };
-  let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
+  let mockPtyProcess: ReturnType<typeof makePty>;
   let mockPtyNativeKill: Mock;
   let mockConoutWorkerDispose: Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    originalProcessEnv = process.env;
-
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
     mockGetPty.mockResolvedValue({
@@ -258,23 +349,11 @@ describe('ShellExecutionService', () => {
       name: 'mock-pty',
     });
     mockLoadXtermHeadless.mockResolvedValue({ Terminal });
-
     onOutputEventMock = vi.fn();
-
-    mockPtyProcess = new EventEmitter() as EventEmitter & {
-      pid: number;
-      kill: Mock;
-      onData: Mock;
-      onExit: Mock;
-      write: Mock;
-      resize: Mock;
-    };
-    mockPtyProcess.pid = 12345;
-    mockPtyProcess.kill = vi.fn();
-    // node-pty's WindowsPtyAgent internals. releaseConPtyHost drives these
-    // directly instead of ptyProcess.kill(), which would also fork a helper to
-    // enumerate the console process list and then TerminateProcess a pid that
-    // ClosePseudoConsole has already freed for reuse. See #11303.
+    mockPtyProcess = makePty();
+    // node-pty WindowsPtyAgent internals, driven directly by releaseConPtyHost:
+    // ptyProcess.kill() would fork a console-list helper, then TerminateProcess
+    // a pid ClosePseudoConsole already freed for reuse (#11303).
     mockPtyNativeKill = vi.fn();
     mockConoutWorkerDispose = vi.fn();
     (mockPtyProcess as unknown as { _agent: Record<string, unknown> })._agent =
@@ -284,129 +363,145 @@ describe('ShellExecutionService', () => {
         _ptyNative: { kill: mockPtyNativeKill },
         _conoutSocketWorker: { dispose: mockConoutWorkerDispose },
       };
-    // node-pty's onData/onExit return IDisposable; the production
-    // background-promote path calls .dispose() on those handles to detach
-    // its listeners cleanly. Mock them to return a disposable stub so the
-    // promote path doesn't crash on `undefined.dispose()`.
-    mockPtyProcess.onData = vi.fn().mockReturnValue({ dispose: vi.fn() });
-    mockPtyProcess.onExit = vi.fn().mockReturnValue({ dispose: vi.fn() });
-    mockPtyProcess.write = vi.fn();
-    mockPtyProcess.resize = vi.fn();
-
-    mockHeadlessTerminal = {
-      resize: vi.fn(),
-      scrollLines: vi.fn(),
-      buffer: {
-        active: {
-          viewportY: 0,
-        },
-      },
-    };
-
     mockPtySpawn.mockReturnValue(mockPtyProcess);
   });
 
-  afterEach(() => {
-    process.env = originalProcessEnv;
-    vi.unstubAllEnvs();
-  });
+  const ptyData = (...chunks: Array<string | Buffer>) =>
+    chunks.forEach((chunk) => mockPtyProcess.onData.mock.calls[0][0](chunk));
+  const ptyExit = (exit: object = { exitCode: 0, signal: null }) =>
+    mockPtyProcess.onExit.mock.calls[0][0](exit);
+  // Drives the most recently registered (post-promote) exit listener.
+  const postPromoteExit = (exit: object = { exitCode: 0, signal: undefined }) =>
+    mockPtyProcess.onExit.mock.calls.at(-1)![0](exit);
+  const disposableOf = (register: Mock) =>
+    register.mock.results[0].value as { dispose: Mock };
+  const ptyTaskkill = (tree = true) => taskkill(mockPtyProcess.pid, tree);
+  const groupKill = (signal: string) => [-mockPtyProcess.pid, signal];
+  const expectConPtyReleased = () => {
+    expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
+    expect(mockConoutWorkerDispose).toHaveBeenCalled();
+  };
 
-  // Helper function to run a standard execution simulation
+  // Start a PTY execution, let spawn settle, drive it, and await the result.
   const simulateExecution = async (
     command: string,
-    simulation: (
-      ptyProcess: typeof mockPtyProcess,
-      ac: AbortController,
-    ) => void | Promise<void>,
+    simulation: (ac: AbortController) => void | Promise<void>,
     config: ShellExecutionConfig = shellExecutionConfig,
     options: ShellExecuteOptions = {},
   ) => {
     const abortController = new AbortController();
-    const handle = await ShellExecutionService.execute(
+    const handle = await exec(command, {
+      signal: abortController.signal,
+      config,
+      options,
+    });
+    await new Promise((resolve) => process.nextTick(resolve));
+    await simulation(abortController);
+    const result = await handle.result;
+    return { result, handle, abortController };
+  };
+  // Feed output chunks, then exit cleanly.
+  const runPty = (
+    command: string,
+    chunks: Array<string | Buffer> = [],
+    config?: ShellExecutionConfig,
+  ) =>
+    simulateExecution(
       command,
-      '/test/dir',
+      () => {
+        ptyData(...chunks);
+        ptyExit();
+      },
+      config,
+    );
+  // Run `echo hi` to a clean exit.
+  const runEchoHi = async () => {
+    const { result } = await runPty('echo hi');
+    expect(result.exitCode).toBe(0);
+    return result;
+  };
+  // Cancel, let the killed PTY exit with code 1, and check the aborted flag.
+  const cancelPty = async (command = 'sleep 10', reason?: ShellAbortReason) => {
+    const { result } = await simulateExecution(command, (ac) => {
+      ac.abort(reason);
+      ptyExit({ exitCode: 1, signal: null });
+    });
+    expect(result.aborted).toBe(true);
+    return result;
+  };
+  // Background-promote and check it took. No onExit: the child is still alive,
+  // so the result must come from the abort handler's own immediate resolve.
+  const promotePty = async (
+    command: string,
+    shellId: string,
+    options?: ShellExecuteOptions,
+  ) => {
+    const { result } = await simulateExecution(
+      command,
+      (ac) => ac.abort(bg(shellId)),
+      shellExecutionConfig,
+      options,
+    );
+    expect(result.promoted).toBe(true);
+    return result;
+  };
+
+  const launch = () => ({
+    executable: '/trusted/program',
+    args: ['two words', "quote'", '$(touch nope); *', ''],
+    cwd: '/workspace',
+    env: { ONLY: 'explicit', TERM: 'xterm-256color', PWD: '/workspace' },
+  });
+  const pipe = () => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 56789,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+      exitCode: null,
+      signalCode: null,
+    });
+    mockCpSpawn.mockReturnValue(child);
+    return child;
+  };
+  const launchWith = (
+    input: Parameters<typeof ShellExecutionService.executeLaunch>[0],
+    pty: boolean,
+    config: ShellExecutionConfig = shellExecutionConfig,
+    options?: ShellExecuteOptions,
+    signal = new AbortController().signal,
+  ) =>
+    ShellExecutionService.executeLaunch(
+      input,
       onOutputEventMock,
-      abortController.signal,
-      true,
+      signal,
+      pty,
       config,
       options,
     );
 
-    await new Promise((resolve) => process.nextTick(resolve));
-    await simulation(mockPtyProcess, abortController);
-    const result = await handle.result;
-    return { result, handle, abortController };
-  };
-
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the pty child env while keeping user vars and third-party credentials', async () => {
-      // Replace (not mutate in place): this file restores process.env by
-      // reference in afterEach, so in-place keys would leak to later tests.
-      process.env = {
-        ...originalProcessEnv,
-        QWEN_SERVER_TOKEN: 'serve-secret',
-        QWEN_DAEMON_TOKEN: 'daemon-secret',
-        GH_TOKEN: 'gh-abc',
-        PATH: '/usr/bin',
-      };
-
-      await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
-
-      const spawnEnv = (
-        mockPtySpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
-      ).env;
-      // Internal daemon secrets must not leak into agent-run commands.
-      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
-      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
-      // Benign vars + third-party credentials user commands rely on are kept.
-      expect(spawnEnv['PATH']).toContain('/usr/bin');
-      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
-      // The shell tool's own marker is still applied on top.
-      expect(spawnEnv['QWEN_CODE']).toBe('1');
+      setSecretEnv();
+      await runPty('echo hi');
+      expectSanitizedEnv(mockPtySpawn);
     });
   });
 
   describe('structured launch', () => {
-    const launch = () => ({
-      executable: '/trusted/program',
-      args: ['two words', "quote'", '$(touch nope); *', ''],
-      cwd: '/workspace',
-      env: { ONLY: 'explicit', TERM: 'xterm-256color', PWD: '/workspace' },
-    });
-    const pipe = () => {
-      const child = Object.assign(new EventEmitter(), {
-        pid: 56789,
-        stdout: new EventEmitter(),
-        stderr: new EventEmitter(),
-        stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
-        exitCode: null,
-        signalCode: null,
-      });
-      mockCpSpawn.mockReturnValue(child);
-      return child;
-    };
-
     it.each([false, true])(
       'passes literal argv and exact env with PTY=%s',
       async (pty) => {
         const child = pipe();
         const input = launch();
-        const handle = await ShellExecutionService.executeLaunch(
-          input,
-          onOutputEventMock,
-          new AbortController().signal,
-          pty,
-          shellExecutionConfig,
-        );
+        const handle = await launchWith(input, pty);
         expect(pty ? mockPtySpawn : mockCpSpawn).toHaveBeenCalledWith(
           input.executable,
           input.args,
           expect.objectContaining({ cwd: input.cwd, env: input.env }),
         );
         expect(mockGetShellConfiguration).not.toHaveBeenCalled();
-        if (pty) mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0 });
+        if (pty) ptyExit({ exitCode: 0 });
         else child.emit('exit', 0, null);
         expect((await handle.result).exitCode).toBe(0);
       },
@@ -414,13 +509,7 @@ describe('ShellExecutionService', () => {
 
     it('snapshots argv and env before asynchronous PTY initialization', async () => {
       const input = launch();
-      const pending = ShellExecutionService.executeLaunch(
-        input,
-        onOutputEventMock,
-        new AbortController().signal,
-        true,
-        shellExecutionConfig,
-      );
+      const pending = launchWith(input, true);
       input.args[0] = 'mutated';
       input.env.ONLY = 'mutated';
       input.executable = '/changed';
@@ -430,7 +519,7 @@ describe('ShellExecutionService', () => {
         launch().args,
         expect.objectContaining({ env: launch().env }),
       );
-      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0 });
+      ptyExit({ exitCode: 0 });
       await handle.result;
     });
 
@@ -444,13 +533,7 @@ describe('ShellExecutionService', () => {
             throw new Error('posix_spawnp failed');
           });
         const input = launch();
-        const handle = await ShellExecutionService.executeLaunch(
-          input,
-          onOutputEventMock,
-          new AbortController().signal,
-          true,
-          shellExecutionConfig,
-        );
+        const handle = await launchWith(input, true);
         expect(mockCpSpawn).toHaveBeenCalledExactlyOnceWith(
           input.executable,
           input.args,
@@ -467,19 +550,10 @@ describe('ShellExecutionService', () => {
       mockPtyProcess.onData.mockImplementationOnce(() => {
         throw new Error('posix_spawnp failed after spawn');
       });
-      const handle = await ShellExecutionService.executeLaunch(
-        launch(),
-        onOutputEventMock,
-        new AbortController().signal,
-        true,
-        shellExecutionConfig,
-      );
+      const handle = await launchWith(launch(), true);
       await expect(handle.result).rejects.toThrow('after spawn');
       expect(mockCpSpawn).not.toHaveBeenCalled();
-      expect(mockProcessKill).toHaveBeenCalledWith(
-        -mockPtyProcess.pid,
-        'SIGKILL',
-      );
+      expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGKILL'));
       expect(disposeSpy).toHaveBeenCalledTimes(1);
       expect(ShellExecutionService['activePtys'].size).toBe(activeBefore);
     });
@@ -487,13 +561,7 @@ describe('ShellExecutionService', () => {
     it('ends stdin without reporting an early-close error when the exit status is known', async () => {
       const child = pipe();
       const input = { ...launch(), stdin: Buffer.from('request') };
-      const handle = await ShellExecutionService.executeLaunch(
-        input,
-        onOutputEventMock,
-        new AbortController().signal,
-        false,
-        shellExecutionConfig,
-      );
+      const handle = await launchWith(input, false);
       expect(child.stdin.end).toHaveBeenCalledWith(Buffer.from('request'));
       expect(mockCpSpawn.mock.calls[0][2].stdio).toEqual([
         'pipe',
@@ -504,10 +572,9 @@ describe('ShellExecutionService', () => {
       child.stdin.emit('error', error);
       child.emit('exit', 0, null);
       const result = await handle.result;
-      // The process's own exit status is authoritative: a transport EPIPE
-      // (the child closed stdin early) must not occupy the error slot that
-      // downstream gates read as a veto on receipt confirmation or as the
-      // evidence-retention trigger (PR #12067 review).
+      // The exit status is authoritative: a transport EPIPE (stdin closed
+      // early) must not fill the error slot that downstream gates read as a
+      // receipt-confirmation veto or evidence-retention trigger (PR #12067).
       expect(result.exitCode).toBe(0);
       expect(result.error).toBeNull();
       expect(mockCpSpawn).toHaveBeenCalledTimes(1);
@@ -515,12 +582,9 @@ describe('ShellExecutionService', () => {
 
     it('inherits stdin without creating a JavaScript pipe', async () => {
       const child = pipe();
-      const handle = await ShellExecutionService.executeLaunch(
+      const handle = await launchWith(
         { ...launch(), inheritStdin: true },
-        onOutputEventMock,
-        new AbortController().signal,
         false,
-        shellExecutionConfig,
       );
       expect(mockCpSpawn.mock.calls[0][2].stdio).toEqual([
         'inherit',
@@ -535,13 +599,7 @@ describe('ShellExecutionService', () => {
     it('surfaces a stdin error only when the process leaves no exit information', async () => {
       const child = pipe();
       const input = { ...launch(), stdin: Buffer.from('request') };
-      const handle = await ShellExecutionService.executeLaunch(
-        input,
-        onOutputEventMock,
-        new AbortController().signal,
-        false,
-        shellExecutionConfig,
-      );
+      const handle = await launchWith(input, false);
       const error = Object.assign(new Error('closed'), { code: 'EPIPE' });
       child.stdin.emit('error', error);
       child.emit('exit', null, null);
@@ -552,17 +610,9 @@ describe('ShellExecutionService', () => {
     it('snapshots caller-owned stdin bytes before the asynchronous write', async () => {
       const child = pipe();
       const input = { ...launch(), stdin: Buffer.from('request') };
-      const pending = ShellExecutionService.executeLaunch(
-        input,
-        onOutputEventMock,
-        new AbortController().signal,
-        false,
-        shellExecutionConfig,
-      );
-      // Mutate the caller's buffer after the call but before the write:
-      // the design contract is that input bytes are caller-owned, so the
-      // service must have taken its copy synchronously at snapshot time
-      // (PR #12067 review).
+      const pending = launchWith(input, false);
+      // Mutate the caller-owned buffer before the write: the service must
+      // have copied it synchronously at snapshot time (PR #12067 review).
       input.stdin.fill(0);
       const handle = await pending;
       expect(child.stdin.end).toHaveBeenCalledWith(Buffer.from('request'));
@@ -571,51 +621,15 @@ describe('ShellExecutionService', () => {
     });
 
     it('rejects PTY stdin and invalid launch paths before spawning', async () => {
-      await expect(
-        ShellExecutionService.executeLaunch(
-          { ...launch(), stdin: '' },
-          onOutputEventMock,
-          new AbortController().signal,
-          true,
-          {},
-        ),
-      ).rejects.toThrow('pipe');
-      await expect(
-        ShellExecutionService.executeLaunch(
-          { ...launch(), inheritStdin: true },
-          onOutputEventMock,
-          new AbortController().signal,
-          true,
-          {},
-        ),
-      ).rejects.toThrow('pipe');
-      await expect(
-        ShellExecutionService.executeLaunch(
-          { ...launch(), stdin: 'input', inheritStdin: true },
-          onOutputEventMock,
-          new AbortController().signal,
-          false,
-          {},
-        ),
-      ).rejects.toThrow('both');
-      await expect(
-        ShellExecutionService.executeLaunch(
-          { ...launch(), executable: 'relative' },
-          onOutputEventMock,
-          new AbortController().signal,
-          false,
-          {},
-        ),
-      ).rejects.toThrow('absolute');
-      await expect(
-        ShellExecutionService.executeLaunch(
-          { ...launch(), env: { 'BAD=KEY': 'x' } },
-          onOutputEventMock,
-          new AbortController().signal,
-          false,
-          {},
-        ),
-      ).rejects.toThrow('Invalid');
+      for (const [input, pty, message] of [
+        [{ ...launch(), stdin: '' }, true, 'pipe'],
+        [{ ...launch(), inheritStdin: true }, true, 'pipe'],
+        [{ ...launch(), stdin: 'input', inheritStdin: true }, false, 'both'],
+        [{ ...launch(), executable: 'relative' }, false, 'absolute'],
+        [{ ...launch(), env: { 'BAD=KEY': 'x' } }, false, 'Invalid'],
+      ] as const) {
+        await expect(launchWith(input, pty, {})).rejects.toThrow(message);
+      }
       expect(mockPtySpawn).not.toHaveBeenCalled();
       expect(mockCpSpawn).not.toHaveBeenCalled();
     });
@@ -625,15 +639,9 @@ describe('ShellExecutionService', () => {
       { TERM: 'vt100' },
       { TERM: 'vt100', PWD: '/wrong' },
     ])('rejects implicit PTY environment additions: %j', async (env) => {
-      await expect(
-        ShellExecutionService.executeLaunch(
-          { ...launch(), env },
-          onOutputEventMock,
-          new AbortController().signal,
-          true,
-          {},
-        ),
-      ).rejects.toThrow(/TERM|PWD/);
+      await expect(launchWith({ ...launch(), env }, true, {})).rejects.toThrow(
+        /TERM|PWD/,
+      );
       expect(mockPtySpawn).not.toHaveBeenCalled();
       expect(mockCpSpawn).not.toHaveBeenCalled();
     });
@@ -644,12 +652,12 @@ describe('ShellExecutionService', () => {
         controller.abort();
         throw new Error('load failed');
       });
-      const handle = await ShellExecutionService.executeLaunch(
+      const handle = await launchWith(
         launch(),
-        onOutputEventMock,
-        controller.signal,
         true,
         {},
+        undefined,
+        controller.signal,
       );
       expect((await handle.result).aborted).toBe(true);
       expect(mockCpSpawn).not.toHaveBeenCalled();
@@ -659,10 +667,7 @@ describe('ShellExecutionService', () => {
 
   describe('Successful Execution', () => {
     it('should execute a command and capture output', async () => {
-      const { result, handle } = await simulateExecution('ls -l', (pty) => {
-        pty.onData.mock.calls[0][0]('file1.txt\n');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const { result, handle } = await runPty('ls -l', ['file1.txt\n']);
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'bash',
@@ -676,16 +681,15 @@ describe('ShellExecutionService', () => {
       expect(result.output.trim()).toBe('file1.txt');
       expect(handle.pid).toBe(12345);
 
-      expect(onOutputEventMock).toHaveBeenCalledWith({
-        type: 'data',
-        chunk: createExpectedAnsiOutput('file1.txt'),
-      });
+      expect(onOutputEventMock).toHaveBeenCalledWith(
+        dataEvent(createExpectedAnsiOutput('file1.txt')),
+      );
     });
 
     it('normalizes node-pty clean-exit signal 0 to null', async () => {
-      const { result } = await simulateExecution('echo clean', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 0 });
-      });
+      const { result } = await simulateExecution('echo clean', () =>
+        ptyExit({ exitCode: 0, signal: 0 }),
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.signal).toBeNull();
@@ -695,18 +699,11 @@ describe('ShellExecutionService', () => {
       const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
 
-      const { result } = await simulateExecution('ls -l', (pty) => {
-        pty.onData.mock.calls[0][0]('file1.txt\n');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const { result } = await runPty('ls -l', ['file1.txt\n']);
 
       expect(result.exitCode).toBe(0);
-      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
-        .value as { dispose: Mock };
-      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
-        .value as { dispose: Mock };
-      expect(dataDisposableStub.dispose).toHaveBeenCalled();
-      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      expect(disposableOf(mockPtyProcess.onData).dispose).toHaveBeenCalled();
+      expect(disposableOf(mockPtyProcess.onExit).dispose).toHaveBeenCalled();
       expect(removeListenerSpy).toHaveBeenCalledWith(
         'error',
         expect.any(Function),
@@ -723,25 +720,15 @@ describe('ShellExecutionService', () => {
         throw new Error('final render failed');
       });
 
-      const { result } = await simulateExecution(
-        'render-fails-on-exit',
-        (pty) => {
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        {
-          ...shellExecutionConfig,
-          disableDynamicLineTrimming: false,
-        },
-      );
+      const { result } = await runPty('render-fails-on-exit', [], {
+        ...shellExecutionConfig,
+        disableDynamicLineTrimming: false,
+      });
 
-      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
-        .value as { dispose: Mock };
-      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
-        .value as { dispose: Mock };
       expect(result.exitCode).toBe(0);
       expect(result.output).toBe('');
-      expect(dataDisposableStub.dispose).toHaveBeenCalled();
-      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      expect(disposableOf(mockPtyProcess.onData).dispose).toHaveBeenCalled();
+      expect(disposableOf(mockPtyProcess.onExit).dispose).toHaveBeenCalled();
       // One terminal is used for live PTY rendering, another for final replay.
       expect(terminalDisposeSpy).toHaveBeenCalledTimes(2);
 
@@ -749,18 +736,12 @@ describe('ShellExecutionService', () => {
     });
 
     it('should strip ANSI codes from output', async () => {
-      const { result } = await simulateExecution('ls --color=auto', (pty) => {
-        pty.onData.mock.calls[0][0]('a\u001b[31mred\u001b[0mword');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const { result } = await runPty('ls --color=auto', [
+        'a\u001b[31mred\u001b[0mword',
+      ]);
 
       expect(result.output.trim()).toBe('aredword');
-      expect(onOutputEventMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'data',
-          chunk: createExpectedAnsiOutput('aredword'),
-        }),
-      );
+      expectDataEvent(createExpectedAnsiOutput('aredword'));
     });
 
     it('suppresses parser diagnostics for malformed PTY output', async () => {
@@ -769,14 +750,10 @@ describe('ShellExecutionService', () => {
         .mockImplementation(() => {});
 
       try {
-        const { result } = await simulateExecution(
-          'malformed-output',
-          (pty) => {
-            pty.onData.mock.calls[0][0]('\u001b\xb0');
-            pty.onData.mock.calls[0][0]('recovered');
-            pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-          },
-        );
+        const { result } = await runPty('malformed-output', [
+          '\u001b\xb0',
+          'recovered',
+        ]);
 
         expect(
           consoleErrorSpy.mock.calls.some((args) =>
@@ -790,31 +767,19 @@ describe('ShellExecutionService', () => {
     });
 
     it('should correctly decode multi-byte characters split across chunks', async () => {
-      const { result } = await simulateExecution('echo "你好"', (pty) => {
-        const multiByteChar = '你好';
-        pty.onData.mock.calls[0][0](multiByteChar.slice(0, 1));
-        pty.onData.mock.calls[0][0](multiByteChar.slice(1));
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const { result } = await runPty('echo "你好"', ['你', '好']);
       expect(result.output.trim()).toBe('你好');
     });
 
     it('bounds buffered PTY output before building the final string', async () => {
-      const { result } = await simulateExecution(
-        'large-output',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('12345678');
-          pty.onData.mock.calls[0][0]('abcdefg');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
-      );
+      const { result } = await runPty('large-output', ['12345678', 'abcdefg'], {
+        ...shellExecutionConfig,
+        maxBufferedOutputBytes: 10,
+      });
 
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
-      expect(result.output).toContain(
-        'Output exceeded the maximum captured size',
-      );
+      expect(result.output).toContain(CAP_NOTICE);
       expect(result.output).not.toContain('cdefg');
     });
 
@@ -823,45 +788,31 @@ describe('ShellExecutionService', () => {
         throw new Error('replay failed');
       });
 
-      const { result } = await simulateExecution(
+      const { result } = await runPty(
         'large-output-replay-fallback',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('12345678');
-          pty.onData.mock.calls[0][0]('abcdefg');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
+        ['12345678', 'abcdefg'],
         { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
       );
 
       expect(result.rawOutput.toString()).toBe('12345678ab');
       expect(result.output).toContain('12345678ab');
-      expect(result.output).toContain(
-        'Output exceeded the maximum captured size',
-      );
+      expect(result.output).toContain(CAP_NOTICE);
       expect(result.output).not.toContain('cdefg');
     });
 
     it('does not add a capture-limit notice at the exact PTY buffer boundary', async () => {
-      const { result } = await simulateExecution(
-        'exact-output',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('1234567890');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
-      );
+      const { result } = await runPty('exact-output', ['1234567890'], {
+        ...shellExecutionConfig,
+        maxBufferedOutputBytes: 10,
+      });
 
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
-      expect(result.output).not.toContain(
-        'Output exceeded the maximum captured size',
-      );
+      expect(result.output).not.toContain(CAP_NOTICE);
     });
 
     it('should handle commands with no output', async () => {
-      await simulateExecution('touch file', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runPty('touch file');
 
       expect(onOutputEventMock).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -871,16 +822,8 @@ describe('ShellExecutionService', () => {
     });
 
     it('should call onPid with the process id', async () => {
-      const abortController = new AbortController();
-      const handle = await ShellExecutionService.execute(
-        'ls -l',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        true,
-        shellExecutionConfig,
-      );
-      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      const handle = await exec('ls -l');
+      ptyExit();
       await handle.result;
       expect(handle.pid).toBe(12345);
     });
@@ -901,25 +844,13 @@ describe('ShellExecutionService', () => {
         });
 
       try {
-        const abortController = new AbortController();
-        const handle = await ShellExecutionService.execute(
-          'fast-output',
-          '/test/dir',
-          onOutputEventMock,
-          abortController.signal,
-          true,
-          shellExecutionConfig,
-        );
-
-        const onData = mockPtyProcess.onData.mock.calls[0][0] as (
-          data: string,
-        ) => void;
+        const handle = await exec('fast-output');
         for (let i = 1; i <= 500; i++) {
-          onData(`Line ${String(i).padStart(4, '0')}\n`);
+          ptyData(`Line ${String(i).padStart(4, '0')}\n`);
         }
 
         const resultPromise = handle.result;
-        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        ptyExit();
 
         await vi.advanceTimersByTimeAsync(250);
         const result = await resultPromise;
@@ -936,29 +867,21 @@ describe('ShellExecutionService', () => {
     });
 
     it('should collapse carriage-return progress updates in final output', async () => {
-      const { result } = await simulateExecution('progress-output', (pty) => {
-        pty.onData.mock.calls[0][0]('Compressing objects: 14% (1/7)\r');
-        pty.onData.mock.calls[0][0]('Compressing objects: 28% (2/7)\r');
-        pty.onData.mock.calls[0][0]('Compressing objects: 42% (3/7)\r');
-        pty.onData.mock.calls[0][0]('Compressing objects: 100% (7/7), done.\n');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const { result } = await runPty('progress-output', [
+        'Compressing objects: 14% (1/7)\r',
+        'Compressing objects: 28% (2/7)\r',
+        'Compressing objects: 42% (3/7)\r',
+        'Compressing objects: 100% (7/7), done.\n',
+      ]);
 
       expect(result.output).toBe('Compressing objects: 100% (7/7), done.');
     });
 
     it('should not persist narrow terminal soft wraps as transcript newlines', async () => {
-      const { result } = await simulateExecution(
+      const { result } = await runPty(
         'narrow-output',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('abcdefghijklmnopqrstuvwxyz\nshort\n');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        {
-          ...shellExecutionConfig,
-          terminalWidth: 8,
-          terminalHeight: 4,
-        },
+        ['abcdefghijklmnopqrstuvwxyz\nshort\n'],
+        { ...shellExecutionConfig, terminalWidth: 8, terminalHeight: 4 },
       );
 
       expect(result.output).toBe('abcdefghijklmnopqrstuvwxyz\nshort');
@@ -966,30 +889,37 @@ describe('ShellExecutionService', () => {
   });
 
   describe('pty interaction', () => {
-    beforeEach(() => {
-      vi.spyOn(ShellExecutionService['activePtys'], 'get').mockReturnValue({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ptyProcess: mockPtyProcess as any,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        headlessTerminal: mockHeadlessTerminal as any,
+    const headless = () => ({
+      resize: vi.fn(),
+      scrollLines: vi.fn(),
+      buffer: { active: { viewportY: 0 } },
+    });
+    let mockHeadlessTerminal: ReturnType<typeof headless>;
+    const resize = () =>
+      ShellExecutionService.resizePty(mockPtyProcess.pid, 100, 40);
+    // Emit a line, run `action` mid-execution, then exit cleanly.
+    const midRun = (action: () => void) =>
+      simulateExecution('ls -l', () => {
+        ptyData('file1.txt\n');
+        action();
+        ptyExit();
       });
+
+    beforeEach(() => {
+      mockHeadlessTerminal = headless();
+      vi.spyOn(ShellExecutionService['activePtys'], 'get').mockReturnValue({
+        ptyProcess: mockPtyProcess,
+        headlessTerminal: mockHeadlessTerminal,
+      } as never);
     });
 
     it('should write to the pty and trigger a render', async () => {
       vi.useFakeTimers();
       try {
-        const abortController = new AbortController();
-        const handle = await ShellExecutionService.execute(
-          'interactive-app',
-          '/test/dir',
-          onOutputEventMock,
-          abortController.signal,
-          true,
-          shellExecutionConfig,
-        );
+        const handle = await exec('interactive-app');
 
         ShellExecutionService.writeToPty(handle.pid!, 'input');
-        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        ptyExit();
 
         await vi.runAllTimersAsync();
         await handle.result;
@@ -1002,47 +932,33 @@ describe('ShellExecutionService', () => {
     });
 
     it('should resize the pty and the headless terminal', async () => {
-      await simulateExecution('ls -l', (pty) => {
-        pty.onData.mock.calls[0][0]('file1.txt\n');
-        ShellExecutionService.resizePty(pty.pid!, 100, 40);
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await midRun(resize);
 
       expect(mockPtyProcess.resize).toHaveBeenCalledWith(100, 40);
       expect(mockHeadlessTerminal.resize).toHaveBeenCalledWith(100, 40);
     });
 
     it('should ignore expected PTY read EIO errors on process exit', async () => {
-      const { result } = await simulateExecution('ls -l', (pty) => {
+      const { result } = await simulateExecution('ls -l', () => {
         const eioError = Object.assign(new Error('read EIO'), { code: 'EIO' });
-        pty.emit('error', eioError);
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        mockPtyProcess.emit('error', eioError);
+        ptyExit();
       });
 
       expect(result.exitCode).toBe(0);
     });
 
     it('should throw unexpected PTY errors from error event', async () => {
-      const abortController = new AbortController();
-      const handle = await ShellExecutionService.execute(
-        'ls -l',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        true,
-        shellExecutionConfig,
-      );
-      await new Promise((resolve) => process.nextTick(resolve));
-
-      const unexpectedError = Object.assign(new Error('unexpected pty error'), {
-        code: 'EPIPE',
+      await simulateExecution('ls -l', () => {
+        const unexpectedError = Object.assign(
+          new Error('unexpected pty error'),
+          { code: 'EPIPE' },
+        );
+        expect(() => mockPtyProcess.emit('error', unexpectedError)).toThrow(
+          'unexpected pty error',
+        );
+        ptyExit();
       });
-      expect(() => mockPtyProcess.emit('error', unexpectedError)).toThrow(
-        'unexpected pty error',
-      );
-
-      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      await handle.result;
     });
 
     it('should ignore ioctl EBADF message-only resize race errors', async () => {
@@ -1050,13 +966,7 @@ describe('ShellExecutionService', () => {
         throw new Error('ioctl(2) failed, EBADF');
       });
 
-      await simulateExecution('ls -l', (pty) => {
-        pty.onData.mock.calls[0][0]('file1.txt\n');
-        expect(() =>
-          ShellExecutionService.resizePty(pty.pid!, 100, 40),
-        ).not.toThrow();
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await midRun(() => expect(resize).not.toThrow());
     });
 
     it('should ignore exited-pty message-only resize race errors', async () => {
@@ -1064,21 +974,13 @@ describe('ShellExecutionService', () => {
         throw new Error('Cannot resize a pty that has already exited');
       });
 
-      await simulateExecution('ls -l', (pty) => {
-        pty.onData.mock.calls[0][0]('file1.txt\n');
-        expect(() =>
-          ShellExecutionService.resizePty(pty.pid!, 100, 40),
-        ).not.toThrow();
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await midRun(() => expect(resize).not.toThrow());
     });
 
     it('should scroll the headless terminal', async () => {
-      await simulateExecution('ls -l', (pty) => {
-        pty.onData.mock.calls[0][0]('file1.txt\n');
-        ShellExecutionService.scrollPty(pty.pid!, 10);
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await midRun(() =>
+        ShellExecutionService.scrollPty(mockPtyProcess.pid, 10),
+      );
 
       expect(mockHeadlessTerminal.scrollLines).toHaveBeenCalledWith(10);
     });
@@ -1086,9 +988,9 @@ describe('ShellExecutionService', () => {
 
   describe('Failed Execution', () => {
     it('should capture a non-zero exit code', async () => {
-      const { result } = await simulateExecution('a-bad-command', (pty) => {
-        pty.onData.mock.calls[0][0]('command not found');
-        pty.onExit.mock.calls[0][0]({ exitCode: 127, signal: null });
+      const { result } = await simulateExecution('a-bad-command', () => {
+        ptyData('command not found');
+        ptyExit({ exitCode: 127, signal: null });
       });
 
       expect(result.exitCode).toBe(127);
@@ -1097,9 +999,9 @@ describe('ShellExecutionService', () => {
     });
 
     it('should capture a termination signal', async () => {
-      const { result } = await simulateExecution('long-process', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: 15 });
-      });
+      const { result } = await simulateExecution('long-process', () =>
+        ptyExit({ exitCode: 0, signal: 15 }),
+      );
 
       expect(result.exitCode).toBe(0);
       expect(result.signal).toBe(15);
@@ -1112,14 +1014,7 @@ describe('ShellExecutionService', () => {
         throw new Error('Simulated PTY spawn error');
       });
 
-      const handle = await ShellExecutionService.execute(
-        'any-command',
-        '/test/dir',
-        onOutputEventMock,
-        new AbortController().signal,
-        true,
-        {},
-      );
+      const handle = await exec('any-command', { config: {} });
       const result = await handle.result;
 
       expect(result.error).toBeInstanceOf(Error);
@@ -1132,74 +1027,33 @@ describe('ShellExecutionService', () => {
 
   describe('Aborting Commands', () => {
     it('should abort a running process and set the aborted flag', async () => {
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (pty, abortController) => {
-          abortController.abort();
-          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-        },
-      );
-
-      expect(result.aborted).toBe(true);
-      // The process kill is mocked, so we just check that the flag is set.
+      // cancelPty checks the aborted flag (the process kill is mocked).
+      await cancelPty();
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (pty, abortController) => {
-          abortController.abort({ kind: 'cancel' } satisfies ShellAbortReason);
-          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-        },
-      );
+      const result = await cancelPty('sleep 10', { kind: 'cancel' });
 
-      expect(result.aborted).toBe(true);
       expect(result.promoted).toBeUndefined();
-      // The default kill path runs: SIGTERM via process.kill on the
-      // process-group pid. Pinning that we DID try to kill — i.e., reason
-      // === 'cancel' is NOT mistakenly routed through the background branch.
-      expect(mockProcessKill).toHaveBeenCalledWith(
-        -mockPtyProcess.pid,
-        'SIGTERM',
-      );
+      // Default kill (group SIGTERM): 'cancel' is not routed as background.
+      expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGTERM'));
     });
 
     it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
       const terminalDisposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
-      // Critical: do NOT fire onExit — the child is still alive after the
-      // background-promote abort. The result Promise must resolve via the
-      // abort handler's own immediate resolve, not via the exit handler.
-      const { result } = await simulateExecution(
-        'tail -f /tmp/never.log',
-        (_pty, abortController) => {
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-        },
-      );
+      const result = await promotePty('tail -f /tmp/never.log', 'bg_test123');
 
-      // `aborted: false` (despite signal.aborted = true) is intentional —
-      // see #3831 design question 7. The flag answers "emit cancel/timeout
-      // copy?" not "did the signal fire?", and a promoted shell is
-      // neither cancelled nor timed out.
+      // `aborted: false` despite signal.aborted is intentional (#3831 design
+      // question 7): it means "emit cancel/timeout copy?"; promoted is neither.
       expect(result.aborted).toBe(false);
-      expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
       expect(result.error).toBeNull();
       expect(result.pid).toBe(mockPtyProcess.pid);
-      // Verify the kill path did NOT run: neither the PTY's own kill() nor
-      // process.kill on the group pid. Caller now owns the child.
+      // No kill (PTY kill() or group process.kill): the caller owns the child.
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
-      expect(mockProcessKill).not.toHaveBeenCalledWith(
-        -mockPtyProcess.pid,
-        'SIGTERM',
-      );
-      expect(mockProcessKill).not.toHaveBeenCalledWith(
-        -mockPtyProcess.pid,
-        'SIGKILL',
-      );
+      expect(mockProcessKill).not.toHaveBeenCalledWith(...groupKill('SIGTERM'));
+      expect(mockProcessKill).not.toHaveBeenCalledWith(...groupKill('SIGKILL'));
       expect(terminalDisposeSpy).toHaveBeenCalled();
 
       terminalDisposeSpy.mockRestore();
@@ -1217,12 +1071,9 @@ describe('ShellExecutionService', () => {
 
       const { result } = await simulateExecution(
         'long-running-output',
-        (pty, ac) => {
-          pty.onData.mock.calls[0][0](output);
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_replay_fallback',
-          } satisfies ShellAbortReason);
+        (ac) => {
+          ptyData(output);
+          ac.abort(bg('bg_replay_fallback'));
         },
       );
 
@@ -1236,143 +1087,62 @@ describe('ShellExecutionService', () => {
     });
 
     it('post-promotion: PTY data is no longer routed to onOutputEvent (handoff boundary)', async () => {
-      // Pin the ownership contract: after background-promote, PTY data
-      // arriving on the still-running child must NOT surface through the
-      // foreground execute()'s onOutputEvent (the caller has its own
-      // listeners now). Without dataDisposable.dispose() in the abort
-      // handler, the listener-retention bug would let post-promote bytes
-      // leak into the foreground consumer.
-      //
-      // Implementation note: PTY's handleOutput is async (`processingChain`
-      // queues microtasks for headlessTerminal.write callbacks), unlike
-      // child_process's sync handleOutput. Sync `expect` immediately
-      // after emit-then-abort would only see the call count BEFORE chain
-      // items run — both pre and post would read 0 and the assertion
-      // would tautologically pass without exercising the
-      // `listenersDetached` guard. We drive the test using the
-      // `simulateExecution` helper, which awaits `handle.result` — by
-      // the time the result resolves, the abort handler has run its
-      // drain (so all queued chain items have settled) and we can read
-      // the final emit count.
+      // Ownership contract: after promote, still-running PTY data must NOT
+      // reach the foreground onOutputEvent (dataDisposable.dispose() stops it).
+      // PTY handleOutput is async (`processingChain`), so a sync expect right
+      // after emit-then-abort passes without exercising `listenersDetached`;
+      // awaiting handle.result lets the abort handler's drain settle the chain.
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (pty, ac) => {
-          // Pre-promote data — fed via the live onData listener so it
-          // reaches the foreground onOutputEvent normally.
-          pty.onData.mock.calls[0][0]('pre-promote-data\n');
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
+        (ac) => {
+          ptyData('pre-promote-data\n');
+          ac.abort(bg('bg_test123'));
         },
       );
       expect(result.promoted).toBe(true);
-      // Snapshot the count after promote settled. Pre-promote chain
-      // item ran AFTER abort set `listenersDetached = true` (chain
-      // items queue at handleOutput time but only execute when their
-      // .then microtask runs, which is after the sync abort dispatch
-      // that set the flag), so the pre-promote emit was already
-      // suppressed by the guard. Asserting `0` here pins both halves
-      // of the contract — pre-promote AND post-promote bytes are both
-      // suppressed once `listenersDetached` is set. Without the guard,
-      // pre-promote's render path would emit a `'data'` event into
-      // `onOutputEventMock` and this would be `>= 1`, failing the
-      // assertion.
+      // The pre-promote chain item ran AFTER the sync abort set
+      // `listenersDetached`, so its emit was suppressed too: 0 pins both halves
+      // (>= 1 without the guard).
       const eventCountAfterSettle = onOutputEventMock.mock.calls.length;
       expect(eventCountAfterSettle).toBe(0);
-      // Drive the data callback again after promote: production-side
-      // dataDisposable was disposed, but the mock stub doesn't actually
-      // detach the callback (the disposable returned by `vi.fn()` is a
-      // no-op). Re-invoking via `mock.calls[0][0]` exercises the
-      // production-side `listenersDetached` guard inside the chain
-      // callback, which is the real backstop against post-promote
-      // bytes leaking to the foreground onOutputEvent.
-      mockPtyProcess.onData.mock.calls[0][0]('post-promote-data\n');
-      // Wait one macrotask + a microtask flush to let any chain items
-      // queued by the post-promote dataCallback fully settle.
+      // The mock disposable is a no-op, so re-invoking the data callback hits
+      // the `listenersDetached` guard, the real backstop against post-promote
+      // leaks. Then let any queued chain items settle.
+      ptyData('post-promote-data\n');
       await new Promise((res) => setImmediate(res));
       await new Promise((res) => setImmediate(res));
       expect(onOutputEventMock.mock.calls.length).toBe(eventCountAfterSettle);
 
-      // The disposable returned by mockPtyProcess.onData was disposed by
-      // the abort handler — verify by calling .dispose's mock.
-      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
-        .value as { dispose: Mock };
-      expect(dataDisposableStub.dispose).toHaveBeenCalled();
-      const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
-        .value as { dispose: Mock };
-      expect(exitDisposableStub.dispose).toHaveBeenCalled();
+      expect(disposableOf(mockPtyProcess.onData).dispose).toHaveBeenCalled();
+      expect(disposableOf(mockPtyProcess.onExit).dispose).toHaveBeenCalled();
     });
 
     it('PR-2.5: post-promote bytes route to postPromote.onData when callback provided', async () => {
-      // Pin the new opt-in contract: when `postPromote.onData` is set,
-      // bytes the still-running PTY emits after promote go to the
-      // caller's handler instead of being lost. PR-2 fully detached
-      // listeners; PR-2.5 re-attaches a minimal forwarder when the
-      // caller opts in.
+      // Opt-in: with `postPromote.onData`, post-promote PTY bytes reach the
+      // caller (PR-2 detached all listeners; PR-2.5 re-attaches a forwarder).
       const onDataCalls: ShellOutputEvent[] = [];
-      const { result } = await simulateExecution(
-        'tail -f /tmp/never.log',
-        (pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_pr25_data',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        {
-          postPromote: {
-            onData: (event) => onDataCalls.push(event),
-          },
-        },
-      );
-      expect(result.promoted).toBe(true);
-      // After promote, drive a fresh post-promote chunk through the
-      // PTY's onData. The service should have attached a NEW listener
-      // (the foreground one is disposed); look at the latest
-      // mock.calls entry — index 1 since PR-2.5 adds a second.
+      await promotePty('tail -f /tmp/never.log', 'bg_pr25_data', {
+        postPromote: { onData: (event) => onDataCalls.push(event) },
+      });
+      // The foreground listener is disposed; PR-2.5 registers a second one.
       const onDataRegistrations = mockPtyProcess.onData.mock.calls;
       expect(onDataRegistrations.length).toBeGreaterThanOrEqual(2);
-      const postPromoteHandler =
-        onDataRegistrations[onDataRegistrations.length - 1][0];
-      postPromoteHandler('post-promote-byte-stream');
+      onDataRegistrations.at(-1)![0]('post-promote-byte-stream');
       expect(onDataCalls).toEqual([
         { type: 'data', chunk: 'post-promote-byte-stream' },
       ]);
     });
 
     it('PR-2.5: postPromote.onSettle fires on natural child exit after promote', async () => {
-      // Pin the natural-exit settle: when the child terminates AFTER
-      // promote, the caller's onSettle handler is invoked exactly
-      // once with the exit code (or signal / error). PR-2 detached
-      // the exit listener entirely; PR-2.5 re-attaches a forwarder
-      // when the caller opts in.
+      // A child exiting AFTER promote fires onSettle exactly once with its exit
+      // info (PR-2 detached the exit listener; PR-2.5 re-attaches on opt-in).
       const settleCalls: ShellPostPromoteSettleInfo[] = [];
-      const { result } = await simulateExecution(
-        'long-running-command',
-        (pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_pr25_settle',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        {
-          postPromote: {
-            onSettle: (info) => settleCalls.push(info),
-          },
-        },
-      );
-      expect(result.promoted).toBe(true);
-      // After promote, drive the PTY's onExit to simulate natural
-      // completion with its raw clean-exit signal metadata. The service
-      // attaches a new exit listener for
-      // post-promote settle — find the most-recently-registered.
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: 0 });
+      await promotePty('long-running-command', 'bg_pr25_settle', {
+        postPromote: { onSettle: (info) => settleCalls.push(info) },
+      });
+      // Natural completion with node-pty's raw clean-exit signal metadata.
+      expect(mockPtyProcess.onExit.mock.calls.length).toBeGreaterThanOrEqual(2);
+      postPromoteExit({ exitCode: 0, signal: 0 });
       expect(settleCalls).toHaveLength(1);
       expect(settleCalls[0].exitCode).toBe(0);
       expect(settleCalls[0].signal).toBeNull();
@@ -1381,40 +1151,22 @@ describe('ShellExecutionService', () => {
     });
 
     it('PR-2.5 wave-2 (C2): unexpected post-promote PTY error routes to onSettle as failure (does NOT crash the CLI)', async () => {
-      // Foreground PTY error handler removed at promote handoff. Before
-      // the wave-2 fix the post-promote path attached NO error listener,
-      // so an unhandled `error` event would take Node down. Now we
-      // attach a forwarder: unexpected errors flow through onSettle
-      // with `error` populated; expected PTY read-exit errors
-      // (EIO / EAGAIN) are filtered.
+      // Promote removes the foreground PTY error handler; before wave-2 nothing
+      // replaced it and an unhandled `error` took Node down. Unexpected errors
+      // now settle with `error`; read-exit errors (EIO / EAGAIN) are filtered.
       const settleCalls: ShellPostPromoteSettleInfo[] = [];
-      const { result } = await simulateExecution(
-        'long-running-with-error',
-        (pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_pr25_pty_err',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        {
-          postPromote: {
-            onSettle: (info) => settleCalls.push(info),
-          },
-        },
-      );
-      expect(result.promoted).toBe(true);
+      await promotePty('long-running-with-error', 'bg_pr25_pty_err', {
+        postPromote: { onSettle: (info) => settleCalls.push(info) },
+      });
 
-      // 1. An expected PTY read-exit error (EIO) is FILTERED — onSettle
-      //    is NOT invoked yet (the upcoming onExit will carry status).
+      // 1. Expected EIO is FILTERED; the upcoming onExit carries the status.
       mockPtyProcess.emit(
         'error',
         Object.assign(new Error('read EIO'), { code: 'EIO' }),
       );
       expect(settleCalls).toHaveLength(0);
 
-      // 2. An UNEXPECTED error (EPIPE) routes to onSettle as a failure.
-      //    Critically: emitting must NOT throw (no unhandled `error`).
+      // 2. An UNEXPECTED error (EPIPE) settles as a failure without throwing.
       const unexpectedErr = Object.assign(new Error('disk gone'), {
         code: 'EPIPE',
       });
@@ -1425,86 +1177,49 @@ describe('ShellExecutionService', () => {
       expect(settleCalls[0].signal).toBeNull();
       expect(typeof settleCalls[0].endTime).toBe('number');
 
-      // 3. A subsequent onExit MUST NOT fire onSettle again (single-fire
-      //    latch): callers like the registry's `complete`/`fail`
-      //    transitions are not idempotent across status types.
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      // 3. A later onExit must NOT settle again: the registry's complete/fail
+      // transitions are not idempotent across status types.
+      postPromoteExit();
       expect(settleCalls).toHaveLength(1);
     });
 
     it('PR-2.5 wave-3 (T6): post-promote IDisposables and error listener are released on settle (no GC roots dangling)', async () => {
-      // Each promoted PTY child can sit dead for milliseconds while
-      // the caller's `cancelChild` finalizes. Node's EventEmitter
-      // holds refs to listener closures, which in turn hold refs to
-      // `onPostData` / `onPostSettle` / the caller's
-      // `promoteArtifacts`. Without disposal on settle, those refs
-      // dangle until the PTY itself is collected. The fix captures
-      // the IDisposables returned by `onData` / `onExit` AND the
-      // `'error'` listener function we registered on the EE, then
-      // releases them when `firePostSettle` fires (no matter which
-      // path triggers settle).
+      // A dead promoted PTY can linger while the caller's `cancelChild`
+      // finalizes, its listener closures pinning `onPostData`, `onPostSettle`,
+      // `promoteArtifacts`. The onData / onExit IDisposables AND the 'error'
+      // listener are released when `firePostSettle` fires, whichever path.
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
-
       const settleCalls: ShellPostPromoteSettleInfo[] = [];
-      const { result } = await simulateExecution(
-        'long-running-disposable',
-        (pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_pr25_dispose',
-          } satisfies ShellAbortReason);
+      await promotePty('long-running-disposable', 'bg_pr25_dispose', {
+        postPromote: {
+          onData: () => {},
+          onSettle: (info) => settleCalls.push(info),
         },
-        shellExecutionConfig,
-        {
-          postPromote: {
-            onData: () => {},
-            onSettle: (info) => settleCalls.push(info),
-          },
-        },
-      );
-      expect(result.promoted).toBe(true);
+      });
 
-      // The mocked `mockReturnValue({ dispose: vi.fn() })` reuses the
-      // SAME disposable object across calls, so foreground +
-      // post-promote share the same dispose Mock. The foreground
-      // disposable was already disposed at promote handoff; clear
-      // the call history so we can assert ONLY on post-settle
-      // disposal.
-      const sharedDataDisposable = mockPtyProcess.onData.mock.results[0]
-        .value as { dispose: Mock };
-      const sharedExitDisposable = mockPtyProcess.onExit.mock.results[0]
-        .value as { dispose: Mock };
+      // The mock shares ONE disposable per onData / onExit between foreground
+      // and post-promote handles: clear promote-time disposal first.
+      const sharedDataDisposable = disposableOf(mockPtyProcess.onData);
+      const sharedExitDisposable = disposableOf(mockPtyProcess.onExit);
       sharedDataDisposable.dispose.mockClear();
       sharedExitDisposable.dispose.mockClear();
       removeListenerSpy.mockClear();
 
-      // Drive onExit → firePostSettle runs disposePostPromoteListeners.
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      // onExit -> firePostSettle -> disposePostPromoteListeners.
+      postPromoteExit();
 
       expect(settleCalls).toHaveLength(1);
-      // Post-settle: BOTH disposables released, error listener removed.
+      // BOTH disposables released; the 'error' listener via `removeListener`.
       expect(sharedDataDisposable.dispose).toHaveBeenCalledTimes(1);
       expect(sharedExitDisposable.dispose).toHaveBeenCalledTimes(1);
-      // The post-promote error listener was attached via
-      // `ptyProcess.on('error', listener)` and is released via
-      // `removeListener('error', listener)`. Verify removeListener
-      // was called on the 'error' channel.
       const errorRemoves = removeListenerSpy.mock.calls.filter(
         (args: unknown[]) => args[0] === 'error',
       );
       expect(errorRemoves.length).toBeGreaterThanOrEqual(1);
 
-      // Re-driving onExit must NOT re-fire settle (latched) AND
-      // dispose calls must NOT double-count (idempotent disposal —
-      // disposePostPromoteListeners nulls the slots after first
-      // disposal).
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      // Re-driving onExit neither re-settles (latched) nor double-disposes
+      // (the slots are nulled after first disposal).
+      postPromoteExit();
       expect(settleCalls).toHaveLength(1);
       expect(sharedDataDisposable.dispose).toHaveBeenCalledTimes(1);
       expect(sharedExitDisposable.dispose).toHaveBeenCalledTimes(1);
@@ -1514,147 +1229,71 @@ describe('ShellExecutionService', () => {
 
     it('PR-2.5: onData-only PTY caller has post-promote error + exit listeners (no crash, listeners disposed on exit)', async () => {
       const dataChunks: ShellOutputEvent[] = [];
-      const { result } = await simulateExecution(
-        'tail -f /dev/null',
-        (pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_pty_ondata_only',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        {
-          postPromote: {
-            onData: (event) => dataChunks.push(event),
-          },
-        },
-      );
-      expect(result.promoted).toBe(true);
+      await promotePty('tail -f /dev/null', 'bg_pty_ondata_only', {
+        postPromote: { onData: (event) => dataChunks.push(event) },
+      });
 
-      // Error listener must be installed even without onSettle —
-      // emitting 'error' on an EventEmitter with no listener throws.
+      // The error listener exists without onSettle (else the emit throws).
       expect(() =>
         mockPtyProcess.emit('error', new Error('post-promote pty err')),
       ).not.toThrow();
 
-      // onExit must also be installed so disposePostPromoteListeners
-      // runs on natural exit (cleaning up data + error listeners).
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-
-      // Simulate natural exit — should dispose listeners without crash.
-      postPromoteExitHandler({ exitCode: 0 });
+      // onExit too, so natural exit cleans up data + error listeners, no crash.
+      expect(mockPtyProcess.onExit.mock.calls.length).toBeGreaterThanOrEqual(2);
+      postPromoteExit({ exitCode: 0 });
     });
 
     it('PR-2.5 backwards compat: without postPromote, no data listener is re-attached and no caller callback fires', async () => {
-      // Pin the caller-visible half of the PR-2 detach-everything contract:
-      // omitting `postPromote` re-attaches no data listener and invokes no
-      // callback the caller didn't provide. The settle listener itself IS
-      // attached — it is the only path left that can release a promoted
-      // shell's conout worker (#11303), and `firePostSettle`
-      // early-returns before any forwarding when there is no onSettle handler.
-      // Pinned by 'releases the conout worker when a promote passed no
-      // postPromote handlers' below.
+      // PR-2 contract, caller-visible half: without `postPromote` no data
+      // listener is re-attached and no unprovided callback fires. The settle
+      // listener IS attached, the only path left to release a promoted shell's
+      // conout worker (#11303; see 'releases the conout worker when a promote
+      // passed no postPromote handlers'); without onSettle it forwards nothing.
       const onDataCalls: ShellOutputEvent[] = [];
       const onSettleCalls: ShellPostPromoteSettleInfo[] = [];
-      const { result } = await simulateExecution(
-        'no-post-promote-handlers',
-        (pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_pr25_compat',
-          } satisfies ShellAbortReason);
-        },
-        // No options arg → postPromote unset → PR-2 contract.
-      );
-      expect(result.promoted).toBe(true);
-      // Drive both PTY events post-promote.
-      const onDataRegistrations = mockPtyProcess.onData.mock.calls;
-      // PR-2 contract: only ONE onData registration (the foreground
-      // one, now disposed). PR-2.5's re-attach is gated on
-      // `postPromote.onData` being set, so without it the
-      // registration count stays at 1.
-      expect(onDataRegistrations.length).toBe(1);
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      // TWO: the foreground handler (disposed at promote) plus the
-      // unconditional settle/release handler.
-      expect(onExitRegistrations.length).toBe(2);
-      // Caller-provided handlers were never invoked.
+      await promotePty('no-post-promote-handlers', 'bg_pr25_compat');
+      // Only the disposed foreground onData: re-attach needs `onData`.
+      expect(mockPtyProcess.onData.mock.calls.length).toBe(1);
+      // TWO onExit: the disposed foreground one plus the settle/release one.
+      expect(mockPtyProcess.onExit.mock.calls.length).toBe(2);
       expect(onDataCalls).toHaveLength(0);
       expect(onSettleCalls).toHaveLength(0);
     });
 
     it('post-exit race: PTY background-promote refuses if process.kill(pid, 0) reports the pid is gone', async () => {
-      // Mirror of the child_process post-exit race test. The PTY may
-      // have already exited but our `exitDisposable` (onExit) handler
-      // hasn't run yet — node-pty delivers the exit event async after
-      // the native SIGCHLD. Promoting in that window would detach our
-      // exit listener, miss the real exit status, and report
-      // `promoted: true` for a dead PTY. Production guard:
-      // process.kill(pid, 0); if it throws ESRCH, fall through.
+      // node-pty delivers exit async after SIGCHLD, so the PTY may be gone
+      // before our onExit runs; promoting would then drop that listener, miss
+      // the real exit status and report `promoted: true` for a dead PTY. The
+      // guard probes process.kill(pid, 0) and falls through on ESRCH.
       mockProcessKill.mockImplementationOnce((pid, signal) => {
-        // Only fail the very first liveness probe with signal 0 — let
-        // any subsequent kill calls (e.g. cleanup() at process exit)
-        // succeed so the test teardown stays clean.
+        // Fail only the liveness probe; later kills (cleanup()) succeed.
         if (signal === 0) {
           throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
         }
         return true;
       });
-      const { result } = await simulateExecution(
-        'fast-and-cancelled',
-        (pty, abortController) => {
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-          // Drain the pending onExit (production code falls through;
-          // normal exit path resolves with the real exit info).
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: undefined });
-        },
-      );
+      const { result } = await simulateExecution('fast-and-cancelled', (ac) => {
+        ac.abort(bg('bg_test123'));
+        // The pending onExit resolves via the normal exit path.
+        ptyExit({ exitCode: 0, signal: undefined });
+      });
 
-      // Result is the normal exit shape, not the promoted shape.
+      // The normal exit shape, not the promoted one.
       expect(result.promoted).toBeUndefined();
       expect(result.exitCode).toBe(0);
-      // Our PTY listeners stayed registered — the disposables are
-      // disposed by the natural onExit, not the abort handler.
-      const dataDisposableStub = mockPtyProcess.onData.mock.results[0]
-        .value as { dispose: Mock };
-      // dataDisposable is NOT disposed by our abort handler in the
-      // race-fallthrough path (the normal onExit handler doesn't
-      // dispose it either — it relies on the PTY tearing down its own
-      // event source). What matters is that we did NOT pre-dispose it
-      // and lose the exit info.
-      void dataDisposableStub; // referenced for the future expansion
+      // Our listeners stayed registered: the abort handler did NOT pre-dispose
+      // dataDisposable and lose the exit info.
+      void disposableOf(mockPtyProcess.onData); // referenced for future expansion
     });
 
     it("post-promotion: ptyProcess error listener is removed via 'removeListener', NOT 'off' (regression guard for @lydell/node-pty)", async () => {
-      // node EventEmitter exposes both `off` (Node 10+) and the legacy
-      // `removeListener`, but @lydell/node-pty's IPty interface only
-      // surfaces `removeListener` — calling `.off(...)` on a real PTY
-      // throws TypeError. Pin that the production code path uses
-      // `removeListener` so a future refactor swapping to `.off()`
-      // doesn't silently regress under the EventEmitter mock (which
-      // tolerates both).
+      // @lydell/node-pty's IPty only has `removeListener` (`.off` throws); the
+      // EventEmitter mock accepts both, so a move to `.off()` fails silently.
       const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
       const offSpy = vi.spyOn(mockPtyProcess, 'off');
 
-      const { result } = await simulateExecution(
-        'tail -f /tmp/never.log',
-        (_pty, abortController) => {
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-        },
-      );
+      await promotePty('tail -f /tmp/never.log', 'bg_test123');
 
-      expect(result.promoted).toBe(true);
-      // The 'error' handler is removed via legacy API; `.off` must not
-      // appear in the production teardown path.
       expect(removeListenerSpy).toHaveBeenCalledWith(
         'error',
         expect.any(Function),
@@ -1666,337 +1305,177 @@ describe('ShellExecutionService', () => {
     });
 
     it('post-promotion: PTY exit does NOT re-resolve the result (already resolved with promoted)', async () => {
-      // Pin: even if the still-running child later exits naturally and the
-      // caller's own exit listener fires, our foreground result Promise
-      // must NOT be re-resolved with a different shape (Promise can only
-      // resolve once). The exit disposable being disposed prevents our
-      // own onExit from firing at all in the first place — but verify the
-      // final resolved shape stays `promoted: true` regardless.
-      const { result } = await simulateExecution(
-        'tail -f /tmp/never.log',
-        (_pty, abortController) => {
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-        },
-      );
+      // A later child exit must not reshape the `promoted: true` result: our
+      // exit disposable is disposed, and a Promise resolves only once anyway.
+      const result = await promotePty('tail -f /tmp/never.log', 'bg_test123');
 
-      // Resolved as promoted, with no exit info from a post-promote exit.
-      expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
     });
   });
 
-  describe('Windows process cleanup (#5873)', () => {
-    // Under ConPTY, ptyProcess.kill() does not kill the pwsh process tree
-    // (microsoft/node-pty#333). These pin that the PTY paths now reap pwsh via
-    // taskkill on Windows — tree-kill on cancel, shell-pid-only on normal
-    // completion — so idle pwsh processes don't accumulate until OOM.
+  // Windows tests default to win32. windowsKillPid attaches an 'error' listener
+  // to the taskkill child, so cpSpawn must return an emitter (the top-level
+  // beforeEach leaves it undefined). PTY cancel taskkills synchronously: a
+  // clean spawnSync exit keeps the result-inspecting logging quiet.
+  const stubWin32Taskkill = () => {
+    mockPlatform.mockReturnValue('win32');
+    mockCpSpawn.mockReturnValue(new EventEmitter());
+    mockSpawnSync.mockReturnValue({ status: 0 });
+  };
 
-    beforeEach(() => {
-      // windowsKillPid attaches an 'error' listener to the spawned taskkill
-      // child so a failed launch can't crash the CLI; the mock must therefore
-      // return something with .on(). The top-level beforeEach leaves
-      // mockCpSpawn returning undefined.
-      mockCpSpawn.mockReturnValue(new EventEmitter());
-      // The PTY cancel path now taskkills synchronously (spawnSync); default it
-      // to a clean exit so the result-inspecting logging doesn't fire.
-      mockSpawnSync.mockReturnValue({ status: 0 });
-    });
+  describe('Windows process cleanup (#5873)', () => {
+    // Under ConPTY, ptyProcess.kill() leaves the pwsh tree (microsoft/node-pty
+    // #333), so PTY paths reap pwsh via taskkill (tree on cancel, shell pid
+    // only on normal completion) lest idle pwsh processes pile up until OOM.
+    beforeEach(stubWin32Taskkill);
+
+    // Register the PTY as active, run the process-exit cleanup, unregister.
+    const exitCleanup = () => {
+      const pid = mockPtyProcess.pid;
+      ShellExecutionService['activePtys'].set(pid, {
+        ptyProcess: mockPtyProcess,
+        headlessTerminal: { dispose: vi.fn() },
+      } as never);
+      ShellExecutionService.cleanup();
+      ShellExecutionService['activePtys'].delete(pid);
+      return pid;
+    };
 
     it('cancel on win32 tree-kills via taskkill, with a ptyProcess.kill fallback', async () => {
-      mockPlatform.mockReturnValue('win32');
+      await cancelPty();
 
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (pty, abortController) => {
-          abortController.abort();
-          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-        },
-      );
-
-      expect(result.aborted).toBe(true);
-      // Cancel tree-kills (/t) SYNCHRONOUSLY (spawnSync) so taskkill enumerates
-      // the tree before ptyProcess.kill() fires ClosePseudoConsole. See #5873.
-      expect(mockSpawnSync).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      // The finalizer reap (async cpSpawn via windowsKillPid) must ALSO
-      // tree-kill on cancel — positively asserted so removing the reap or
-      // forcing cancelKillDispatched=false fails here, not just trivially via
-      // the negative check below. See #5873.
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      // ...and it must never downgrade to a shell-only (/f without /t) kill
-      // that could leave the abandoned descendant tree behind. See #5873.
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      // ...and still calls ptyProcess.kill() so that if taskkill cannot launch,
-      // the ConPTY host is torn down and onExit fires (the cancel can't hang).
-      // See #5873.
+      // Cancel tree-kills (/t) SYNCHRONOUSLY (spawnSync).
+      expect(mockSpawnSync).toHaveBeenCalledWith(...ptyTaskkill());
+      // The async finalizer reap ALSO tree-kills on cancel, asserted positively
+      // so dropping it or forcing cancelKillDispatched=false fails here...
+      expect(mockCpSpawn).toHaveBeenCalledWith(...ptyTaskkill());
+      // ...never downgrading to a shell-only kill that strands the descendants.
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(...ptyTaskkill(false));
+      // ptyProcess.kill() still runs, so a taskkill that cannot launch still
+      // tears down the ConPTY host and onExit fires (no hang).
       expect(mockPtyProcess.kill).toHaveBeenCalled();
-      // Ordering is the race fix: the sync taskkill must enumerate/kill the
-      // tree BEFORE ptyProcess.kill() fires ClosePseudoConsole. See #5873.
+      // The race fix (#5873): the sync taskkill enumerates/kills the tree
+      // BEFORE ptyProcess.kill() fires ClosePseudoConsole.
       expect(mockSpawnSync.mock.invocationCallOrder[0]).toBeLessThan(
         mockPtyProcess.kill.mock.invocationCallOrder[0],
       );
     });
 
     it('normal completion on win32 reaps a still-alive pty by shell pid only (no /t)', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // isPtyActive -> process.kill(pid, 0) returns true (default mock):
-      // node-pty reported exit but the pwsh process is still alive.
+      // Default liveness mock: node-pty reported exit but pwsh is still alive.
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
-      // Reap kills only the shell pid — no /t — so a child the command
-      // intentionally detached (e.g. Start-Process) survives. See #5873.
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
+      // Shell pid only (no /t), so a child the command detached on purpose
+      // (e.g. Start-Process) survives. See #5873.
+      expect(mockCpSpawn).toHaveBeenCalledWith(...ptyTaskkill(false));
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(...ptyTaskkill());
     });
 
     it('normal completion on win32 swallows a taskkill launch error (no crash)', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // windowsKillPid attaches a no-op 'error' listener so a failed taskkill
-      // launch (reported as an async EventEmitter 'error' event, not a throw)
-      // can't crash the CLI from this cleanup path. See #5873.
+      // windowsKillPid's no-op 'error' listener keeps a failed taskkill launch
+      // (an async 'error' event, not a throw) from crashing the CLI. See #5873.
       const taskkillProc = new EventEmitter();
       mockCpSpawn.mockReturnValue(taskkillProc);
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
-      // By now the finalizer reap has spawned taskkill (taskkillProc) and
-      // attached its 'error' listener; firing the launch error must be
-      // swallowed. Without the listener this emit would throw (EventEmitter
-      // re-raises an 'error' with no handler) — i.e. the production crash.
+      // Without the finalizer reap's listener this emit re-raises (the crash).
       expect(() =>
         taskkillProc.emit('error', new Error('spawn taskkill ENOENT')),
       ).not.toThrow();
     });
 
     it('normal completion on win32 does NOT taskkill when the pty already exited', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // isPtyActive -> process.kill(pid, 0) throws => the process is gone, so
-      // the reap is skipped (avoids killing a possibly-reused pid).
-      mockProcessKill.mockImplementation(
-        (_pid: number, signal?: string | number) => {
-          if (signal === 0) {
-            throw new Error('ESRCH');
-          }
-          return true;
-        },
-      );
+      // The liveness probe throws (process gone), so the reap is skipped: it
+      // could kill a reused pid.
+      await withDeadShell(async () => {
+        await runEchoHi();
 
-      try {
-        const { result } = await simulateExecution('echo hi', (pty) => {
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        });
-
-        expect(result.exitCode).toBe(0);
-        expect(mockCpSpawn).not.toHaveBeenCalledWith(
-          TASKKILL,
-          expect.anything(),
-          HIDDEN_WINDOW,
-        );
-      } finally {
-        // clearAllMocks() resets calls but not implementations — restore the
-        // default liveness mock so later tests see isPtyActive === true.
-        mockProcessKill.mockImplementation(() => true);
-      }
+        expectNoTaskkill();
+      });
     });
 
     it('normal completion on non-win32 never taskkills', async () => {
-      // Default platform is 'linux'.
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      mockPlatform.mockReturnValue('linux');
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(
-        TASKKILL,
-        expect.anything(),
-        HIDDEN_WINDOW,
-      );
+      expectNoTaskkill();
     });
 
     it('exit cleanup on win32 tree-kills via taskkill and tears down the host', () => {
-      mockPlatform.mockReturnValue('win32');
       mockSpawnSync.mockReturnValue({ error: undefined });
-      const pid = mockPtyProcess.pid;
-      ShellExecutionService['activePtys'].set(pid, {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ptyProcess: mockPtyProcess as any,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        headlessTerminal: { dispose: vi.fn() } as any,
-      });
 
-      ShellExecutionService.cleanup();
-      ShellExecutionService['activePtys'].delete(pid);
+      const pid = exitCleanup();
 
-      expect(mockSpawnSync).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(pid)],
-        HIDDEN_WINDOW,
-      );
+      expect(mockSpawnSync).toHaveBeenCalledWith(...taskkill(pid));
       // The ConPTY host is torn down unconditionally, alongside the tree-kill.
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
 
     it('exit cleanup on win32 still tears down the host when taskkill exits non-zero', () => {
-      mockPlatform.mockReturnValue('win32');
-      // taskkill launched (no spawn error) but failed — e.g. access denied, or
-      // the pid was already gone. result.error is undefined, so we must not
-      // treat that as success and skip the host teardown.
+      // taskkill launched but failed (access denied, or pid gone): an undefined
+      // result.error must not count as success and skip the host teardown.
       mockSpawnSync.mockReturnValue({ status: 1, error: undefined });
-      const pid = mockPtyProcess.pid;
-      ShellExecutionService['activePtys'].set(pid, {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ptyProcess: mockPtyProcess as any,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        headlessTerminal: { dispose: vi.fn() } as any,
-      });
 
-      ShellExecutionService.cleanup();
-      ShellExecutionService['activePtys'].delete(pid);
+      exitCleanup();
 
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
 
     it('cancel on win32 still resolves when ptyProcess.kill throws', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // The host-teardown fallback in performCancelKill is wrapped in try/catch;
-      // a throwing kill (pty already gone) must not break the cancel. See #5873.
+      // performCancelKill's host-teardown fallback is wrapped in try/catch: a
+      // throwing kill (pty already gone) must not break the cancel. See #5873.
       mockPtyProcess.kill.mockImplementation(() => {
         throw new Error('pty already gone');
       });
 
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (pty, abortController) => {
-          abortController.abort();
-          pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-        },
-      );
+      await cancelPty();
 
-      expect(result.aborted).toBe(true);
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
 
     it('cancel on win32 with an already-dead shell skips the finalizer reap', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // performCancelKill already killed the shell, so by the time the finalizer
-      // runs the liveness check fails (ESRCH) — the common cancel-on-healthy-
-      // ConPTY flow. The cancel still tree-kills (performCancelKill), and the
-      // finalizer adds no shell-only kill. See #5873.
-      mockProcessKill.mockImplementation(
-        (_pid: number, signal?: string | number) => {
-          if (signal === 0) {
-            throw new Error('ESRCH');
-          }
-          return true;
-        },
-      );
+      // The common healthy-ConPTY cancel: performCancelKill already killed the
+      // shell, so the finalizer's liveness check fails (ESRCH). See #5873.
+      await withDeadShell(async () => {
+        await cancelPty();
 
-      try {
-        const { result } = await simulateExecution(
-          'sleep 10',
-          (pty, abortController) => {
-            abortController.abort();
-            pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-          },
-        );
-
-        expect(result.aborted).toBe(true);
-        // performCancelKill's sync tree-kill still runs...
-        expect(mockSpawnSync).toHaveBeenCalledWith(
-          TASKKILL,
-          ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-          HIDDEN_WINDOW,
-        );
-        // ...but the finalizer reap is skipped (isPtyActive false via ESRCH),
-        // so no async taskkill fires there.
-        expect(mockCpSpawn).not.toHaveBeenCalledWith(
-          TASKKILL,
-          expect.anything(),
-          HIDDEN_WINDOW,
-        );
-      } finally {
-        mockProcessKill.mockImplementation(() => true);
-      }
+        // The sync tree-kill still runs, but no async finalizer taskkill.
+        expect(mockSpawnSync).toHaveBeenCalledWith(...ptyTaskkill());
+        expectNoTaskkill();
+      });
     });
 
     it('exit cleanup falls back to ptyProcess.kill when taskkill spawnSync throws', () => {
-      mockPlatform.mockReturnValue('win32');
-      // spawnSync can throw on a synchronous arg/setup failure; the catch in
-      // killPty must swallow it and still tear down the host. See #5873.
+      // killPty must swallow a sync spawnSync throw (arg/setup failure) and
+      // still tear down the host. See #5873.
       mockSpawnSync.mockImplementationOnce(() => {
         throw new Error('spawnSync EACCES');
       });
-      const pid = mockPtyProcess.pid;
-      ShellExecutionService['activePtys'].set(pid, {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ptyProcess: mockPtyProcess as any,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        headlessTerminal: { dispose: vi.fn() } as any,
-      });
 
-      ShellExecutionService.cleanup();
-      ShellExecutionService['activePtys'].delete(pid);
+      exitCleanup();
 
       expect(mockPtyProcess.kill).toHaveBeenCalled();
     });
 
     it('exit cleanup tree-kills child_process children via the absolute taskkill', () => {
-      mockPlatform.mockReturnValue('win32');
       const childPid = 54321;
       ShellExecutionService['activeChildProcesses'].add(childPid);
 
       ShellExecutionService.cleanup();
       ShellExecutionService['activeChildProcesses'].delete(childPid);
 
-      // Pins killChildProcesses on the absolute System32 path — a regression to
-      // the bare 'taskkill' name reopens the binary-planting hole. See #5873.
-      expect(mockSpawnSync).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(childPid)],
-        HIDDEN_WINDOW,
-      );
+      // The bare 'taskkill' name reopens the binary-planting hole. #5873.
+      expect(mockSpawnSync).toHaveBeenCalledWith(...taskkill(childPid));
     });
 
     it('win32 taskkill is invoked by absolute System32 path, not the bare name', async () => {
-      mockPlatform.mockReturnValue('win32');
+      await runPty('echo hi');
 
-      await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
-
-      // The executable must be the trusted absolute System32 path — never the
-      // bare 'taskkill', which Windows spawn would resolve through PATH/CWD and
-      // could be hijacked by a planted taskkill.exe/.bat. See #5873.
+      // Never the bare 'taskkill': spawn resolves it through PATH/CWD, where a
+      // planted taskkill.exe/.bat could hijack it. See #5873.
       const cmd = mockCpSpawn.mock.calls.find((c) =>
         /taskkill/i.test(String(c[0])),
       )?.[0];
@@ -2006,266 +1485,123 @@ describe('ShellExecutionService', () => {
     });
 
     it('a late abort after a normal exit does NOT tree-kill (no cancel retro-flag)', async () => {
-      mockPlatform.mockReturnValue('win32');
-
-      const { result } = await simulateExecution(
-        'echo hi',
-        (pty, abortController) => {
-          // Command exits normally FIRST...
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-          // ...then an unrelated abort lands during the finalize window. The
-          // abort listener is already removed and performCancelKill never ran,
-          // so cancelKillDispatched stays false and the reap must stay
-          // shell-pid-only — detached children must not be tree-killed.
-          abortController.abort();
-        },
-      );
+      const { result } = await simulateExecution('echo hi', (ac) => {
+        // A normal exit FIRST, then an unrelated abort in the finalize window:
+        // performCancelKill never ran, so the reap stays shell-pid-only and
+        // detached children survive.
+        ptyExit();
+        ac.abort();
+      });
 
       expect(result.exitCode).toBe(0);
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
+      expect(mockCpSpawn).toHaveBeenCalledWith(...ptyTaskkill(false));
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(...ptyTaskkill());
     });
 
     it('win32 promoted shell reaps its lingering pwsh on natural exit (shell-pid-only)', async () => {
-      mockPlatform.mockReturnValue('win32');
       const settleCalls: ShellPostPromoteSettleInfo[] = [];
 
-      const { result } = await simulateExecution(
-        'long-running-command',
-        (_pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_5873_reap',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        { postPromote: { onSettle: (info) => settleCalls.push(info) } },
-      );
-      expect(result.promoted).toBe(true);
+      await promotePty('long-running-command', 'bg_5873_reap', {
+        postPromote: { onSettle: (info) => settleCalls.push(info) },
+      });
 
-      // Drive the promoted PTY's natural exit. The post-promote settle path
-      // must reap the lingering ConPTY shell — shell-pid-only, since the
-      // command finished and any detached child should survive. Before this
-      // fix the reap only ran in the foreground finalizer, so backgrounded
-      // shells still leaked the pwsh process. See #5873.
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      // Natural exit reaps the lingering ConPTY shell by pid only (detached
+      // children survive); only the foreground finalizer used to reap, so
+      // backgrounded shells leaked pwsh. See #5873.
+      postPromoteExit();
 
       expect(settleCalls).toHaveLength(1);
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      expect(mockCpSpawn).not.toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
+      expect(mockCpSpawn).toHaveBeenCalledWith(...ptyTaskkill(false));
+      expect(mockCpSpawn).not.toHaveBeenCalledWith(...ptyTaskkill());
     });
 
     it('win32 promoted shell reaps on natural exit even with onData only (no onSettle)', async () => {
-      mockPlatform.mockReturnValue('win32');
+      // onData only: the reap must fire BEFORE firePostSettle's
+      // `!postPromote?.onSettle` early return. See #5873.
+      await promotePty('long-running-command', 'bg_5873_ondata', {
+        postPromote: { onData: () => {} },
+      });
 
-      const { result } = await simulateExecution(
-        'long-running-command',
-        (_pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_5873_ondata',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        // onData only — the reap must fire BEFORE firePostSettle's
-        // `!postPromote?.onSettle` early return. See #5873.
-        { postPromote: { onData: () => {} } },
-      );
-      expect(result.promoted).toBe(true);
+      postPromoteExit();
 
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
-
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      // The ConPTY release (#11303) sits in the same spot for the same
-      // reason: above firePostSettle's `!postPromote?.onSettle` early return.
-      // This assertion is what goes red if it is ever slid below it — with
-      // onData but no onSettle, every backgrounded command would leak its
-      // conout worker. (mockPtyNativeKill only pins that the call is made; the
-      // real native no-ops after a natural exit — see releaseConPtyHost.)
-      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
-      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      expect(mockCpSpawn).toHaveBeenCalledWith(...ptyTaskkill(false));
+      // The ConPTY release (#11303) sits above that early return too; below it,
+      // every onData-only backgrounded command leaks its conout worker. The
+      // real native kill no-ops after a natural exit (see releaseConPtyHost).
+      expectConPtyReleased();
     });
 
     it('win32 promoted shell skips the post-settle reap when the pty already exited', async () => {
-      mockPlatform.mockReturnValue('win32');
-
-      const { result } = await simulateExecution(
-        'long-running-command',
-        (_pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_5873_settle_esrch',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        { postPromote: { onSettle: () => {} } },
-      );
-      // Promote succeeded while the shell was still alive (default liveness).
-      expect(result.promoted).toBe(true);
-
-      // Now the shell has exited: the post-settle liveness check fails (ESRCH),
-      // so the firePostSettle reap must be skipped (no taskkill against a
-      // possibly-reused pid). Mirrors the foreground finalizer's guard. See #5873.
-      mockProcessKill.mockImplementation(
-        (_pid: number, signal?: string | number) => {
-          if (signal === 0) {
-            throw new Error('ESRCH');
-          }
-          return true;
-        },
-      );
-      try {
-        const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-        const postPromoteExitHandler =
-          onExitRegistrations[onExitRegistrations.length - 1][0];
-        postPromoteExitHandler({ exitCode: 0, signal: undefined });
-
-        expect(mockCpSpawn).not.toHaveBeenCalledWith(
-          TASKKILL,
-          expect.anything(),
-          HIDDEN_WINDOW,
-        );
-      } finally {
-        mockProcessKill.mockImplementation(() => true);
-      }
+      await promotePty('long-running-command', 'bg_5873_settle_esrch', {
+        postPromote: { onSettle: () => {} },
+      });
+      // Promoted while alive; now the shell is gone (ESRCH), so like the
+      // foreground finalizer the reap is skipped: no taskkill of a possibly
+      // reused pid. See #5873.
+      await withDeadShell(() => {
+        postPromoteExit();
+        expectNoTaskkill();
+      });
     });
   });
 
   describe('Windows ConPTY release (#11303)', () => {
-    // Bundled ConPTY releases its host reference after spawn, but node-pty's JS
-    // still leaves the conout worker running after a natural shell exit. Inbox
-    // ConPTY users such as web terminals can leave both resources behind.
-    //
-    // The release deliberately does NOT go through ptyProcess.kill(): the inbox
-    // backend can terminate a recycled pid through its helper fallback, while
-    // the bundled backend waits for more output before disposing the worker.
-    //
-    // These cases certify the worker release only. Host lifecycle coverage for
-    // the shell path belongs to the bundled ConPTY tests below.
-
-    beforeEach(() => {
-      mockCpSpawn.mockReturnValue(new EventEmitter());
-      mockSpawnSync.mockReturnValue({ status: 0 });
-    });
+    // Bundled ConPTY frees its host after spawn, but node-pty's JS leaves the
+    // conout worker running after a natural exit (inbox users such as web
+    // terminals leave both). The release never uses ptyProcess.kill(): inbox
+    // can kill a recycled pid via its helper, bundled waits for more output
+    // before disposing the worker. Worker release only; host lifecycle for the
+    // shell path is in the bundled ConPTY tests below.
+    beforeEach(stubWin32Taskkill);
 
     it('releases the conout worker on a clean win32 completion (the leaking path)', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // The shell exited cleanly: isPtyActive is false, so the taskkill reap is
-      // (correctly) skipped — and that is exactly the path that leaked.
-      mockProcessKill.mockImplementation(
-        (_pid: number, signal?: string | number) => {
-          if (signal === 0) {
-            throw new Error('ESRCH');
-          }
-          return true;
-        },
-      );
+      // A clean exit (shell gone) correctly skips the taskkill reap, and that
+      // is exactly the path that leaked: the worker must still be released,
+      // never through kill() (see the block comment above).
+      await withDeadShell(async () => {
+        await runEchoHi();
 
-      try {
-        const { result } = await simulateExecution('echo hi', (pty) => {
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        });
-
-        expect(result.exitCode).toBe(0);
-        // No taskkill (the shell is already gone)...
-        expect(mockCpSpawn).not.toHaveBeenCalledWith(
-          TASKKILL,
-          expect.anything(),
-          HIDDEN_WINDOW,
-        );
-        // ...but the stranded conout worker is still released.
-        expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
-        expect(mockConoutWorkerDispose).toHaveBeenCalled();
-        // Never through kill(): see the block comment above.
+        expectNoTaskkill();
+        expectConPtyReleased();
         expect(mockPtyProcess.kill).not.toHaveBeenCalled();
-      } finally {
-        mockProcessKill.mockImplementation(() => true);
-      }
+      });
     });
 
     it('releases them even when the shell lingers and taskkill fires', async () => {
-      mockPlatform.mockReturnValue('win32');
       // Default liveness mock: node-pty reported exit but the shell lingers.
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
-      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
-      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      expect(mockCpSpawn).toHaveBeenCalledWith(...ptyTaskkill(false));
+      expectConPtyReleased();
     });
 
     it('does not fail the result when the native pty kill throws', async () => {
-      mockPlatform.mockReturnValue('win32');
       mockPtyNativeKill.mockImplementation(() => {
         throw new Error('pty already gone');
       });
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const result = await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
       expect(result.error).toBeNull();
       // A throwing host close must not skip the worker teardown.
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
     });
 
     it('still drops the pid from activePtys when the conout worker dispose throws', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // The second guard in releaseConPtyHost — the one around
-      // _conoutSocketWorker.dispose(). The release runs in finalize()'s
-      // finally, immediately before activePtys.delete(pid) and after the result
-      // has already settled, so an escaping throw would leave a finished pid
-      // registered for the process-exit `taskkill /f /t` — against a pid
-      // Windows may have recycled by then.
+      // releaseConPtyHost's guard around _conoutSocketWorker.dispose(): the
+      // release runs in finalize()'s finally just before activePtys.delete, so
+      // an escaping throw leaves a finished pid registered for the exit-time
+      // `taskkill /f /t`, against a pid Windows may have recycled.
       mockConoutWorkerDispose.mockImplementation(() => {
         throw new Error('dispose boom');
       });
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
-      // Direct witness for the guard, and the one that survives a refactor of
-      // how the process-exit reap spawns taskkill: `resolve(...)` sits in
-      // finalize()'s try and `disposeForegroundPtyResources()` — which owns
-      // both the release and activePtys.delete — is in its finally, so the
-      // finally body has already run by the time the awaited result resumes.
-      // Remove the try/catch around _conoutSocketWorker.dispose() in
-      // conpty-host.ts and this comes back true.
+      // Direct witness, independent of how the exit reap spawns taskkill:
+      // finalize()'s finally (release + activePtys.delete) has run once the
+      // awaited result resumes. Drop the try/catch around
+      // _conoutSocketWorker.dispose() in conpty-host.ts and this turns true.
       expect(ShellExecutionService['activePtys'].has(mockPtyProcess.pid)).toBe(
         false,
       );
@@ -2273,166 +1609,101 @@ describe('ShellExecutionService', () => {
       ShellExecutionService.cleanup();
       ShellExecutionService['activePtys'].delete(mockPtyProcess.pid);
 
-      // End-to-end consequence of the same invariant: the pid was already
-      // dropped, so the exit cleanup has nothing to tree-kill.
-      expect(mockSpawnSync).not.toHaveBeenCalledWith(
-        TASKKILL,
-        ['/f', '/t', '/pid', String(mockPtyProcess.pid)],
-        HIDDEN_WINDOW,
-      );
+      // End to end: the pid is gone, so exit cleanup has nothing to tree-kill.
+      expect(mockSpawnSync).not.toHaveBeenCalledWith(...ptyTaskkill());
     });
 
     it('degrades to the pre-fix leak, not to kill(), if node-pty internals change', async () => {
-      mockPlatform.mockReturnValue('win32');
       delete (mockPtyProcess as unknown as { _agent?: unknown })._agent;
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
-      // Leaking is recoverable by restarting the CLI; killing a recycled pid is
-      // not, so the fallback must never be ptyProcess.kill().
+      // A leak is cured by restarting the CLI; killing a recycled pid is not,
+      // so the fallback must never be ptyProcess.kill().
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
     it('still disposes the worker when only the native-kill shape drifts', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // A node-pty bump that renames _pty / _ptyNative must not cost the worker
-      // dispose — the only teardown that frees anything today. The fused guard
-      // used to skip both on a native-shape drift; see releaseConPtyHost.
+      // A node-pty bump renaming _pty / _ptyNative must not cost the worker
+      // dispose, today the only teardown that frees anything (a fused guard
+      // used to skip both; see releaseConPtyHost).
       (mockPtyProcess as unknown as { _agent: unknown })._agent = {
         _conoutSocketWorker: { dispose: mockConoutWorkerDispose },
       };
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
       expect(mockConoutWorkerDispose).toHaveBeenCalled();
-      // Never fall back to kill(): leaking is recoverable, killing a recycled
-      // pid is not.
+      // Never kill(): a leak is recoverable, killing a recycled pid is not.
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
     it('does not close the pseudo-console twice and still disposes the bundled worker after cancel', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // performCancelKill closes the pseudo-console itself. With bundled
-      // ConPTY, node-pty waits for more output before disposing the worker, so
-      // the finalizer must skip the native close but still start the worker's
-      // drain timeout in case no more data arrives.
-      const { result } = await simulateExecution('sleep 100', (pty, ac) => {
-        ac.abort();
-        pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-      });
+      // performCancelKill closes the pseudo-console itself; bundled ConPTY
+      // waits for output before disposing the worker, so the finalizer skips
+      // the native close but still starts the worker's drain timeout.
+      await cancelPty('sleep 100');
 
-      expect(result.aborted).toBe(true);
       expect(mockPtyProcess.kill).toHaveBeenCalled();
       expect(mockPtyNativeKill).not.toHaveBeenCalled();
       expect(mockConoutWorkerDispose).toHaveBeenCalledOnce();
     });
 
     it('never touches the pty on non-win32 (no ConPTY host, no conout worker)', async () => {
-      // Default platform is 'linux'.
-      const { result } = await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      mockPlatform.mockReturnValue('linux');
+      await runEchoHi();
 
-      expect(result.exitCode).toBe(0);
       expect(mockPtyNativeKill).not.toHaveBeenCalled();
       expect(mockConoutWorkerDispose).not.toHaveBeenCalled();
       expect(mockPtyProcess.kill).not.toHaveBeenCalled();
     });
 
     it('releases the conout worker of a promoted shell when it settles', async () => {
-      mockPlatform.mockReturnValue('win32');
-
-      const { result } = await simulateExecution(
-        'long-running-command',
-        (_pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_11303_settle',
-          } satisfies ShellAbortReason);
-        },
-        shellExecutionConfig,
-        { postPromote: { onSettle: () => {} } },
-      );
-      expect(result.promoted).toBe(true);
+      await promotePty('long-running-command', 'bg_11303_settle', {
+        postPromote: { onSettle: () => {} },
+      });
       // Promote itself must not tear anything down — the caller owns the child.
       expect(mockPtyNativeKill).not.toHaveBeenCalled();
 
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      postPromoteExit();
 
-      // The promote branch already dropped this pid from activePtys, so the
-      // process-exit cleanup() cannot reach it: settle is the last chance.
-      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
-      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      // Promote dropped the pid from activePtys, out of cleanup()'s reach:
+      // settle is the last chance.
+      expectConPtyReleased();
     });
 
     it('releases the conout worker when a promote passed no postPromote handlers', async () => {
-      mockPlatform.mockReturnValue('win32');
-
-      const { result } = await simulateExecution(
-        'long-running-command',
-        (_pty, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_11303_no_handlers',
-          } satisfies ShellAbortReason);
-        },
-        // No options arg → postPromote unset → PR-2 detach contract.
-      );
-      expect(result.promoted).toBe(true);
+      await promotePty('long-running-command', 'bg_11303_no_handlers');
       // Promote itself must not tear anything down — the caller owns the child.
       expect(mockPtyNativeKill).not.toHaveBeenCalled();
 
-      // The settle listener is attached even without postPromote: it is the
-      // only path that can still reach this PTY, because the promote branch
-      // dropped the pid from activePtys and disposed exitDisposable. Wrapping
-      // the attach in `if (postPromote)` again must turn this red.
-      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
-      expect(onExitRegistrations.length).toBe(2);
-      const postPromoteExitHandler =
-        onExitRegistrations[onExitRegistrations.length - 1][0];
-      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      // The settle listener is attached even without postPromote, the only
+      // path still reaching this PTY (promote dropped the pid and disposed
+      // exitDisposable); gating it on `if (postPromote)` must turn this red.
+      expect(mockPtyProcess.onExit.mock.calls.length).toBe(2);
+      postPromoteExit();
 
-      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
-      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      expectConPtyReleased();
     });
 
     it('still releases after a cancel that landed before the terminal was ready', async () => {
-      mockPlatform.mockReturnValue('win32');
-      // WindowsTerminal.kill() runs its whole teardown through _deferNoArgs,
-      // which queues it until `_isReady` — and that flag flips only on the
-      // conout socket's first data byte. A cancel before that point (Esc during
-      // pwsh startup, `timeout /t 30 >nul`) queues a teardown that may never
-      // run, so it must not be recorded as a release: the finalizer still owes
-      // the conout worker. Noting it unconditionally — the previous code —
-      // makes both release assertions below fail.
+      // WindowsTerminal.kill() defers its teardown until `_isReady` (the conout
+      // socket's first byte). A cancel before then (Esc during pwsh startup,
+      // `timeout /t 30 >nul`) may never tear down, so the finalizer still owes
+      // the worker; counting it as released (the old code) fails both asserts.
       (mockPtyProcess as unknown as { _isReady: boolean })._isReady = false;
 
-      const { result } = await simulateExecution('timeout /t 30', (pty, ac) => {
-        ac.abort();
-        pty.onExit.mock.calls[0][0]({ exitCode: 1, signal: null });
-      });
+      await cancelPty('timeout /t 30');
 
-      expect(result.aborted).toBe(true);
       expect(mockPtyProcess.kill).toHaveBeenCalled();
-      expect(mockPtyNativeKill).toHaveBeenCalledWith(777, true);
-      expect(mockConoutWorkerDispose).toHaveBeenCalled();
+      expectConPtyReleased();
     });
   });
 
   describe('Windows bundled ConPTY backend (#11303)', () => {
-    // With the inbox ConPTY backend a natural shell exit orphans the
-    // `conhost.exe --headless` it spawned (microsoft/node-pty#965); #11303
-    // measured that growth gone once node-pty loads the conpty.dll it ships
-    // instead of the one built into Windows.
+    // The inbox ConPTY backend orphans its `conhost.exe --headless` on natural
+    // exit (microsoft/node-pty#965); #11303 measured that growth gone once
+    // node-pty loads the conpty.dll it ships instead of Windows' own.
 
     let capturedReplyListener: ((data: string) => void) | undefined;
 
@@ -2446,15 +1717,12 @@ describe('ShellExecutionService', () => {
     }
 
     beforeEach(() => {
+      mockPlatform.mockReturnValue('win32');
       capturedReplyListener = undefined;
     });
 
     it('spawns PTYs with the bundled ConPTY backend on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-
-      await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runPty('echo hi');
 
       expect(mockPtySpawn.mock.calls[0][2]).toMatchObject({
         useConptyDll: true,
@@ -2462,41 +1730,22 @@ describe('ShellExecutionService', () => {
     });
 
     it('falls back to child_process when the bundled ConPTY spawn throws on Windows', async () => {
-      // node-pty throws synchronously out of spawn when the conpty.dll it
-      // ships is missing or cannot be loaded, and none of those messages
-      // contain `posix_spawnp failed`. Without the spawn-phase branch in
-      // executeWithPty's catch this resolved exitCode 1 / executionMethod
-      // 'none', so the child_process fallback in execute() never ran.
-      mockPlatform.mockReturnValue('win32');
+      // node-pty throws synchronously from spawn when its conpty.dll is missing
+      // or fails to load, never with `posix_spawnp failed`. Without the
+      // spawn-phase branch in executeWithPty's catch this resolved exitCode 1 /
+      // executionMethod 'none' and the child_process fallback never ran.
       mockPtySpawn.mockImplementationOnce(() => {
         throw new Error('Failed to load conpty.dll, error code: 126');
       });
-      const fallbackChild = new EventEmitter() as EventEmitter &
-        Partial<ChildProcess>;
-      fallbackChild.stdout = new EventEmitter() as Readable;
-      fallbackChild.stderr = new EventEmitter() as Readable;
-      fallbackChild.kill = vi.fn();
-      Object.defineProperty(fallbackChild, 'pid', {
-        value: 4242,
-        configurable: true,
-      });
+      const fallbackChild = makeChild(4242, false);
       mockCpSpawn.mockReturnValue(fallbackChild);
 
       try {
-        const handle = await ShellExecutionService.execute(
-          'echo hi',
-          '/test/dir',
-          onOutputEventMock,
-          new AbortController().signal,
-          true,
-          shellExecutionConfig,
-        );
-
-        await new Promise((resolve) => process.nextTick(resolve));
-        fallbackChild.stdout?.emit('data', Buffer.from('FALLBACK_MARKER'));
-        fallbackChild.emit('exit', 0, null);
-        fallbackChild.emit('close', 0, null);
-        const result = await handle.result;
+        const { result } = await simulateExecution('echo hi', () => {
+          fallbackChild.stdout?.emit('data', Buffer.from('FALLBACK_MARKER'));
+          fallbackChild.emit('exit', 0, null);
+          fallbackChild.emit('close', 0, null);
+        });
 
         expect(mockCpSpawn).toHaveBeenCalled();
         expect(result.executionMethod).toBe('child_process');
@@ -2519,7 +1768,6 @@ describe('ShellExecutionService', () => {
     });
 
     it('does not run the fallback after the PTY has already spawned', async () => {
-      mockPlatform.mockReturnValue('win32');
       let pidReads = 0;
       Object.defineProperty(mockPtyProcess, 'pid', {
         configurable: true,
@@ -2531,14 +1779,7 @@ describe('ShellExecutionService', () => {
       });
 
       try {
-        const handle = await ShellExecutionService.execute(
-          'echo hi',
-          '/test/dir',
-          onOutputEventMock,
-          new AbortController().signal,
-          true,
-          shellExecutionConfig,
-        );
+        const handle = await exec('echo hi');
         const result = await handle.result;
 
         expect(mockPtySpawn).toHaveBeenCalledOnce();
@@ -2551,10 +1792,8 @@ describe('ShellExecutionService', () => {
     });
 
     it('leaves the inbox ConPTY backend alone off Windows', async () => {
-      // beforeEach pins the platform to linux.
-      await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      mockPlatform.mockReturnValue('linux');
+      await runPty('echo hi');
 
       expect(mockPtySpawn.mock.calls[0][2]).toMatchObject({
         useConptyDll: false,
@@ -2565,14 +1804,13 @@ describe('ShellExecutionService', () => {
       // Bundled ConPTY answers no queries itself, so an unanswered DA probe
       // stalls the shell for its full ~2s timeout; the forwarder must carry
       // the reply generated by xterm's real parser back to the PTY.
-      mockPlatform.mockReturnValue('win32');
 
-      await simulateExecution('echo hi', async (pty) => {
-        pty.onData.mock.calls[0][0]('\x1b[c');
+      await simulateExecution('echo hi', async () => {
+        ptyData('\x1b[c');
         await vi.waitFor(() => {
           expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?1;2c');
         });
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        ptyExit();
       });
     });
 
@@ -2580,7 +1818,6 @@ describe('ShellExecutionService', () => {
       // A reply racing shell exit finds a dead PTY. The forwarder's try/catch
       // has to contain that throw: deleting it lets the error escape the
       // terminal's onData listener and this test goes red.
-      mockPlatform.mockReturnValue('win32');
       mockLoadXtermHeadless.mockResolvedValueOnce({
         Terminal: ReplyCapturingTerminal,
       });
@@ -2588,9 +1825,9 @@ describe('ShellExecutionService', () => {
         throw new Error('pty gone');
       });
 
-      const { result } = await simulateExecution('echo hi', (pty) => {
+      const { result } = await simulateExecution('echo hi', () => {
         capturedReplyListener!('\x1b[?64;1;22c');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+        ptyExit();
       });
 
       expect(mockPtyProcess.write).toHaveBeenCalledWith('\x1b[?64;1;22c');
@@ -2601,13 +1838,12 @@ describe('ShellExecutionService', () => {
     it('registers no terminal reply forwarder off Windows', async () => {
       // The gate must not change POSIX behavior at all: no onData
       // subscription, so nothing can reach pty.write.
+      mockPlatform.mockReturnValue('linux');
       mockLoadXtermHeadless.mockResolvedValueOnce({
         Terminal: ReplyCapturingTerminal,
       });
 
-      await simulateExecution('echo hi', (pty) => {
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runPty('echo hi');
 
       expect(capturedReplyListener).toBeUndefined();
       expect(mockPtyProcess.write).not.toHaveBeenCalled();
@@ -2618,24 +1854,9 @@ describe('ShellExecutionService', () => {
     it('streams byte-exact output when the caller requests raw chunks', async () => {
       const stdout = Buffer.from([0x00, 0xff, 0x61]);
       const stderr = Buffer.from([0x62, 0x00, 0xfe]);
-      const child = Object.assign(new EventEmitter(), {
-        pid: 56789,
-        stdout: new EventEmitter(),
-        stderr: new EventEmitter(),
-        stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
-        exitCode: null,
-        signalCode: null,
-      });
-      mockCpSpawn.mockReturnValue(child);
-      const handle = await ShellExecutionService.executeLaunch(
-        {
-          executable: '/trusted/program',
-          args: [],
-          cwd: '/workspace',
-          env: {},
-        },
-        onOutputEventMock,
-        new AbortController().signal,
+      const child = pipe();
+      const handle = await launchWith(
+        { ...launch(), args: [], env: {} },
         false,
         {},
         { streamStdout: true, streamRawOutput: true },
@@ -2658,37 +1879,28 @@ describe('ShellExecutionService', () => {
       const binaryChunk1 = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const binaryChunk2 = Buffer.from([0x0d, 0x0a, 0x1a, 0x0a]);
 
-      const { result } = await simulateExecution('cat image.png', (pty) => {
-        pty.onData.mock.calls[0][0](binaryChunk1);
-        pty.onData.mock.calls[0][0](binaryChunk2);
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      const { result } = await runPty('cat image.png', [
+        binaryChunk1,
+        binaryChunk2,
+      ]);
 
       expect(result.rawOutput).toEqual(
         Buffer.concat([binaryChunk1, binaryChunk2]),
       );
       expect(onOutputEventMock).toHaveBeenCalledTimes(3);
-      expect(onOutputEventMock.mock.calls[0][0]).toEqual({
-        type: 'binary_detected',
-      });
-      expect(onOutputEventMock.mock.calls[1][0]).toEqual({
-        type: 'binary_progress',
-        bytesReceived: 4,
-      });
-      expect(onOutputEventMock.mock.calls[2][0]).toEqual({
-        type: 'binary_progress',
-        bytesReceived: 8,
-      });
+      const [[detected], [first], [second]] = onOutputEventMock.mock.calls;
+      expect(detected).toEqual({ type: 'binary_detected' });
+      expect(first).toEqual({ type: 'binary_progress', bytesReceived: 4 });
+      expect(second).toEqual({ type: 'binary_progress', bytesReceived: 8 });
     });
 
     it('should not emit data events after binary is detected', async () => {
       mockIsBinary.mockImplementation((buffer) => buffer.includes(0x00));
 
-      await simulateExecution('cat mixed_file', (pty) => {
-        pty.onData.mock.calls[0][0](Buffer.from([0x00, 0x01, 0x02]));
-        pty.onData.mock.calls[0][0](Buffer.from('more text'));
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      await runPty('cat mixed_file', [
+        Buffer.from([0x00, 0x01, 0x02]),
+        Buffer.from('more text'),
+      ]);
 
       const eventTypes = onOutputEventMock.mock.calls.map(
         (call: [ShellOutputEvent]) => call[0].type,
@@ -2702,154 +1914,77 @@ describe('ShellExecutionService', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
-      await simulateExecution('dir "foo bar"', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
+    afterEach(() => {
+      useShell(BASH_SHELL);
+    });
 
-      expect(mockPtySpawn).toHaveBeenCalledWith(
-        'cmd.exe',
+    it.each<[string, string[], string, string | string[]]>([
+      [
+        'should use cmd.exe on Windows',
+        CMD_SHELL,
+        'dir "foo bar"',
         `/d /s /c ${CHCP} 65001 >nul 2>nul & dir "foo bar"`,
-        expect.any(Object),
-      );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-    });
-
-    it('should not apply UTF-8 prefix for Git Bash on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash.exe',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-      await simulateExecution('echo hello', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
-
-      expect(mockPtySpawn).toHaveBeenCalledWith(
-        'bash.exe',
+      ],
+      [
+        'should not apply UTF-8 prefix for Git Bash on Windows',
+        GIT_BASH_SHELL,
+        'echo hello',
         ['-c', 'echo hello'],
-        expect.any(Object),
-      );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-    });
-
-    it('should use PowerShell on Windows with array args and UTF-8 prefix', async () => {
+      ],
+      [
+        'should use PowerShell on Windows with array args and UTF-8 prefix',
+        POWERSHELL_SHELL,
+        PS_COMMAND,
+        PS_UTF8_ARGS,
+      ],
+    ])('%s', async (_title, shell, command, args) => {
       mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'powershell.exe',
-        argsPrefix: ['-NoProfile', '-Command'],
-        shell: 'powershell',
-      });
-      await simulateExecution('Test-Path "C:\\Temp\\"', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
+      useShell(shell);
+      await runPty(command);
 
-      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
       expect(mockPtySpawn).toHaveBeenCalledWith(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-Command',
-          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
-        ],
+        shell[0],
+        args,
         expect.any(Object),
       );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('should normalize PATH-like env keys on Windows for pty execution', async () => {
       mockPlatform.mockReturnValue('win32');
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
+      useShell(CMD_SHELL);
       setupConflictingPathEnv();
 
-      await simulateExecution('dir', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
+      await runPty('dir');
 
-      const spawnOptions = mockPtySpawn.mock.calls[0][2];
-      expectNormalizedWindowsPathEnv(spawnOptions.env);
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
+      expectNormalizedWindowsPathEnv(mockPtySpawn.mock.calls[0][2].env);
     });
 
     it('does not inject Unix pager defaults into Windows pty env when unset', async () => {
       mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
+      useShell(CMD_SHELL);
 
-      await simulateExecution(
-        'echo hello',
-        (pty) => pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-        shellExecutionConfigWithoutPager,
-      );
+      await runPty('echo hello', [], shellExecutionConfigWithoutPager);
 
       const spawnOptions = mockPtySpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('');
       expect(spawnOptions.env['GIT_PAGER']).toBe('');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('preserves explicit pager configuration in Windows pty env', async () => {
       mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
+      useShell(CMD_SHELL);
 
-      await simulateExecution('echo hello', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
+      await runPty('echo hello');
 
       const spawnOptions = mockPtySpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('cat');
       expect(spawnOptions.env['GIT_PAGER']).toBe('cat');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('should use bash on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
-      await simulateExecution('ls "foo bar"', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
+      await runPty('ls "foo bar"');
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'bash',
@@ -2861,45 +1996,26 @@ describe('ShellExecutionService', () => {
 
   describe('AnsiOutput rendering', () => {
     it('should call onOutputEvent with AnsiOutput when showColor is true', async () => {
-      const coloredShellExecutionConfig = {
-        ...shellExecutionConfig,
-        showColor: true,
-        defaultFg: '#ffffff',
-        defaultBg: '#000000',
-        disableDynamicLineTrimming: true,
-      };
       const mockAnsiOutput = [
         [{ text: 'hello', fg: '#ffffff', bg: '#000000' }],
       ];
       mockSerializeTerminalToObject.mockReturnValue(mockAnsiOutput);
 
-      await simulateExecution(
-        'ls --color=auto',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('a\u001b[31mred\u001b[0mword');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        coloredShellExecutionConfig,
-      );
+      await runPty('ls --color=auto', ['a\u001b[31mred\u001b[0mword'], {
+        ...shellExecutionConfig,
+        showColor: true,
+        defaultFg: '#ffffff',
+        defaultBg: '#000000',
+      });
 
       expect(mockSerializeTerminalToObject).toHaveBeenCalledWith(
         expect.anything(), // The terminal object
       );
 
-      expect(onOutputEventMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'data',
-          chunk: mockAnsiOutput,
-        }),
-      );
+      expectDataEvent(mockAnsiOutput);
     });
 
     it('does not re-emit live output when only soft-wrap segmentation changes', async () => {
-      const coloredShellExecutionConfig = {
-        ...shellExecutionConfig,
-        showColor: true,
-        disableDynamicLineTrimming: true,
-      };
       const firstWrappedOutput = [
         [createAnsiToken('abcd')],
         [createAnsiToken('efgh')],
@@ -2927,85 +2043,44 @@ describe('ShellExecutionService', () => {
         },
       );
 
-      await simulateExecution(
-        'narrow-output',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('abcdefgh');
-          pty.onData.mock.calls[0][0]('\r');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        coloredShellExecutionConfig,
-      );
-
-      const dataEvents = onOutputEventMock.mock.calls.filter(
-        ([event]) => event.type === 'data',
-      );
-      expect(dataEvents).toHaveLength(1);
-      expect(dataEvents[0][0]).toEqual({
-        type: 'data',
-        chunk: firstWrappedOutput,
+      await runPty('narrow-output', ['abcdefgh', '\r'], {
+        ...shellExecutionConfig,
+        showColor: true,
       });
+
+      const dataEvents = emittedData();
+      expect(dataEvents).toHaveLength(1);
+      expect(dataEvents[0][0]).toEqual(dataEvent(firstWrappedOutput));
     });
 
     it('should call onOutputEvent with AnsiOutput when showColor is false', async () => {
-      await simulateExecution(
-        'ls --color=auto',
-        (pty) => {
-          pty.onData.mock.calls[0][0]('a\u001b[31mred\u001b[0mword');
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        {
-          ...shellExecutionConfig,
-          showColor: false,
-          disableDynamicLineTrimming: true,
-        },
-      );
+      await runPty('ls --color=auto', ['a\u001b[31mred\u001b[0mword']);
 
-      const expected = createExpectedAnsiOutput('aredword');
-
-      expect(onOutputEventMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'data',
-          chunk: expected,
-        }),
-      );
+      expectDataEvent(createExpectedAnsiOutput('aredword'));
     });
 
     it('does not re-emit default plain live output when only soft-wrap segmentation changes', async () => {
-      const abortController = new AbortController();
-      const handle = await ShellExecutionService.execute(
+      await simulateExecution(
         'narrow-output',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        true,
+        async () => {
+          ptyData('abcdefgh');
+          await vi.waitUntil(() => emittedData().length > 0);
+
+          ShellExecutionService.resizePty(mockPtyProcess.pid, 2, 4);
+          ptyData('\r');
+          ptyExit();
+        },
         {
           ...shellExecutionConfig,
           terminalWidth: 4,
           terminalHeight: 4,
-          showColor: false,
           disableDynamicLineTrimming: false,
         },
       );
 
-      await new Promise((resolve) => process.nextTick(resolve));
-      mockPtyProcess.onData.mock.calls[0][0]('abcdefgh');
-      await waitForDataEventCount(onOutputEventMock, 1);
-
-      ShellExecutionService.resizePty(handle.pid!, 2, 4);
-      mockPtyProcess.onData.mock.calls[0][0]('\r');
-      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      await handle.result;
-
-      const dataEvents = onOutputEventMock.mock.calls.filter(
-        ([event]) => event.type === 'data',
-      );
+      const dataEvents = emittedData();
       expect(dataEvents).toHaveLength(1);
-      const firstDataEvent = dataEvents[0][0];
-      if (firstDataEvent.type !== 'data') {
-        throw new Error('Expected a shell data event.');
-      }
-      const chunk = firstDataEvent.chunk as AnsiOutput;
+      const chunk = (dataEvents[0][0] as { chunk: AnsiOutput }).chunk;
       expect(chunk.map((line) => line[0]?.text).filter(Boolean)).toEqual([
         'abcd',
         'efgh',
@@ -3013,166 +2088,195 @@ describe('ShellExecutionService', () => {
     });
 
     it('should handle multi-line output correctly when showColor is false', async () => {
-      await simulateExecution(
-        'ls --color=auto',
-        (pty) => {
-          pty.onData.mock.calls[0][0](
-            'line 1\n\u001b[32mline 2\u001b[0m\nline 3',
-          );
-          pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-        },
-        {
-          ...shellExecutionConfig,
-          showColor: false,
-          disableDynamicLineTrimming: true,
-        },
-      );
+      await runPty('ls --color=auto', [
+        'line 1\n\u001b[32mline 2\u001b[0m\nline 3',
+      ]);
 
-      const expected = createExpectedAnsiOutput(['line 1', 'line 2', 'line 3']);
-
-      expect(onOutputEventMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'data',
-          chunk: expected,
-        }),
-      );
+      expectDataEvent(createExpectedAnsiOutput(['line 1', 'line 2', 'line 3']));
     });
   });
 });
 
 describe('ShellExecutionService child_process fallback', () => {
-  let mockChildProcess: EventEmitter & Partial<ChildProcess>;
-  let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
+  let mockChildProcess: MockChild;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    originalProcessEnv = process.env;
-
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
     mockGetPty.mockResolvedValue(null);
-
     onOutputEventMock = vi.fn();
-
-    mockChildProcess = new EventEmitter() as EventEmitter &
-      Partial<ChildProcess>;
-    mockChildProcess.stdout = new EventEmitter() as Readable;
-    mockChildProcess.stderr = new EventEmitter() as Readable;
-    mockChildProcess.kill = vi.fn();
-
-    Object.defineProperty(mockChildProcess, 'pid', {
-      value: 12345,
-      configurable: true,
-    });
-    // Mirror real Node ChildProcess: `exitCode` / `signalCode` are `null`
-    // while the child is alive and become a number / signal name on
-    // exit. The background-promote liveness guard reads these to detect
-    // an exit that fired between abort dispatch and the abort handler
-    // run, and a default of `undefined` would mistakenly look terminal
-    // and skip the promote.
-    Object.defineProperty(mockChildProcess, 'exitCode', {
-      value: null,
-      writable: true,
-      configurable: true,
-    });
-    Object.defineProperty(mockChildProcess, 'signalCode', {
-      value: null,
-      writable: true,
-      configurable: true,
-    });
-
+    mockChildProcess = makeChild(12345);
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
 
-  afterEach(() => {
-    process.env = originalProcessEnv;
-    vi.unstubAllEnvs();
-  });
+  type Simulation = (cp: MockChild, ac: AbortController) => void;
 
-  // Helper function to run a standard execution simulation
+  // Start an execution, let spawn settle, drive the child, await the result.
   const simulateExecution = async (
     command: string,
-    simulation: (cp: typeof mockChildProcess, ac: AbortController) => void,
+    simulation: Simulation,
     options: ShellExecuteOptions = {},
+    config: ShellExecutionConfig = shellExecutionConfig,
   ) => {
     const abortController = new AbortController();
-    const handle = await ShellExecutionService.execute(
-      command,
-      '/test/dir',
-      onOutputEventMock,
-      abortController.signal,
-      true,
-      shellExecutionConfig,
-      options,
-    );
-
-    await new Promise((resolve) => process.nextTick(resolve));
-    simulation(mockChildProcess, abortController);
-    const result = await handle.result;
-    return { result, handle, abortController };
-  };
-
-  const simulateExecutionWithConfig = async (
-    command: string,
-    simulation: (cp: typeof mockChildProcess, ac: AbortController) => void,
-    config: ShellExecutionConfig,
-    options: ShellExecuteOptions = {},
-  ) => {
-    const abortController = new AbortController();
-    const handle = await ShellExecutionService.execute(
-      command,
-      '/test/dir',
-      onOutputEventMock,
-      abortController.signal,
-      true,
+    const handle = await exec(command, {
+      signal: abortController.signal,
       config,
       options,
-    );
+    });
 
     await new Promise((resolve) => process.nextTick(resolve));
     simulation(mockChildProcess, abortController);
     const result = await handle.result;
     return { result, handle, abortController };
   };
+
+  const emitOut = (
+    data: string | Buffer,
+    stream: 'stdout' | 'stderr' = 'stdout',
+  ) =>
+    mockChildProcess[stream]?.emit(
+      'data',
+      typeof data === 'string' ? Buffer.from(data) : data,
+    );
+  const finish = (
+    code: number | null = 0,
+    signal: NodeJS.Signals | null = null,
+  ) => {
+    mockChildProcess.emit('exit', code, signal);
+    mockChildProcess.emit('close', code, signal);
+  };
+  // Stream stdout chunks, then exit and close cleanly.
+  const runChunks = (
+    command: string,
+    chunks: Array<string | Buffer>,
+    config: ShellExecutionConfig = shellExecutionConfig,
+    options?: ShellExecuteOptions,
+  ) =>
+    simulateExecution(
+      command,
+      () => {
+        chunks.forEach((chunk) => emitOut(chunk));
+        finish();
+      },
+      options,
+      config,
+    );
+  const groupKill = (signal?: string) => [-mockChildProcess.pid!, signal];
+  const dataChunksOf = (events: Array<{ type: string; chunk?: unknown }>) =>
+    events.filter((e) => e.type === 'data').map((e) => e.chunk);
+
+  /**
+   * Executes under a raw-output capture with a 64-byte preview; `drive` emits
+   * the child's output, then both streams end and the child exits with `code`.
+   */
+  const runCaptured = async (command: string, drive: () => void, code = 0) => {
+    for (const stream of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
+      Object.assign(stream, { pause: vi.fn(), resume: vi.fn() });
+    }
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      command,
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      { ...shellExecutionConfig, maxBufferedOutputBytes: 64 },
+      { rawCapture: capture },
+    );
+    drive();
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    finish(code);
+    return { result: await handle.result, capture };
+  };
+
+  it('keeps a bounded head and tail preview while capturing every raw byte', async () => {
+    const bytes = Buffer.from(`HEAD${'x'.repeat(100)}TAIL`);
+    const { result, capture } = await runCaptured('printf output', () =>
+      emitOut(bytes),
+    );
+    expect(capture.write).toHaveBeenCalledWith('stdout', bytes);
+    expect(result.rawOutput.byteLength).toBe(32);
+    expect(result.output).toContain('HEAD');
+    expect(result.output).toContain('TAIL');
+    expect(result.output).toContain('Middle output omitted');
+    expect(result.output).not.toContain('x'.repeat(100));
+  });
+
+  it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
+    const { result, capture } = await runCaptured(
+      'failing build',
+      () => {
+        emitOut('HEAD' + 'x'.repeat(80));
+        emitOut('ERR: 42\n', 'stderr');
+        emitOut('y'.repeat(100) + 'TAIL');
+      },
+      3,
+    );
+    expect(result.output).toContain('HEAD');
+    expect(result.output).toContain('TAIL');
+    expect(result.output).toContain('[Recent stderr]\nERR: 42');
+    expect(capture.write).toHaveBeenCalledWith(
+      'stderr',
+      Buffer.from('ERR: 42\n'),
+    );
+  });
+
+  it('decodes a combined preview tail that starts inside a UTF-8 character', async () => {
+    const stdout = Buffer.from(`${'错'.repeat(30)}END`);
+    const { result, capture } = await runCaptured('printf output', () =>
+      emitOut(stdout),
+    );
+    const tail = result.output.split('managed capture.]\n')[1];
+    expect(tail).toMatch(/^错+END$/);
+    expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
+
+  it('decodes a stderr preview that starts inside a UTF-8 character', async () => {
+    const stderr = Buffer.from(`${'错'.repeat(30)}END\n`);
+    const { result, capture } = await runCaptured(
+      'failing build',
+      () => {
+        emitOut('HEAD' + 'x'.repeat(80));
+        emitOut(stderr, 'stderr');
+        emitOut('y'.repeat(100));
+      },
+      3,
+    );
+    expect(result.output.split('[Recent stderr]\n')[1]).toBe('错END');
+    expect(capture.write).toHaveBeenCalledWith('stderr', stderr);
+  });
+
+  it('keeps a stdout-only preview complete within its byte limit', async () => {
+    const stdout = Buffer.from('x'.repeat(60));
+    const { result, capture } = await runCaptured('printf output', () =>
+      emitOut(stdout),
+    );
+    expect(result.output).toBe(stdout.toString());
+    expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
+  });
 
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
-      // Replace (not mutate in place): this file restores process.env by
-      // reference in afterEach, so in-place keys would leak to later tests.
-      process.env = {
-        ...originalProcessEnv,
-        QWEN_SERVER_TOKEN: 'serve-secret',
-        QWEN_DAEMON_TOKEN: 'daemon-secret',
-        GH_TOKEN: 'gh-abc',
-        PATH: '/usr/bin',
-      };
-
-      await simulateExecution('echo hi', (cp) => {
-        cp.emit('exit', 0, null);
-        cp.emit('close', 0, null);
-      });
-
-      const spawnEnv = (
-        mockCpSpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
-      ).env;
-      // Internal daemon secrets must not leak into agent-run commands.
-      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
-      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
-      // Benign vars + third-party credentials user commands rely on are kept.
-      expect(spawnEnv['PATH']).toContain('/usr/bin');
-      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
-      // The shell tool's own marker is still applied on top.
-      expect(spawnEnv['QWEN_CODE']).toBe('1');
+      setSecretEnv();
+      await runChunks('echo hi', []);
+      expectSanitizedEnv(mockCpSpawn);
     });
   });
 
   describe('Successful Execution', () => {
     it('should execute a command and capture stdout and stderr', async () => {
-      const { result, handle } = await simulateExecution('ls -l', (cp) => {
-        cp.stdout?.emit('data', Buffer.from('file1.txt\n'));
-        cp.stderr?.emit('data', Buffer.from('a warning'));
-        cp.emit('exit', 0, null);
-        cp.emit('close', 0, null);
+      const { result, handle } = await simulateExecution('ls -l', () => {
+        emitOut('file1.txt\n');
+        emitOut('a warning', 'stderr');
+        finish();
       });
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
@@ -3189,88 +2293,60 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toBe('file1.txt\na warning');
       expect(handle.pid).toBe(12345);
 
-      expect(onOutputEventMock).toHaveBeenCalledWith({
-        type: 'data',
-        chunk: 'file1.txt\na warning',
-      });
-    });
-
-    it('should strip ANSI codes from output', async () => {
-      const { result } = await simulateExecution('ls --color=auto', (cp) => {
-        cp.stdout?.emit('data', Buffer.from('a\u001b[31mred\u001b[0mword'));
-        cp.emit('exit', 0, null);
-        cp.emit('close', 0, null);
-      });
-
-      expect(result.output.trim()).toBe('aredword');
       expect(onOutputEventMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'data',
-          chunk: 'aredword',
-        }),
+        dataEvent('file1.txt\na warning'),
       );
     });
 
+    it('should strip ANSI codes from output', async () => {
+      const { result } = await runChunks('ls --color=auto', [
+        'a\u001b[31mred\u001b[0mword',
+      ]);
+
+      expect(result.output.trim()).toBe('aredword');
+      expectDataEvent('aredword');
+    });
+
     it('should correctly decode multi-byte characters split across chunks', async () => {
-      const { result } = await simulateExecution('echo "你好"', (cp) => {
-        const multiByteChar = Buffer.from('你好', 'utf-8');
-        cp.stdout?.emit('data', multiByteChar.slice(0, 2));
-        cp.stdout?.emit('data', multiByteChar.slice(2));
-        cp.emit('exit', 0, null);
-        cp.emit('close', 0, null);
-      });
+      const multiByteChar = Buffer.from('你好', 'utf-8');
+      const { result } = await runChunks('echo "你好"', [
+        multiByteChar.slice(0, 2),
+        multiByteChar.slice(2),
+      ]);
       expect(result.output.trim()).toBe('你好');
     });
 
     it('bounds buffered child_process output before building the final string', async () => {
-      const abortController = new AbortController();
-      const handle = await ShellExecutionService.execute(
-        'large-output',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        false,
-        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
-      );
+      const handle = await exec('large-output', {
+        usePty: false,
+        config: { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      });
 
       await new Promise((resolve) => process.nextTick(resolve));
-      mockChildProcess.stdout?.emit('data', Buffer.from('12345678'));
-      mockChildProcess.stdout?.emit('data', Buffer.from('abcdefg'));
-      mockChildProcess.emit('exit', 0, null);
-      mockChildProcess.emit('close', 0, null);
+      emitOut('12345678');
+      emitOut('abcdefg');
+      finish();
 
       const result = await handle.result;
 
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toContain('12345678ab');
-      expect(result.output).toContain(
-        'Output exceeded the maximum captured size',
-      );
+      expect(result.output).toContain(CAP_NOTICE);
       expect(result.output).not.toContain('cdefg');
-      expect(onOutputEventMock).toHaveBeenCalledWith({
-        type: 'data',
-        chunk: expect.stringContaining(
-          'Output exceeded the maximum captured size',
-        ),
-      });
+      expect(onOutputEventMock).toHaveBeenCalledWith(
+        dataEvent(expect.stringContaining(CAP_NOTICE)),
+      );
     });
 
     it('does not add a capture-limit notice at the exact child_process buffer boundary', async () => {
-      const { result } = await simulateExecutionWithConfig(
-        'exact-output',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from('1234567890'));
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
-        },
-        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
-      );
+      const { result } = await runChunks('exact-output', ['1234567890'], {
+        ...shellExecutionConfig,
+        maxBufferedOutputBytes: 10,
+      });
 
       expect(result.rawOutput.length).toBe(10);
       expect(result.output).toBe('1234567890');
-      expect(result.output).not.toContain(
-        'Output exceeded the maximum captured size',
-      );
+      expect(result.output).not.toContain(CAP_NOTICE);
     });
 
     it.each([
@@ -3284,13 +2360,9 @@ describe('ShellExecutionService child_process fallback', () => {
     ])(
       'falls back to the default capture limit for invalid maxBufferedOutputBytes: %s',
       async (configuredValue) => {
-        const { result } = await simulateExecutionWithConfig(
+        const { result } = await runChunks(
           'invalid-limit',
-          (cp) => {
-            cp.stdout?.emit('data', Buffer.from('1234567890abcde'));
-            cp.emit('exit', 0, null);
-            cp.emit('close', 0, null);
-          },
+          ['1234567890abcde'],
           {
             ...shellExecutionConfig,
             maxBufferedOutputBytes: configuredValue as unknown as number,
@@ -3299,29 +2371,23 @@ describe('ShellExecutionService child_process fallback', () => {
 
         expect(result.rawOutput.length).toBe(15);
         expect(result.output).toBe('1234567890abcde');
-        expect(result.output).not.toContain(
-          'Output exceeded the maximum captured size',
-        );
+        expect(result.output).not.toContain(CAP_NOTICE);
       },
     );
 
     it('emits live snapshots before exit while retaining the buffered final result', async () => {
-      const { result } = await simulateExecutionWithConfig(
+      const { result } = await simulateExecution(
         'live-buffered-output',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from('ready\n'));
-          expect(onOutputEventMock).toHaveBeenCalledWith({
-            type: 'data',
-            chunk: 'ready\n',
-          });
-          cp.stdout?.emit('data', Buffer.from('done\n'));
-          expect(onOutputEventMock).toHaveBeenLastCalledWith({
-            type: 'data',
-            chunk: 'ready\ndone\n',
-          });
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
+        () => {
+          emitOut('ready\n');
+          expect(onOutputEventMock).toHaveBeenCalledWith(dataEvent('ready\n'));
+          emitOut('done\n');
+          expect(onOutputEventMock).toHaveBeenLastCalledWith(
+            dataEvent('ready\ndone\n'),
+          );
+          finish();
         },
+        {},
         { ...shellExecutionConfig, streamBufferedOutput: true },
       );
       expect(result.output).toBe('ready\ndone');
@@ -3329,39 +2395,36 @@ describe('ShellExecutionService child_process fallback', () => {
 
     it('bounds cumulative previews while preserving complete stdout and stderr', async () => {
       const stdout = 'x'.repeat(200000);
-      const { result } = await simulateExecutionWithConfig(
+      const { result } = await simulateExecution(
         'bounded-preview',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from(stdout));
-          cp.stderr?.emit('data', Buffer.from('\u001b[31merror\u001b[0m'));
-          expect(onOutputEventMock).toHaveBeenLastCalledWith({
-            type: 'data',
-            chunk: 'x'.repeat(65530) + '\nerror',
-          });
-          cp.stdout?.emit('data', Buffer.from('end'));
-          expect(onOutputEventMock).toHaveBeenLastCalledWith({
-            type: 'data',
-            chunk: 'x'.repeat(65527) + 'end\nerror',
-          });
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
+        () => {
+          emitOut(stdout);
+          emitOut('\u001b[31merror\u001b[0m', 'stderr');
+          expect(onOutputEventMock).toHaveBeenLastCalledWith(
+            dataEvent('x'.repeat(65530) + '\nerror'),
+          );
+          emitOut('end');
+          expect(onOutputEventMock).toHaveBeenLastCalledWith(
+            dataEvent('x'.repeat(65527) + 'end\nerror'),
+          );
+          finish();
         },
+        {},
         { ...shellExecutionConfig, streamBufferedOutput: true },
       );
       expect(result.output).toBe(stdout + 'end\nerror');
     });
 
     it('keeps streaming both pipes after exit until stdio closes', async () => {
-      await simulateExecutionWithConfig(
+      await simulateExecution(
         'monitor',
         (cp) => {
-          cp.stdout?.emit('data', Buffer.from('before'));
+          emitOut('before');
           cp.emit('exit', 0, null);
-          cp.stderr?.emit('data', Buffer.from('stderr after exit'));
-          cp.stdout?.emit('data', Buffer.from('stdout after exit'));
+          emitOut('stderr after exit', 'stderr');
+          emitOut('stdout after exit');
           cp.emit('close', 0, null);
         },
-        shellExecutionConfig,
         { streamStdout: true },
       );
       expect(onOutputEventMock.mock.calls.map(([event]) => event)).toEqual([
@@ -3372,122 +2435,76 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('flushes a trailing partial character for streaming text', async () => {
-      await simulateExecutionWithConfig(
+      await runChunks(
         'partial-character',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from([0xe2]));
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
-        },
+        [Buffer.from([0xe2])],
         shellExecutionConfig,
         { streamStdout: true },
       );
-      expect(onOutputEventMock).toHaveBeenLastCalledWith({
-        type: 'data',
-        chunk: '\ufffd',
-        stream: 'stdout',
-      });
+      expect(onOutputEventMock).toHaveBeenLastCalledWith(stdoutEvent('\ufffd'));
     });
 
     it('does not settle a streaming execution at exit while stdio is still draining', async () => {
-      // The trailing-output fix: settling at 'exit' would race the
-      // consumer's own settle (a background task closes its output file
-      // when the result resolves) and drop chunks that arrive between
-      // 'exit' and 'close'. Settlement must wait for 'close'. Reverting
-      // to plain 'exit' settlement turns this red.
-      const abortController = new AbortController();
-      const handle = await ShellExecutionService.execute(
-        'monitor',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        true,
-        shellExecutionConfig,
-        { streamStdout: true },
-      );
+      // Settling at 'exit' races the consumer's own settle (a background task
+      // closes its output file on resolve) and drops chunks arriving before
+      // 'close'. Settlement waits for 'close'; reverting to 'exit' turns red.
+      const handle = await exec('monitor', { options: { streamStdout: true } });
       await new Promise((resolve) => process.nextTick(resolve));
-      mockChildProcess.stdout?.emit('data', Buffer.from('before'));
+      emitOut('before');
       mockChildProcess.emit('exit', 0, null);
       let settledEarly = false;
       void handle.result.then(() => {
         settledEarly = true;
       });
-      // Flush the microtask queue: had the result promise resolved during
-      // the synchronous 'exit' emit, the .then callback would run here.
+      // Had the result resolved during the sync 'exit' emit, .then runs here.
       await Promise.resolve();
       await Promise.resolve();
       expect(settledEarly).toBe(false);
-      mockChildProcess.stdout?.emit('data', Buffer.from('after'));
+      emitOut('after');
       mockChildProcess.emit('close', 0, null);
       const result = await handle.result;
       expect(settledEarly).toBe(true);
       expect(result.exitCode).toBe(0);
-      expect(onOutputEventMock).toHaveBeenCalledWith({
-        type: 'data',
-        chunk: 'after',
-        stream: 'stdout',
-      });
+      expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('after'));
     });
 
     it('settles a streaming execution within a bounded drain when stdio never closes', async () => {
-      // A grandchild inheriting the stdout pipe (`sleep 10 &`, `nohup … &`)
-      // defers 'close' indefinitely; the result promise must still settle
-      // on the recorded exit info after the bounded post-exit drain
-      // (PR #12067 review — wedging here hangs background shells and the
-      // ACP channel). Red when settlement is bound to 'close' alone: the
-      // result promise never resolves.
-      const { result } = await simulateExecutionWithConfig(
+      // A grandchild holding the stdout pipe (`sleep 10 &`, `nohup … &`) defers
+      // 'close' forever; the result must still settle on the recorded exit
+      // after the bounded drain (PR #12067 review: wedging hangs background
+      // shells and the ACP channel). Bound to 'close' alone it never resolves.
+      const { result } = await simulateExecution(
         'daemonize',
         (cp) => {
-          cp.stdout?.emit('data', Buffer.from('before'));
+          emitOut('before');
           cp.emit('exit', 0, null);
           // No 'close': the grandchild holds the pipe forever.
         },
-        shellExecutionConfig,
         { streamStdout: true },
       );
       expect(result.exitCode).toBe(0);
       expect(result.aborted).toBe(false);
-      expect(onOutputEventMock).toHaveBeenCalledWith({
-        type: 'data',
-        chunk: 'before',
-        stream: 'stdout',
-      });
+      expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('before'));
     });
 
     it('reports capture-limit notice for streaming child_process output', async () => {
-      const { result } = await simulateExecutionWithConfig(
+      const { result } = await runChunks(
         'streaming-large-output',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from('abcdef'));
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
-        },
+        ['abcdef'],
         { ...shellExecutionConfig, maxBufferedOutputBytes: 1 },
         { streamStdout: true },
       );
 
-      expect(onOutputEventMock).toHaveBeenCalledWith({
-        type: 'data',
-        chunk: 'abcdef',
-        stream: 'stdout',
-      });
+      expect(onOutputEventMock).toHaveBeenCalledWith(stdoutEvent('abcdef'));
       expect(result.rawOutput.length).toBe(1);
-      expect(result.output).toContain(
-        'Output exceeded the maximum captured size',
-      );
+      expect(result.output).toContain(CAP_NOTICE);
     });
 
     it('emits only the capture-limit notice when stripped captured output is empty', async () => {
-      const { result } = await simulateExecutionWithConfig(
-        'empty-captured-output',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from('\nabc'));
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
-        },
-        { ...shellExecutionConfig, maxBufferedOutputBytes: 1 },
-      );
+      const { result } = await runChunks('empty-captured-output', ['\nabc'], {
+        ...shellExecutionConfig,
+        maxBufferedOutputBytes: 1,
+      });
 
       expect(result.rawOutput.length).toBe(1);
       expect(result.output).toMatch(
@@ -3496,10 +2513,7 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('should handle commands with no output', async () => {
-      const { result } = await simulateExecution('touch file', (cp) => {
-        cp.emit('exit', 0, null);
-        cp.emit('close', 0, null);
-      });
+      const { result } = await runChunks('touch file', []);
 
       expect(result.output.trim()).toBe('');
       expect(onOutputEventMock).not.toHaveBeenCalled();
@@ -3508,10 +2522,9 @@ describe('ShellExecutionService child_process fallback', () => {
 
   describe('Failed Execution', () => {
     it('should capture a non-zero exit code and format output correctly', async () => {
-      const { result } = await simulateExecution('a-bad-command', (cp) => {
-        cp.stderr?.emit('data', Buffer.from('command not found'));
-        cp.emit('exit', 127, null);
-        cp.emit('close', 127, null);
+      const { result } = await simulateExecution('a-bad-command', () => {
+        emitOut('command not found', 'stderr');
+        finish(127);
       });
 
       expect(result.exitCode).toBe(127);
@@ -3520,10 +2533,9 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('should capture a termination signal', async () => {
-      const { result } = await simulateExecution('long-process', (cp) => {
-        cp.emit('exit', null, 'SIGTERM');
-        cp.emit('close', null, 'SIGTERM');
-      });
+      const { result } = await simulateExecution('long-process', () =>
+        finish(null, 'SIGTERM'),
+      );
 
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBe(15);
@@ -3533,8 +2545,7 @@ describe('ShellExecutionService child_process fallback', () => {
       const spawnError = new Error('spawn EACCES');
       const { result } = await simulateExecution('protected-cmd', (cp) => {
         cp.emit('error', spawnError);
-        cp.emit('exit', 1, null);
-        cp.emit('close', 1, null);
+        finish(1);
       });
 
       expect(result.error).toBe(spawnError);
@@ -3562,182 +2573,118 @@ describe('ShellExecutionService child_process fallback', () => {
       },
       {
         platform: 'win32',
-        expectedCommand: TASKKILL,
         expectedExit: { code: 1 },
       },
-    ])(
-      'on $platform',
-      ({ platform, expectedSignal, expectedCommand, expectedExit }) => {
-        it('should abort a running process and set the aborted flag', async () => {
-          mockPlatform.mockReturnValue(platform);
+    ])('on $platform', ({ platform, expectedSignal, expectedExit }) => {
+      it('should abort a running process and set the aborted flag', async () => {
+        mockPlatform.mockReturnValue(platform);
 
-          const { result } = await simulateExecution(
-            'sleep 10',
-            (cp, abortController) => {
-              abortController.abort();
-              if (expectedExit.signal) {
-                cp.emit('exit', null, expectedExit.signal);
-                cp.emit('close', null, expectedExit.signal);
-              }
-              if (typeof expectedExit.code === 'number') {
-                cp.emit('exit', expectedExit.code, null);
-                cp.emit('close', expectedExit.code, null);
-              }
-            },
-          );
-
-          expect(result.aborted).toBe(true);
-
-          if (platform === 'linux') {
-            expect(mockProcessKill).toHaveBeenCalledWith(
-              -mockChildProcess.pid!,
-              expectedSignal,
-            );
-          } else {
-            expect(mockCpSpawn).toHaveBeenCalledWith(
-              expectedCommand,
-              ['/f', '/t', '/pid', String(mockChildProcess.pid)],
-              HIDDEN_WINDOW,
-            );
-          }
+        const { result } = await simulateExecution('sleep 10', (_cp, ac) => {
+          ac.abort();
+          if (expectedExit.signal) finish(null, expectedExit.signal);
+          if (typeof expectedExit.code === 'number') finish(expectedExit.code);
         });
-      },
-    );
 
-    it('win32 cancel falls back to child.kill when taskkill cannot launch', async () => {
+        expect(result.aborted).toBe(true);
+
+        if (platform === 'linux') {
+          expect(mockProcessKill).toHaveBeenCalledWith(
+            ...groupKill(expectedSignal),
+          );
+        } else {
+          expect(mockCpSpawn).toHaveBeenCalledWith(
+            ...taskkill(mockChildProcess.pid),
+          );
+        }
+      });
+    });
+
+    // Cancel on win32 and check the aborted flag. performCancelKill's taskkill
+    // gets its own emitter, so its 'error' / 'exit' fire in isolation from the
+    // shell child's 'error' handler.
+    const cancelWithTaskkill = async (
+      drive: (taskkillProc: EventEmitter) => void,
+    ) => {
       mockPlatform.mockReturnValue('win32');
-      // The shell spawn returns mockChildProcess; the taskkill spawn returns a
-      // separate emitter so its launch 'error' can be fired in isolation
-      // (without also tripping the shell child's own 'error' handler).
       const taskkillProc = new EventEmitter();
       mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
       mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
-
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (cp, abortController) => {
-          abortController.abort();
-          // taskkill could not launch -> async 'error' event (not a throw).
-          taskkillProc.emit('error', new Error('spawn taskkill ENOENT'));
-          // The child.kill() fallback makes the real child exit; settle it.
-          cp.emit('exit', 1, null);
-          cp.emit('close', 1, null);
-        },
-      );
-
+      const { result } = await simulateExecution('sleep 10', (_cp, ac) => {
+        ac.abort();
+        drive(taskkillProc);
+      });
       expect(result.aborted).toBe(true);
-      // Without the fallback the abort would hang waiting for an exit that
-      // never comes. See #5873.
+    };
+
+    it('win32 cancel falls back to child.kill when taskkill cannot launch', async () => {
+      await cancelWithTaskkill((taskkillProc) => {
+        // taskkill could not launch -> async 'error' event (not a throw).
+        taskkillProc.emit('error', new Error('spawn taskkill ENOENT'));
+        // The child.kill() fallback makes the real child exit; settle it.
+        finish(1);
+      });
+
+      // Without the fallback the abort hangs for an exit that never comes.
+      // See #5873.
       expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
     });
 
     it('win32 cancel falls back to child.kill when taskkill exits non-zero', async () => {
-      mockPlatform.mockReturnValue('win32');
-      const taskkillProc = new EventEmitter();
-      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
-      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+      await cancelWithTaskkill((taskkillProc) => {
+        // taskkill launched but failed (e.g. access denied on an elevated
+        // child): non-zero exit, no 'error' event.
+        taskkillProc.emit('exit', 1);
+        finish(1);
+      });
 
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (cp, abortController) => {
-          abortController.abort();
-          // taskkill launched but failed to kill the tree (e.g. access denied
-          // on an elevated child): non-zero exit, no 'error' event.
-          taskkillProc.emit('exit', 1);
-          // The child.kill() fallback makes the real child exit; settle it.
-          cp.emit('exit', 1, null);
-          cp.emit('close', 1, null);
-        },
-      );
-
-      expect(result.aborted).toBe(true);
-      // The 'exit' handler must fall back to child.kill on a non-zero taskkill
-      // exit, else the cancel hangs (no 'error', child still alive). See #5873.
+      // Else the cancel hangs (no 'error', child still alive). See #5873.
       expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
     });
 
     it('win32 cancel does NOT fall back to child.kill when taskkill exits 0', async () => {
-      mockPlatform.mockReturnValue('win32');
-      const taskkillProc = new EventEmitter();
-      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
-      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+      await cancelWithTaskkill((taskkillProc) => {
+        // taskkill killed the tree (exit 0): no fallback. Pins the
+        // `if (code !== 0)` guard against removal or inversion.
+        taskkillProc.emit('exit', 0);
+        finish(1);
+      });
 
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (cp, abortController) => {
-          abortController.abort();
-          // taskkill succeeded (exit 0): it killed the tree, so the fallback
-          // must NOT fire — pins the `if (code !== 0)` guard against removal
-          // or inversion.
-          taskkillProc.emit('exit', 0);
-          cp.emit('exit', 1, null);
-          cp.emit('close', 1, null);
-        },
-      );
-
-      expect(result.aborted).toBe(true);
       expect(mockChildProcess.kill).not.toHaveBeenCalled();
     });
 
     it('win32 cancel does NOT fall back to child.kill when the child already exited', async () => {
-      mockPlatform.mockReturnValue('win32');
-      const taskkillProc = new EventEmitter();
-      mockCpSpawn.mockReturnValueOnce(mockChildProcess); // shell
-      mockCpSpawn.mockReturnValueOnce(taskkillProc); // performCancelKill taskkill
+      await cancelWithTaskkill((taskkillProc) => {
+        // The child exits BEFORE a slow taskkill reports failure...
+        finish();
+        // ...so no child.kill on a dead (maybe pid-reused) child: pins the
+        // `if (!exited)` guard.
+        taskkillProc.emit('error', new Error('spawn taskkill ENOENT'));
+      });
 
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (cp, abortController) => {
-          abortController.abort();
-          // The child exits naturally BEFORE taskkill reports failure (taskkill
-          // can be slow to report). This sets `exited = true`...
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
-          // ...so the late taskkill error must NOT fall back to child.kill on a
-          // dead (possibly pid-reused) child — pins the `if (!exited)` guard.
-          taskkillProc.emit('error', new Error('spawn taskkill ENOENT'));
-        },
-      );
-
-      expect(result.aborted).toBe(true);
       expect(mockChildProcess.kill).not.toHaveBeenCalled();
     });
 
     it('signal.reason = { kind: "cancel" } still tree-kills (same as default)', async () => {
-      mockPlatform.mockReturnValue('linux');
-      const { result } = await simulateExecution(
-        'sleep 10',
-        (cp, abortController) => {
-          abortController.abort({ kind: 'cancel' } satisfies ShellAbortReason);
-          cp.emit('exit', null, 'SIGKILL');
-          cp.emit('close', null, 'SIGKILL');
-        },
-      );
+      const { result } = await simulateExecution('sleep 10', (_cp, ac) => {
+        ac.abort({ kind: 'cancel' } satisfies ShellAbortReason);
+        finish(null, 'SIGKILL');
+      });
 
       expect(result.aborted).toBe(true);
       expect(result.promoted).toBeUndefined();
-      // Default kill path ran — pin that reason === 'cancel' is NOT
-      // mistakenly routed through the background branch.
-      expect(mockProcessKill).toHaveBeenCalledWith(
-        -mockChildProcess.pid!,
-        'SIGTERM',
-      );
+      // Default kill path: 'cancel' is not routed as background.
+      expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGTERM'));
     });
 
     it('signal.reason = { kind: "background" } skips kill and resolves with promoted: true (and aborted: false per design question 7)', async () => {
-      mockPlatform.mockReturnValue('linux');
-      // Critical: do NOT fire 'exit' — the child is still alive after the
-      // background-promote abort. The result Promise must resolve via the
-      // abort handler's own immediate resolve.
+      // No 'exit': the child is still alive after the promote, so the result
+      // must come from the abort handler's own immediate resolve.
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (cp, abortController) => {
-          // Emit some output first so the snapshot has content.
-          cp.stdout?.emit('data', Buffer.from('line1\nline2\n'));
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
+        (_cp, ac) => {
+          // Output first, so the snapshot has content.
+          emitOut('line1\nline2\n');
+          ac.abort(bg('bg_test123'));
         },
       );
 
@@ -3748,116 +2695,72 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.signal).toBeNull();
       expect(result.error).toBeNull();
       expect(result.pid).toBe(mockChildProcess.pid);
-      // Output captured up to the promote moment is preserved as the
-      // snapshot for the caller to seed the BackgroundShellEntry's output
-      // file from.
+      // Output up to the promote is the snapshot seeding the caller's
+      // BackgroundShellEntry output file; the kill path did NOT run.
       expect(result.output).toContain('line1');
       expect(result.output).toContain('line2');
-      // Verify the kill path did NOT run.
-      expect(mockProcessKill).not.toHaveBeenCalledWith(
-        -mockChildProcess.pid!,
-        'SIGTERM',
-      );
-      expect(mockProcessKill).not.toHaveBeenCalledWith(
-        -mockChildProcess.pid!,
-        'SIGKILL',
-      );
+      expect(mockProcessKill).not.toHaveBeenCalledWith(...groupKill('SIGTERM'));
+      expect(mockProcessKill).not.toHaveBeenCalledWith(...groupKill('SIGKILL'));
       expect(mockChildProcess.kill).not.toHaveBeenCalled();
     });
 
     it('post-promotion: stdout / stderr data is no longer routed to onOutputEvent (handoff boundary)', async () => {
-      mockPlatform.mockReturnValue('linux');
-      // Pin the ownership contract: after background-promote, stdout/stderr
-      // arriving on the still-running child must NOT surface through the
-      // foreground execute()'s onOutputEvent. Without off()'ing the
-      // stdoutHandler / stderrHandler in the abort handler, post-promote
-      // bytes would re-enter handleOutput, which then calls
-      // decoder.decode() on a now-finalized decoder (cleanup() called
-      // .decode() without stream:true) → TypeError crash, OR routes to
-      // onOutputEvent → ownership leak / duplicated emit.
+      // Ownership contract: without off()'ing the stdout / stderr handlers at
+      // promote, post-promote bytes re-enter handleOutput and either hit the
+      // finalized decoder (TypeError crash) or reach the foreground
+      // onOutputEvent (ownership leak / duplicated emit).
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (cp, abortController) => {
-          cp.stdout?.emit('data', Buffer.from('pre-promote\n'));
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-          // Capture call count at the moment of promote, then emit more
-          // data on the still-live child stream and assert onOutputEvent
-          // was NOT called again. (Also verifies no TypeError from
-          // decoding through the finalized decoder.)
+        (_cp, ac) => {
+          emitOut('pre-promote\n');
+          ac.abort(bg('bg_test123'));
+          // More data on the live streams: no onOutputEvent, no decoder throw.
           const eventCountAtPromote = onOutputEventMock.mock.calls.length;
-          cp.stdout?.emit('data', Buffer.from('post-promote-stdout\n'));
-          cp.stderr?.emit('data', Buffer.from('post-promote-stderr\n'));
+          emitOut('post-promote-stdout\n');
+          emitOut('post-promote-stderr\n', 'stderr');
           expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
         },
       );
 
       expect(result.promoted).toBe(true);
-      // Pre-promote data made it into the snapshot; post-promote did not.
       expect(result.output).toContain('pre-promote');
       expect(result.output).not.toContain('post-promote-stdout');
       expect(result.output).not.toContain('post-promote-stderr');
     });
 
     it('post-exit race: background-promote refuses if child is already terminal (exitCode/signalCode non-null)', async () => {
-      // Race window: the child may have exited (exitCode set) but the
-      // 'exit' event hasn't reached our handler yet because Node delivers
-      // child_process events on the next microtask. Promoting in that
-      // window would detach our exit listener and report `promoted: true`
-      // for a process that's already dead — the caller would hold an
-      // inert pid expecting to take over. Production code reads
-      // exitCode / signalCode before detaching; if either is non-null,
-      // it falls through and lets the pending exit handler resolve
-      // normally with the real exit info.
-      mockPlatform.mockReturnValue('linux');
+      // The child may exit (exitCode set) before Node delivers 'exit'; a
+      // promote then would detach our exit listener and hand the caller an
+      // inert pid as `promoted: true`. Production checks exitCode / signalCode
+      // first and lets the pending exit handler resolve with the real info.
       const { result } = await simulateExecution(
         'fast-and-cancelled',
-        (cp, abortController) => {
-          // Simulate the race: pretend the child has already exited
-          // (exitCode set on the ChildProcess) but the 'exit' event
-          // emit is queued behind the abort dispatch.
+        (cp, ac) => {
+          // Exited, with its 'exit' emit queued behind the abort dispatch.
           Object.defineProperty(cp, 'exitCode', {
             value: 0,
             writable: true,
             configurable: true,
           });
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-          // Now drain the pending exit + close events; the normal
-          // exit path should resolve the result.
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
+          ac.abort(bg('bg_test123'));
+          finish();
         },
       );
 
-      // Result is the normal exit shape, not the promoted shape.
+      // The normal exit shape, not the promoted one.
       expect(result.promoted).toBeUndefined();
       expect(result.aborted).toBe(true); // abortSignal.aborted is still true
       expect(result.exitCode).toBe(0);
     });
 
     it('post-promotion: child exit does NOT re-resolve the result with a non-promoted shape', async () => {
-      mockPlatform.mockReturnValue('linux');
-      // Pin: even if the still-running child later exits naturally and the
-      // caller's own exit listener fires, our foreground result Promise
-      // must NOT be re-resolved (Promise can only resolve once). The
-      // detached exit handler prevents our own handler from firing.
+      // A later child exit must not re-resolve: promote off()'d our exit
+      // listener, and a Promise resolves only once anyway.
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (cp, abortController) => {
-          abortController.abort({
-            kind: 'background',
-            shellId: 'bg_test123',
-          } satisfies ShellAbortReason);
-          // Simulate the still-running child exiting later; this should
-          // NOT route through our handleExit because the exit listener
-          // was off()'d in the background-promote branch.
-          cp.emit('exit', 42, null);
-          cp.emit('close', 42, null);
+        (_cp, ac) => {
+          ac.abort(bg('bg_test123'));
+          finish(42);
         },
       );
 
@@ -3867,61 +2770,38 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('PR-2.5 child_process: post-promote stdout/stderr forward to postPromote.onData with SEPARATE decoders', async () => {
-      // Pin: post-promote bytes from the still-running child route to
-      // the caller's onData handler. Separate decoders for stdout vs
-      // stderr — a single shared decoder would corrupt interleaved
-      // multibyte UTF-8 (the continuation-byte state machine assumes
-      // one byte source).
-      mockPlatform.mockReturnValue('linux');
+      // Separate decoders: a shared one corrupts interleaved multibyte UTF-8
+      // (the continuation-byte state machine assumes one byte source).
       const events: Array<{ type: string; chunk?: string | unknown }> = [];
       const { result } = await simulateExecution(
         'tail -f',
-        (cp, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_data',
-          } satisfies ShellAbortReason);
-          // Drive post-promote chunks — should now flow to onData.
-          cp.stdout?.emit('data', Buffer.from('post-promote-stdout\n'));
-          cp.stderr?.emit('data', Buffer.from('post-promote-stderr\n'));
+        (_cp, ac) => {
+          ac.abort(bg('bg_cp_data'));
+          emitOut('post-promote-stdout\n');
+          emitOut('post-promote-stderr\n', 'stderr');
         },
-        {
-          postPromote: {
-            onData: (event) => events.push(event),
-          },
-        },
+        { postPromote: { onData: (event) => events.push(event) } },
       );
       expect(result.promoted).toBe(true);
-      // Both streams forwarded.
-      const dataChunks = events
-        .filter((e) => e.type === 'data')
-        .map((e) => e.chunk);
+      const dataChunks = dataChunksOf(events);
       expect(dataChunks).toContain('post-promote-stdout\n');
       expect(dataChunks).toContain('post-promote-stderr\n');
     });
 
     it('PR-2.5 child_process: onSettle fires on `close` (NOT `exit`) so late chunks land before the registry transitions', async () => {
-      // Pin the `close`-not-`exit` contract: child can emit buffered
-      // data AFTER 'exit' but BEFORE 'close'. If onSettle fired on
-      // 'exit' the caller would close the output stream + transition
-      // the registry while late chunks were still in flight — they'd
-      // hit a closed stream and be dropped, producing truncated logs.
-      mockPlatform.mockReturnValue('linux');
+      // Data can arrive between 'exit' and 'close'; settling on 'exit' has the
+      // caller close its output and transition the registry first, dropping
+      // those chunks (truncated logs).
       const events: Array<{ type: string; chunk?: string | unknown }> = [];
       const settles: ShellPostPromoteSettleInfo[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_close',
-          } satisfies ShellAbortReason);
-          // Order matters: emit 'exit' first (this would have settled
-          // PR-1 of PR-2.5 too early), then a final stdout chunk, then
-          // 'close'. With the new contract, onSettle only fires on
-          // 'close' so the late chunk is captured.
+          ac.abort(bg('bg_cp_close'));
+          // 'exit' (settled too early in PR-1 of PR-2.5), a late chunk, then
+          // 'close', the only event that settles.
           cp.emit('exit', 0, null);
-          cp.stdout?.emit('data', Buffer.from('late-chunk\n'));
+          emitOut('late-chunk\n');
           cp.emit('close', 0, null);
         },
         {
@@ -3932,34 +2812,21 @@ describe('ShellExecutionService child_process fallback', () => {
         },
       );
       expect(result.promoted).toBe(true);
-      // Late chunk made it through.
-      const dataChunks = events
-        .filter((e) => e.type === 'data')
-        .map((e) => e.chunk);
-      expect(dataChunks).toContain('late-chunk\n');
-      // onSettle fired exactly once with exitCode 0.
+      expect(dataChunksOf(events)).toContain('late-chunk\n');
       expect(settles).toHaveLength(1);
       expect(settles[0].exitCode).toBe(0);
       expect(settles[0].signal).toBeNull();
     });
 
     it('PR-2.5 child_process: post-promote spawn error routes to onSettle with error populated', async () => {
-      mockPlatform.mockReturnValue('linux');
       const settles: ShellPostPromoteSettleInfo[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_err',
-          } satisfies ShellAbortReason);
+          ac.abort(bg('bg_cp_err'));
           cp.emit('error', new Error('post-promote spawn boom'));
         },
-        {
-          postPromote: {
-            onSettle: (info) => settles.push(info),
-          },
-        },
+        { postPromote: { onSettle: (info) => settles.push(info) } },
       );
       expect(result.promoted).toBe(true);
       expect(settles).toHaveLength(1);
@@ -3969,34 +2836,21 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('PR-2.5 wave-4 (T1): post-promote `error` followed by `close` fires onSettle EXACTLY ONCE', async () => {
-      // Regression for the double-fire bug: pre-fix, `child.once('close', ...)`
-      // and `child.once('error', ...)` were independent and each invoked
-      // `onPostSettle` directly. A spawn-side error followed by the
-      // child-process automatic 'close' event would call the caller's
-      // settle twice, violating the exactly-once contract and racing
-      // the caller's `transitionRegistry`. Fix wraps both branches in
-      // a `firePostSettle` latch (mirroring the PTY path).
-      mockPlatform.mockReturnValue('linux');
+      // Double-fire regression: 'close' and 'error' each called
+      // `onPostSettle`, so a spawn error plus the automatic 'close' settled
+      // twice, racing the caller's `transitionRegistry`. Both now go through
+      // the `firePostSettle` latch (as on the PTY path).
       const settles: ShellPostPromoteSettleInfo[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_double',
-          } satisfies ShellAbortReason);
-          // First: error fires.
+          ac.abort(bg('bg_cp_double'));
           cp.emit('error', new Error('error first'));
-          // Then: close (Node child_process always emits 'close' even
-          // after an error). Pre-fix this would call onSettle a second
-          // time.
+          // Node child_process always emits 'close' even after an error;
+          // pre-fix this settled a second time.
           cp.emit('close', 1, null);
         },
-        {
-          postPromote: {
-            onSettle: (info) => settles.push(info),
-          },
-        },
+        { postPromote: { onSettle: (info) => settles.push(info) } },
       );
       expect(result.promoted).toBe(true);
       expect(settles).toHaveLength(1);
@@ -4004,40 +2858,23 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('PR-2.5 wave-4 (T3): onData-only caller still gets decoder flush on close (no trailing multibyte loss)', async () => {
-      // T3 regression: the close handler used to be installed only
-      // when `onSettle` was set, so an `onData`-only caller never got
-      // the trailing-multibyte flush — a UTF-8 character split across
-      // chunks could vanish. Fix installs close whenever ANY
-      // postPromote handler is set, and the flush helper runs whenever
-      // onData is set independent of onSettle.
-      mockPlatform.mockReturnValue('linux');
+      // T3: close was installed only with `onSettle`, so an onData-only caller
+      // lost the trailing flush and a split UTF-8 character could vanish. close
+      // now comes with ANY postPromote handler; onData implies the flush.
       const dataChunks: ShellOutputEvent[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_t3',
-          } satisfies ShellAbortReason);
-          // Push the FIRST byte of a 3-byte UTF-8 char (€ = 0xE2 0x82 0xAC).
-          // Without flush, the trailing two bytes would be stuck in the
-          // decoder's continuation state and lost.
-          cp.stdout?.emit('data', Buffer.from([0xe2]));
-          cp.stdout?.emit('data', Buffer.from([0x82, 0xac]));
-          // Trigger close so the flush runs; no onSettle to gate on.
+          ac.abort(bg('bg_cp_t3'));
+          // € = 0xE2 0x82 0xAC split across chunks; close triggers the flush.
+          emitOut(Buffer.from([0xe2]));
+          emitOut(Buffer.from([0x82, 0xac]));
           cp.emit('close', 0, null);
         },
-        {
-          postPromote: {
-            onData: (event) => dataChunks.push(event),
-            // NO onSettle — close handler must still fire flush.
-          },
-        },
+        // NO onSettle: the close handler must still flush.
+        { postPromote: { onData: (event) => dataChunks.push(event) } },
       );
       expect(result.promoted).toBe(true);
-      // The € character should appear once the second chunk completes
-      // the multibyte sequence; flush at close ensures any remainder
-      // is surfaced.
       const joined = dataChunks
         .map((d) =>
           d.type === 'data' && typeof d.chunk === 'string' ? d.chunk : '',
@@ -4047,69 +2884,43 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('PR-2.5 wave-4 (T6): onData-only caller has post-promote `error` listener (does not crash CLI)', async () => {
-      // T6 regression: `child.once('error', ...)` install was gated
-      // on `onSettle`, so an `onData`-only caller had the foreground
-      // errorHandler detached at promote with no replacement — a
-      // post-promote spawn error would surface as Node's default
-      // unhandled-error crash. Fix attaches an error listener
-      // whenever ANY postPromote handler is set.
-      mockPlatform.mockReturnValue('linux');
+      // T6: the post-promote 'error' listener was gated on `onSettle`, so an
+      // onData-only caller had none and a spawn error crashed Node (unhandled
+      // 'error'). ANY postPromote handler now attaches one.
       const dataChunks: ShellOutputEvent[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_t6',
-          } satisfies ShellAbortReason);
-          // Emitting 'error' on an EventEmitter with no listener throws
-          // synchronously. With the fix, our listener is attached so
-          // the emit does not throw.
+          ac.abort(bg('bg_cp_t6'));
           expect(() =>
             cp.emit('error', new Error('post-promote err')),
           ).not.toThrow();
           // child_process auto-emits 'close' after 'error'.
           cp.emit('close', null, null);
         },
-        {
-          postPromote: {
-            onData: (event) => dataChunks.push(event),
-            // NO onSettle — but error must still be handled (no crash).
-          },
-        },
+        // NO onSettle, but the error must still be handled (no crash).
+        { postPromote: { onData: (event) => dataChunks.push(event) } },
       );
       expect(result.promoted).toBe(true);
     });
 
     it('PR-2.5 wave-4 (T7): onSettle-only caller has stdout/stderr resumed (child does not block on full pipes)', async () => {
-      // T7 regression: when `onSettle` is set but `onData` is NOT, the
-      // post-promote path used to leave stdout/stderr without any data
-      // listener. The Readables stay paused; the OS pipe buffer fills
-      // (~64KB on Linux); the child blocks on stdout.write; 'close'
-      // never fires; onSettle never fires. Fix calls .resume() on
-      // both streams in the no-onData branch so the child can drain.
-      mockPlatform.mockReturnValue('linux');
+      // T7: with `onSettle` but no `onData` the Readables stayed paused, the OS
+      // pipe filled (~64KB on Linux), the child blocked on write, and 'close' /
+      // onSettle never fired. The no-onData branch now resume()s both streams.
       const settles: ShellPostPromoteSettleInfo[] = [];
       const stdoutResumeSpy = vi.fn();
       const stderrResumeSpy = vi.fn();
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
-          // Patch resume() so we can verify the wire was driven.
           if (cp.stdout) cp.stdout.resume = stdoutResumeSpy;
           if (cp.stderr) cp.stderr.resume = stderrResumeSpy;
-          ac.abort({
-            kind: 'background',
-            shellId: 'bg_cp_t7',
-          } satisfies ShellAbortReason);
+          ac.abort(bg('bg_cp_t7'));
           cp.emit('close', 0, null);
         },
-        {
-          postPromote: {
-            // NO onData — but stdout/stderr must still be resumed.
-            onSettle: (info) => settles.push(info),
-          },
-        },
+        // NO onData, but stdout/stderr must still be resumed.
+        { postPromote: { onSettle: (info) => settles.push(info) } },
       );
       expect(result.promoted).toBe(true);
       expect(stdoutResumeSpy).toHaveBeenCalled();
@@ -4121,38 +2932,21 @@ describe('ShellExecutionService child_process fallback', () => {
       mockPlatform.mockReturnValue('linux');
       vi.useFakeTimers();
 
-      // Don't await the result inside the simulation block for this specific test.
-      // We need to control the timeline manually.
+      // Drive the timeline by hand: don't await the result before escalation.
       const abortController = new AbortController();
-      const handle = await ShellExecutionService.execute(
-        'unresponsive_process',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        true,
-        {},
-      );
+      const handle = await exec('unresponsive_process', {
+        signal: abortController.signal,
+        config: {},
+      });
 
       abortController.abort();
 
-      // Check the first kill signal
-      expect(mockProcessKill).toHaveBeenCalledWith(
-        -mockChildProcess.pid!,
-        'SIGTERM',
-      );
+      expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGTERM'));
 
-      // Now, advance time past the timeout
       await vi.advanceTimersByTimeAsync(250);
+      expect(mockProcessKill).toHaveBeenCalledWith(...groupKill('SIGKILL'));
 
-      // Check the second kill signal
-      expect(mockProcessKill).toHaveBeenCalledWith(
-        -mockChildProcess.pid!,
-        'SIGKILL',
-      );
-
-      // Finally, simulate the process exiting and await the result
-      mockChildProcess.emit('exit', null, 'SIGKILL');
-      mockChildProcess.emit('close', null, 'SIGKILL');
+      finish(null, 'SIGKILL');
       const result = await handle.result;
 
       vi.useRealTimers();
@@ -4169,8 +2963,8 @@ describe('ShellExecutionService child_process fallback', () => {
       const binaryChunk2 = Buffer.from([0x0d, 0x0a, 0x1a, 0x0a]);
 
       const { result } = await simulateExecution('cat image.png', (cp) => {
-        cp.stdout?.emit('data', binaryChunk1);
-        cp.stdout?.emit('data', binaryChunk2);
+        emitOut(binaryChunk1);
+        emitOut(binaryChunk2);
         cp.emit('exit', 0, null);
       });
 
@@ -4186,14 +2980,10 @@ describe('ShellExecutionService child_process fallback', () => {
     it('should not emit data events after binary is detected', async () => {
       mockIsBinary.mockImplementation((buffer) => buffer.includes(0x00));
 
-      await simulateExecution(
+      await runChunks(
         'cat mixed_file',
-        (cp) => {
-          cp.stdout?.emit('data', Buffer.from([0xe2]));
-          cp.stdout?.emit('data', Buffer.from([0x00, 0x01, 0x02]));
-          cp.emit('exit', 0, null);
-          cp.emit('close', 0, null);
-        },
+        [Buffer.from([0xe2]), Buffer.from([0x00, 0x01, 0x02])],
+        shellExecutionConfig,
         { streamStdout: true },
       );
 
@@ -4207,85 +2997,48 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe with chcp 65001 UTF-8 prefix on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
-      await simulateExecution('dir "foo bar"', (cp) =>
-        cp.emit('exit', 0, null),
-      );
-
-      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        'cmd.exe',
-        ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
-        expect.objectContaining({
-          detached: false,
-          windowsHide: true,
-          windowsVerbatimArguments: true,
-        }),
-      );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
+    afterEach(() => {
+      useShell(BASH_SHELL);
     });
 
-    it('should not apply UTF-8 prefix for Git Bash on Windows via child_process', async () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash.exe',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-      await simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null));
+    const exitOnly: Simulation = (cp) => cp.emit('exit', 0, null);
 
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        'bash.exe',
+    const windowsSpawn = (windowsVerbatimArguments: boolean) =>
+      expect.objectContaining({
+        detached: false,
+        windowsHide: true,
+        windowsVerbatimArguments,
+      });
+
+    it.each<[string, string[], string, string[], unknown]>([
+      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
+      [
+        'should use cmd.exe with chcp 65001 UTF-8 prefix on Windows',
+        CMD_SHELL,
+        'dir "foo bar"',
+        ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
+        windowsSpawn(true),
+      ],
+      [
+        'should not apply UTF-8 prefix for Git Bash on Windows via child_process',
+        GIT_BASH_SHELL,
+        'echo hello',
         ['-c', 'echo hello'],
         expect.any(Object),
-      );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-    });
-
-    it('should use PowerShell with UTF-8 prefix without windowsVerbatimArguments on Windows', async () => {
+      ],
+      [
+        'should use PowerShell with UTF-8 prefix without windowsVerbatimArguments on Windows',
+        POWERSHELL_SHELL,
+        PS_COMMAND,
+        PS_UTF8_ARGS,
+        windowsSpawn(false),
+      ],
+    ])('%s', async (_title, shell, command, args, spawnOptions) => {
       mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'powershell.exe',
-        argsPrefix: ['-NoProfile', '-Command'],
-        shell: 'powershell',
-      });
-      await simulateExecution('Test-Path "C:\\Temp\\"', (cp) =>
-        cp.emit('exit', 0, null),
-      );
+      useShell(shell);
+      await simulateExecution(command, exitOnly);
 
-      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
-      expect(mockCpSpawn).toHaveBeenCalledWith(
-        'powershell.exe',
-        [
-          '-NoProfile',
-          '-Command',
-          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
-        ],
-        expect.objectContaining({
-          detached: false,
-          windowsHide: true,
-          windowsVerbatimArguments: false,
-        }),
-      );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
+      expect(mockCpSpawn).toHaveBeenCalledWith(shell[0], args, spawnOptions);
     });
 
     it('should normalize PATH-like env keys on Windows for child_process fallback', async () => {
@@ -4293,63 +3046,43 @@ describe('ShellExecutionService child_process fallback', () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       setupConflictingPathEnv();
 
-      await simulateExecution('dir', (cp) => cp.emit('exit', 0, null));
+      await simulateExecution('dir', exitOnly);
 
-      const spawnOptions = mockCpSpawn.mock.calls[0][2];
-      expectNormalizedWindowsPathEnv(spawnOptions.env);
+      expectNormalizedWindowsPathEnv(mockCpSpawn.mock.calls[0][2].env);
     });
 
     it('does not inject Unix pager defaults into Windows child_process env when unset', async () => {
       mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
+      useShell(CMD_SHELL);
 
-      await withoutGitPagerEnv(() =>
-        simulateExecutionWithConfig(
-          'echo hello',
-          (cp) => cp.emit('exit', 0, null),
-          shellExecutionConfigWithoutPager,
-        ),
+      vi.stubEnv('GIT_PAGER', undefined);
+      await simulateExecution(
+        'echo hello',
+        exitOnly,
+        {},
+        shellExecutionConfigWithoutPager,
       );
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('');
       expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('preserves explicit pager configuration in Windows child_process env', async () => {
       mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
+      useShell(CMD_SHELL);
 
-      await withoutGitPagerEnv(() =>
-        simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null)),
-      );
+      vi.stubEnv('GIT_PAGER', undefined);
+      await simulateExecution('echo hello', exitOnly);
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expect(spawnOptions.env['PAGER']).toBe('cat');
       expect(spawnOptions.env['GIT_PAGER']).toBeUndefined();
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('should use bash and detached process group on Linux', async () => {
       mockPlatform.mockReturnValue('linux');
-      await simulateExecution('ls "foo bar"', (cp) => cp.emit('exit', 0, null));
+      await simulateExecution('ls "foo bar"', exitOnly);
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'bash',
@@ -4363,72 +3096,21 @@ describe('ShellExecutionService child_process fallback', () => {
 });
 
 describe('ShellExecutionService execution method selection', () => {
-  let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
-  let mockPtyProcess: EventEmitter & {
-    pid: number;
-    kill: Mock;
-    onData: Mock;
-    onExit: Mock;
-    write: Mock;
-    resize: Mock;
-  };
-  let mockChildProcess: EventEmitter & Partial<ChildProcess>;
+  let mockPtyProcess: ReturnType<typeof makePty>;
+  let mockChildProcess: MockChild;
 
   beforeEach(() => {
     vi.clearAllMocks();
     onOutputEventMock = vi.fn();
-
-    // Mock for pty
-    mockPtyProcess = new EventEmitter() as EventEmitter & {
-      pid: number;
-      kill: Mock;
-      onData: Mock;
-      onExit: Mock;
-      write: Mock;
-      resize: Mock;
-    };
-    mockPtyProcess.pid = 12345;
-    mockPtyProcess.kill = vi.fn();
-    // node-pty's onData/onExit return IDisposable; the production
-    // background-promote path calls .dispose() on those handles to detach
-    // its listeners cleanly. Mock them to return a disposable stub so the
-    // promote path doesn't crash on `undefined.dispose()`.
-    mockPtyProcess.onData = vi.fn().mockReturnValue({ dispose: vi.fn() });
-    mockPtyProcess.onExit = vi.fn().mockReturnValue({ dispose: vi.fn() });
-    mockPtyProcess.write = vi.fn();
-    mockPtyProcess.resize = vi.fn();
-
+    mockPtyProcess = makePty();
     mockPtySpawn.mockReturnValue(mockPtyProcess);
     mockGetPty.mockResolvedValue({
       module: { spawn: mockPtySpawn },
       name: 'mock-pty',
     });
-
-    // Mock for child_process
-    mockChildProcess = new EventEmitter() as EventEmitter &
-      Partial<ChildProcess>;
-    mockChildProcess.stdout = new EventEmitter() as Readable;
-    mockChildProcess.stderr = new EventEmitter() as Readable;
-    mockChildProcess.kill = vi.fn();
-    Object.defineProperty(mockChildProcess, 'pid', {
-      value: 54321,
-      configurable: true,
-    });
-    // Mirror real Node ChildProcess: `exitCode` / `signalCode` are
-    // `null` while alive. Kept in sync with the `child_process
-    // fallback` describe block's mock setup so any future promote-
-    // related test that lands here doesn't trip the production
-    // `child.exitCode !== null` race guard with a stale `undefined`.
-    Object.defineProperty(mockChildProcess, 'exitCode', {
-      value: null,
-      writable: true,
-      configurable: true,
-    });
-    Object.defineProperty(mockChildProcess, 'signalCode', {
-      value: null,
-      writable: true,
-      configurable: true,
-    });
+    // Same exit-state shape as the child_process fallback block, so a future
+    // promote test here doesn't trip the `child.exitCode !== null` race guard.
+    mockChildProcess = makeChild(54321);
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
 
@@ -4438,17 +3120,10 @@ describe('ShellExecutionService execution method selection', () => {
   ])(
     'does not spawn through $label when the signal is already aborted',
     async ({ shouldUseNodePty }) => {
-      const abortController = new AbortController();
-      abortController.abort();
-
-      const handle = await ShellExecutionService.execute(
-        'test command',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        shouldUseNodePty,
-        shellExecutionConfig,
-      );
+      const handle = await exec('test command', {
+        signal: AbortSignal.abort(),
+        usePty: shouldUseNodePty,
+      });
       const result = await handle.result;
 
       expect(handle.pid).toBeUndefined();
@@ -4480,14 +3155,9 @@ describe('ShellExecutionService execution method selection', () => {
         abortController.signal,
         'removeEventListener',
       );
-      const handlePromise = ShellExecutionService.execute(
-        'test command',
-        '/test/dir',
-        onOutputEventMock,
-        abortController.signal,
-        true,
-        shellExecutionConfig,
-      );
+      const handlePromise = exec('test command', {
+        signal: abortController.signal,
+      });
 
       abortController.abort();
       const handle = await handlePromise;
@@ -4522,14 +3192,9 @@ describe('ShellExecutionService execution method selection', () => {
       }),
     );
     const abortController = new AbortController();
-    const handlePromise = ShellExecutionService.execute(
-      'test command',
-      '/test/dir',
-      onOutputEventMock,
-      abortController.signal,
-      true,
-      shellExecutionConfig,
-    );
+    const handlePromise = exec('test command', {
+      signal: abortController.signal,
+    });
 
     await vi.waitFor(() => {
       expect(mockLoadXtermHeadless).toHaveBeenCalledOnce();
@@ -4549,17 +3214,8 @@ describe('ShellExecutionService execution method selection', () => {
   });
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
-    const abortController = new AbortController();
-    const handle = await ShellExecutionService.execute(
-      'test command',
-      '/test/dir',
-      onOutputEventMock,
-      abortController.signal,
-      true, // shouldUseNodePty
-      shellExecutionConfig,
-    );
+    const handle = await exec('test command');
 
-    // Simulate exit to allow promise to resolve
     mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
     const result = await handle.result;
 
@@ -4570,17 +3226,8 @@ describe('ShellExecutionService execution method selection', () => {
   });
 
   it('should use child_process when shouldUseNodePty is false', async () => {
-    const abortController = new AbortController();
-    const handle = await ShellExecutionService.execute(
-      'test command',
-      '/test/dir',
-      onOutputEventMock,
-      abortController.signal,
-      false, // shouldUseNodePty
-      {},
-    );
+    const handle = await exec('test command', { usePty: false, config: {} });
 
-    // Simulate exit to allow promise to resolve
     mockChildProcess.emit('exit', 0, null);
     const result = await handle.result;
 
@@ -4593,17 +3240,8 @@ describe('ShellExecutionService execution method selection', () => {
   it('should fall back to child_process if pty is not available even if shouldUseNodePty is true', async () => {
     mockGetPty.mockResolvedValue(null);
 
-    const abortController = new AbortController();
-    const handle = await ShellExecutionService.execute(
-      'test command',
-      '/test/dir',
-      onOutputEventMock,
-      abortController.signal,
-      true, // shouldUseNodePty
-      shellExecutionConfig,
-    );
+    const handle = await exec('test command');
 
-    // Simulate exit to allow promise to resolve
     mockChildProcess.emit('exit', 0, null);
     const result = await handle.result;
 
@@ -4615,23 +3253,27 @@ describe('ShellExecutionService execution method selection', () => {
 });
 
 describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
-  it("returns 'cancel' for null reason (e.g. plain abortController.abort())", () => {
-    expect(getShellAbortReasonKind(null)).toBe('cancel');
-    expect(getShellAbortReasonKind(undefined)).toBe('cancel');
-  });
-
-  it("returns 'cancel' for non-object reasons (string / number / DOMException)", () => {
-    expect(getShellAbortReasonKind('background')).toBe('cancel');
-    expect(getShellAbortReasonKind(42)).toBe('cancel');
-    expect(getShellAbortReasonKind(true)).toBe('cancel');
-    // DOMException-like object — not the real DOMException constructor in
-    // the test runtime, but the principle is the same: a non-discriminated
-    // object reason without an own `kind` falls back to cancel.
-    expect(getShellAbortReasonKind(new Error('aborted'))).toBe('cancel');
-  });
-
-  it("returns 'cancel' for an empty object (no own kind)", () => {
-    expect(getShellAbortReasonKind({})).toBe('cancel');
+  it.each<[string, unknown[]]>([
+    [
+      "returns 'cancel' for null reason (e.g. plain abortController.abort())",
+      [null, undefined],
+    ],
+    [
+      "returns 'cancel' for non-object reasons (string / number / DOMException)",
+      // A DOMException-like Error (not the real constructor, same principle):
+      // an object reason without an own `kind` is a cancel.
+      ['background', 42, true, new Error('aborted')],
+    ],
+    ["returns 'cancel' for an empty object (no own kind)", [{}]],
+    [
+      "returns 'cancel' for an unknown kind value (typo / future-untyped variant)",
+      [{ kind: 'suspend' }, { kind: 'BACKGROUND' }, { kind: 42 }],
+    ],
+    ["returns 'cancel' for the canonical cancel reason", [{ kind: 'cancel' }]],
+  ])('%s', (_title, reasons) => {
+    for (const reason of reasons) {
+      expect(getShellAbortReasonKind(reason)).toBe('cancel');
+    }
   });
 
   it("returns 'cancel' when 'kind' lives only on the prototype (pollution defense)", () => {
@@ -4640,12 +3282,6 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
     });
     // hasOwnProperty('kind') is false → helper rejects the prototype-only kind
     expect(getShellAbortReasonKind(polluted)).toBe('cancel');
-  });
-
-  it("returns 'cancel' for an unknown kind value (typo / future-untyped variant)", () => {
-    expect(getShellAbortReasonKind({ kind: 'suspend' })).toBe('cancel');
-    expect(getShellAbortReasonKind({ kind: 'BACKGROUND' })).toBe('cancel');
-    expect(getShellAbortReasonKind({ kind: 42 })).toBe('cancel');
   });
 
   it("returns 'cancel' when reading 'kind' throws (accessor / Proxy trap)", () => {
@@ -4677,15 +3313,9 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
   });
 
   it("returns 'cancel' when the `getOwnPropertyDescriptor` Proxy trap throws", () => {
-    // `Object.prototype.hasOwnProperty.call(reason, 'kind')` triggers
-    // the `[[GetOwnProperty]]` Proxy trap. A Proxy whose
-    // `getOwnPropertyDescriptor` handler throws (separate from the
-    // `get` trap covered by the test above) used to propagate past
-    // the helper because `hasOwnProperty.call` was outside the try.
-    // Now the helper wraps both the descriptor probe and the property
-    // read, so this also falls back to 'cancel'. (No `get` handler on
-    // the proxy: `hasOwnProperty.call` throws before the helper ever
-    // tries to read `kind`.)
+    // The `hasOwnProperty` probe hits this trap before `kind` is read (so no
+    // `get` handler); it used to escape the helper from outside the try, which
+    // now wraps both the probe and the read.
     const throwingDescriptorProxy = new Proxy(
       {},
       {
@@ -4702,9 +3332,5 @@ describe('getShellAbortReasonKind (defensive abort-reason read)', () => {
     expect(
       getShellAbortReasonKind({ kind: 'background', shellId: 'bg_x' }),
     ).toBe('background');
-  });
-
-  it("returns 'cancel' for the canonical cancel reason", () => {
-    expect(getShellAbortReasonKind({ kind: 'cancel' })).toBe('cancel');
   });
 });

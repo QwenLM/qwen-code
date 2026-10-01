@@ -14,6 +14,11 @@ import type {
 } from './types.js';
 import type { Config } from '../config/config.js';
 
+/** An assistant reply from the LLM carrying `text` as its only part. */
+const llmReply = (text: string) => ({
+  candidates: [{ content: { parts: [{ text }], role: 'assistant' } }],
+});
+
 /**
  * Integration tests for Prompt Hook functionality
  * These tests verify the full hook execution pipeline with prompt hooks
@@ -26,10 +31,7 @@ describe('Prompt Hook Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Create mock generateContent function
     mockGenerateContent = vi.fn();
-
-    // Create mock config with content generator
     mockConfig = {
       getFastModel: vi.fn().mockReturnValue('qwen-turbo'),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
@@ -88,31 +90,29 @@ describe('Prompt Hook Integration', () => {
     ...overrides,
   });
 
+  /** Runs `hookConfig` for a PreToolUse of `toolName` with `toolInput`. */
+  const runPreToolUse = (
+    hookConfig: PromptHookConfig,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    runner = hookRunner,
+  ) =>
+    runner.executeHook(
+      hookConfig,
+      HookEventName.PreToolUse,
+      createPreToolUseInput(toolName, toolInput),
+    );
+
   describe('HookRunner with Prompt Hook', () => {
     it('should execute prompt hook for PreToolUse event', async () => {
-      // Mock LLM response - allow the operation
-      mockGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: '{"ok": true}' }],
-              role: 'assistant',
-            },
-          },
-        ],
-      });
+      mockGenerateContent.mockResolvedValue(llmReply('{"ok": true}'));
 
-      const hookConfig = createPromptHookConfig(
-        'Evaluate this tool use: $ARGUMENTS. Allow if safe.',
-      );
-      const input = createPreToolUseInput('Read', {
-        file_path: '/test/file.txt',
-      });
-
-      const result = await hookRunner.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        input,
+      const result = await runPreToolUse(
+        createPromptHookConfig(
+          'Evaluate this tool use: $ARGUMENTS. Allow if safe.',
+        ),
+        'Read',
+        { file_path: '/test/file.txt' },
       );
 
       expect(result.success).toBe(true);
@@ -121,34 +121,17 @@ describe('Prompt Hook Integration', () => {
     });
 
     it('should block dangerous Bash command via prompt hook', async () => {
-      // Mock LLM response - block the operation
-      mockGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [
-                {
-                  text: '{"ok": false, "reason": "rm -rf is a dangerous command"}',
-                },
-              ],
-              role: 'assistant',
-            },
-          },
-        ],
-      });
-
-      const hookConfig = createPromptHookConfig(
-        'Analyze this Bash command for safety risks: $ARGUMENTS. Block dangerous commands like rm -rf.',
-        { name: 'bash-security-check' },
+      mockGenerateContent.mockResolvedValue(
+        llmReply('{"ok": false, "reason": "rm -rf is a dangerous command"}'),
       );
-      const input = createPreToolUseInput('Bash', {
-        command: 'rm -rf /important-data',
-      });
 
-      const result = await hookRunner.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        input,
+      const result = await runPreToolUse(
+        createPromptHookConfig(
+          'Analyze this Bash command for safety risks: $ARGUMENTS. Block dangerous commands like rm -rf.',
+          { name: 'bash-security-check' },
+        ),
+        'Bash',
+        { command: 'rm -rf /important-data' },
       );
 
       expect(result.success).toBe(false);
@@ -157,54 +140,25 @@ describe('Prompt Hook Integration', () => {
     });
 
     it('should use custom model when specified', async () => {
-      mockGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: '{"ok": true}' }],
-              role: 'assistant',
-            },
-          },
-        ],
-      });
+      mockGenerateContent.mockResolvedValue(llmReply('{"ok": true}'));
 
-      const hookConfig = createPromptHookConfig('Check: $ARGUMENTS', {
-        model: 'qwen-max',
-      });
-      const input = createPreToolUseInput('Write', {
-        file_path: '/test/file.txt',
-        content: 'test',
-      });
+      await runPreToolUse(
+        createPromptHookConfig('Check: $ARGUMENTS', { model: 'qwen-max' }),
+        'Write',
+        { file_path: '/test/file.txt', content: 'test' },
+      );
 
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
-
-      // Verify the custom model was used
       const callArg = mockGenerateContent.mock.calls[0][0];
       expect(callArg.model).toBe('qwen-max');
     });
 
     it('should fail-open when LLM returns invalid response', async () => {
-      // Mock invalid LLM response
-      mockGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: 'This is not valid JSON' }],
-              role: 'assistant',
-            },
-          },
-        ],
-      });
+      mockGenerateContent.mockResolvedValue(llmReply('This is not valid JSON'));
 
-      const hookConfig = createPromptHookConfig('Check: $ARGUMENTS');
-      const input = createPreToolUseInput('Edit', {
-        file_path: '/test/file.txt',
-      });
-
-      const result = await hookRunner.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        input,
+      const result = await runPreToolUse(
+        createPromptHookConfig('Check: $ARGUMENTS'),
+        'Edit',
+        { file_path: '/test/file.txt' },
       );
 
       // Fail-open: invalid response defaults to allow
@@ -215,13 +169,10 @@ describe('Prompt Hook Integration', () => {
     it('should handle LLM API errors gracefully', async () => {
       mockGenerateContent.mockRejectedValue(new Error('API rate limit'));
 
-      const hookConfig = createPromptHookConfig('Check: $ARGUMENTS');
-      const input = createPreToolUseInput('Bash', { command: 'ls' });
-
-      const result = await hookRunner.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        input,
+      const result = await runPreToolUse(
+        createPromptHookConfig('Check: $ARGUMENTS'),
+        'Bash',
+        { command: 'ls' },
       );
 
       // Errors are non-blocking (fail-open)
@@ -233,33 +184,19 @@ describe('Prompt Hook Integration', () => {
 
   describe('HookSystem with Prompt Hooks', () => {
     it('should process hook definitions with prompt hooks', async () => {
-      mockGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [
-                {
-                  text: '{"ok": true, "additionalContext": "Verified safe"}',
-                },
-              ],
-              role: 'assistant',
-            },
-          },
-        ],
-      });
-
+      mockGenerateContent.mockResolvedValue(
+        llmReply('{"ok": true, "additionalContext": "Verified safe"}'),
+      );
       const hookDefinition: HookDefinition = {
         matcher: 'Bash',
         hooks: [createPromptHookConfig('Security check: $ARGUMENTS')],
       };
 
-      const input = createPreToolUseInput('Bash', { command: 'npm test' });
-
-      // Test that hook runner can handle prompt hook definitions directly
-      const result = await hookRunner.executeHook(
+      // The hook runner handles prompt hook definitions directly.
+      const result = await runPreToolUse(
         hookDefinition.hooks[0] as PromptHookConfig,
-        HookEventName.PreToolUse,
-        input,
+        'Bash',
+        { command: 'npm test' },
       );
 
       expect(result).toBeDefined();
@@ -269,16 +206,11 @@ describe('Prompt Hook Integration', () => {
 
   describe('Hook Configuration Validation', () => {
     it('should return error result when Config not provided for prompt hooks', async () => {
-      // Create HookRunner without Config
-      const runnerWithoutConfig = new HookRunner();
-
-      const hookConfig = createPromptHookConfig('Check: $ARGUMENTS');
-      const input = createPreToolUseInput('Bash', { command: 'ls' });
-
-      const result = await runnerWithoutConfig.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        input,
+      const result = await runPreToolUse(
+        createPromptHookConfig('Check: $ARGUMENTS'),
+        'Bash',
+        { command: 'ls' },
+        new HookRunner(),
       );
 
       // Should return error result instead of throwing
@@ -289,26 +221,15 @@ describe('Prompt Hook Integration', () => {
 
   describe('$ARGUMENTS Placeholder', () => {
     it('should properly substitute tool input in prompt', async () => {
-      mockGenerateContent.mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [{ text: '{"ok": true}' }],
-              role: 'assistant',
-            },
-          },
-        ],
-      });
+      mockGenerateContent.mockResolvedValue(llmReply('{"ok": true}'));
 
-      const hookConfig = createPromptHookConfig(
-        'Tool: $ARGUMENTS. Analyze the tool_name and tool_input fields.',
+      await runPreToolUse(
+        createPromptHookConfig(
+          'Tool: $ARGUMENTS. Analyze the tool_name and tool_input fields.',
+        ),
+        'Bash',
+        { command: 'git status', description: 'Check git status' },
       );
-      const input = createPreToolUseInput('Bash', {
-        command: 'git status',
-        description: 'Check git status',
-      });
-
-      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
 
       const callArg = mockGenerateContent.mock.calls[0][0];
       const promptText = callArg.contents?.[0]?.parts?.[0]?.text as string;
@@ -340,15 +261,12 @@ describe('Prompt Hook Integration', () => {
           }),
       );
 
-      const hookConfig = createPromptHookConfig('Check: $ARGUMENTS', {
-        timeout: 0.1, // 100ms timeout
-      });
-      const input = createPreToolUseInput('Bash', { command: 'ls' });
-
-      const result = await hookRunner.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        input,
+      const result = await runPreToolUse(
+        createPromptHookConfig('Check: $ARGUMENTS', {
+          timeout: 0.1, // 100ms timeout
+        }),
+        'Bash',
+        { command: 'ls' },
       );
 
       expect(result.success).toBe(false);

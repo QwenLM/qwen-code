@@ -75,6 +75,7 @@ import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
+  WorktreeOwnershipConflictError,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
 import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
@@ -98,6 +99,7 @@ import {
   recordAcpConfigStartupEvent,
 } from './utils/acp-startup-profiler.js';
 import {
+  exitWhenSupervisorExits,
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -115,6 +117,7 @@ import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
   UPDATE_COMPLETE_EXIT_CODE,
+  superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
 
@@ -427,6 +430,7 @@ export async function main() {
   // that never completes — reach no other scrub, so it happens here for
   // all of them. A session that does bind one re-exports its own pair.
   clearInheritedPeerMessagingEnv();
+  exitWhenSupervisorExits();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -490,6 +494,20 @@ export async function main() {
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
     conversationsRuntimeMarkerSeen;
+  // Only the daemon that spawns a Managed host can drive its sessions, and
+  // the Conversations runtime is never paired. A repeated option arrives as
+  // an array, which is refused too.
+  if (
+    argv.acpExecutionEngine !== undefined &&
+    (argv.acpExecutionEngine !== 'managed' ||
+      !isAcpMode ||
+      privateAcpParentCapability === undefined ||
+      conversationsRuntimeProvenance)
+  ) {
+    throw new Error(
+      '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+    );
+  }
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
@@ -822,6 +840,20 @@ export async function main() {
         },
       );
       process.exit(0);
+    } else if (
+      memoryArgs.length === 0 &&
+      !hasLoadedEnvironmentValues() &&
+      !isAcpMode &&
+      argv.inputFormat !== InputFormat.STREAM_JSON &&
+      !(argv.inputFile ?? settings.merged.dualOutput?.inputFile) &&
+      argv.jsonFd === undefined &&
+      typeof process.execve === 'function' &&
+      !['win32', 'os400'].includes(process.platform)
+    ) {
+      // Nothing to add to this process's flags, and no env-file values that
+      // already-loaded modules missed, so a relaunch would only load the whole
+      // CLI a second time. Restarts re-exec in place instead.
+      superviseInProcess(onUpdateRelaunch);
     } else {
       // Interactive and streaming modes keep a supervisor for in-session
       // restarts. A one-shot prompt can replace this already-loaded process.
@@ -1131,6 +1163,7 @@ export async function main() {
           ),
         );
       } catch (error) {
+        if (error instanceof WorktreeOwnershipConflictError) throw error;
         debugLogger.warn(
           `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -1261,6 +1294,7 @@ export async function main() {
             ? privateAcpParentCapability
             : undefined,
           conversationsRuntimeProvenance,
+          executionEngine: argv.acpExecutionEngine,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
