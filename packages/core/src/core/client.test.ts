@@ -2376,7 +2376,7 @@ describe('Gemini Client (client.ts)', () => {
         [{ functionDeclarations: [{ name: 'read_file' }] }],
       ],
     ])('declares %j to the chat as %j', async (declarations, tools) => {
-      const reg = getRegistryMock();
+      const reg = registryMock();
       reg.getDeferredToolSummary.mockReturnValue([]);
       reg.getFunctionDeclarations.mockReturnValue(declarations);
       const setTools = vi
