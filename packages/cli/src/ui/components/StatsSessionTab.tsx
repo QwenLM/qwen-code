@@ -31,10 +31,7 @@ interface SessionTabProps {
   height?: number;
 }
 
-export const SessionTab: React.FC<SessionTabProps> = ({ height }) => {
-  const contentRef = useRef<DOMElement>(null);
-  const [contentHeight, setContentHeight] = useState(0);
-  const [scrollOffset, setScrollOffset] = useState(0);
+const SessionContent: React.FC = () => {
   const SERIES_COLORS = getSeriesColors();
   const { stats } = useSessionStats();
   const { metrics } = stats;
@@ -80,46 +77,6 @@ export const SessionTab: React.FC<SessionTabProps> = ({ height }) => {
   });
 
   const labelWidth = 28;
-
-  // Re-measure after every render: the content height depends on metrics that
-  // change independently of `height`. The state update is skipped when equal.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useLayoutEffect(() => {
-    if (height === undefined || !contentRef.current) return;
-    const measured = measureElement(contentRef.current).height;
-    setContentHeight((prev) => (prev === measured ? prev : measured));
-  });
-
-  // One row of the budget is reserved for the scroll hint when it overflows.
-  const overflowing = height !== undefined && contentHeight > height;
-  const viewportHeight =
-    height === undefined
-      ? undefined
-      : Math.max(1, height - (overflowing ? 1 : 0));
-  const maxScroll =
-    viewportHeight === undefined
-      ? 0
-      : Math.max(0, contentHeight - viewportHeight);
-  const offset = Math.min(scrollOffset, maxScroll);
-
-  useKeypress(
-    (key) => {
-      if (viewportHeight === undefined) return;
-      // Functional updaters so several keys handled before a re-render compose.
-      if (key.name === 'up') {
-        setScrollOffset((prev) => Math.max(0, Math.min(prev, maxScroll) - 1));
-      } else if (key.name === 'down') {
-        setScrollOffset((prev) => Math.min(maxScroll, prev + 1));
-      } else if (key.name === 'pageup') {
-        setScrollOffset((prev) =>
-          Math.max(0, Math.min(prev, maxScroll) - viewportHeight),
-        );
-      } else if (key.name === 'pagedown') {
-        setScrollOffset((prev) => Math.min(maxScroll, prev + viewportHeight));
-      }
-    },
-    { isActive: height !== undefined },
-  );
 
   const content = (
     <Box flexDirection="column">
@@ -355,7 +312,50 @@ export const SessionTab: React.FC<SessionTabProps> = ({ height }) => {
     </Box>
   );
 
-  if (height === undefined) return content;
+  return content;
+};
+
+/**
+ * Scrolling wrapper, mounted only when a row budget is passed. The key
+ * subscription needs a KeypressProvider, which the unscrolled tab must not.
+ */
+const ScrollableSessionTab: React.FC<{ height: number }> = ({ height }) => {
+  const contentRef = useRef<DOMElement>(null);
+  const [contentHeight, setContentHeight] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
+
+  // Re-measure after every render: the content height depends on metrics that
+  // change independently of `height`. The state update is skipped when equal.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (!contentRef.current) return;
+    const measured = measureElement(contentRef.current).height;
+    setContentHeight((prev) => (prev === measured ? prev : measured));
+  });
+
+  // One row of the budget is reserved for the scroll hint when it overflows.
+  const overflowing = contentHeight > height;
+  const viewportHeight = Math.max(1, height - (overflowing ? 1 : 0));
+  const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  const offset = Math.min(scrollOffset, maxScroll);
+
+  useKeypress(
+    (key) => {
+      // Functional updaters so several keys handled before a re-render compose.
+      if (key.name === 'up') {
+        setScrollOffset((prev) => Math.max(0, Math.min(prev, maxScroll) - 1));
+      } else if (key.name === 'down') {
+        setScrollOffset((prev) => Math.min(maxScroll, prev + 1));
+      } else if (key.name === 'pageup') {
+        setScrollOffset((prev) =>
+          Math.max(0, Math.min(prev, maxScroll) - viewportHeight),
+        );
+      } else if (key.name === 'pagedown') {
+        setScrollOffset((prev) => Math.min(maxScroll, prev + viewportHeight));
+      }
+    },
+    { isActive: true },
+  );
 
   return (
     <Box flexDirection="column">
@@ -366,7 +366,7 @@ export const SessionTab: React.FC<SessionTabProps> = ({ height }) => {
           flexDirection="column"
           marginTop={-offset}
         >
-          {content}
+          <SessionContent />
         </Box>
       </Box>
       {overflowing && (
@@ -375,3 +375,10 @@ export const SessionTab: React.FC<SessionTabProps> = ({ height }) => {
     </Box>
   );
 };
+
+export const SessionTab: React.FC<SessionTabProps> = ({ height }) =>
+  height === undefined ? (
+    <SessionContent />
+  ) : (
+    <ScrollableSessionTab height={height} />
+  );

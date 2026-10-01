@@ -435,7 +435,12 @@ export function OpenTuiStatsDialog(props: {
       {bodyRows === undefined ? (
         body
       ) : (
-        <scrollbox ref={scrollRef} height={bodyRows} stickyScroll={false}>
+        <scrollbox
+          ref={scrollRef}
+          height={bodyRows}
+          stickyScroll={false}
+          focusable={false}
+        >
           {body}
         </scrollbox>
       )}

@@ -30,13 +30,18 @@ const mocks = vi.hoisted(() => {
     // dialog a fake renderable through the ref, as OpenTUI would.
     const ScrollBox = (props: {
       height?: number;
+      focusable?: boolean;
       children?: React.ReactNode;
       ref?: React.Ref<unknown>;
     }) => {
       React.useImperativeHandle(props.ref, () => state.scroller);
       return React.createElement(
         'div',
-        { 'data-testid': 'scrollbox', 'data-height': props.height },
+        {
+          'data-testid': 'scrollbox',
+          'data-height': props.height,
+          'data-focusable': String(props.focusable),
+        },
         props.children,
       );
     };
@@ -125,6 +130,8 @@ describe('OpenTuiStatsDialog scrolling', () => {
     );
     const box = getByTestId('scrollbox');
     expect(box.getAttribute('data-height')).toBe('7');
+    // A focusable scrollbox would also handle arrows after a click, doubling them.
+    expect(box.getAttribute('data-focusable')).toBe('false');
     // The last Session sections, the ones a short terminal used to clip,
     // live inside the scrolled region.
     expect(box.textContent).toContain('Tokens');
