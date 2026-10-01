@@ -2247,6 +2247,55 @@ ${boardState}
       expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
 
+    it('fires on the real MCP producer wording, args JSON and all', async () => {
+      // Contract pin: the consumer's normalizeMcpToolError keys on the
+      // wording buildMcpToolError composes inline in mcp-tool.ts, with no
+      // shared constant. Producing the error through a real
+      // DiscoveredMCPTool means a wording drift turns this red instead of
+      // silently disabling the guard for MCP errors (the consumer would
+      // fall back to hashing the full message, per-call args JSON included).
+      const { DiscoveredMCPTool } = await import('../tools/mcp-tool.js');
+      const callableTool = {
+        callTool: vi.fn(async () => [
+          fnResponse('db_query', { error: { isError: true } }),
+        ]),
+      };
+      const tool = new DiscoveredMCPTool(
+        callableTool as never,
+        'db',
+        'db_query',
+        'queries the database',
+        { type: 'object', properties: { id: { type: 'string' } } },
+      );
+
+      const produceErrorPart = async (id: string): Promise<Part> => {
+        const result = await tool
+          .build({ id })
+          .execute(new AbortController().signal);
+        expect(result.error?.message).toContain('reported tool error');
+        return {
+          functionResponse: {
+            id: `mcp-${id}`,
+            name: tool.name,
+            response: { error: result.error!.message },
+          },
+        };
+      };
+
+      // Varied args per round: the producer message embeds the call JSON,
+      // so only the consumer's MCP normalization can collapse the streak.
+      expect(service.recordToolErrorBatch([await produceErrorPart('1')])).toBe(
+        false,
+      );
+      expect(service.recordToolErrorBatch([await produceErrorPart('2')])).toBe(
+        false,
+      );
+      expect(service.recordToolErrorBatch([await produceErrorPart('3')])).toBe(
+        true,
+      );
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
     it('emits the signature only, never the raw error payload', () => {
       // The raw payload leads with the command line and the working
       // directory, and this event is emitted on a default-on path into

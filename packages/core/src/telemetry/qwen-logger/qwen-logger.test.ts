@@ -28,6 +28,8 @@ import {
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
   SubagentExecutionEvent,
+  LoopDetectedEvent,
+  LoopType,
   makeGoalStateEvent,
   type ToolCallEvent,
 } from '../types.js';
@@ -434,6 +436,37 @@ describe('QwenLogger', () => {
       expectLogged((l) => l.logSubagentExecutionEvent(event), {
         properties: expect.not.objectContaining({
           loop_type: expect.anything(),
+        }),
+      });
+    });
+
+    it('passes the repeated-tool-error signature through to the loop_detected RUM event', () => {
+      // The fire site is pinned in loopDetectionService.test.ts; this is the
+      // sink half — renaming the spread key at qwen-logger.ts must not ship
+      // green, or pages for #10887 lose the failing payload's identity.
+      const signature = 'a'.repeat(64);
+      const event = new LoopDetectedEvent(
+        LoopType.REPEATED_TOOL_ERROR,
+        'prompt-1',
+        { errorSignature: signature },
+      );
+      expectLogged((l) => l.logLoopDetectedEvent(event), {
+        name: 'loop_detected',
+        properties: expect.objectContaining({
+          error_type: LoopType.REPEATED_TOOL_ERROR,
+          error_signature: signature,
+        }),
+      });
+    });
+
+    it('omits error_signature from loop_detected when the guard carried none', () => {
+      const event = new LoopDetectedEvent(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        'prompt-2',
+      );
+      expectLogged((l) => l.logLoopDetectedEvent(event), {
+        properties: expect.not.objectContaining({
+          error_signature: expect.anything(),
         }),
       });
     });

@@ -2962,6 +2962,63 @@ describe('ShellTool', () => {
       expect(result.llmContent).not.toContain('Full output sha256:');
     });
 
+    it('embeds the failure-core digest for signal-terminated failures, never for aborts', async () => {
+      // OOM-kill / SIGTERM-on-eviction failures with aborted:false reach the
+      // digest only through the isSignalTermination arm — the exit-code-arm
+      // tests cannot see that disjunct, so removing it ships green without
+      // this witness. Aborts stay digest-free so the gate cannot widen.
+      const killed = await runFg('worker-process', {
+        output: '',
+        exitCode: null,
+        signal: 'SIGTERM',
+        aborted: false,
+        error: null,
+      });
+
+      expect(killed.llmContent).toContain(
+        `Full output sha256: ${FAKE_BLOCK_DIGEST}`,
+      );
+      expect(lastCreateHashInput).toBe(
+        [
+          'Output: (empty)',
+          'Error: (none)',
+          'Exit Code: (none)',
+          'Signal: SIGTERM',
+        ].join('\n'),
+      );
+
+      const aborted = await runFg('worker-process', {
+        output: '',
+        exitCode: null,
+        signal: 'SIGTERM',
+        aborted: true,
+      });
+      expect(aborted.llmContent).not.toContain('Full output sha256:');
+    });
+
+    it('keeps the failure-core digest through real >30KB truncation', async () => {
+      // Drives the real truncateToolOutput path with no module spy: the
+      // digest line sits at the END of the failure block, so only
+      // keep='both' tail retention preserves it. A keep:'head' flip would
+      // drop it from every >30KB failure, and those failures would then
+      // fingerprint via the per-call spill path — the guard dead for
+      // exactly the largest failures.
+      const bigOutput = `find: missing-directory: No such file or directory\n${'x'.repeat(35_000)}`;
+      const result = await runFg('find missing-directory', {
+        output: bigOutput,
+        exitCode: 1,
+        error: null,
+      });
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+      expect(result.llmContent).toContain(
+        'Tool output was too large and has been truncated',
+      );
+      expect(result.llmContent).toContain(
+        `Full output sha256: ${FAKE_BLOCK_DIGEST}`,
+      );
+    });
+
     describe('output truncation threshold', () => {
       const TRUNCATED = 'Tool output was too large and has been truncated';
       const ADVISORY = 'this foreground command ran for 60s';

@@ -45,6 +45,7 @@ import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
 import { getInitialChatHistory } from '../../core/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
+import { ToolErrorType } from '../../tools/tool-error.js';
 import {
   ContextState,
   AgentHeadless,
@@ -1636,6 +1637,41 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(inv.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+      });
+
+      it('halts on repeated identical tool errors across varied-argument rounds (issue #10887)', async () => {
+        // The AgentCore half of the error-repetition guard: three rounds of
+        // the same failure with varied args — so the consecutive-identical
+        // call guard cannot fire — must trip repeated_tool_error. The
+        // failure sits at functionResponse.response.error, the only payload
+        // shape extractToolErrors reads.
+        const failing = vi.fn().mockResolvedValue({
+          llmContent: 'fatal: not a git repository',
+          returnDisplay: 'fatal: not a git repository',
+          error: {
+            message: 'fatal: not a git repository',
+            type: ToolErrorType.SHELL_EXECUTE_ERROR,
+          },
+        });
+        const { config, inv, toolConfig } = await setupReadTool(
+          decl('run_shell_command', 'Runs a shell command'),
+          invocation({ command: 'git status' }, 'Run shell', failing),
+          'Shell',
+          'Runs shell commands',
+        );
+        respond(
+          [call('run_shell_command', { command: 'git status' }, 'err_1')],
+          [call('run_shell_command', { command: 'git status -s' }, 'err_2')],
+          [call('run_shell_command', { command: 'git -C r status' }, 'err_3')],
+          'stop',
+        );
+        const [emitter, finishEvents] = eventLog(AgentEventType.FINISH);
+        const scope = await runAgent(config, { tools: toolConfig, emitter });
+
+        expect(inv.execute).toHaveBeenCalledTimes(3);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(finishEvents).toHaveLength(1);
+        expect(finishEvents[0].loopType).toBe('repeated_tool_error');
       });
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {
