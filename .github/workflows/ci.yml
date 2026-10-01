@@ -1522,7 +1522,9 @@ jobs:
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
+        timeout-minutes: 8
         run: |-
+          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
           node node_modules/playwright/cli.js install --with-deps chromium webkit
           nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
           if [ -f "${nested_cli}" ]; then
