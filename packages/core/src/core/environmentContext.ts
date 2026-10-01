@@ -29,7 +29,7 @@ const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 // snapshot. The snapshot lives in the stable messages prefix; simplifying a
 // large skill set limits cached-prefix growth. Typical small skill sets render
 // in full with no truncation (and thus no behavior change).
-const MAX_SKILL_LISTING_CHARS = 8000;
+export const MAX_SKILL_LISTING_CHARS = 8000;
 
 /**
  * Shared date formatter for system-prompt date injection.
