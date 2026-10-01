@@ -289,6 +289,12 @@ public class ManagedAgentService {
                 // command.
                 if (error instanceof RuntimeBrokerException refusal
                         && !refusal.isRetryable()) {
+                    // Retire the command row this refusal would leave
+                    // PENDING: nothing else clears it, so every later rename
+                    // with a fresh key would die in
+                    // requireNoOpenOperation for the Session's life.
+                    store.abandonSessionMutation(tenantId, RENAME,
+                            idempotencyKey, sessionId);
                     HttpStatus status = HttpStatus.resolve(
                             refusal.getStatusCode());
                     throw new ApiException(

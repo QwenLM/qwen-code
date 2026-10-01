@@ -15,12 +15,14 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -661,6 +663,82 @@ class ManagedWorkspaceAdmissionTest {
         // stays admitted.
         assertThat(enabled.getWebShellSession(tenant, "actor-a", controlId)
                 .capabilities().workspaceTurns()).isTrue();
+    }
+
+    @Test
+    void refusedRenameRetiresItsCommandAndAdmitsTheNextOne() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String digest = "sha256:" + "a".repeat(64);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, enabled);
+        // The Workspace authority refuses the first attach and admits the
+        // second, so a rename after the refused one is observable.
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    private int attaches;
+
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        if (attaches++ == 0) {
+                            throw WorkspaceExecutionStore.unavailable();
+                        }
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = new ManagedAgentService(gated,
+                new RequestDigests(), null, harness, registry);
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+
+        // The refusal answers its own permanent status, and the command row
+        // it wrote must not survive to wedge every later rename.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-a", "rename-1", sessionId, "first"))
+                        .isInstanceOfSatisfying(ApiException.class, error -> {
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_command WHERE tenant_id = ?"
+                        + " AND session_id = ? AND command_status = 'PENDING'",
+                Integer.class, tenant, sessionId)).isZero();
+
+        transaction.executeWithoutResult(status -> service.renameSession(
+                tenant, "actor-a", "rename-2", sessionId, "second"));
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("second");
     }
 
     @Test
