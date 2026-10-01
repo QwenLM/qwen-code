@@ -286,6 +286,16 @@ jobs:
           npm config set fetch-retries 5
           npm config set fetch-timeout 300000
 
+      # Fail fast on a saturated pool host instead of dying on ENOSPC
+      # mid-job (#10035): run 36241138248 lost this leg with no failed step
+      # and no test result when the runner's own worker died writing its
+      # diag log on a full disk (#12764). ci.yml and the release lane already
+      # gate on this script; a gate failure is a clear, retryable signal and
+      # a re-run lands on a host with headroom.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Install dependencies'
         env:
           # `npm ci` runs the `prepare` script, which builds and bundles the

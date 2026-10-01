@@ -10,6 +10,7 @@ import {
   MESSAGE_DISPLAY_DRAIN_TIMEOUT_MS,
 } from './message-display-dispatcher.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
+import { runWithHookExecutionOwner } from '../hooks/hook-execution-context.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 interface SentPayload {
@@ -85,6 +86,31 @@ describe('MessageDisplayDispatcher', () => {
   afterEach(() => {
     consoleWarnSpy.mockRestore();
     vi.useRealTimers();
+  });
+
+  it('keeps its captured owner while queued delivery resumes under another agent', async () => {
+    const owner = { runtimeId: 'runtime', sessionId: 'session', agentId: 'A' };
+    const { bus, request, release } = createControlledBus();
+    const dispatcher = new MessageDisplayDispatcher(
+      bus,
+      new AbortController().signal,
+      () => {},
+      0,
+      owner,
+    );
+    dispatcher.addChunk('first', PAST_DEBOUNCE);
+    dispatcher.addChunk('second', PAST_DEBOUNCE * 2);
+    const finished = runWithHookExecutionOwner({ ...owner, agentId: 'B' }, () =>
+      dispatcher.finish(),
+    );
+    await release();
+    await release();
+    await finished;
+    expect(request.mock.calls.length).toBeGreaterThanOrEqual(2);
+    for (const [message] of request.mock.calls) {
+      expect(message).toHaveProperty('owner', owner);
+      expect(message.input).not.toHaveProperty('owner');
+    }
   });
 
   it('delivers a due mid-stream flush and then the final flush, sharing one message_id', async () => {

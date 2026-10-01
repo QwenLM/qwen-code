@@ -1,0 +1,21 @@
+CREATE TABLE managed_workspace_operator_recovery (
+    recovery_id CHAR(36) PRIMARY KEY,
+    binding_id VARCHAR(512) NOT NULL,
+    runtime_generation BIGINT NOT NULL,
+    storage_key CHAR(64) NOT NULL,
+    holder_key CHAR(64) NOT NULL,
+    runtime_session_id VARCHAR(512) NOT NULL,
+    provision_request_id VARCHAR(512) NOT NULL,
+    resource_handle_json LONGTEXT NOT NULL,
+    runtime_lease_id VARCHAR(512) NOT NULL,
+    runtime_epoch BIGINT NOT NULL,
+    blocked_execution_call_id VARCHAR(512) NOT NULL,
+    operator_id VARCHAR(512) NOT NULL,
+    reason VARCHAR(2048) NOT NULL,
+    prepared_at DATETIME(6) NOT NULL,
+    attestation_json LONGTEXT,
+    attestation_sha256 CHAR(64),
+    attested_at DATETIME(6),
+    completed_at DATETIME(6),
+    UNIQUE (binding_id, runtime_generation)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;

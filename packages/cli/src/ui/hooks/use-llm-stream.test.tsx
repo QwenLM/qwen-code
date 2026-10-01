@@ -785,6 +785,35 @@ describe('useLlmStream', () => {
     });
   });
 
+  it('displays a foreground workflow result before the model request and never duplicates it', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    const displayText =
+      'Workflow completed. Run ID: wf_client\nResult: {"failed":["fr"]}\nReported failed: ["fr"]';
+    const modelText =
+      '<task-notification><kind>workflow</kind><result>fr failed</result></task-notification>';
+    const callback =
+      mockWorkflowRunRegistry.setCompletionCallback.mock.calls[0][0];
+    act(() => {
+      callback(displayText, modelText, {
+        runId: 'wf_client',
+        status: 'completed',
+        isBackgrounded: false,
+      });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: displayText },
+        expect.any(Number),
+      );
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(mockSendMessageStream.mock.calls[0][0]).toBe(modelText);
+    expect(
+      mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'notification' && item.text === displayText,
+      ),
+    ).toHaveLength(1);
+  });
+
   it('forwards submitted prompt provenance only for UserQuery', async () => {
     const { result, mockSendMessageStream } = renderTestHook();
 
@@ -13358,7 +13387,13 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/help');
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/help',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
       });
@@ -13386,6 +13421,10 @@ describe('useLlmStream', () => {
       await waitFor(() => {
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(
           '/my-custom-command',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -13423,7 +13462,13 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/emptycmd');
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/emptycmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
           expect.any(AbortSignal),
@@ -14577,6 +14622,10 @@ describe('useLlmStream', () => {
           await waitFor(() =>
             expect(mockHandleSlashCommand).toHaveBeenCalledWith(
               '/loop check status',
+              undefined,
+              undefined,
+              undefined,
+              undefined,
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -14658,7 +14707,13 @@ describe('useLlmStream', () => {
           release();
           rerender(rerenderProps(client));
           await waitFor(() =>
-            expect(mockHandleSlashCommand).toHaveBeenCalledWith('/loop cron 0'),
+            expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+              '/loop cron 0',
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+            ),
           );
 
           expect(notificationTexts()).not.toContainEqual(
@@ -18392,7 +18447,13 @@ describe('useLlmStream', () => {
           await result.current.submitQuery(btwQuery);
         });
 
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          btwQuery,
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
         resolveFirstCall();

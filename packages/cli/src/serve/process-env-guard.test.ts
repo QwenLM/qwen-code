@@ -164,6 +164,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-context-worker.ts',
+    {
+      reason:
+        'Managed Runtime startup selects its deployment-owned MCP manifest from the process environment; server definitions are then scoped by tenant and workspace.',
+      accesses: { 'key:QWEN_MANAGED_MCP_CONFIG': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-mcp-runtime.ts',
+    {
+      reason:
+        'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
+      accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
@@ -192,9 +208,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
-        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
+        'The Hosted Harness capability digest is a process-scoped contract fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
+        'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -285,6 +303,27 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/daemon-update.ts',
+    {
+      reason:
+        'The process-global updater snapshots the running daemon launcher and its managed npm installation stamp, not workspace configuration.',
+      accesses: {
+        'key:QWEN_CODE_CLI': 1,
+        'key:QWEN_CODE_MANAGED_NPM_PIN': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
+    {
+      reason:
+        'A daemon-wide ambient usage-statistics opt-out is a process-scoped ' +
+        'operator decision that must close the gate for every hosted ' +
+        'workspace; an ambient opt-in belongs to another hosted repository.',
+      accesses: { 'key:QWEN_USAGE_STATISTICS_ENABLED': 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/routes/workspace-git-branches.ts',
     {
       reason:
@@ -306,8 +345,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { whole: 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback. ' +
+        'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
+        'by design: it governs work no session owns (a recovery sweep and the ' +
+        'dispatch timer), so it cannot be a per-session setting.',
+      accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
   [

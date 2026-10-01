@@ -98,39 +98,80 @@ describe('NotebookEditTool', () => {
     >;
   }
 
-  it('replaces a code cell by real ID and clears stale outputs', async () => {
-    const filePath = writeNotebook('analysis.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        {
-          cell_type: 'code',
-          id: 'load-data',
-          source: ['x = 1\n'],
-          execution_count: 7,
-          outputs: [{ output_type: 'stream', text: ['old\n'] }],
-          metadata: {},
-        },
-      ],
-      metadata: { language_info: { name: 'python' } },
+  const edit = (params: Parameters<NotebookEditTool['build']>[0]) =>
+    buildInvocation(params).execute(abortSignal);
+  const replaceLoadData = (notebook_path: string) =>
+    edit({
+      notebook_path,
+      cell_id: 'load-data',
+      new_source: 'x = 2\nprint(x)',
     });
+  const editA = (notebook_path: string) =>
+    edit({ notebook_path, cell_id: 'a', new_source: 'x = 2' });
+  const readNotebook = (filePath: string) =>
+    JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  function writeSeeded(name: string, notebook: Record<string, unknown>) {
+    const filePath = writeNotebook(name, notebook);
     seedNotebookRead(filePath);
+    return filePath;
+  }
+
+  // Cell and notebook literals, keys in nbformat order; `id` omitted when
+  // undefined (fallback `cell-N` IDs).
+  const cell = (
+    cell_type: string,
+    id: string | undefined,
+    source: unknown,
+    extra: object = {},
+  ) => ({
+    cell_type,
+    ...(id === undefined ? {} : { id }),
+    source,
+    ...extra,
+    metadata: {},
+  });
+  const nb45 = (cells: object[], metadata: object = {}) => ({
+    nbformat: 4,
+    nbformat_minor: 5,
+    cells,
+    metadata,
+  });
+  const bareNb = (cells: object[]) => ({ cells, metadata: {} });
+  const CODE_A = cell('code', 'a', ['x = 1']);
+  const PYTHON = { language_info: { name: 'python' } };
+  const NO_OUTPUTS = { execution_count: null, outputs: [] };
+  const STALE_OUTPUTS = {
+    execution_count: 7,
+    outputs: [{ output_type: 'stream', text: ['old\n'] }],
+  };
+  const SECRET = `token = "ghp_${'a'.repeat(36)}"`;
+  // A code cell holding `source` with its execution state cleared.
+  const expectFreshCode = (c: Record<string, unknown>, source: string[]) => {
+    expect(c['source']).toEqual(source);
+    expect(c['execution_count']).toBeNull();
+    expect(c['outputs']).toEqual([]);
+  };
+  const teamMemoryPath = () => {
+    fs.mkdirSync(path.join(tempDir, '.qwen', 'team-memory'), {
+      recursive: true,
+    });
+    return path.join('.qwen', 'team-memory', 'analysis.ipynb');
+  };
+
+  it('replaces a code cell by real ID and clears stale outputs', async () => {
+    const filePath = writeSeeded(
+      'analysis.ipynb',
+      nb45([cell('code', 'load-data', ['x = 1\n'], STALE_OUTPUTS)], PYTHON),
+    );
     const writeSpy = vi.spyOn(
       StandardFileSystemService.prototype,
       'writeTextFile',
     );
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'load-data',
-      new_source: 'x = 2\nprint(x)',
-    }).execute(abortSignal);
+    const result = await replaceLoadData(filePath);
 
     expect(result.error).toBeUndefined();
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    expect(updated.cells[0].source).toEqual(['x = 2\n', 'print(x)']);
-    expect(updated.cells[0].execution_count).toBeNull();
-    expect(updated.cells[0].outputs).toEqual([]);
+    expectFreshCode(readNotebook(filePath).cells[0], ['x = 2\n', 'print(x)']);
     expect(result.llmContent).toContain('replace cell load-data');
     expect(writeSpy).toHaveBeenCalledWith(
       expect.objectContaining({ toolWriteOrigin: 'notebook_edit' }),
@@ -146,33 +187,10 @@ describe('NotebookEditTool', () => {
   });
 
   it('blocks writing a secret into a team-memory notebook', async () => {
-    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
-    fs.mkdirSync(teamDir, { recursive: true });
-    const filePath = path.join(teamDir, 'analysis.ipynb');
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify(
-        {
-          nbformat: 4,
-          nbformat_minor: 5,
-          cells: [
-            {
-              cell_type: 'code',
-              id: 'load-data',
-              source: ['x = 1\n'],
-              execution_count: null,
-              outputs: [],
-              metadata: {},
-            },
-          ],
-          metadata: { language_info: { name: 'python' } },
-        },
-        null,
-        1,
-      ),
-      'utf-8',
+    const filePath = writeSeeded(
+      teamMemoryPath(),
+      nb45([cell('code', 'load-data', ['x = 1\n'], NO_OUTPUTS)], PYTHON),
     );
-    seedNotebookRead(filePath);
     const originalContent = fs.readFileSync(filePath, 'utf-8');
 
     // Rejected at validate/build time (parity with edit/write-file), before any
@@ -181,62 +199,36 @@ describe('NotebookEditTool', () => {
       buildInvocation({
         notebook_path: filePath,
         cell_id: 'load-data',
-        new_source: `token = "ghp_${'a'.repeat(36)}"`,
+        new_source: SECRET,
       }),
     ).toThrow(/shared with all repository collaborators/i);
     expect(fs.readFileSync(filePath, 'utf-8')).toBe(originalContent);
   });
 
   it('blocks a secret in a sibling cell at execute time (full-notebook backstop)', async () => {
-    // A team-memory notebook that already carries a secret in one cell. Editing
-    // a DIFFERENT, clean cell passes the validate-time single-cell scan (its
-    // new_source has no secret), so only execute()'s scan of the whole
-    // serialized notebook — the backstop edit/write-file can't run on an
-    // .ipynb — catches it. Exercises the execute-time path, not the build-time one.
-    const teamDir = path.join(tempDir, '.qwen', 'team-memory');
-    fs.mkdirSync(teamDir, { recursive: true });
-    const filePath = path.join(teamDir, 'analysis.ipynb');
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify(
-        {
-          nbformat: 4,
-          nbformat_minor: 5,
-          cells: [
-            {
-              cell_type: 'code',
-              id: 'creds',
-              source: [`token = "ghp_${'a'.repeat(36)}"`],
-              execution_count: null,
-              outputs: [],
-              metadata: {},
-            },
-            {
-              cell_type: 'code',
-              id: 'clean',
-              source: ['x = 1\n'],
-              execution_count: null,
-              outputs: [],
-              metadata: {},
-            },
-          ],
-          metadata: { language_info: { name: 'python' } },
-        },
-        null,
-        1,
+    // A team-memory notebook already carries a secret in one cell. Editing a
+    // DIFFERENT, clean cell passes the validate-time single-cell scan, so only
+    // execute()'s scan of the whole serialized notebook (the backstop
+    // edit/write-file can't run on an .ipynb) catches it.
+    const filePath = writeSeeded(
+      teamMemoryPath(),
+      nb45(
+        [
+          cell('code', 'creds', [SECRET], NO_OUTPUTS),
+          cell('code', 'clean', ['x = 1\n'], NO_OUTPUTS),
+        ],
+        PYTHON,
       ),
-      'utf-8',
     );
-    seedNotebookRead(filePath);
     const originalContent = fs.readFileSync(filePath, 'utf-8');
 
     // new_source is clean, so build() succeeds; the rejection comes from
     // execute()'s full-notebook scan, returned as an error result (not a throw).
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       cell_id: 'clean',
       new_source: 'x = 2\n',
-    }).execute(abortSignal);
+    });
 
     expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
     expect(result.llmContent).toMatch(
@@ -248,72 +240,46 @@ describe('NotebookEditTool', () => {
 
   it('replaces a code cell in a UTF-8 BOM notebook and preserves the BOM', async () => {
     const filePath = path.join(tempDir, 'bom-replace.ipynb');
+    const notebook = nb45(
+      [cell('code', 'load-data', ['x = 1\n'], STALE_OUTPUTS)],
+      PYTHON,
+    );
     fs.writeFileSync(
       filePath,
-      `\ufeff${JSON.stringify(
-        {
-          nbformat: 4,
-          nbformat_minor: 5,
-          cells: [
-            {
-              cell_type: 'code',
-              id: 'load-data',
-              source: ['x = 1\n'],
-              execution_count: 7,
-              outputs: [{ output_type: 'stream', text: ['old\n'] }],
-              metadata: {},
-            },
-          ],
-          metadata: { language_info: { name: 'python' } },
-        },
-        null,
-        1,
-      )}`,
+      `\ufeff${JSON.stringify(notebook, null, 1)}`,
       'utf-8',
     );
     seedNotebookRead(filePath);
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'load-data',
-      new_source: 'x = 2\nprint(x)',
-    }).execute(abortSignal);
+    const result = await replaceLoadData(filePath);
 
     expect(result.error).toBeUndefined();
     const updatedBuffer = fs.readFileSync(filePath);
     expect([...updatedBuffer.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
     const updated = JSON.parse(updatedBuffer.toString('utf-8').slice(1));
-    expect(updated.cells[0].source).toEqual(['x = 2\n', 'print(x)']);
-    expect(updated.cells[0].execution_count).toBeNull();
-    expect(updated.cells[0].outputs).toEqual([]);
+    expectFreshCode(updated.cells[0], ['x = 2\n', 'print(x)']);
   });
 
   it('replaces by cell-N fallback and converts code to markdown cleanly', async () => {
-    const filePath = writeNotebook('convert.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        {
-          cell_type: 'code',
-          source: 'print("old")',
+    const filePath = writeSeeded(
+      'convert.ipynb',
+      nb45([
+        cell('code', undefined, 'print("old")', {
           execution_count: 1,
           outputs: [{ output_type: 'stream', text: 'old\n' }],
-          metadata: {},
-        },
-      ],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+        }),
+      ]),
+    );
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       cell_id: 'cell-0',
       cell_type: 'markdown',
       new_source: '# Notes',
-    }).execute(abortSignal);
+    });
 
     expect(result.error).toBeUndefined();
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const updated = readNotebook(filePath);
     expect(updated.cells[0].cell_type).toBe('markdown');
     expect(updated.cells[0].source).toBe('# Notes');
     expect(updated.cells[0]).not.toHaveProperty('outputs');
@@ -321,54 +287,39 @@ describe('NotebookEditTool', () => {
   });
 
   it('converts markdown to code with code-only fields', async () => {
-    const filePath = writeNotebook('convert-to-code.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        {
-          cell_type: 'markdown',
-          id: 'intro',
-          source: ['# Intro'],
-          metadata: {},
-        },
-      ],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded(
+      'convert-to-code.ipynb',
+      nb45([cell('markdown', 'intro', ['# Intro'])]),
+    );
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       cell_id: 'intro',
       cell_type: 'code',
       new_source: 'print("hi")',
-    }).execute(abortSignal);
-
-    expect(result.error).toBeUndefined();
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    expect(updated.cells[0].cell_type).toBe('code');
-    expect(updated.cells[0].source).toEqual(['print("hi")']);
-    expect(updated.cells[0].execution_count).toBeNull();
-    expect(updated.cells[0].outputs).toEqual([]);
-  });
-
-  it('inserts after a target cell and generates an nbformat 4.5 cell ID', async () => {
-    const raw = JSON.stringify({
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        { cell_type: 'markdown', id: 'cell-1', source: ['# A'], metadata: {} },
-        { cell_type: 'code', id: 'cell-2', source: ['a = 1'], metadata: {} },
-      ],
-      metadata: {},
     });
 
-    const result = applyNotebookEdit(raw, {
+    expect(result.error).toBeUndefined();
+    const updated = readNotebook(filePath);
+    expect(updated.cells[0].cell_type).toBe('code');
+    expectFreshCode(updated.cells[0], ['print("hi")']);
+  });
+
+  // Inserts a '## Inserted' markdown cell after `cell_id` via the pure API.
+  const insertMarkdown = (cells: object[], cell_id: string) =>
+    applyNotebookEdit(JSON.stringify(nb45(cells)), {
       notebook_path: '/tmp/insert.ipynb',
       edit_mode: 'insert',
-      cell_id: 'cell-1',
+      cell_id,
       cell_type: 'markdown',
       new_source: '## Inserted',
     });
+
+  it('inserts after a target cell and generates an nbformat 4.5 cell ID', async () => {
+    const result = insertMarkdown(
+      [cell('markdown', 'cell-1', ['# A']), cell('code', 'cell-2', ['a = 1'])],
+      'cell-1',
+    );
 
     const updated = JSON.parse(result.updatedContent);
     expect(updated.cells).toHaveLength(3);
@@ -379,48 +330,21 @@ describe('NotebookEditTool', () => {
   });
 
   it('preserves adjacent source style for inserted cells in mixed-format notebooks', async () => {
-    const raw = JSON.stringify({
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        { cell_type: 'markdown', id: 'intro', source: '# Intro', metadata: {} },
-        {
-          cell_type: 'code',
-          id: 'code',
-          source: ['value = 1\n'],
-          metadata: {},
-        },
+    const result = insertMarkdown(
+      [
+        cell('markdown', 'intro', '# Intro'),
+        cell('code', 'code', ['value = 1\n']),
       ],
-      metadata: {},
-    });
-
-    const result = applyNotebookEdit(raw, {
-      notebook_path: '/tmp/insert.ipynb',
-      edit_mode: 'insert',
-      cell_id: 'intro',
-      cell_type: 'markdown',
-      new_source: '## Inserted',
-    });
-
-    const updated = JSON.parse(result.updatedContent);
-    expect(updated.cells[1].source).toBe('## Inserted');
+      'intro',
+    );
+    expect(JSON.parse(result.updatedContent).cells[1].source).toBe(
+      '## Inserted',
+    );
   });
 
   it('preserves notebook JSON indentation and trailing newline style on edit', () => {
     const raw = JSON.stringify(
-      {
-        nbformat: 4,
-        nbformat_minor: 5,
-        cells: [
-          {
-            cell_type: 'markdown',
-            id: 'intro',
-            source: '# Intro',
-            metadata: {},
-          },
-        ],
-        metadata: {},
-      },
+      nb45([cell('markdown', 'intro', '# Intro')]),
       null,
       2,
     );
@@ -436,125 +360,98 @@ describe('NotebookEditTool', () => {
   });
 
   it('rejects ambiguous fallback-like cell IDs', async () => {
-    const filePath = writeNotebook('ambiguous.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        {
-          cell_type: 'markdown',
-          id: 'cell-1',
-          source: ['real id'],
-          metadata: {},
-        },
-        {
-          cell_type: 'markdown',
-          source: ['fallback id'],
-          metadata: {},
-        },
-      ],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded(
+      'ambiguous.ipynb',
+      nb45([
+        cell('markdown', 'cell-1', ['real id']),
+        cell('markdown', undefined, ['fallback id']),
+      ]),
+    );
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       cell_id: 'cell-1',
       new_source: 'updated',
-    }).execute(abortSignal);
+    });
 
     expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
     expect(result.llmContent).toContain('ambiguous');
   });
 
   it('inserts at the beginning when no cell_id is provided', async () => {
-    const filePath = writeNotebook('insert-start.ipynb', {
+    const filePath = writeSeeded('insert-start.ipynb', {
       nbformat: 4,
       nbformat_minor: 4,
-      cells: [{ cell_type: 'code', source: ['x = 1'], metadata: {} }],
+      cells: [cell('code', undefined, ['x = 1'])],
       metadata: {},
     });
-    seedNotebookRead(filePath);
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       edit_mode: 'insert',
       cell_type: 'code',
       new_source: 'print("first")',
-    }).execute(abortSignal);
+    });
 
     expect(result.error).toBeUndefined();
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const updated = readNotebook(filePath);
     expect(updated.cells[0].source).toEqual(['print("first")']);
     expect(updated.cells[0]).not.toHaveProperty('id');
   });
 
   it('deletes a cell without requiring new_source', async () => {
-    const filePath = writeNotebook('delete.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        { cell_type: 'markdown', id: 'keep', source: ['keep'], metadata: {} },
-        { cell_type: 'markdown', id: 'drop', source: ['drop'], metadata: {} },
-      ],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded(
+      'delete.ipynb',
+      nb45([
+        cell('markdown', 'keep', ['keep']),
+        cell('markdown', 'drop', ['drop']),
+      ]),
+    );
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       edit_mode: 'delete',
       cell_id: 'drop',
-    }).execute(abortSignal);
+    });
 
     expect(result.error).toBeUndefined();
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    expect(updated.cells.map((cell: { id: string }) => cell.id)).toEqual([
-      'keep',
-    ]);
+    const updated = readNotebook(filePath);
+    expect(updated.cells.map((c: { id: string }) => c.id)).toEqual(['keep']);
   });
 
   it('requires a fresh read after structural edits when fallback IDs can shift', async () => {
-    const filePath = writeNotebook('fallback-shift.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        { cell_type: 'markdown', source: ['A'], metadata: {} },
-        { cell_type: 'markdown', source: ['B'], metadata: {} },
-      ],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded(
+      'fallback-shift.ipynb',
+      nb45([
+        cell('markdown', undefined, ['A']),
+        cell('markdown', undefined, ['B']),
+      ]),
+    );
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       edit_mode: 'insert',
       cell_type: 'markdown',
       new_source: 'inserted',
-    }).execute(abortSignal);
+    });
 
     expect(result.error).toBeUndefined();
     expect(fileReadCache.check(fs.statSync(filePath)).state).toBe('unknown');
   });
 
   it('preserves fresh read state after structural edits when all IDs are stable', async () => {
-    const filePath = writeNotebook('stable-ids.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [
-        { cell_type: 'markdown', id: 'a', source: ['A'], metadata: {} },
-        { cell_type: 'markdown', id: 'b', source: ['B'], metadata: {} },
-      ],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded(
+      'stable-ids.ipynb',
+      nb45([cell('markdown', 'a', ['A']), cell('markdown', 'b', ['B'])]),
+    );
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       edit_mode: 'insert',
       cell_id: 'a',
       cell_type: 'markdown',
       new_source: 'inserted',
-    }).execute(abortSignal);
+    });
 
     expect(result.error).toBeUndefined();
     const cacheState = fileReadCache.check(fs.statSync(filePath));
@@ -565,16 +462,7 @@ describe('NotebookEditTool', () => {
   });
 
   it('requires a fresh full notebook read before editing', async () => {
-    const filePath = writeNotebook('unread.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    }).execute(abortSignal);
+    const result = await editA(writeNotebook('unread.ipynb', bareNb([CODE_A])));
 
     expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
     expect(result.llmContent).toContain('has not been fully read');
@@ -584,14 +472,7 @@ describe('NotebookEditTool', () => {
     // `ino: 0` (FAT/exFAT, some SMB mounts) makes the prior read
     // unprovable, and re-reading cannot fix it — so the model gets a
     // terminal error instead of the "read it first" instruction.
-    const filePath = writeNotebook('zero-inode.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    fileReadCache.recordRead(filePath, fs.statSync(filePath), {
-      full: true,
-      cacheable: false,
-    });
+    const filePath = writeSeeded('zero-inode.ipynb', bareNb([CODE_A]));
     const nativeStat = fs.promises.stat;
     const stat = vi
       .spyOn(fs.promises, 'stat')
@@ -604,11 +485,7 @@ describe('NotebookEditTool', () => {
       });
 
     try {
-      const result = await buildInvocation({
-        notebook_path: filePath,
-        cell_id: 'a',
-        new_source: 'x = 2',
-      }).execute(abortSignal);
+      const result = await editA(filePath);
 
       expect(result.error?.type).toBe(
         ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
@@ -622,23 +499,23 @@ describe('NotebookEditTool', () => {
   });
 
   it('rejects edits after a truncated notebook read', async () => {
-    const filePath = writeNotebook('truncated-read.ipynb', {
-      cells: [
-        { cell_type: 'code', id: 'visible', source: ['x = 1'], metadata: {} },
-        { cell_type: 'code', id: 'tail', source: ['x = 2'], metadata: {} },
-      ],
-      metadata: {},
-    });
+    const filePath = writeNotebook(
+      'truncated-read.ipynb',
+      bareNb([
+        cell('code', 'visible', ['x = 1']),
+        cell('code', 'tail', ['x = 2']),
+      ]),
+    );
     fileReadCache.recordRead(filePath, fs.statSync(filePath), {
       full: false,
       cacheable: false,
     });
 
-    const result = await buildInvocation({
+    const result = await edit({
       notebook_path: filePath,
       cell_id: 'tail',
       new_source: 'x = 3',
-    }).execute(abortSignal);
+    });
 
     expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
     expect(result.llmContent).toContain('too large for cell-level editing');
@@ -649,22 +526,17 @@ describe('NotebookEditTool', () => {
     const dirPath = path.join(tempDir, 'directory.ipynb');
     fs.mkdirSync(dirPath);
 
-    const result = await buildInvocation({
-      notebook_path: dirPath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    }).execute(abortSignal);
+    const result = await editA(dirPath);
 
     expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
     expect(result.llmContent).toContain('is a directory');
   });
 
   it('returns FILE_CHANGED_SINCE_READ when a notebook disappears after content read', async () => {
-    const filePath = writeNotebook('disappears-after-read.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded(
+      'disappears-after-read.ipynb',
+      bareNb([CODE_A]),
+    );
     const realFileSystemService = new StandardFileSystemService();
     const fileSystemService = new StandardFileSystemService();
     vi.spyOn(fileSystemService, 'readTextFile').mockImplementation(
@@ -676,22 +548,14 @@ describe('NotebookEditTool', () => {
     );
     vi.spyOn(config, 'getFileSystemService').mockReturnValue(fileSystemService);
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    }).execute(abortSignal);
+    const result = await editA(filePath);
 
     expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
     expect(result.llmContent).toContain('disappeared after it was read');
   });
 
   it('returns PRIOR_READ_VERIFICATION_FAILED when notebook stat verification fails', async () => {
-    const filePath = writeNotebook('stat-fails.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded('stat-fails.ipynb', bareNb([CODE_A]));
     const statSpy = vi
       .spyOn(fs.promises, 'stat')
       .mockRejectedValueOnce(
@@ -700,11 +564,7 @@ describe('NotebookEditTool', () => {
     let result: ToolResult | undefined;
 
     try {
-      result = await buildInvocation({
-        notebook_path: filePath,
-        cell_id: 'a',
-        new_source: 'x = 2',
-      }).execute(abortSignal);
+      result = await editA(filePath);
     } finally {
       statSpy.mockRestore();
     }
@@ -721,11 +581,7 @@ describe('NotebookEditTool', () => {
       const fifoPath = path.join(tempDir, 'notebook-fifo.ipynb');
       execFileSync('mkfifo', [fifoPath]);
 
-      const result = await buildInvocation({
-        notebook_path: fifoPath,
-        cell_id: 'a',
-        new_source: 'x = 2',
-      }).execute(abortSignal);
+      const result = await editA(fifoPath);
 
       expect(result.error?.type).toBe(ToolErrorType.TARGET_NOT_REGULAR_FILE);
       expect(result.llmContent).toContain('not a regular file');
@@ -733,43 +589,26 @@ describe('NotebookEditTool', () => {
   );
 
   it('rejects stale notebook edits after an external change', async () => {
-    const filePath = writeNotebook('stale.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded('stale.ipynb', bareNb([CODE_A]));
     fs.writeFileSync(
       filePath,
-      JSON.stringify({
-        cells: [
-          { cell_type: 'code', id: 'a', source: ['x = 100'], metadata: {} },
-        ],
-        metadata: {},
-      }),
+      JSON.stringify(bareNb([cell('code', 'a', ['x = 100'])])),
       'utf-8',
     );
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    }).execute(abortSignal);
+    const result = await editA(filePath);
 
     expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
   });
 
   it('returns structured errors for missing cells and invalid JSON', async () => {
-    const missingCellPath = writeNotebook('missing-cell.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(missingCellPath);
+    const missingCellPath = writeSeeded('missing-cell.ipynb', bareNb([CODE_A]));
 
-    const missingCellResult = await buildInvocation({
+    const missingCellResult = await edit({
       notebook_path: missingCellPath,
       cell_id: 'missing',
       new_source: 'x = 2',
-    }).execute(abortSignal);
+    });
 
     expect(missingCellResult.error?.type).toBe(
       ToolErrorType.NOTEBOOK_CELL_NOT_FOUND,
@@ -779,75 +618,79 @@ describe('NotebookEditTool', () => {
     fs.writeFileSync(invalidPath, 'not json', 'utf-8');
     seedNotebookRead(invalidPath);
 
-    const invalidResult = await buildInvocation({
+    const invalidResult = await edit({
       notebook_path: invalidPath,
       edit_mode: 'insert',
       new_source: 'x = 1',
-    }).execute(abortSignal);
+    });
 
     expect(invalidResult.error?.type).toBe(ToolErrorType.NOTEBOOK_INVALID_JSON);
   });
 
-  it('keeps invalid original notebook errors structured for user-modified content', async () => {
-    const invalidPath = writeNotebook('bad-original.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(invalidPath);
-    const originalParams = {
-      notebook_path: invalidPath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    };
+  // Runs the modify-with-editor flow: current and proposed content for the
+  // `cell a -> x = 2` edit, optionally rewritten, turned into updated params.
+  async function modifiedParams(
+    notebook_path: string,
+    rewrite: (proposed: string) => string = (proposed) => proposed,
+  ) {
+    const originalParams = { notebook_path, cell_id: 'a', new_source: 'x = 2' };
     const modifyContext = tool.getModifyContext(abortSignal);
     const currentContent =
       await modifyContext.getCurrentContent(originalParams);
     const proposedContent =
       await modifyContext.getProposedContent(originalParams);
-    const updatedParams = modifyContext.createUpdatedParams(
-      currentContent,
-      proposedContent,
-      originalParams,
+    return structuredClone(
+      modifyContext.createUpdatedParams(
+        currentContent,
+        rewrite(proposedContent),
+        originalParams,
+      ),
     );
+  }
+
+  it('keeps invalid original notebook errors structured for user-modified content', async () => {
+    const invalidPath = writeSeeded('bad-original.ipynb', nb45([CODE_A]));
+    const updatedParams = await modifiedParams(invalidPath);
     fs.writeFileSync(invalidPath, 'not json', 'utf-8');
     seedNotebookRead(invalidPath);
 
-    const result = await buildInvocation(
-      structuredClone(updatedParams),
-    ).execute(abortSignal);
+    const result = await edit(updatedParams);
 
     expect(result.error?.type).toBe(ToolErrorType.NOTEBOOK_INVALID_JSON);
   });
 
   it('rejects direct attempts to set internal modified notebook content params', () => {
-    const filePath = writeNotebook('injected-modified-content.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
+    const filePath = writeNotebook(
+      'injected-modified-content.ipynb',
+      nb45([CODE_A]),
+    );
 
     expect(() =>
       tool.build({
         notebook_path: filePath,
         cell_id: 'a',
         new_source: 'x = 2',
-        modified_notebook_content: JSON.stringify({
-          cells: [],
-          metadata: {},
-        }),
+        modified_notebook_content: JSON.stringify(bareNb([])),
       } as Parameters<NotebookEditTool['build']>[0]),
     ).toThrow(/additional properties|modified_notebook_content/i);
   });
 
-  it('rejects qwenignored notebooks during validation', () => {
-    fs.writeFileSync(path.join(tempDir, '.qwenignore'), '*.ipynb\n', 'utf-8');
-    const filePath = writeNotebook('ignored.ipynb', {
-      cells: [],
-      metadata: {},
-    });
+  it.each([
+    [
+      'rejects qwenignored notebooks during validation',
+      '.qwenignore',
+      'ignored.ipynb',
+      /ignored by \.qwenignore/,
+    ],
+    [
+      'rejects notebooks ignored by .agentignore during validation',
+      '.agentignore',
+      'agent-ignored.ipynb',
+      /ignored by \.agentignore/,
+    ],
+  ])('%s', (_title, ignoreFile, name, message) => {
+    fs.writeFileSync(path.join(tempDir, ignoreFile), '*.ipynb\n', 'utf-8');
+    const filePath = writeNotebook(name, bareNb([]));
 
     expect(() =>
       tool.build({
@@ -855,31 +698,11 @@ describe('NotebookEditTool', () => {
         edit_mode: 'insert',
         new_source: 'x = 1',
       }),
-    ).toThrow(/ignored by \.qwenignore/);
-  });
-
-  it('rejects notebooks ignored by .agentignore during validation', () => {
-    fs.writeFileSync(path.join(tempDir, '.agentignore'), '*.ipynb\n', 'utf-8');
-    const filePath = writeNotebook('agent-ignored.ipynb', {
-      cells: [],
-      metadata: {},
-    });
-
-    expect(() =>
-      tool.build({
-        notebook_path: filePath,
-        edit_mode: 'insert',
-        new_source: 'x = 1',
-      }),
-    ).toThrow(/ignored by \.agentignore/);
+    ).toThrow(message);
   });
 
   it('returns a notebook diff for confirmation', async () => {
-    const filePath = writeNotebook('confirm.ipynb', {
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded('confirm.ipynb', bareNb([CODE_A]));
 
     const details = await buildInvocation({
       notebook_path: filePath,
@@ -896,38 +719,16 @@ describe('NotebookEditTool', () => {
   });
 
   it('applies IDE or inline modified full-notebook content instead of the original cell proposal', async () => {
-    const filePath = writeNotebook('modified-content.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded('modified-content.ipynb', nb45([CODE_A]));
 
-    const originalParams = {
-      notebook_path: filePath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    };
-    const modifyContext = tool.getModifyContext(abortSignal);
-    const currentContent =
-      await modifyContext.getCurrentContent(originalParams);
-    const proposedContent =
-      await modifyContext.getProposedContent(originalParams);
-    const modifiedContent = proposedContent.replace('x = 2', 'x = 99');
-    const updatedParams = modifyContext.createUpdatedParams(
-      currentContent,
-      modifiedContent,
-      originalParams,
+    const result = await edit(
+      await modifiedParams(filePath, (proposed) =>
+        proposed.replace('x = 2', 'x = 99'),
+      ),
     );
 
-    const result = await buildInvocation(
-      structuredClone(updatedParams),
-    ).execute(abortSignal);
-
     expect(result.error).toBeUndefined();
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    expect(updated.cells[0].source).toEqual(['x = 99']);
+    expect(readNotebook(filePath).cells[0].source).toEqual(['x = 99']);
     expect(result.llmContent).toContain('modified by the user');
     expect(
       CommitAttributionService.getInstance().getFileAttribution(filePath),
@@ -935,12 +736,7 @@ describe('NotebookEditTool', () => {
   });
 
   it('uses one current-content snapshot for notebook modify previews', async () => {
-    const filePath = writeNotebook('modify-snapshot.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
+    const filePath = writeNotebook('modify-snapshot.ipynb', nb45([CODE_A]));
 
     const params = {
       notebook_path: filePath,
@@ -949,21 +745,9 @@ describe('NotebookEditTool', () => {
     };
     const modifyContext = tool.getModifyContext(abortSignal);
     const currentContent = await modifyContext.getCurrentContent(params);
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify(
-        {
-          nbformat: 4,
-          nbformat_minor: 5,
-          cells: [
-            { cell_type: 'code', id: 'a', source: ['x = 999'], metadata: {} },
-          ],
-          metadata: {},
-        },
-        null,
-        1,
-      ),
-      'utf-8',
+    writeNotebook(
+      'modify-snapshot.ipynb',
+      nb45([cell('code', 'a', ['x = 999'])]),
     );
 
     const proposedContent = await modifyContext.getProposedContent(params);
@@ -974,19 +758,9 @@ describe('NotebookEditTool', () => {
   });
 
   it('records AI-originated notebook writes for commit attribution', async () => {
-    const filePath = writeNotebook('attribution.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded('attribution.ipynb', nb45([CODE_A]));
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    }).execute(abortSignal);
+    const result = await editA(filePath);
 
     expect(result.error).toBeUndefined();
     const attribution =
@@ -997,41 +771,18 @@ describe('NotebookEditTool', () => {
   });
 
   it('tracks file history before the final freshness check', async () => {
-    const filePath = writeNotebook('history-before-check.ipynb', {
-      nbformat: 4,
-      nbformat_minor: 5,
-      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
-      metadata: {},
-    });
-    seedNotebookRead(filePath);
+    const filePath = writeSeeded('history-before-check.ipynb', nb45([CODE_A]));
     mockFileHistoryService.trackEdit.mockImplementation(async () => {
-      fs.writeFileSync(
-        filePath,
-        JSON.stringify(
-          {
-            nbformat: 4,
-            nbformat_minor: 5,
-            cells: [
-              { cell_type: 'code', id: 'a', source: ['x = 100'], metadata: {} },
-            ],
-            metadata: {},
-          },
-          null,
-          1,
-        ),
-        'utf-8',
+      writeNotebook(
+        'history-before-check.ipynb',
+        nb45([cell('code', 'a', ['x = 100'])]),
       );
     });
 
-    const result = await buildInvocation({
-      notebook_path: filePath,
-      cell_id: 'a',
-      new_source: 'x = 2',
-    }).execute(abortSignal);
+    const result = await editA(filePath);
 
     expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
     expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
-    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    expect(updated.cells[0].source).toEqual(['x = 100']);
+    expect(readNotebook(filePath).cells[0].source).toEqual(['x = 100']);
   });
 });

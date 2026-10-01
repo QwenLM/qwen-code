@@ -2,20 +2,29 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -40,6 +49,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private static final Duration LEASE = Duration.ofSeconds(30);
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
+    private final RuntimeRecoveryCoordinator recovery;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
@@ -47,6 +57,27 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeBindingRepository bindingRepository,
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository) {
+        this(store, properties, bindingRepository, sessionRepository, executionRepository, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store,
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore) {
+        this(store, properties, bindingRepository, sessionRepository,
+                executionRepository, workspaceExecutionStore, null, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store,
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications,
+            ToolPublicationDataStore publicationData) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -57,8 +88,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         String workspaceId = resolveWorkspaceId(broker, workspaceCwd);
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
-        HttpRuntimeTransport transport = new HttpRuntimeTransport();
-        RuntimeProvisioner provisioner = provisioner(broker, transport);
+        HttpRuntimeTransport http = new HttpRuntimeTransport();
+        WorkspaceRuntimeResolver workspaces = workspaceExecutionStore == null ? null
+                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
+        RuntimeTransport transport = workspaces == null ? http
+                : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
+                        bindingRepository, sessionRepository);
+        RuntimeProvisioner baseProvisioner = provisioner(broker, http);
+        RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
+                : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = sessionId -> {
             SessionRecord session = store.findSessionById(sessionId)
                     .orElse(null);
@@ -69,6 +107,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                         "Session is not owned by this service"));
                 return failed;
             }
+            if (session.workspace() != null) {
+                if (workspaces != null) {
+                    return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+                }
+                return CompletableFuture.failedFuture(
+                        new RuntimeBrokerException(409,
+                                "workspace_unavailable",
+                                "Hosted Workspace execution is not available.",
+                                false));
+            }
             return CompletableFuture.completedFuture(new RuntimeScope(
                     session.tenantId(), workspaceId,
                     broker.getWorkspaceGeneration(),
@@ -76,10 +124,37 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     properties.getHarness().getCapabilityDigest(),
                     broker.getIsolationClass()));
         };
+        ObjectMapper mapper = new ObjectMapper();
+        RuntimePublicationVerifier verifier = publications == null || publicationData == null
+                ? null : new RuntimePublicationVerifier() {
+                    @Override
+                    public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                            String id, String token) {
+                        var binding = publications.verifyDispatch(execution, id, token);
+                        var fields = mapper.convertValue(binding,
+                                new TypeReference<java.util.Map<String, Object>>() { });
+                        return new RuntimePublicationGrant(id, token,
+                                properties.getToolPublication().getServiceBaseUrl(), fields);
+                    }
+
+                    @Override
+                    public java.util.Map<String, Object> finished(ToolExecutionRecord execution) {
+                        var saved = publicationData.finishedForBroker(execution);
+                        return saved == null ? null : mapper.convertValue(saved.path("result"),
+                                new TypeReference<java.util.Map<String, Object>>() { });
+                    }
+
+                    @Override
+                    public java.util.Map<String, Object> receipt(ToolExecutionRecord execution) {
+                        var saved = publicationData.receiptForBroker(execution);
+                        return saved == null ? null : mapper.convertValue(saved,
+                                new TypeReference<java.util.Map<String, Object>>() { });
+                    }
+                };
         this.service = new RuntimeBrokerService(resolver, provisioner,
                 transport, bindingRepository, sessionRepository,
                 executionRepository, UUID.randomUUID().toString(), LEASE,
-                LEASE);
+                LEASE, verifier);
         try {
             this.server = new RuntimeBrokerHttpServer(
                     new InetSocketAddress(broker.getHost(), broker.getPort()),
@@ -90,6 +165,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             throw new IllegalStateException(
                     "Runtime Broker listener could not start", error);
         }
+        this.recovery = broker.isTrustedLocalRebootRecovery()
+                ? new RuntimeRecoveryCoordinator(service, bindingRepository) : null;
         LOG.info("Embedded Runtime Broker listening at {}",
                 server.getBaseUri());
     }
@@ -122,23 +199,32 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return CompletableFuture.completedFuture(null);
     }
 
-    @Override
-    public void resume(String sessionId) {
-        retired.remove(sessionId);
-    }
-
     public URI getBaseUri() {
         return server.getBaseUri();
     }
 
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 5000)
+    public void recoverSavedRuntimes() {
+        if (recovery != null) {
+            recovery.scan();
+        }
+    }
+
     @Override
     public void close() {
+        if (recovery != null) {
+            recovery.close();
+        }
         server.close();
     }
 
     private static RuntimeProvisioner provisioner(
             ManagedAgentProperties.RuntimeBroker broker,
             HttpRuntimeTransport transport) {
+        if (broker.isTrustedLocalRebootRecovery()
+                && (!broker.isDurableLocalProcess() || !"local-process".equals(broker.getProvisioner()))) {
+            throw new IllegalStateException("Trusted reboot recovery requires durable local-process provisioning");
+        }
         if ("local-process".equals(broker.getProvisioner())) {
             require(broker.getStateDirectory(),
                     "Runtime Broker state directory");
@@ -149,12 +235,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 throw new IllegalStateException("Merged local Runtime"
                         + " provisioner does not accept extra environment");
             }
-            return new LocalProcessRuntimeProvisioner(List.of(
+            List<String> command = List.of(
                     Path.of(broker.getNodeExecutable()).toAbsolutePath()
                             .toString(),
                     Path.of(broker.getWorkerEntry()).toAbsolutePath()
-                            .toString()),
-                    Path.of(broker.getStateDirectory()), transport);
+                            .toString(), "managed-runtime-worker");
+            Path stateDirectory = Path.of(broker.getStateDirectory()).toAbsolutePath().normalize();
+            if (broker.isDurableLocalProcess()) {
+                requireRecoveryDirectoryOutsideWorkspaces(broker, stateDirectory);
+                return LocalProcessRuntimeProvisioner.durable(command, stateDirectory, transport,
+                        broker.isTrustedLocalRebootRecovery());
+            }
+            return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport);
         }
         if ("static".equals(broker.getProvisioner())) {
             if (!"workspace".equals(broker.getIsolationClass())) {
@@ -175,6 +267,24 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
         throw new IllegalStateException("Runtime Broker provisioner must be"
                 + " local-process or static");
+    }
+
+    private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentProperties.RuntimeBroker broker,
+            Path directory) {
+        try {
+            Path candidate = java.nio.file.Files.exists(directory) ? directory.toRealPath()
+                    : directory.getParent().toRealPath().resolve(directory.getFileName());
+            if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
+                throw new IllegalStateException("Runtime recovery directory must be outside Workspace roots");
+            }
+            for (var mount : broker.getWorkspaceMounts()) {
+                if (candidate.startsWith(Path.of(mount.root()).toRealPath())) {
+                    throw new IllegalStateException("Runtime recovery directory must be outside Workspace roots");
+                }
+            }
+        } catch (IOException error) {
+            throw new IllegalStateException("Runtime recovery directory could not be verified", error);
+        }
     }
 
     private static String resolveWorkspaceCwd(
