@@ -170,6 +170,47 @@ describe('workspace memory routes', () => {
         (f) => f.path,
       );
       expect(paths).toEqual(expect.arrayContaining([wsFile, globalFile]));
+      for (const file of res.body.files as Array<Record<string, unknown>>) {
+        expect(file).not.toHaveProperty('content');
+      }
+    });
+
+    it('returns the global file text with content=true', async () => {
+      await fs.mkdir(globalDir, { recursive: true });
+      const globalFile = path.join(globalDir, 'QWEN.md');
+      await fs.writeFile(globalFile, 'global memory\n', 'utf8');
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.files).toEqual([
+        {
+          kind: 'memory_file',
+          path: globalFile,
+          scope: 'global',
+          bytes: Buffer.byteLength('global memory\n'),
+          content: 'global memory\n',
+        },
+      ]);
+    });
+
+    it('marks content truncated past the 1 MB cap', async () => {
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, 'x'.repeat(1024 * 1024 + 5), 'utf8');
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      const [file] = res.body.files as Array<{
+        content: string;
+        truncated?: boolean;
+      }>;
+      expect(file.truncated).toBe(true);
+      expect(file.content).toHaveLength(1024 * 1024);
     });
   });
 

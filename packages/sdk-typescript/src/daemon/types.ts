@@ -2621,6 +2621,10 @@ export interface DaemonWorkspaceMemoryFile {
   path: string;
   scope: DaemonContextFileScope;
   bytes: number;
+  /** Present only for `workspaceMemory({ includeContent: true })`. */
+  content?: string;
+  /** True when `content` stops at the daemon's read cap. */
+  truncated?: boolean;
 }
 
 export interface DaemonWorkspaceMemoryStatus {

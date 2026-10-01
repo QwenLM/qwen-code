@@ -46,9 +46,10 @@ export function MemoryMessage({
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
-  const { files, loading, error, readFile, reload, writeMemory } = useMemory({
-    autoLoad: true,
-  });
+  const { files, loading, error, readMemoryFile, reload, writeMemory } =
+    useMemory({
+      autoLoad: true,
+    });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
   const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
@@ -57,6 +58,10 @@ export function MemoryMessage({
   const [draft, setDraft] = useState('');
   const [contentLoading, setContentLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // False when an existing file's full text is not in hand (read failed
+  // or truncated): saving uses mode=replace, which would overwrite
+  // whatever the panel could not show.
+  const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
 
@@ -91,6 +96,7 @@ export function MemoryMessage({
       setMessage(null);
       setContent('');
       setDraft('');
+      setEditable(true);
       if (!entry?.file) {
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
@@ -98,26 +104,37 @@ export function MemoryMessage({
         return;
       }
       setContentLoading(true);
-      readFile(entry.file.path)
+      readMemoryFile(entry.file.path)
         .then((result) => {
           if (loadSeq !== loadSeqRef.current) return;
           setContent(result.content);
+          if (result.truncated) {
+            setEditable(false);
+            setMode('view');
+            setMessage(t('memory.fileTruncated'));
+            return;
+          }
           setDraft(result.content);
-          if (result.truncated) setMessage(t('memory.fileTruncated'));
           requestAnimationFrame(() => editorRef.current?.focus());
         })
         .catch((readError: unknown) => {
           if (loadSeq !== loadSeqRef.current) return;
+          setEditable(false);
+          setMode('view');
+          if (entry.scope === 'global') {
+            setMessage(t('memory.globalReadUnsupported'));
+            return;
+          }
           const text =
             readError instanceof Error ? readError.message : String(readError);
           setMessage(text);
-          if (entry.scope !== 'global') onMessage?.(text, 'error');
+          onMessage?.(text, 'error');
         })
         .finally(() => {
           if (loadSeq === loadSeqRef.current) setContentLoading(false);
         });
     },
-    [onMessage, readFile, t],
+    [onMessage, readMemoryFile, t],
   );
 
   useEffect(() => {
@@ -167,7 +184,7 @@ export function MemoryMessage({
   };
 
   const handleSave = () => {
-    if (!selectedEntry) return;
+    if (!selectedEntry || !editable) return;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
@@ -232,6 +249,7 @@ export function MemoryMessage({
             <button
               type="button"
               className={styles.actionButton}
+              disabled={!editable}
               onClick={handleEdit}
             >
               {t('settings.action.edit')}
@@ -268,7 +286,7 @@ export function MemoryMessage({
               <button
                 type="button"
                 className={styles.primaryButton}
-                disabled={saving || contentLoading}
+                disabled={saving || contentLoading || !editable}
                 onClick={handleSave}
               >
                 {saving ? t('memory.saving') : t('memory.save')}

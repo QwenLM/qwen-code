@@ -1,0 +1,155 @@
+// @vitest-environment jsdom
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonWorkspaceMemoryFile } from '@qwen-code/web-shell/daemon-react-sdk';
+import { I18nProvider } from '../../i18n';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+const GLOBAL_PATH = '/home/u/.qwen/QWEN.md';
+
+const memory = vi.hoisted(() => ({
+  files: [] as DaemonWorkspaceMemoryFile[],
+  readMemoryFile: vi.fn(),
+  writeMemory: vi.fn(),
+  reload: vi.fn(),
+}));
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
+  return {
+    ...actual,
+    useMemory: () => ({
+      files: memory.files,
+      loading: false,
+      error: undefined,
+      readMemoryFile: memory.readMemoryFile,
+      reload: memory.reload,
+      writeMemory: memory.writeMemory,
+    }),
+  };
+});
+
+const { MemoryMessage } = await import('./MemoryMessage');
+
+let container: HTMLDivElement;
+let root: Root;
+
+async function flush() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function mountOnUserTab() {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <MemoryMessage />
+      </I18nProvider>,
+    );
+  });
+  await flush();
+  act(() => button('User').click());
+  await flush();
+}
+
+function button(label: string): HTMLButtonElement {
+  const match = Array.from(container.querySelectorAll('button')).find(
+    (item) => item.textContent === label,
+  );
+  if (!match) throw new Error(`button not found: ${label}`);
+  return match;
+}
+
+beforeEach(() => {
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+    cb(0);
+    return 0;
+  });
+  memory.files = [
+    { kind: 'memory_file', path: GLOBAL_PATH, scope: 'global', bytes: 42 },
+  ];
+  memory.readMemoryFile.mockReset();
+  memory.writeMemory.mockReset();
+  memory.reload.mockReset().mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  vi.unstubAllGlobals();
+});
+
+describe('MemoryMessage', () => {
+  it('keeps the User tab read-only when its file cannot be read', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error(`GET /file: path escapes workspace: ${GLOBAL_PATH}`),
+    );
+
+    await mountOnUserTab();
+
+    expect(memory.readMemoryFile).toHaveBeenLastCalledWith(GLOBAL_PATH);
+    expect(container.textContent).toContain(
+      'Global memory is outside the bound workspace',
+    );
+    expect(container.textContent).not.toContain('path escapes workspace');
+    expect(button('Edit').disabled).toBe(true);
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('replaces the global file with the edited text once it was read', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'existing\n',
+      truncated: false,
+    });
+    memory.writeMemory.mockResolvedValue({
+      ok: true,
+      filePath: GLOBAL_PATH,
+      bytesWritten: 15,
+      mode: 'replace',
+      changed: true,
+    });
+
+    await mountOnUserTab();
+    act(() => button('Edit').click());
+    await flush();
+
+    const editor = container.querySelector('textarea')!;
+    expect(editor.value).toBe('existing\n');
+    act(() => button('Save Memory').click());
+    await flush();
+
+    expect(memory.writeMemory).toHaveBeenCalledWith({
+      scope: 'global',
+      mode: 'replace',
+      content: 'existing\n',
+    });
+  });
+
+  it('does not offer editing a truncated file', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'partial',
+      truncated: true,
+    });
+
+    await mountOnUserTab();
+
+    expect(container.textContent).toContain('partial');
+    expect(button('Edit').disabled).toBe(true);
+  });
+});

@@ -1263,6 +1263,13 @@ export interface ServeWorkspaceMemoryFile {
   scope: ServeContextFileScope;
   /** Size in bytes of the file's serialized contents on disk. */
   bytes: number;
+  /**
+   * File text, present only when the caller asked for content
+   * (`GET /workspace/memory?content=true`) and the read succeeded.
+   */
+  content?: string;
+  /** True when `content` stops at the daemon's read cap. */
+  truncated?: boolean;
 }
 
 export interface ServeWorkspaceMemoryStatus {

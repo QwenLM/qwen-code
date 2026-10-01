@@ -39,6 +39,9 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
  * plus the user's `~/.qwen/` global. Read-only; returns
  * `initialized: false` and an empty `files` list when no files exist
  * (no synthetic 500s, mirroring PR 12's read-only routes).
+ * `?content=true` also returns each file's text, which is how a client
+ * reads the global file: it lives outside the bound workspace, so the
+ * sandboxed `GET /file` refuses it, yet `POST` below can replace it.
  *
  * `POST /workspace/memory` accepts `{ scope, content, mode }` and
  * forwards to `writeWorkspaceContextFile`. Strict mutation gate; on
@@ -192,13 +195,15 @@ export function mountWorkspaceMemoryRoutes(
   app: Application,
   deps: WorkspaceMemoryRouteDeps,
 ): void {
-  app.get('/workspace/memory', async (_req, res) => {
+  app.get('/workspace/memory', async (req, res) => {
     const assertGenerationOpen = captureOpenGeneration(deps, res);
     if (!assertGenerationOpen) return;
     if (!requireTrustedWorkspace(deps, res)) return;
     try {
       const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
-      const status = await collectStatus(deps.boundWorkspace);
+      const status = await collectStatus(deps.boundWorkspace, {
+        includeContent: req.query['content'] === 'true',
+      });
       assertGenerationOpen();
       res.status(200).json(status);
     } catch (err) {
@@ -359,7 +364,9 @@ export function mountWorkspaceQualifiedMemoryRoutes(
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
       const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
-      const status = await collectStatus(runtime.workspaceCwd);
+      const status = await collectStatus(runtime.workspaceCwd, {
+        includeContent: req.query['content'] === 'true',
+      });
       runtime.generationGuard?.assertOpen();
       res.status(200).json(status);
     } catch (err) {
@@ -483,6 +490,17 @@ interface DiscoveredFile {
   absolutePath: string;
   scope: ServeContextFileScope;
   bytes: number;
+  content?: string;
+  truncated?: boolean;
+}
+
+export interface CollectWorkspaceMemoryStatusOptions {
+  /**
+   * Read each discovered file's text, capped at the write route's
+   * byte limit. A file that fails to read keeps its entry without
+   * `content` and adds a cell to `errors[]`.
+   */
+  includeContent?: boolean;
 }
 
 /**
@@ -501,6 +519,7 @@ interface DiscoveredFile {
  */
 export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
+  options: CollectWorkspaceMemoryStatusOptions = {},
 ): Promise<ServeWorkspaceMemoryStatus> {
   const filenames = new Set(getAllMemoryFilenames());
   const files: DiscoveredFile[] = [];
@@ -542,6 +561,21 @@ export async function collectWorkspaceMemoryStatus(
     return createIdleWorkspaceMemoryStatus(boundWorkspace);
   }
 
+  if (options.includeContent) {
+    for (const file of files) {
+      try {
+        Object.assign(file, await readMemoryFileContent(file.absolutePath));
+      } catch (err) {
+        errors.push({
+          kind: 'memory_file',
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+          hint: file.absolutePath,
+        });
+      }
+    }
+  }
+
   const totalBytes = files.reduce((acc, f) => acc + f.bytes, 0);
   const result: ServeWorkspaceMemoryStatus = {
     v: STATUS_SCHEMA_VERSION,
@@ -553,6 +587,8 @@ export async function collectWorkspaceMemoryStatus(
         path: f.absolutePath,
         scope: f.scope,
         bytes: f.bytes,
+        ...(f.content !== undefined ? { content: f.content } : {}),
+        ...(f.truncated ? { truncated: true } : {}),
       }),
     ),
     totalBytes,
@@ -605,6 +641,19 @@ async function walkWorkspaceForMemory(
     }
   }
   return out;
+}
+
+async function readMemoryFileContent(
+  filePath: string,
+): Promise<{ content: string; truncated: boolean }> {
+  const buffer = await fs.readFile(filePath);
+  const truncated = buffer.length > MAX_MEMORY_CONTENT_BYTES;
+  return {
+    content: buffer
+      .subarray(0, truncated ? MAX_MEMORY_CONTENT_BYTES : buffer.length)
+      .toString('utf8'),
+    truncated,
+  };
 }
 
 function isEnoent(err: unknown): boolean {
