@@ -175,13 +175,14 @@ public class HarnessCoordinator {
             terminal = runClaimed(claimed, leaseLost,
                     submissionAttempted, recoveryPath);
         } catch (HostedHarnessCapabilityMismatchException error) {
-            terminal = fail(claimed, error.getCode(),
-                    "Hosted Harness capability policy changed.");
+            terminal = failTerminally(claimed, error.getCode(),
+                    "Hosted Harness capability policy changed.", error);
         } catch (HostedHarnessRecoveryDeclinedException error) {
-            terminal = fail(claimed, "managed_runtime_recovery_blocked",
+            terminal = failTerminally(claimed,
+                    "managed_runtime_recovery_blocked",
                     "The prior Harness generation parked a Turn this"
                             + " Harness cannot take over ("
-                            + error.getReason() + ").");
+                            + error.getReason() + ").", error);
         } catch (HostedHarnessGenerationException error) {
             // G3: a generation change is adopted, not failed. The next
             // dispatch attempt re-attaches through the takeover load; the
@@ -190,14 +191,15 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error, true);
         } catch (DaemonProtocolException error) {
-            terminal = fail(claimed, "hosted_harness_protocol_error",
-                    "Hosted Harness returned an invalid protocol response.");
+            terminal = failTerminally(claimed, "hosted_harness_protocol_error",
+                    "Hosted Harness returned an invalid protocol response.",
+                    error);
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() >= 400
                     && error.getStatusCode() < 500
                     && error.getStatusCode() != 409) {
-                terminal = fail(claimed, "hosted_harness_rejected",
-                        "Hosted Harness rejected the Turn.");
+                terminal = failTerminally(claimed, "hosted_harness_rejected",
+                        "Hosted Harness rejected the Turn.", error);
             } else {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error,
@@ -611,6 +613,18 @@ public class HarnessCoordinator {
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);
         return true;
+    }
+
+    // Terminal failures leave the Turn row as their only trace; log the
+    // underlying exception once so operators (and fault gates) see the
+    // actual cause.
+    private boolean failTerminally(TurnRecord turn, String code,
+            String message, RuntimeException error) {
+        LOG.warn("Managed Turn failed terminally tenant={} session={}"
+                        + " turn={} code={} message={}",
+                turn.tenantId(), turn.sessionId(), turn.turnId(), code,
+                message, error);
+        return fail(turn, code, message);
     }
 
     private boolean transientFailure(TurnRecord turn,

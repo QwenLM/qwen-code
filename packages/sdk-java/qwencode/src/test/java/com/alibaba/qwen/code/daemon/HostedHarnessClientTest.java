@@ -740,6 +740,36 @@ class HostedHarnessClientTest {
                         .loadTimeout(Duration.ZERO));
     }
 
+    // The serve delegating app answers with a bare 404 while its runtime is
+    // still starting (before the contract middleware exists); that window is
+    // transient, never a protocol defect (G3 Harness-restart race).
+    @Test
+    void preContract404IsTransientNotAProtocolDefect() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/plain");
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of("type", "text", "text", "hi");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            DaemonTransportException error = assertThrows(
+                    DaemonTransportException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertTrue(error.getMessage().contains("pre-contract"));
+        }
+    }
+
     private void createSessionRoute() {
         server.createContext("/session", exchange ->
                 sendSessionJson(exchange, 200, sessionJson()));

@@ -1094,8 +1094,19 @@ public final class HostedHarnessClient implements AutoCloseable {
             if (statusCode == 401 || statusCode == 403) {
                 return;
             }
+            // The serve delegating app answers requests with a bare
+            // pre-contract 404 while the runtime is still booting — the
+            // generation contract lives only in the runtime app, so this
+            // is "not ready yet", never a generation change.
+            if (statusCode == 404) {
+                throw new DaemonTransportException(
+                        "Hosted Harness answered a pre-contract 404"
+                                + " (still starting)",
+                        null);
+            }
             throw new DaemonProtocolException(
-                    "Hosted Harness response omitted " + BOOT_ID_HEADER);
+                    "Hosted Harness response omitted " + BOOT_ID_HEADER
+                            + " (HTTP " + statusCode + ")");
         }
         String normalized;
         try {

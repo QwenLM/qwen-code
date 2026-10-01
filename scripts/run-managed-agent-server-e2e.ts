@@ -959,9 +959,12 @@ try {
   await waitUntil(
     'Hosted Harness',
     async () => {
-      const response = await fetch(`http://127.0.0.1:${harnessPort}/health`, {
-        headers: { authorization: `Bearer ${harnessToken}` },
-      });
+      const response = await fetch(
+        `http://127.0.0.1:${harnessPort}/health?deep=1`,
+        {
+          headers: { authorization: `Bearer ${harnessToken}` },
+        },
+      );
       return response.ok;
     },
     60_000,
@@ -1339,7 +1342,7 @@ try {
       'Replacement Hosted Harness',
       async () => {
         const response = await fetch(
-          `http://127.0.0.1:${replacementHarnessPort}/health`,
+          `http://127.0.0.1:${replacementHarnessPort}/health?deep=1`,
           { headers: { authorization: `Bearer ${harnessToken}` } },
         );
         return response.ok;
