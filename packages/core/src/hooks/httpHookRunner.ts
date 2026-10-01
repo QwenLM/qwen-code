@@ -121,6 +121,7 @@ export class HttpHookRunner {
     input: HookInput,
     signal?: AbortSignal,
     trackRequest = false,
+    requestSignal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     let requestState: NonNullable<HookExecutionResult['httpRequestState']> =
       'not_started';
@@ -134,6 +135,7 @@ export class HttpHookRunner {
             requestState = state;
           }
         : undefined,
+      requestSignal,
     );
     return trackRequest
       ? { ...result, httpRequestState: requestState }
@@ -148,6 +150,7 @@ export class HttpHookRunner {
     onRequestState?: (
       state: NonNullable<HookExecutionResult['httpRequestState']>,
     ) => void,
+    requestSignal?: AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
     const hookId = hookConfig.name || hookConfig.url;
@@ -235,18 +238,19 @@ export class HttpHookRunner {
         hook_event_name: eventName,
       });
 
-      // Set up combined abort signal (external signal + timeout)
+      // Managed requests keep their response channel until timeout or shutdown.
       const timeout = hookConfig.timeout
         ? hookConfig.timeout * 1000
         : DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000;
       const { signal: combinedSignal, cleanup } = combineAbortSignals(
-        [signal],
+        [requestSignal ?? signal],
         { timeoutMs: timeout },
       );
 
       try {
         debugLogger.debug(`Executing HTTP hook: ${hookId} -> ${url}`);
 
+        signal?.throwIfAborted();
         combinedSignal.throwIfAborted();
         onRequestState?.('outcome_unknown');
         const response = await fetch(url, {
@@ -315,9 +319,9 @@ export class HttpHookRunner {
           (fetchError.name === 'AbortError' || combinedSignal.aborted)
         ) {
           // Timeout or abort is a non-blocking error per Qwen Code spec.
-          // The combined signal fires for both, so the caller's own signal
-          // tells them apart.
-          const cancelled = signal?.aborted === true;
+          const cancelled =
+            (requestSignal ?? signal)?.aborted === true ||
+            (signal?.aborted === true && !combinedSignal.aborted);
           debugLogger.warn(
             `HTTP hook ${hookId} ${cancelled ? 'was aborted' : `timed out after ${timeout}ms`} (non-blocking)`,
           );

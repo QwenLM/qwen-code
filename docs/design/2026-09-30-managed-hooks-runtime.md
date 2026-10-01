@@ -54,6 +54,13 @@ plan order. Fail-open/fail-closed policy is applied before saving the result, al
 when status reconciliation supplies the receipt. Failed or unknown once attempts
 do not become eligible again.
 
+With a ready catalog and no pending recovery, cancellation before a new occurrence
+still saves its plan and cancelled result, without dispatching a child Hook or
+consuming its once key. PreToolUse can then durably refuse every committed
+assistant tool call, including later calls in the same batch, before the turn
+ends as cancelled. An unknown prior effect or a failed journal write still blocks
+this continuation.
+
 Catalog replacement is an idempotent registration operation with an expected
 registration count. Revisions increase within each catalog namespace. Retrying an
 older operation acknowledges it without restoring an older effective catalog.
@@ -150,6 +157,12 @@ HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
 refused. A local runner-construction failure before dispatch is a settled failure
 under the saved fail policy. A received failure response can settle; a lost response after sending
 remains unknown and cannot be retried automatically. Hook outputs are bounded.
+For an in-flight managed HTTP Hook, user cancellation keeps the original request
+and body read alive until the configured HTTP timeout so a complete response can
+provide settlement evidence. The occurrence still ends as cancelled. Cancellation
+before dispatch sends no request. Runtime shutdown aborts the transport immediately;
+shutdown, timeout and disconnected or partial responses after dispatch remain
+unknown. Native HTTP cancellation keeps its existing immediate-abort behavior.
 Individual receipts and aggregate outputs use a 60 KiB bound. An oversized
 initial plan (including event input, descriptors and snapshot references) saves a
 bounded blocking receipt and a digest of the original semantic input. Recovery
@@ -174,6 +187,21 @@ before asynchronous admission can report success. This permanent capacity limit 
 the temporary concurrency refusal. Capacity reclamation needs a durable
 acknowledgement protocol and is deferred;
 an unrecorded refusal whose response is lost remains unknown on lookup.
+
+H2 explicitly accepts an unbounded availability loss for a genuine unknown.
+An unknown SessionEnd or SessionDelete prevents DELETE from completing: it returns
+503 and retains the attached Session and original Workspace owner. Retries observe
+the same saved occurrence; they do not redispatch it. Detach also requires all
+Hook effects to settle. The retained owner can block tools in other Sessions in
+that Workspace; it does not block a different Workspace's Runtime worker.
+Unknown operations count toward the worker's 16-operation admission limit and
+retain their holds for its lifetime. All saved receipts, including settled ones,
+count toward the 4096 lifetime limit. Neither timeout, user cancellation, DELETE
+nor process replacement proves completion or permits replay. H2 provides no
+administrative abandonment route; receipt reconciliation or durable fenced
+reclamation is tracked in [#13133](https://github.com/QwenLM/qwen-code/issues/13133).
+This is an accepted recovery limitation, not a bounded recovery or availability
+guarantee, and does not declare the original review findings resolved.
 
 ## Model activation
 

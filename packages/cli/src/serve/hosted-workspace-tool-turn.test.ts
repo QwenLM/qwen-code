@@ -2711,6 +2711,123 @@ function hookSession(fire: HostedHookSession['fire']): HostedHookSession {
   } as unknown as HostedHookSession;
 }
 
+it.each(['assistant-commit', 'second-call'] as const)(
+  'settles every tool refusal when cancelled before a new Hook plan (%s)',
+  async (window) => {
+    const controller = new AbortController();
+    const reason = new Error('turn cancelled');
+    const pin = {
+      catalogId: 'pre-cancel',
+      catalogRevision: 1,
+      definitionDigest: 'a'.repeat(64),
+    };
+    const hookControl = vi.fn<HostedWorkspaceBroker['hookControl']>(
+      async (operation) => {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: {
+              ...pin,
+              hooks: [
+                {
+                  hookId: 'before',
+                  eventName: HookEventName.PreToolUse,
+                  sequential: false,
+                  async: false,
+                  failClosed: true,
+                  onceKey: null,
+                  config: { type: 'command' },
+                },
+              ],
+            },
+          };
+        expect(operation.kind).toBe('hook-execute');
+        controller.abort(reason);
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      },
+    );
+    const hookBroker = {
+      ...broker,
+      runtimeSessionId: 'prompt',
+      runtime: {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      },
+      hookControl,
+    } as unknown as HostedWorkspaceBroker;
+    const hooks = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pin,
+      hookBroker,
+    );
+    await hooks.ensureReady();
+    if (window === 'assistant-commit') {
+      const originalCommit = commit;
+      commit = async (...args) => {
+        const id = await originalCommit(...args);
+        if (args[0] === 'assistant') controller.abort(reason);
+        return id;
+      };
+    }
+    turn = createTurn(false, { mode: 'yolo' }, hooks);
+    await expect(
+      turn.execute(calls, parts, 'model', controller.signal),
+    ).rejects.toBe(reason);
+    await expect(turn.finish()).resolves.toBeUndefined();
+    const history = await session.sink.project();
+    expect(history.map((record) => record.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual(
+      calls.map((call) => ({
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { error: 'Hook execution cancelled.' },
+        },
+      })),
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(hooks.hasPendingOperations).toBe(false);
+    const restored = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pin,
+      hookBroker,
+    );
+    for (const call of calls) {
+      expect(
+        await restored.fire(
+          HookEventName.PreToolUse,
+          `prompt:${call.callId}`,
+          {
+            tool_name: call.name,
+            tool_input: call.args,
+            tool_use_id: call.callId,
+            permission_mode: 'yolo',
+            prompt_id: 'prompt',
+          },
+          new AbortController().signal,
+        ),
+      ).toMatchObject({ continue: false, reason: 'Hook execution cancelled.' });
+    }
+    expect(
+      hookControl.mock.calls.filter(
+        ([operation]) => operation.kind === 'hook-execute',
+      ),
+    ).toHaveLength(window === 'assistant-commit' ? 0 : 1);
+  },
+);
+
 it('recovers committed tool results through the Hook owner acquisition', async () => {
   const hooks = hookSession(vi.fn());
   const acquire = vi.spyOn(hooks, 'acquire');
