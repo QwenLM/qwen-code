@@ -832,6 +832,105 @@ describe('ToolSearchTool', () => {
     ).resolves.toMatchObject({ tool: mcpTool });
   });
 
+  it('keeps a reviewed tool armed when its tool_search block is truncated mid-JSON', async () => {
+    // Model-facing truncation can cut a tool_search response inside a
+    // <function> block: the entry stays in history but the JSON no longer
+    // parses. The review did happen — the model received the full schema
+    // when the response arrived — so the tool must stay callable. Red when
+    // the sync goes back to deriving only from parseable blocks.
+    const hidden = new MockTool({
+      name: 'cron_list',
+      shouldDefer: true,
+      // A real schema so the serialized block carries parametersJsonSchema
+      // for the truncation cut to land inside the JSON payload.
+      params: { type: 'object', properties: { target: { type: 'string' } } },
+    });
+    registry.registerTool(hidden);
+    const history = await searchHistory(hidden.name);
+    registry.syncReviewedDeclarations(history);
+    expect(registry.getReviewedDeclaration(hidden.name)).toBe(
+      deferredDeclarationFingerprint(hidden),
+    );
+
+    // Cut the response output inside the JSON payload: the <function> head
+    // (and the tool's name) survives, the schema tail is gone.
+    const truncated = history.map((entry) => ({
+      ...entry,
+      parts: (entry.parts ?? []).map((part) => {
+        if (!part.functionResponse) return part;
+        const output = part.functionResponse.response?.['output'];
+        if (typeof output !== 'string') return part;
+        const cut = output.indexOf('"parametersJsonSchema"');
+        return {
+          ...part,
+          functionResponse: {
+            ...part.functionResponse,
+            response: { output: output.slice(0, cut) },
+          },
+        };
+      }),
+    }));
+    registry.syncReviewedDeclarations(truncated);
+
+    expect(registry.getReviewedDeclaration(hidden.name)).toBe(
+      deferredDeclarationFingerprint(hidden),
+    );
+    await expect(
+      resolveDeferredToolCall(registry, {
+        name: hidden.name,
+        arguments: {},
+      }),
+    ).resolves.toMatchObject({ tool: hidden });
+  });
+
+  it('still forgets a review when its tool_search block leaves the history entirely', async () => {
+    // The carry-over is for present-but-unreadable evidence only: an empty
+    // retained window means the model can no longer see the schema at all,
+    // so the review is forgotten (the truncate/orphan/clear pins' contract).
+    const hidden = new MockTool({ name: 'cron_list', shouldDefer: true });
+    registry.registerTool(hidden);
+    registry.syncReviewedDeclarations(await searchHistory(hidden.name));
+    expect(registry.getReviewedDeclaration(hidden.name)).toBeDefined();
+
+    registry.syncReviewedDeclarations([]);
+
+    expect(registry.getReviewedDeclaration(hidden.name)).toBeUndefined();
+    await expect(
+      resolveDeferredToolCall(registry, {
+        name: hidden.name,
+        arguments: {},
+      }),
+    ).resolves.toMatchObject({ errorType: ToolErrorType.INVALID_TOOL_PARAMS });
+  });
+
+  it('overwrites a review when a fresher tool_search block re-derives one', async () => {
+    // The carry-over is not accumulation of stale entries: a new review of
+    // the same name re-derives and replaces the old fingerprint.
+    const hidden = new MockTool({
+      name: 'cron_list',
+      shouldDefer: true,
+    });
+    registry.registerTool(hidden);
+    registry.recordReviewedDeclaration(hidden);
+    const stale = registry.getReviewedDeclaration(hidden.name);
+
+    const changed = new MockTool({
+      name: 'cron_list',
+      shouldDefer: true,
+      description: 'a changed schema',
+      params: {
+        type: 'object',
+        properties: { extra: { type: 'string' } },
+      },
+    });
+    registry.registerTool(changed);
+    registry.syncReviewedDeclarations(await searchHistory(changed.name));
+
+    const fresh = registry.getReviewedDeclaration(changed.name);
+    expect(fresh).toBe(deferredDeclarationFingerprint(changed));
+    expect(fresh).not.toBe(stale);
+  });
+
   it('leaves a legacy serverName-less block unreviewed while its tool is not registered', () => {
     // Progressive MCP discovery registers tools after a resumed chat's first
     // sync. Recording the bare suffix here would refuse every later call as

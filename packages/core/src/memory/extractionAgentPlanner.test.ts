@@ -171,6 +171,56 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ]);
   });
 
+  it('curates degraded placeholder turns out of the pending window', async () => {
+    // The window comes from raw history; the cached tail was curated. Without
+    // the same curation the extractor is told the assistant said
+    // "(request timeout)" and may write a durable memory from it.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    const pending: Content[] = [
+      { role: 'user', parts: [{ text: 'Remember: I prefer pnpm.' }] },
+      { role: 'model', parts: [{ text: '(request timeout)' }] },
+      { role: 'model', parts: [{ text: 'Noted.' }] },
+    ];
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', pending);
+
+    const extraHistory =
+      vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory;
+    expect(JSON.stringify(extraHistory)).not.toContain('(request timeout)');
+    expect(JSON.stringify(extraHistory)).toContain('Noted.');
+  });
+
+  it('drops the recency and today-anchoring claims for a historical window', async () => {
+    // While the cursor is behind, the window is a historical segment: the
+    // prompt must not claim it is the recent tail nor anchor its relative
+    // dates to today (nothing on this path carries the segment's own date).
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    const pending: Content[] = [
+      { role: 'user', parts: [{ text: 'We hit this yesterday.' }] },
+      { role: 'model', parts: [{ text: 'Noted.' }] },
+    ];
+
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', pending, {
+      windowAsOf: '2026-09-28T10:00:00.000Z',
+    });
+
+    const prompt = vi.mocked(runForkedAgent).mock.calls[0]?.[0].taskPrompt;
+    expect(prompt).not.toContain("Today's date is");
+    expect(prompt).not.toContain('recent conversation history');
+    expect(prompt).toContain('earlier part of the session');
+    expect(prompt).toContain('2026-09-28T10:00:00.000Z');
+  });
+
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {
     vi.mocked(getCacheSafeParams).mockReturnValue({
       generationConfig: {},

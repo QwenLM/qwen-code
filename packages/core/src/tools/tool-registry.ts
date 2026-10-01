@@ -1036,15 +1036,36 @@ export class ToolRegistry {
     this.reviewedDeferredDeclarations.clear();
   }
 
-  /** Rebuilds reviews from schemas actually retained in the primary history. */
+  /**
+   * Rebuilds reviews from schemas actually retained in the primary history.
+   *
+   * Replacement is the contract for history-replacement events: when a
+   * compaction or truncation removes the tool_search block entirely, the
+   * model can no longer see the schema, so the review must be forgotten.
+   * The one exception is a block that is still present but unreadable —
+   * model-facing truncation can cut a tool_search response mid-JSON, which
+   * fails the parse without meaning the review never happened: the model
+   * did receive the full schema when the response arrived. Such a name is
+   * recovered from the block's intact head and its in-memory review carries
+   * over; a name absent from every tool_search block in history is still
+   * forgotten.
+   */
   syncReviewedDeclarations(history: readonly Content[]): void {
-    const reviewed = new Map<string, string>();
+    const derived = new Map<string, string>();
+    // Names mentioned by a tool_search block, recoverable from the block's
+    // head even when truncation cut the JSON tail.
+    const mentioned = new Set<string>();
     for (const entry of history) {
       for (const part of entry.parts ?? []) {
         const response = part.functionResponse;
         if (response?.name !== ToolNames.TOOL_SEARCH) continue;
         const output = response.response?.['output'];
         if (typeof output !== 'string') continue;
+        for (const mention of output.matchAll(
+          /<function>\s*\{\s*"name"\s*:\s*"([^"]+)"/gs,
+        )) {
+          mentioned.add(mention[1]!);
+        }
         for (const match of output.matchAll(/<function>(.*?)<\/function>/gs)) {
           try {
             const { name, parametersJsonSchema, serverName } = JSON.parse(
@@ -1054,10 +1075,10 @@ export class ToolRegistry {
             const suffix = `\u0000${name}\u0000${JSON.stringify(parametersJsonSchema)}`;
             const previous = this.reviewedDeferredDeclarations.get(name);
             if (typeof serverName === 'string') {
-              reviewed.set(name, `${serverName}${suffix}`);
+              derived.set(name, `${serverName}${suffix}`);
             } else if (previous?.endsWith(suffix)) {
               // Old transcripts did not serialize the MCP server identity.
-              reviewed.set(name, previous);
+              derived.set(name, previous);
             } else {
               // Legacy block without server provenance, and no in-memory
               // review to re-adopt (fresh process, or a cleared map).
@@ -1076,10 +1097,10 @@ export class ToolRegistry {
                 // changed schema must keep refusing.
                 const liveFingerprint = deferredDeclarationFingerprint(live);
                 if (liveFingerprint === `${live.serverName}${suffix}`) {
-                  reviewed.set(name, liveFingerprint);
+                  derived.set(name, liveFingerprint);
                 }
               } else {
-                reviewed.set(name, suffix);
+                derived.set(name, suffix);
               }
             }
           } catch {
@@ -1088,7 +1109,16 @@ export class ToolRegistry {
         }
       }
     }
-    this.reviewedDeferredDeclarations = reviewed;
+    for (const name of mentioned) {
+      if (derived.has(name)) continue;
+      // Present but unreadable (truncated mid-block): keep the review the
+      // model genuinely received rather than disarming the tool.
+      const existing = this.reviewedDeferredDeclarations.get(name);
+      if (existing !== undefined) {
+        derived.set(name, existing);
+      }
+    }
+    this.reviewedDeferredDeclarations = derived;
   }
 
   /**

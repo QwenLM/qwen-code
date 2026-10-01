@@ -8,6 +8,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
+import { extractCuratedHistory } from '../core/llm-chat.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
@@ -43,7 +44,7 @@ const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACTION_AGENT');
 const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   'You are now acting as the managed memory extraction subagent for an AI coding assistant.',
   '',
-  'The recent conversation history is already in your context. Analyze only that recent conversation and use it to update persistent managed memory.',
+  'The conversation history is already in your context. Analyze only that conversation and use it to update persistent managed memory.',
   '',
   'Rules:',
   '- Read existing memory files first to avoid creating duplicates.',
@@ -188,25 +189,35 @@ function buildTaskPrompt(
   userMemoryRoot: string,
   topicSummaries: string,
   keywordVocabularySnapshot: string,
+  windowAsOf?: string,
 ): string {
   return [
     'Managed memory has TWO directories. Choose which one to write each memory into using the per-type `<scope>` guidance in your system instructions:',
     `- USER memory (cross-project, durable knowledge about who the user is): \`${userMemoryRoot}\``,
     `- PROJECT memory (this project only): \`${projectMemoryRoot}\``,
     '',
-    'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
+    windowAsOf
+      ? 'Scan the conversation history segment in your context and update durable managed memory in whichever directory each memory belongs.'
+      : 'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
     '',
     // Inherited history is scrubbed of `<system-reminder>` blocks above, and
     // those are the only place a date reaches the model (the startup prelude
     // and the per-turn refresh). Passing extraHistory also suppresses the
     // fork's own env bootstrap, so the date has to be stated here or the
     // "convert relative dates to absolute ones" instruction is unanswerable.
-    `Today's date is ${formatDateForContext()} — use it to turn any relative date in the history into an absolute one before saving.`,
+    // A historical segment (the pending window while the cursor is behind)
+    // must NOT be anchored to today: nothing on this path carries the
+    // window's own date, and `windowAsOf` is the previous cursor's write
+    // time — only a proxy, so the instruction drops the conversion claim
+    // rather than re-anchoring to it.
+    windowAsOf
+      ? `This segment is from an earlier part of the session (last processed around ${windowAsOf}) — do not convert its relative dates against today; keep them relative or omit them.`
+      : `Today's date is ${formatDateForContext()} — use it to turn any relative date in the history into an absolute one before saving.`,
     '',
     'Available tools in this run: `read_file`, `grep_search`, `glob`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
     '- Do not use any other tools.',
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
-    '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
+    '- You MUST only use content from the conversation history in your context plus the current managed memory files.',
     '- Do not inspect repository code, git history, or unrelated files.',
     `- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory in either managed memory root as protected read-only records. You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete them, and do not intentionally remove their valid entries from \`${AUTO_MEMORY_INDEX_FILENAME}\`.`,
     '- Prefer updating an existing writable memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
@@ -300,6 +311,14 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
   history?: Content[],
+  opts?: {
+    /**
+     * Set when `history` is the pending window and the cursor is behind: the
+     * previous cursor's write time, the nearest proxy for the window's own
+     * date. Drops the recency wording and the anchor-to-today date claim.
+     */
+    windowAsOf?: string;
+  },
 ): Promise<AutoMemoryExtractionExecutionResult> {
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
@@ -308,9 +327,14 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
+  // The pending window comes from raw history: curate it the way the cached
+  // tail is curated, or degraded placeholder turns (e.g. "(request
+  // timeout)") reach the extractor as something the assistant said.
   const inputHistory = history
-    ? slimCompactionInput(history, config.getEffectiveInputModalities())
-        .slimmedHistory
+    ? slimCompactionInput(
+        extractCuratedHistory(history),
+        config.getEffectiveInputModalities(),
+      ).slimmedHistory
     : cacheSafe.history;
   const extraHistory = buildAgentHistory(inputHistory);
 
@@ -338,6 +362,7 @@ export async function runAutoMemoryExtractionByAgent(
       userMemoryRoot,
       topicSummaries,
       keywordVocabularySnapshot,
+      opts?.windowAsOf,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
     maxTurns: config.getMemoryAgentMaxTurns() ?? 5,
