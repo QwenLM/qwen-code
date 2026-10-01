@@ -387,6 +387,48 @@ describe('useManagedActions', () => {
     expect(hook.latest?.action).toEqual(pending);
   });
 
+  it('drops an approval the service reports as ended and reads again', async () => {
+    const ended = Object.assign(new Error('Action expired'), {
+      status: 409,
+      code: 'action_expired',
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    expect(hook.latest?.action).toBeUndefined();
+    expect(hook.latest?.answerError).toBeUndefined();
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(hook.latest?.action).toBeUndefined();
+  });
+
+  it('shows an ended approval again when the next read still lists it', async () => {
+    const ended = Object.assign(new Error('Action cancelled'), {
+      status: 409,
+      code: 'action_cancelled',
+    });
+    const listPending = vi.fn().mockResolvedValue([pending]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(hook.latest?.answerError).toBeUndefined();
+  });
+
   it('does not retry a read the service answered definitively', async () => {
     vi.useFakeTimers();
     const listPending = vi

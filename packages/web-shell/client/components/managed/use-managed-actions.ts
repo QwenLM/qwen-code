@@ -12,6 +12,21 @@ const EXPIRY_GRACE_MS = 1_000;
 // A failed read of the pending approvals is retried a few times, so one
 // transient failure does not hide an approval until it expires.
 const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+// The contract's codes for an Action that already ended: it expired, was
+// cancelled, or was answered elsewhere. Retrying the answer cannot succeed.
+const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
+  'action_expired',
+  'action_cancelled',
+  'action_already_resolved',
+]);
+
+function endedAction(failure: unknown): boolean {
+  const code =
+    typeof failure === 'object' && failure !== null && 'code' in failure
+      ? (failure as { code?: unknown }).code
+      : undefined;
+  return typeof code === 'string' && ENDED_ACTION_CODES.has(code);
+}
 
 export interface ManagedActionsState {
   /** The approval to show; answered ones stay hidden while they settle. */
@@ -57,6 +72,10 @@ export function useManagedActions(
   // The Action whose answer last failed, so the warning can be dropped once
   // that Action is no longer pending instead of labelling the next one.
   const answerFailure = useRef<string | undefined>(undefined);
+  // Actions hidden because the service reported them ended when answered. A
+  // read that still lists one shows it again, so a wrong report cannot hide
+  // an approvable Action.
+  const endedAnswers = useRef(new Set<string>());
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -73,6 +92,7 @@ export function useManagedActions(
     setAnswerError(undefined);
     loadFailures.current = 0;
     answerFailure.current = undefined;
+    endedAnswers.current.clear();
   }, [sessionId]);
 
   useEffect(() => {
@@ -93,6 +113,17 @@ export function useManagedActions(
         loadFailures.current = 0;
         setPending({ sessionId, actions });
         setLoadError(undefined);
+        const stillListed = actions
+          .map((entry) => entry.actionId)
+          .filter((id) => endedAnswers.current.has(id));
+        endedAnswers.current.clear();
+        if (stillListed.length > 0) {
+          setAnswered((current) => {
+            const next = new Set(current);
+            for (const id of stillListed) next.delete(id);
+            return next;
+          });
+        }
         // The Action whose answer failed is no longer pending, so the
         // unconfirmed-answer warning has nothing left to describe; keeping it
         // would announce a stale failure beside an unrelated card.
@@ -163,6 +194,15 @@ export function useManagedActions(
         answerFailure.current = undefined;
         setRevision((value) => value + 1);
       } catch (failure) {
+        if (endedAction(failure)) {
+          // No retry can succeed, so keep the card hidden and read the list
+          // again instead of offering an answer the service will refuse.
+          endedAnswers.current.add(actionId);
+          answerFailure.current = undefined;
+          setAnswerError(undefined);
+          setRevision((value) => value + 1);
+          return;
+        }
         setAnswered((current) => {
           const next = new Set(current);
           next.delete(actionId);
