@@ -1,4 +1,10 @@
 import type { components } from './generated/managed-agent-api';
+import type {
+  ManagedArtifact,
+  ManagedArtifactPage,
+  ManagedArtifactResponse,
+  ManagedToolResultResponse,
+} from './managed-tool-result-types';
 
 type Schemas = components['schemas'];
 
@@ -19,6 +25,10 @@ export type JavaAgentSession = Omit<
   environment?: JavaAgentEnvironment | null;
 };
 
+export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
+
+export type JavaAgentWorkspacePage = Schemas['WebShellWorkspacePage'];
+
 export type JavaAgentSessionPage = Omit<
   Schemas['WebShellSessionPage'],
   'data'
@@ -28,6 +38,16 @@ export type JavaAgentSessionPage = Omit<
 
 export type JavaAgentEvent = Schemas['WebShellEvent'];
 
+export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
+
+const RESYNC_REQUIRED = 'agent.session.resync_required';
+
+export function isJavaAgentResyncRequired(
+  frame: JavaAgentEvent | JavaAgentResyncRequired,
+): frame is JavaAgentResyncRequired {
+  return frame.type === RESYNC_REQUIRED && !('sequence' in frame);
+}
+
 export type JavaAgentContentPart = Schemas['WebShellContentPart'];
 
 export type JavaAgentItem = Schemas['WebShellItem'];
@@ -35,12 +55,6 @@ export type JavaAgentItem = Schemas['WebShellItem'];
 export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
-
-// The server still accepts only "text" blocks, not the contract's "input_text"
-// (contract-known-gaps.txt in packages/sdk-java/managed-agent-server).
-type JavaAgentInput<T> = Omit<T, 'input'> & {
-  input: Array<{ type: 'text'; text: string }>;
-};
 
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
@@ -92,6 +106,21 @@ export class JavaManagedAgentClient {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
   }
 
+  listWorkspaces(
+    request: Schemas['WebShellWorkspaceQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentWorkspacePage> {
+    return this.post('/workspaces/query', request, signal);
+  }
+
+  getWorkspace(workspaceId: string, signal?: AbortSignal) {
+    return this.post<JavaAgentWorkspace>(
+      '/workspaces/get',
+      { workspaceId },
+      signal,
+    );
+  }
+
   getTranscript(
     request: Schemas['WebShellTranscriptRequest'],
     signal?: AbortSignal,
@@ -100,14 +129,14 @@ export class JavaManagedAgentClient {
   }
 
   createSession(
-    request: JavaAgentInput<Schemas['WebShellCreateRequest']>,
+    request: Schemas['WebShellCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
   }
 
   submitTurn(
-    request: JavaAgentInput<Schemas['WebShellSubmitRequest']>,
+    request: Schemas['WebShellSubmitRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/submit', request, signal);
@@ -120,10 +149,185 @@ export class JavaManagedAgentClient {
     return this.post('/turns/cancel', request, signal);
   }
 
+  getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
+    return this.post<ManagedToolResultResponse>(
+      '/tool-results/get',
+      { sessionId, itemId },
+      signal,
+    );
+  }
+
+  listArtifacts(
+    request: { sessionId: string; cursor?: string; limit?: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedArtifactPage>('/artifacts/query', request, signal);
+  }
+
+  getArtifact(sessionId: string, artifactId: string, signal?: AbortSignal) {
+    return this.post<ManagedArtifactResponse>(
+      '/artifacts/get',
+      { sessionId, artifactId },
+      signal,
+    );
+  }
+
+  async readArtifactRange(
+    artifact: ManagedArtifact,
+    offset: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
+    if (
+      !Number.isSafeInteger(offset) ||
+      !Number.isSafeInteger(length) ||
+      offset < 0 ||
+      length < 1 ||
+      length > 1024 * 1024 ||
+      offset >= artifact.byte_length
+    ) {
+      throw new Error('Invalid artifact byte range');
+    }
+    const end = Math.min(offset + length, artifact.byte_length) - 1;
+    const response = await this.artifactContent(
+      artifact,
+      signal,
+      `bytes=${offset}-${end}`,
+    );
+    if (
+      response.status !== 206 ||
+      response.headers.get('content-range') !==
+        `bytes ${offset}-${end}/${artifact.byte_length}`
+    ) {
+      await response.body?.cancel();
+      throw new Error('Artifact response does not match the requested range');
+    }
+    const bytes = new Uint8Array(end - offset + 1);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Artifact response has no byte stream');
+    let received = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        if (received + chunk.value.byteLength > bytes.byteLength) {
+          throw new Error('Artifact response exceeds the requested range');
+        }
+        bytes.set(chunk.value, received);
+        received += chunk.value.byteLength;
+      }
+      if (received !== bytes.byteLength) {
+        throw new Error('Artifact response ended before the requested range');
+      }
+      return bytes;
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
+
+  async openArtifactStream(
+    artifact: ManagedArtifact,
+    signal?: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const response = await this.artifactContent(artifact, signal);
+    if (
+      response.status !== 200 ||
+      response.headers.get('content-length') !== String(artifact.byte_length) ||
+      !response.body
+    ) {
+      await response.body?.cancel();
+      throw new Error('Artifact download does not match its metadata');
+    }
+    let received = 0;
+    return response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          received += chunk.byteLength;
+          if (received > artifact.byte_length) {
+            throw new Error('Artifact download exceeds its declared length');
+          }
+          controller.enqueue(chunk);
+        },
+        flush() {
+          if (received !== artifact.byte_length) {
+            throw new Error('Artifact download is incomplete');
+          }
+        },
+      }),
+      { signal },
+    );
+  }
+
+  private async artifactContent(
+    artifact: ManagedArtifact,
+    signal?: AbortSignal,
+    range?: string,
+  ): Promise<Response> {
+    if (
+      !/^[a-f0-9]{64}$/.test(artifact.revision) ||
+      artifact.sha256 !== artifact.revision ||
+      !Number.isSafeInteger(artifact.byte_length) ||
+      artifact.byte_length < 0
+    ) {
+      throw new Error('Artifact byte identity is invalid');
+    }
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('accept', 'application/octet-stream');
+    headers.set('if-match', `"${artifact.sha256}"`);
+    if (range) headers.set('range', range);
+    const path = `/v1/agents/sessions/${encodeURIComponent(artifact.session_id)}/artifacts/${encodeURIComponent(artifact.id)}/content`;
+    let response: Response;
+    for (let attempt = 0; ; attempt++) {
+      response = await this.fetchImpl(
+        `${this.baseUrl}${path}?revision=${encodeURIComponent(artifact.revision)}`,
+        {
+          method: 'GET',
+          headers,
+          credentials: this.credentials,
+          signal,
+          redirect: 'error',
+        },
+      );
+      if (attempt > 0 || ![429, 503].includes(response.status)) break;
+      const retryAfter = response.headers.get('retry-after');
+      const delay =
+        retryAfter === null
+          ? 1000
+          : Number.isFinite(Number(retryAfter))
+            ? Number(retryAfter) * 1000
+            : Date.parse(retryAfter) - Date.now();
+      const wait = Number.isFinite(delay) ? Math.max(0, delay) : 1000;
+      if (wait > 5000) break;
+      await response.body?.cancel();
+      signal?.throwIfAborted();
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, wait);
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+    if (!response.ok) throw await toHttpError(response);
+    if (
+      response.headers.get('etag') !== `"${artifact.sha256}"` ||
+      ![null, 'identity'].includes(response.headers.get('content-encoding'))
+    ) {
+      await response.body?.cancel();
+      throw new Error('Artifact validator does not match its metadata');
+    }
+    return response;
+  }
+
   async *streamEvents(
     request: Schemas['WebShellStreamRequest'],
     signal?: AbortSignal,
-  ): AsyncGenerator<JavaAgentEvent> {
+  ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
       '/events/stream',
       request,
@@ -208,9 +412,12 @@ function nextFrameBoundary(
     : { index: match.index, length: match[0].length };
 }
 
-function decodeEventFrame(frame: string): JavaAgentEvent | undefined {
+function decodeEventFrame(
+  frame: string,
+): JavaAgentEvent | JavaAgentResyncRequired | undefined {
   const data: string[] = [];
   let id: number | undefined;
+  let name: string | undefined;
   for (const line of frame.split(/\r?\n/)) {
     if (!line || line.startsWith(':')) continue;
     const separator = line.indexOf(':');
@@ -219,10 +426,16 @@ function decodeEventFrame(frame: string): JavaAgentEvent | undefined {
       separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
     if (field === 'data') data.push(value);
     if (field === 'id' && /^\d+$/.test(value)) id = Number(value);
+    if (field === 'event') name = value;
   }
   if (data.length === 0) return undefined;
   const parsed: unknown = JSON.parse(data.join('\n'));
   if (typeof parsed !== 'object' || parsed === null) return undefined;
+  // The server's only frame without an id: the cursor fell below the replay
+  // floor, and the stream ends after it.
+  if (name === RESYNC_REQUIRED && id === undefined) {
+    return parsed as JavaAgentResyncRequired;
+  }
   const event = parsed as JavaAgentEvent;
   return id === undefined || event.sequence === id
     ? event

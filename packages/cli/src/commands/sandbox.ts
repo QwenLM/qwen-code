@@ -92,8 +92,8 @@ export const sandboxCommand: CommandModule = {
       const { admitShellSandbox, probeShellSandbox } = await import(
         '@qwen-code/qwen-code-core/sandbox/runtime-shell-policy.js'
       );
-      const { executeBwrap } = await import(
-        '@qwen-code/qwen-code-core/sandbox/bwrap-execution.js'
+      const { executeSandbox } = await import(
+        '@qwen-code/qwen-code-core/sandbox/execute-sandbox.js'
       );
       const { sanitizeChildEnv } = await import(
         '@qwen-code/qwen-code-core/utils/sanitize-child-env.js'
@@ -103,7 +103,7 @@ export const sandboxCommand: CommandModule = {
         process.cwd(),
       );
       const candidate = createExecutionSandboxPolicy(selected, process.cwd());
-      const policy = admitShellSandbox(
+      const admitted = admitShellSandbox(
         {
           model: '',
           debugMode: false,
@@ -114,14 +114,16 @@ export const sandboxCommand: CommandModule = {
         Storage.getRuntimeBaseDir(),
         Storage.getGlobalQwenDir(),
       )!;
-      report(`Boundary: tools; backend: ${policy.requestedBackend} → bwrap`);
+      const policy = await probeShellSandbox(admitted, controller.signal);
+      report(
+        `Boundary: tools; backend: ${policy.requestedBackend} → ${policy.effectiveBackend} (${policy.enforcement}${policy.landlockAbi ? `, ABI ${policy.landlockAbi}` : ''})`,
+      );
       report(
         `Filesystem: ${policy.filesystem}; workspace: ${policy.workspace}`,
       );
       report(`Command network: ${policy.network}`);
       report('Model, authentication and session traffic stay on the host.');
       report('Host reads and pathname Unix sockets remain accessible.');
-      await probeShellSandbox(policy, controller.signal);
       report('Backend probe: passed');
       const env = Object.fromEntries(
         Object.entries(sanitizeChildEnv(process.env)).filter(
@@ -141,7 +143,7 @@ export const sandboxCommand: CommandModule = {
         process.stderr.on('error', handleOutputError);
         try {
           // env resolves PATH inside confinement and receives literal argv.
-          const handle = await executeBwrap(
+          const handle = await executeSandbox(
             policy,
             {
               executable: '/usr/bin/env',
@@ -217,7 +219,7 @@ export const sandboxCommand: CommandModule = {
           if (inside === 'allowed') fs.unlinkSync(process.argv[1]);
           console.log(JSON.stringify({inside, outside:write(process.argv[2], 'w'), pid:fs.readlinkSync('/proc/self/ns/pid'), net:fs.readlinkSync('/proc/self/ns/net')}));
         `;
-        const handle = await executeBwrap(
+        const handle = await executeSandbox(
           policy,
           {
             executable: fs.realpathSync(process.execPath),
@@ -239,16 +241,26 @@ export const sandboxCommand: CommandModule = {
           [
             'workspace policy',
             observed['inside'] ===
-              (policy.filesystem === 'workspace-write' ? 'allowed' : 'EROFS'),
+              (policy.filesystem === 'workspace-write'
+                ? 'allowed'
+                : policy.effectiveBackend === 'landlock'
+                  ? 'EACCES'
+                  : 'EROFS'),
           ],
           [
             'host-writable outside file denied',
-            observed['outside'] === 'EROFS' &&
+            observed['outside'] ===
+              (policy.effectiveBackend === 'landlock' ? 'EACCES' : 'EROFS') &&
               fs.readFileSync(outside, 'utf8') === 'unchanged',
           ],
           [
-            'private PID namespace',
-            typeof observed['pid'] === 'string' && observed['pid'] !== hostPid,
+            policy.effectiveBackend === 'landlock'
+              ? 'shared PID namespace (Landlock boundary)'
+              : 'private PID namespace',
+            typeof observed['pid'] === 'string' &&
+              (policy.effectiveBackend === 'landlock'
+                ? observed['pid'] === hostPid
+                : observed['pid'] !== hostPid),
           ],
           [
             'command network namespace',

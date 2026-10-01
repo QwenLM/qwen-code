@@ -392,10 +392,17 @@ describe('POST /session/:id/worktree-reset', () => {
     });
     expect(res.body.worktreeState).toBe('persisted-v1');
 
+    // Worktree metadata at spawn keeps the replacement off a paired Managed
+    // engine, as it does for a fresh worktree creation.
     expect(fixture.fake.spawnOrAttach).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceCwd: fixture.workspaceDir,
         sessionScope: 'thread',
+        worktree: {
+          slug: fixture.slug,
+          path: fixture.realTarget,
+          branch: fixture.worktreeBranch,
+        },
       }),
     );
     expect(fixture.fake.changeSessionCwd).toHaveBeenCalledWith(

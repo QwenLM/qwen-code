@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, onTestFinished } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
+  MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
   QUALIFIED_ACP_WS_PROXY,
   QUALIFIED_VOICE_STREAM_PROXY,
 } from '../vite.config';
@@ -28,39 +29,49 @@ function loadConfig(): UserConfig {
   });
 }
 
-it('serves preview documents with CSP scoped to the selected daemon', async ({
-  onTestFinished,
-}) => {
-  const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
-  onTestFinished(() => rm(dist, { recursive: true, force: true }));
-  await writeFile(
-    join(dist, 'index.html'),
-    '<!doctype html><title>Preview</title>',
-  );
-  const server = await preview({
-    ...loadConfig(),
-    configFile: false,
-    build: { outDir: dist },
-    preview: { host: '127.0.0.1', port: 0 },
-  });
-  onTestFinished(() => server.close());
-  const baseUrl = server.resolvedUrls!.local[0];
-  for (const [query, expected] of [
-    [
-      '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
-      "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
-    ],
-    ['//', "connect-src 'self'"],
-    ['', "connect-src 'self'"],
-  ]) {
-    const response = await fetch(`${baseUrl}${query}`);
-    expect(response.status).toBe(200);
-    expect(await response.text()).toContain('<title>Preview</title>');
-    expect(
-      response.headers.get('Content-Security-Policy')?.split('; '),
-    ).toContain(expected);
-  }
-});
+it.each([
+  [undefined, false],
+  ['0', false],
+  [' FALSE ', false],
+  ['1', true],
+  [' TRUE ', true],
+  ['', true],
+] as const)(
+  'serves preview documents with CSP scoped to the selected daemon (desktop=%s)',
+  async (desktopRelay, enabled) => {
+    vi.stubEnv('QWEN_SERVE_CLIENT_MCP_OVER_WS', desktopRelay);
+    onTestFinished(() => vi.unstubAllEnvs());
+    const dist = await mkdtemp(join(tmpdir(), 'web-shell-preview-'));
+    onTestFinished(() => rm(dist, { recursive: true, force: true }));
+    await writeFile(
+      join(dist, 'index.html'),
+      '<!doctype html><title>Preview</title>',
+    );
+    const server = await preview({
+      ...loadConfig(),
+      configFile: false,
+      build: { outDir: dist },
+      preview: { host: '127.0.0.1', port: 0 },
+    });
+    onTestFinished(() => server.close());
+    const baseUrl = server.resolvedUrls!.local[0];
+    for (const [query, expected] of [
+      [
+        '?daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      ],
+      ['//', "connect-src 'self'"],
+      ['', "connect-src 'self'"],
+    ]) {
+      const response = await fetch(`${baseUrl}${query}`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('<title>Preview</title>');
+      expect(
+        response.headers.get('Content-Security-Policy')?.split('; '),
+      ).toContain(expected + (enabled ? ' http://127.0.0.1:47821' : ''));
+    }
+  },
+);
 
 describe('Web Shell Voice development proxy', () => {
   it('proxies only qualified Voice stream upgrades', () => {
@@ -136,7 +147,7 @@ describe('Web Shell standalone session development proxy', () => {
 });
 
 describe('Web Shell Java Managed Agent development proxy', () => {
-  it('proxies only the public Java WebShell API prefix', () => {
+  it('proxies Java WebShell metadata and public artifact bytes', () => {
     const proxy = loadConfig().server?.proxy;
     const managed = proxy?.[MANAGED_AGENT_JAVA_ROUTE_PROXY];
 
@@ -144,6 +155,8 @@ describe('Web Shell Java Managed Agent development proxy', () => {
     expect(managed).toBeDefined();
     expect((managed as ProxyOptions).target).toBe('http://127.0.0.1:8080');
     expect(MANAGED_AGENT_JAVA_ROUTE_PROXY).toBe('/api/agent/web-shell/v1');
+    expect(MANAGED_AGENT_PUBLIC_ROUTE_PROXY).toBe('/v1/agents');
+    expect(proxy?.[MANAGED_AGENT_PUBLIC_ROUTE_PROXY]).toBe(managed);
   });
 });
 

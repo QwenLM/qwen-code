@@ -154,6 +154,7 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 
 export { InvalidStreamError };
 
@@ -588,6 +589,8 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Internal identity for the user prompt added to model history. */
+  promptId?: string;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -2736,9 +2739,13 @@ export class LlmChat {
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
+        // Resume replaces history with this snapshot, so include the pending
+        // question and do not share the live array mutated later in the turn.
         this.chatRecordingService?.recordChatCompression({
           info,
-          compressedHistory: newHistory,
+          compressedHistory: options?.pendingUserMessage
+            ? [...newHistory, options.pendingUserMessage]
+            : newHistory,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3180,6 +3187,8 @@ export class LlmChat {
         );
       }
 
+      // Compression derives prompt ids before the user content is pushed.
+      markApiHistoryPrompt(userContent, options?.promptId);
       if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
@@ -3293,9 +3302,10 @@ export class LlmChat {
         shouldForceFromHard &&
         compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
       ) {
+        // Keep the pending question with the compressed answer on resume.
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
-          compressedHistory: this.getHistoryShallow(),
+          compressedHistory: [...this.getHistoryShallow(), userContent],
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3331,7 +3341,8 @@ export class LlmChat {
           userContentPushSnapshotKey
         ] = this.userContentPushCount;
       }
-      // Add user content to history ONCE before any attempts.
+      // Add user content to history ONCE before any attempts. Later object
+      // spreads preserve the identity marked before compression.
       this.history.push(userContent);
       currentUserContent = userContent;
       userContentAdded = true;
