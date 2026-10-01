@@ -3,6 +3,10 @@ package com.alibaba.qwen.code.managedagent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
@@ -21,6 +25,7 @@ import org.flywaydb.core.api.configuration.Configuration;
 import org.flywaydb.core.api.migration.Context;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -46,7 +51,11 @@ class ManagedHookAdmissionIndexTest {
         // committed sibling, and both consume a once key.
         HookAdmissionHistory.Admission early = history.admitUntil(10);
         HookAdmissionHistory.Admission late = history.admitUntil(402);
+        assertThat(early.history()).isEqualTo(9);
         assertThat(late.history()).isEqualTo(401);
+        assertThat(early.selects()).as("lookups admitting execution %d",
+                early.history()).isPositive();
+        assertThat(early.statements()).isPositive();
         assertThat(late.selects()).as("SELECTs of execution %d vs %d",
                 late.history(), early.history()).isEqualTo(early.selects());
         assertThat(late.statements()).isEqualTo(early.statements());
@@ -110,6 +119,25 @@ class ManagedHookAdmissionIndexTest {
     }
 
     @Test
+    void consumesOnceKeysAndOrdinalsPerSession() throws Exception {
+        JdbcDataSource dataSource = migrated();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        // Two Sessions of one tenant name the same once keys and occurrences.
+        List<String> sessions = List.of(UUID.randomUUID().toString(),
+                UUID.randomUUID().toString());
+        for (String sessionId : sessions) {
+            new HookAdmissionHistory(dataSource, TENANT, WORKSPACE, sessionId)
+                    .admitUntil(4);
+        }
+        for (String sessionId : sessions) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_id = ? AND hook_once_key_hash IS NOT NULL",
+                    Integer.class, sessionId)).isEqualTo(2);
+        }
+    }
+
+    @Test
     void theUniqueIndexesRefuseADuplicateTheChecksMissed() throws Exception {
         JdbcDataSource dataSource = migrated();
         String sessionId = UUID.randomUUID().toString();
@@ -154,7 +182,21 @@ class ManagedHookAdmissionIndexTest {
         // A once key the checks found free is taken before the insert lands.
         ObjectNode execution = history.execution(5);
         history.interleaveOnceKey("once-5");
-        assertRefused(history, "race", execution, "repeats a record or a Hook once key");
+        Logger log = (Logger) LoggerFactory.getLogger(ManagedExtensionRecordStore.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
+        try {
+            assertRefused(history, "race", execution, "repeats a record or a Hook once key");
+        } finally {
+            log.detachAppender(logged);
+        }
+        // Only the log names the index; the refusal does not.
+        assertThat(logged.list).singleElement().satisfies(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getThrowableProxy().getMessage())
+                    .containsIgnoringCase("uq_managed_session_hook_once");
+        });
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                 + " qwen_managed_session_extension_record WHERE session_id = ?",
                 Integer.class, sessionId)).isEqualTo(rows);
@@ -206,7 +248,7 @@ class ManagedHookAdmissionIndexTest {
         }
         List<Damaged> damaged = new ArrayList<>();
         for (String damage : List.of("flipped", "deleted", "kind", "invalid",
-                "duplicate", "object", "foreign", "missing")) {
+                "duplicate", "object", "foreign", "digest", "length", "missing")) {
             String sessionId = UUID.randomUUID().toString();
             HookAdmissionHistory history = new HookAdmissionHistory(dataSource,
                     TENANT, WORKSPACE, sessionId);
@@ -249,7 +291,14 @@ class ManagedHookAdmissionIndexTest {
                         notAnExecution.getBytes(StandardCharsets.UTF_8),
                         notAnExecution.length(),
                         ExtensionRecordJournal.sha256(notAnExecution));
-                default -> jdbc.update("DELETE FROM qwen_managed_session_resource" + where);
+                // The body is intact; only what it was recorded as changes.
+                case "digest" -> jdbc.update("UPDATE qwen_managed_session_resource"
+                        + " SET sha256 = ?" + where,
+                        ExtensionRecordJournal.sha256("another body"));
+                case "length" -> jdbc.update("UPDATE qwen_managed_session_resource"
+                        + " SET byte_length = byte_length + 1" + where);
+                case "missing" -> jdbc.update("DELETE FROM qwen_managed_session_resource" + where);
+                default -> throw new AssertionError("No damage named " + damage);
             }
             damaged.add(new Damaged(damage, sessionId, history));
         }
@@ -289,6 +338,92 @@ class ManagedHookAdmissionIndexTest {
     }
 
     @Test
+    void blocksOnlyTheSessionsWhoseRecordsRepeatAKeyOfTheirSession() throws Exception {
+        JdbcDataSource dataSource = migrated();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        String healthy = UUID.randomUUID().toString();
+        new HookAdmissionHistory(dataSource, TENANT, WORKSPACE, healthy).admitUntil(4);
+        List<String> repeating = new ArrayList<>();
+        for (String field : List.of("onceKey", "ordinal")) {
+            String sessionId = UUID.randomUUID().toString();
+            HookAdmissionHistory history = new HookAdmissionHistory(dataSource,
+                    TENANT, WORKSPACE, sessionId);
+            history.admitUntil(4);
+            // Written past admission: execution 3 repeats execution 1's once
+            // key or ordinal, in a body that verifies.
+            ObjectNode repeated = history.execution(3);
+            if (field.equals("onceKey")) {
+                repeated.put("onceKey", "once-1");
+            } else {
+                repeated.put("ordinal", 1);
+            }
+            rewrite(jdbc, sessionId, "execution-3", repeated);
+            repeating.add(sessionId);
+        }
+        clearProjection(jdbc);
+        backfill(dataSource);
+
+        for (String sessionId : repeating) {
+            // One of the two keeps the key; the other none, and its Session
+            // admits nothing more.
+            assertThat(jdbc.queryForList("SELECT record_id FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_id = ? AND domain = 'hook_execution'"
+                            + " AND hook_occurrence_hash IS NULL",
+                    String.class, sessionId)).singleElement()
+                    .isIn("execution-1", "execution-3");
+            assertThat(jdbc.queryForMap("SELECT recovery_status,"
+                            + " recovery_detail_code FROM"
+                            + " qwen_managed_session_journal_head WHERE session_id = ?",
+                    sessionId)).containsValues("BLOCKED_RESOURCE",
+                    "hook_admission_record_duplicate");
+        }
+        assertThat(jdbc.queryForObject("SELECT recovery_status FROM"
+                + " qwen_managed_session_journal_head WHERE session_id = ?",
+                String.class, healthy)).isEqualTo("READY");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_id = ? AND hook_occurrence_hash IS NOT NULL",
+                Integer.class, healthy)).isEqualTo(4);
+    }
+
+    @Test
+    void blocksASessionWhoseRepeatedKeySpansBackfillPages() throws Exception {
+        JdbcDataSource dataSource = migrated();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        String sessionId = UUID.randomUUID().toString();
+        HookAdmissionHistory history = new HookAdmissionHistory(dataSource,
+                TENANT, WORKSPACE, sessionId);
+        history.admitUntil(600);
+        // The first and last executions the backfill reads, more than a page
+        // apart: the last repeats the first's occurrence ordinal.
+        List<String> order = jdbc.queryForList("SELECT record_id FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_id = ? AND domain = 'hook_execution'"
+                        + " ORDER BY record_key",
+                String.class, sessionId);
+        int first = Integer.parseInt(order.get(0).substring("execution-".length()));
+        int last = Integer.parseInt(order.get(order.size() - 1)
+                .substring("execution-".length()));
+        ObjectNode repeated = history.execution(last);
+        repeated.put("occurrenceId", "occurrence-" + first / 4).put("ordinal", first % 4);
+        rewrite(jdbc, sessionId, order.get(order.size() - 1), repeated);
+        clearProjection(jdbc);
+        backfill(dataSource);
+
+        assertThat(jdbc.queryForList("SELECT record_id FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_id = ? AND domain = 'hook_execution'"
+                        + " AND hook_occurrence_hash IS NULL",
+                String.class, sessionId)).containsExactly(order.get(order.size() - 1));
+        assertThat(jdbc.queryForMap("SELECT recovery_status,"
+                        + " recovery_detail_code FROM"
+                        + " qwen_managed_session_journal_head WHERE session_id = ?",
+                sessionId)).containsValues("BLOCKED_RESOURCE",
+                "hook_admission_record_duplicate");
+    }
+
+    @Test
     void upgradesHookRecordsWrittenUnderV27() throws Exception {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:hook-index-" + UUID.randomUUID()
@@ -311,6 +446,19 @@ class ManagedHookAdmissionIndexTest {
                         assertThat(error.getCode()).isEqualTo(
                                 ManagedExtensionRecordStore.ERROR_REJECTED))
                 .hasMessageContaining(message);
+    }
+
+    /** Replaces a record's committed body with a valid one, past admission. */
+    private static void rewrite(JdbcTemplate jdbc, String sessionId, String recordId,
+            ObjectNode record) {
+        byte[] body = ExtensionRecordJournal.bytes(record);
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = ?,"
+                        + " byte_length = ?, sha256 = ? WHERE session_id = ? AND"
+                        + " resource_id = (SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_id = ? AND record_id = ?)",
+                body, body.length, ExtensionRecordJournal.sha256(body), sessionId,
+                sessionId, recordId);
     }
 
     private static JdbcDataSource migrated() {

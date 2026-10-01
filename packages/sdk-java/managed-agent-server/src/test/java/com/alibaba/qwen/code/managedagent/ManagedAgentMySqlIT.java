@@ -985,11 +985,17 @@ class ManagedAgentMySqlIT {
                 early.selects(), early.statements(), early.nanos() / 1e6,
                 late.history(), late.selects(), late.statements(),
                 late.nanos() / 1e6);
+        assertThat(early.history()).isEqualTo(17);
+        assertThat(late.history()).isEqualTo(2001);
+        assertThat(early.selects()).as("lookups admitting execution %d",
+                early.history()).isPositive();
+        assertThat(early.statements()).isPositive();
         assertThat(late.selects()).isEqualTo(early.selects());
         assertThat(late.statements()).isEqualTo(early.statements());
 
         // Each admission lookup is an index lookup, not a scan of the
-        // Session's Hook records.
+        // Session's Hook records. The lookups are the statements the store
+        // ran above.
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         jdbc.queryForList("ANALYZE TABLE qwen_managed_session_extension_record");
         String scopeKey = sha256("mysql-hook-index\u0000" + session);
@@ -1006,13 +1012,18 @@ class ManagedAgentMySqlIT {
             Object[] arguments = new Object[lookup.length - 1];
             arguments[0] = scopeKey;
             System.arraycopy(lookup, 2, arguments, 1, lookup.length - 2);
-            assertThat(jdbc.queryForList("EXPLAIN SELECT record_resource_id FROM"
-                            + " qwen_managed_session_extension_record WHERE"
-                            + " session_scope_key = ? AND " + lookup[1]
-                            + " LIMIT 1", arguments))
-                    .as((String) lookup[1])
-                    .extracting(row -> row.get("key"))
-                    .containsExactly(lookup[0]);
+            String query = "SELECT record_resource_id FROM"
+                    + " qwen_managed_session_extension_record WHERE"
+                    + " session_scope_key = ? AND " + lookup[1] + " LIMIT 1";
+            assertThat(history.sql()).as((String) lookup[1]).contains(query);
+            // MySQL may intersect the index with the primary key; either way
+            // the lookup reads the index, never every row of the table.
+            assertThat(jdbc.queryForList("EXPLAIN " + query, arguments))
+                    .as((String) lookup[1]).singleElement().satisfies(plan -> {
+                        assertThat(plan.get("type")).isNotIn("ALL", "index");
+                        assertThat(String.valueOf(plan.get("key")).split(","))
+                                .contains((String) lookup[0]);
+                    });
         }
     }
 

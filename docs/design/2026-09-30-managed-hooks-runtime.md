@@ -248,8 +248,10 @@ even when an older registration settles later, independently of clocks or UUIDs.
 Migration V28 adds the admission columns and indexes; V29 backfills them for records
 written under V27 from their verified bodies. A record whose body is missing or
 corrupt keeps no keys, and V29 blocks its Session as a missing resource does
-(`BLOCKED_RESOURCE`), so no later admission can reuse a once key it consumed;
-other Sessions are unaffected. Running a binary older than V28 against a migrated
+(`BLOCKED_RESOURCE`), so no later admission can reuse a once key it consumed.
+So does a record that repeats a once key or occurrence ordinal of its Session,
+which only a write that bypassed admission can leave; other Sessions are
+unaffected. Running a binary older than V28 against a migrated
 database is unsupported: it writes Hook records without these keys, which the
 Session Store's checks then cannot see, although the Session authority still
 enforces them in memory.

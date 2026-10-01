@@ -189,8 +189,9 @@ Java Broker transport 和 Session Store 投影，以及对应同目录测试。M
 与原生注册顺序一致；即使旧注册较晚结算，也不受时钟或 UUID 排序影响。
 Migration V28 增加准入列与索引；V29 从经过校验的记录体为 V27 写入的记录回填。
 记录体缺失或损坏的记录不写入 key，V29 按资源缺失的方式阻塞其所属 Session
-（`BLOCKED_RESOURCE`），使后续准入无法复用该记录已消费的 once key；其他 Session
-不受影响。迁移后不支持再运行早于 V28 的二进制：它写入的 Hook 记录不带这些 key，
+（`BLOCKED_RESOURCE`），使后续准入无法复用该记录已消费的 once key。若记录重复了
+所属 Session 中已有的 once key 或 occurrence ordinal（只有绕过准入的写入才会留下），
+V29 同样阻塞该 Session；其他 Session 不受影响。迁移后不支持再运行早于 V28 的二进制：它写入的 Hook 记录不带这些 key，
 Session Store 的检查看不到这些记录，但 Session authority 仍在内存中执行这些约束。
 
 ## 验证与验收

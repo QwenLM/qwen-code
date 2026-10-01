@@ -27,6 +27,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -43,6 +45,8 @@ import org.springframework.stereotype.Repository;
  */
 @Repository
 public class ManagedExtensionRecordStore {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedExtensionRecordStore.class);
     public static final String ERROR_REJECTED =
             "managed_session_extension_record_rejected";
     private static final String EVENT_SUBTYPE = "managed_session_event_v1";
@@ -511,8 +515,12 @@ public class ManagedExtensionRecordStore {
                         keys.onceKeyHash(), keys.occurrenceHash(), keys.ordinal(),
                         keys.definitionHash());
             } catch (DuplicateKeyException error) {
-                // The checks above run under the Session's head lock; the
-                // unique indexes refuse whatever reaches here regardless.
+                // The checks above run under the Session's head lock, so
+                // only a writer that bypassed them reaches here; the unique
+                // indexes refuse it, and the log names which one.
+                LOG.warn("Managed Stage H record was refused by a unique index"
+                                + " tenant={} session={} domain={} record={}",
+                        tenantId, sessionId, domain, recordId, error);
                 throw rejected(domain + " record " + recordId + " repeats a"
                         + " record or a Hook once key or occurrence ordinal"
                         + " already committed in this Session.");

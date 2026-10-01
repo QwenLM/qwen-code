@@ -15,6 +15,8 @@ import java.sql.Statement;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import javax.sql.DataSource;
@@ -39,6 +41,7 @@ final class HookAdmissionHistory {
 
     private final AtomicInteger selects = new AtomicInteger();
     private final AtomicInteger statements = new AtomicInteger();
+    private final Set<String> sql = ConcurrentHashMap.newKeySet();
     private final TransactionTemplate transactions;
     private final ExtensionRecordJournal journal;
     private final ObjectNode registration;
@@ -142,6 +145,11 @@ final class HookAdmissionHistory {
         return last;
     }
 
+    /** Every distinct statement text the store has run for this history. */
+    Set<String> sql() {
+        return Set.copyOf(sql);
+    }
+
     /** Commits a revision; a refusal leaves the history unchanged. */
     void commit(String commandId, String domain, JsonNode record,
             List<CommitResource> resources) {
@@ -201,6 +209,7 @@ final class HookAdmissionHistory {
 
     private void record(String sql) {
         statements.incrementAndGet();
+        this.sql.add(sql);
         if (sql.stripLeading().toUpperCase(Locale.ROOT).startsWith("SELECT")) {
             selects.incrementAndGet();
         }

@@ -15,7 +15,9 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.Set;
 import org.flywaydb.core.api.migration.BaseJavaMigration;
 import org.flywaydb.core.api.migration.Context;
 
@@ -25,13 +27,15 @@ import org.flywaydb.core.api.migration.Context;
  * read from the record's committed body, verified as the store verifies a
  * resource it reads. A record that cannot be verified keeps no projection,
  * and its Session is blocked as a missing resource blocks it, so no later
- * admission can reuse a once key the record consumed; other Sessions are
- * unaffected.
+ * admission can reuse a once key the record consumed. So does a record that
+ * repeats a once key or an occurrence ordinal of its Session, which the
+ * unique indexes would refuse. Other Sessions are unaffected.
  */
 public class V29__managed_hook_admission_backfill extends BaseJavaMigration {
     // Rows read per query, so memory does not grow with the record count.
     private static final int PAGE_SIZE = 500;
     static final String BLOCKED_DETAIL = "hook_admission_record_unverified";
+    static final String DUPLICATE_DETAIL = "hook_admission_record_duplicate";
 
     @Override
     public void migrate(Context context) throws Exception {
@@ -71,6 +75,9 @@ public class V29__managed_hook_admission_backfill extends BaseJavaMigration {
                                 + " AND recovery_status = 'READY'")) {
             String scopeKey = "";
             String recordKey = "";
+            // The unique keys given to the Session being read. Its rows are
+            // read together, so this holds one Session's at a time.
+            Set<String> given = new HashSet<>();
             int read;
             do {
                 select.setString(1, scopeKey);
@@ -81,16 +88,30 @@ public class V29__managed_hook_admission_backfill extends BaseJavaMigration {
                 try (ResultSet rows = select.executeQuery()) {
                     while (rows.next()) {
                         read++;
+                        if (!rows.getString("session_scope_key").equals(scopeKey)) {
+                            given.clear();
+                        }
                         scopeKey = rows.getString("session_scope_key");
                         recordKey = rows.getString("record_key");
                         AdmissionKeys keys = keys(rows);
                         if (keys == null) {
-                            block.setString(1, BLOCKED_DETAIL);
-                            block.setTimestamp(2, Timestamp.from(Instant.now()));
-                            block.setString(3, rows.getString("tenant_id"));
-                            block.setString(4, rows.getString("session_id"));
-                            block.executeUpdate();
+                            block(block, rows, BLOCKED_DETAIL);
                             continue;
+                        }
+                        String once = keys.onceKeyHash() == null ? null
+                                : "once " + keys.onceKeyHash();
+                        String ordinal = keys.occurrenceHash() == null ? null
+                                : "ordinal " + keys.occurrenceHash() + " "
+                                        + keys.ordinal();
+                        if (given.contains(once) || given.contains(ordinal)) {
+                            block(block, rows, DUPLICATE_DETAIL);
+                            continue;
+                        }
+                        if (once != null) {
+                            given.add(once);
+                        }
+                        if (ordinal != null) {
+                            given.add(ordinal);
                         }
                         update.setString(1, keys.onceKeyHash());
                         update.setString(2, keys.occurrenceHash());
@@ -109,6 +130,15 @@ public class V29__managed_hook_admission_backfill extends BaseJavaMigration {
                 update.clearBatch();
             } while (read == PAGE_SIZE);
         }
+    }
+
+    private static void block(PreparedStatement block, ResultSet row,
+            String detail) throws SQLException {
+        block.setString(1, detail);
+        block.setTimestamp(2, Timestamp.from(Instant.now()));
+        block.setString(3, row.getString("tenant_id"));
+        block.setString(4, row.getString("session_id"));
+        block.executeUpdate();
     }
 
     /** The keys of a verified record body, or null when it cannot be verified. */
