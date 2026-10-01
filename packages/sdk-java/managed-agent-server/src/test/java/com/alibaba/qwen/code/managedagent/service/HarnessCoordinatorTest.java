@@ -233,9 +233,7 @@ class HarnessCoordinatorTest {
         AgentStateStore store = boundCancellingStore();
         HarnessConnector harness = mock(HarnessConnector.class);
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
-        // Cancellation attaches passively: an abort must not depend on the
-        // physical mount still verifying.
-        when(harness.createOrLoad("tenant", "session", true, true))
+        when(harness.createOrLoad("tenant", "session", true))
                 .thenReturn(new Attachment("boot", null, null, null));
         when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("boot"))).thenReturn(true);
@@ -245,7 +243,11 @@ class HarnessCoordinatorTest {
                 new ManagedAgentProperties());
         try {
             coordinator.cancel("tenant", "session", "turn");
-            verify(harness).createOrLoad("tenant", "session", true, true);
+            // The live cancel keeps the running attachment; a passive reload
+            // would leave the abort on a different one.
+            verify(harness).createOrLoad("tenant", "session", true);
+            verify(harness, never()).createOrLoad("tenant", "session", true,
+                    true);
             verify(harness).cancel("tenant", "session");
         } finally {
             coordinator.close();

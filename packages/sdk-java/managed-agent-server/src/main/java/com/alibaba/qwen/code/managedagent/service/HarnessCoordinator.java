@@ -550,13 +550,14 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // Attach passively, like the cancellation-recovery path above:
-            // an abort must not depend on the physical mount still
-            // verifying, or a cancel the API already answered would be
-            // dropped with only a WARN to show for it.
+            // A live cancel reuses the running Turn's attachment. A passive
+            // attach reloads the Session in the Harness, so the abort would
+            // reach a different attachment and the Turn would stay CANCELLING;
+            // only cancellation recovery, which has no live attachment, may
+            // attach passively.
             Attachment attachment = harness.createOrLoad(
                     session.tenantId(), session.sessionId(),
-                    session.harnessBootId() != null, true);
+                    session.harnessBootId() != null);
             if (store.bindHarness(tenantId, sessionId,
                     turnId, owner, attachment.bootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
