@@ -798,6 +798,8 @@ class ManagedAgentMySqlIT {
                 + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
                 + " session_id = ?", String.class, tenant, session))
                 .isEqualTo("DELETED");
+        assertThat(count(jdbc, "qwen_managed_session_extension_record",
+                tenant, session)).isEqualTo(1);
         List<String> events = jdbc.queryForList("SELECT event_type FROM"
                         + " managed_agent_event WHERE tenant_id = ? AND"
                         + " session_id = ? ORDER BY sequence_id",
@@ -963,6 +965,49 @@ class ManagedAgentMySqlIT {
                 .isEmpty();
         assertThat(store.listTurns(tenant.toUpperCase(), sessionId, null,
                 null, 10).turns()).isEmpty();
+    }
+
+    @Test
+    @Order(12)
+    void firstWriterAcquisitionsForDifferentTenantsDoNotDeadlock() throws Exception {
+        var source = dataSource();
+        var admin = new JdbcTemplate(source);
+        String schema = "first_writer_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema);
+        var isolated = new DriverManagerDataSource(source.getUrl().replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema),
+                required("mysql.user"), System.getProperty("mysql.password", ""));
+        try {
+            Flyway.configure().dataSource(isolated).load().migrate();
+            var ready = new java.util.concurrent.CountDownLatch(2);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            var jdbc = new JdbcTemplate(isolated) {
+                @Override public int update(String sql, Object... arguments) {
+                    if (sql.startsWith("INSERT INTO qwen_managed_session_journal_head")) {
+                        ready.countDown();
+                        try { assertThat(release.await(10, TimeUnit.SECONDS)).isTrue(); }
+                        catch (InterruptedException error) { throw new IllegalStateException(error); }
+                    }
+                    return super.update(sql, arguments);
+                }
+            };
+            var store = new ManagedSessionStore(jdbc);
+            var tx = new TransactionTemplate(new DataSourceTransactionManager(isolated));
+            tx.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+            tx.setTimeout(10);
+            try (var workers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+                var first = workers.submit(() -> tx.execute(status -> store.acquireWriter("first-tenant-a", "session-a",
+                        "a".repeat(32), new AcquireWriterRequest("workspace", "writer-a", 60000L))));
+                var second = workers.submit(() -> tx.execute(status -> store.acquireWriter("first-tenant-b", "session-b",
+                        "b".repeat(32), new AcquireWriterRequest("workspace", "writer-b", 60000L))));
+                try { assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue(); }
+                finally { release.countDown(); }
+                assertThat(first.get(10, TimeUnit.SECONDS).writerGeneration()).isEqualTo(1);
+                assertThat(second.get(10, TimeUnit.SECONDS).writerGeneration()).isEqualTo(1);
+            } finally { release.countDown(); }
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_journal_head", Long.class)).isEqualTo(2);
+        } finally {
+            admin.execute("DROP DATABASE " + schema);
+        }
     }
 
     @ParameterizedTest

@@ -50,29 +50,35 @@ public class ManagedArtifactReader {
     }
 
     public InputStream open(Artifact artifact, Runnable guard) {
-        guard.run();
         var lease = lease(artifact);
         try {
-            Runnable protectedGuard = () -> {
-                lease.check();
-                guard.run();
-                check(artifact);
-            };
-            var input = verified(artifact, protectedGuard).open(protectedGuard);
+            var input = open(artifact, lease, guard);
             return new java.io.FilterInputStream(input) {
                 @Override
                 public void close() throws java.io.IOException {
-                    try {
+                    try (lease) {
                         super.close();
-                    } finally {
-                        lease.close();
                     }
                 }
             };
         } catch (RuntimeException error) {
-            lease.close();
+            try {
+                lease.close();
+            } catch (RuntimeException cleanup) {
+                error.addSuppressed(cleanup);
+            }
             throw error;
         }
+    }
+
+    public InputStream open(Artifact artifact, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        lease.requireScope(artifact.source().sessionKey());
+        Runnable protectedGuard = () -> {
+            lease.check();
+            guard.run();
+            check(artifact);
+        };
+        return verified(artifact, lease, protectedGuard).open(protectedGuard);
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length) {
@@ -80,24 +86,28 @@ public class ManagedArtifactReader {
     }
 
     public byte[] readRange(Artifact artifact, long offset, int length, Runnable guard) {
+        try (var lease = lease(artifact)) {
+            return readRange(artifact, offset, length, lease, guard);
+        }
+    }
+
+    public byte[] readRange(Artifact artifact, long offset, int length,
+            ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
         ToolPublicationContract.require(offset >= 0 && length >= 0 && length <= 1024 * 1024
                         && offset <= artifact.descriptor().path("byte_length").asLong()
                         && length <= artifact.descriptor().path("byte_length").asLong() - offset,
                 "Artifact range is invalid");
-        guard.run();
-        try (var lease = lease(artifact)) {
-            Runnable protectedGuard = () -> {
-                lease.check();
-                guard.run();
-                check(artifact);
-            };
-            return readRange(artifact, verified(artifact, protectedGuard), offset, length, protectedGuard);
-        }
+        lease.requireScope(artifact.source().sessionKey());
+        Runnable protectedGuard = () -> {
+            lease.check();
+            guard.run();
+            check(artifact);
+        };
+        return verified(artifact, lease, protectedGuard).readRange(offset, length, protectedGuard);
     }
 
     byte[] readRange(Artifact artifact, ToolPublicationDataStore.VerifiedStream stream,
             long offset, int length, Runnable guard) {
-        guard.run();
         return stream.readRange(offset, length, () -> {
             guard.run();
             check(artifact);
@@ -108,11 +118,8 @@ public class ManagedArtifactReader {
         return data().readLease(artifact.source().sessionKey());
     }
 
-    ToolPublicationDataStore.VerifiedStream verified(Artifact artifact) {
-        return verified(artifact, () -> {});
-    }
-
-    ToolPublicationDataStore.VerifiedStream verified(Artifact artifact, Runnable guard) {
+    ToolPublicationDataStore.VerifiedStream verified(Artifact artifact,
+            ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
         guard.run();
         var source = artifact.source();
         var binding = artifact.binding();
@@ -127,7 +134,7 @@ public class ManagedArtifactReader {
                 "Artifact source conflicts");
         var stream = data().openReferencedStream(source.sessionKey(), artifact.publicationId(),
                 source.outcomeRef(), artifact.manifestRef(), identity, artifact.streamId(),
-                source.journalRevision(), source.receiptSequence(), guard);
+                source.journalRevision(), source.receiptSequence(), lease, guard);
         ToolPublicationContract.require(stream.size() == artifact.descriptor().path("byte_length").asLong(-1),
                 "Artifact length conflicts");
         return stream;

@@ -16,7 +16,7 @@ Session 是保留根。close、archive、Runtime 排空、ACK 和事件过期后
 
 新增独立生命周期 `PINNED → RETIRING → DELETING → COLLECTED`，不改写 execution、capture、delivery 和 producer phase。删除按 tenant → 私有 journal head → publication → 公共 Session 加锁，在同一事务复核 writer 并完成公共删除；即使从未建立私有 head，也保留永久 Session 墓碑。拒绝新 acquisition、恢复、publication 修改和投影。回填跳过退役 head，待处理投影被抑制。
 
-数据库读租约覆盖整个 Session 输出闭包，包括元数据解析。固定两分钟预算不能续期；每次读取和返回字节前检查数据库时间、租约身份和退役 generation。公共下载继续保留 O3 授权与总预算检查。私有资源及 projector 扫描使用相同保护。过期进程恢复后不能继续输出。
+每个 Artifact 下载请求只持有一个数据库读租约，覆盖元数据解析和对象分段；内层读取借用原租约，不延长预算。固定两分钟预算不能续期；每次读取和返回字节前检查数据库时间、租约身份和退役 generation。公共下载继续保留 O3 授权与总预算检查。每次租约检查在一条查询中读取身份、退役标记与数据库时间。退役后仍允许增加隔离保护标记，因此并发发现的损坏对象继续被保留。私有资源及 projector 扫描使用相同保护。过期进程恢复后不能继续输出。
 
 每次物理 PUT 在网络请求之前独立持久登记 attempt。确定成功只闭合该 attempt；异常或进程死亡保留 unknown/outstanding，直到外部处置前阻止自动清理。后续重试成功不能闭合前驱。禁用 OSS SDK 隐式重试，现有显式重试创建新 attempt。纯 inline publication 也有新协议证据，历史行默认缺失证据。
 

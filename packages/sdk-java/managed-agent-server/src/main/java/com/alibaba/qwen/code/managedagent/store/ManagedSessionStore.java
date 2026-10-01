@@ -155,7 +155,7 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
-        ToolPublicationRetentionStore.lockSession(jdbc, tenantId, sessionId);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         String tokenHash = tokenHash(writerToken);
         Timestamp createdAt = databaseNow();
@@ -516,39 +516,34 @@ public class ManagedSessionStore {
 
     public StoredResource readResource(String tenantId, String workspaceId,
             String sessionId, String resourceId, String writerToken) {
-        try (var lease = outputRetention.read(tenantId, sessionId)) {
-            var result = readResourceInternal(tenantId, workspaceId, sessionId, resourceId, writerToken);
-            lease.check();
-            return result;
-        }
-    }
-
-    private StoredResource readResourceInternal(String tenantId, String workspaceId,
-            String sessionId, String resourceId, String writerToken) {
         validateScope(tenantId, workspaceId, sessionId);
         validateStableId(resourceId, "resourceId");
         HeadRow head = requireHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, workspaceId, sessionId);
         requireReadGrant(head, writerToken);
-        String scopeKey = sessionScopeKey(tenantId, sessionId);
-        ResourceRow resource = findResource(scopeKey, resourceId);
-        if (resource == null) {
-            throw new ApiException(HttpStatus.NOT_FOUND,
-                    ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
-                    "The Managed Session resource does not exist.");
+        try (var lease = outputRetention.read(tenantId, sessionId)) {
+            String scopeKey = sessionScopeKey(tenantId, sessionId);
+            ResourceRow resource = findResource(scopeKey, resourceId);
+            if (resource == null) {
+                throw new ApiException(HttpStatus.NOT_FOUND,
+                        ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
+                        "The Managed Session resource does not exist.");
+            }
+            requireResourceScope(resource, tenantId, workspaceId, sessionId,
+                    resourceId);
+            verifyStoredResource(resource);
+            jdbc.update("UPDATE qwen_managed_session_resource SET"
+                            + " last_verified_at = ? WHERE session_scope_key = ?"
+                            + " AND resource_id = ?",
+                    databaseNow(), scopeKey, resourceId);
+            byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
+                    ? readPublicationObject(resource, lease) : resource.bytes();
+            var result = new StoredResource(resource.resourceId(), resource.kind(),
+                    resource.schemaVersion(), resource.byteLength(),
+                    resource.digest(), bytes);
+            lease.check();
+            return result;
         }
-        requireResourceScope(resource, tenantId, workspaceId, sessionId,
-                resourceId);
-        verifyStoredResource(resource);
-        jdbc.update("UPDATE qwen_managed_session_resource SET"
-                        + " last_verified_at = ? WHERE session_scope_key = ?"
-                        + " AND resource_id = ?",
-                databaseNow(), scopeKey, resourceId);
-        byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
-                ? readPublicationObject(resource) : resource.bytes();
-        return new StoredResource(resource.resourceId(), resource.kind(),
-                resource.schemaVersion(), resource.byteLength(),
-                resource.digest(), bytes);
     }
 
     @Transactional
@@ -1166,26 +1161,35 @@ public class ManagedSessionStore {
         }
     }
 
-    private InputStream guardedPublicationResource(ResourceRow resource) {
+    private InputStream guardedPublicationResource(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
+        lease.requireScope(resource.tenantId(), resource.sessionId());
         var rows = jdbc.queryForList("SELECT scope_key, publication_id FROM qwen_tool_publication_object"
-                + " WHERE resource_id = ? AND object_key = ?", resource.resourceId(), resource.objectKey());
+                + " WHERE scope_key = ? AND resource_id = ? AND object_key = ?",
+                ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+                resource.resourceId(), resource.objectKey());
         if (rows.size() != 1) {
             throw resourceCorrupt();
         }
-        return outputRetention.open((String) rows.getFirst().get("scope_key"),
-                (String) rows.getFirst().get("publication_id"), resource.objectKey(), publicationObjects);
+        return outputRetention.open(resource.objectKey(), publicationObjects, lease, () -> {});
     }
 
-    private byte[] readPublicationObject(ResourceRow resource) {
+    private byte[] readPublicationObject(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
         if (publicationObjects == null) {
             throw resourceCorrupt();
         }
-        try (InputStream stream = guardedPublicationResource(resource)) {
+        try (InputStream stream = guardedPublicationResource(resource, lease)) {
             byte[] bytes = stream.readNBytes(Math.toIntExact(resource.byteLength()) + 1);
             if (bytes.length != resource.byteLength()
                     || !sha256(bytes).equals(resource.digest())) {
-                outputRetention.quarantineResource(resource.resourceId(), resource.objectKey());
-                throw resourceCorrupt();
+                var error = resourceCorrupt();
+                try {
+                    outputRetention.quarantineResource(
+                            ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+                            resource.resourceId(), resource.objectKey());
+                } catch (RuntimeException cleanup) {
+                    error.addSuppressed(cleanup);
+                }
+                throw error;
             }
             return bytes;
         } catch (IOException error) {
