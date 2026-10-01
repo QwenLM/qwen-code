@@ -140,6 +140,9 @@ import {
   isSystemReminderContent,
   findApiRewindCutPoint,
   countApiUserPrompts,
+  getStartupContextLength,
+  isAbsorbedSnapshotOffsetPayload,
+  type AbsorbedSnapshotOffsetRecordPayload,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -2207,6 +2210,9 @@ export class Session implements SessionContext {
   // the chat-instance check alone never invalidates the count on a route
   // change (#9529, follow-up to #9454/#9506).
   private lastPromptTokenCountRouteKey: string | undefined = undefined;
+  #absorbedSnapshotOffset: number | null = null;
+  #boundaryPromptId: string | null = null;
+  #activeCompressionPromptId: string | undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -2591,6 +2597,8 @@ export class Session implements SessionContext {
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
     this.#bindGoalRuntime();
+    // /clear rebinds onto a fresh recorder. Drop the previous session's offset.
+    this.#reconcileRewindOffset([], 'restore');
   }
 
   /**
@@ -4695,6 +4703,7 @@ export class Session implements SessionContext {
     gaps?: HistoryGap[],
     options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
+    this.restoreRecordedRewindOffset(records);
     this.primeTurnFromHistory(records);
     const skipFinalizeCallIds =
       this.config.getRestoreAskUserQuestion?.() === true
@@ -4743,10 +4752,17 @@ export class Session implements SessionContext {
     const llmClient = this.config.getLlmClient()!;
     const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
-    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
-      apiHistory,
-      targetTurnIndex,
-    );
+    const rewindWindow = this.#rewindOffsetState(apiHistory);
+    const visibleOrdinal = targetTurnIndex - rewindWindow.start;
+    const apiTruncateIndex =
+      rewindWindow.failClosed ||
+      targetTurnIndex < rewindWindow.start ||
+      targetTurnIndex >= rewindWindow.end
+        ? -1
+        : this.#computeApiTruncationIndexForUserTurn(
+            apiHistory,
+            visibleOrdinal,
+          );
 
     if (apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
@@ -4792,7 +4808,7 @@ export class Session implements SessionContext {
     this.config
       .getChatRecordingService()
       ?.rewindRecording(
-        targetTurnIndex,
+        visibleOrdinal,
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
         {
@@ -4828,6 +4844,44 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Absolute file-history snapshot indexes a client may rewind to.
+   * `start` is the offset recorded when compression succeeded.
+   */
+  getRewindableTurnRange(): { start: number; end: number } {
+    const window = this.#rewindOffsetState(this.captureHistorySnapshot());
+    return { start: window.start, end: window.end };
+  }
+
+  /**
+   * Installs the offset from a restore projection. A missing payload does
+   * not reset a live value, so a partial replay cannot wipe it.
+   */
+  applyRecordedRewindOffset(
+    payload: AbsorbedSnapshotOffsetRecordPayload | undefined,
+  ): void {
+    if (!isAbsorbedSnapshotOffsetPayload(payload)) return;
+    this.#absorbedSnapshotOffset = payload.absorbedSnapshotCount;
+    this.#boundaryPromptId = payload.boundaryPromptId ?? null;
+    this.#reconcileRewindOffset(this.captureHistorySnapshot(), 'install');
+  }
+
+  restoreRecordedRewindOffset(records: readonly ChatRecord[]): void {
+    let payload: AbsorbedSnapshotOffsetRecordPayload | undefined;
+    for (const record of records) {
+      if (
+        record.type !== 'system' ||
+        record.subtype !== 'absorbed_snapshot_offset' ||
+        !isAbsorbedSnapshotOffsetPayload(record.systemPayload)
+      ) {
+        continue;
+      }
+      payload = record.systemPayload;
+    }
+    if (!payload) return;
+    this.applyRecordedRewindOffset(payload);
+  }
+
   restoreHistory(history: Content[]): void {
     if (!this.isTurnIdle()) {
       throw RequestError.invalidParams(
@@ -4837,6 +4891,7 @@ export class Session implements SessionContext {
     }
 
     this.config.getLlmClient()!.setHistory(structuredClone(history));
+    this.#reconcileRewindOffset(history, 'restore');
     this.clearActiveTodoPlanRevision();
     // Restoring history discards the timeline the active-todo reminder
     // described: clear the chain head so the next turn starts fresh instead
@@ -4854,6 +4909,113 @@ export class Session implements SessionContext {
       targetTurnIndex,
       ACP_API_USER_PROMPT_OPTIONS,
     );
+  }
+
+  #historyHasCompressedPrefix(apiHistory: Content[]): boolean {
+    return (
+      getStartupContextLength(apiHistory, { includeCompressed: true }) >
+      getStartupContextLength(apiHistory)
+    );
+  }
+
+  #clearRewindOffset(): void {
+    this.#absorbedSnapshotOffset = null;
+    this.#boundaryPromptId = null;
+  }
+
+  #persistRewindOffset(): void {
+    const absorbed = this.#absorbedSnapshotOffset ?? 0;
+    this.config.getChatRecordingService()?.recordAbsorbedSnapshotOffset({
+      absorbedSnapshotCount: absorbed,
+      ...(this.#boundaryPromptId
+        ? { boundaryPromptId: this.#boundaryPromptId }
+        : {}),
+    });
+  }
+
+  /**
+   * The snapshot opened for the prompt being sent is not in the counted tail
+   * yet, so it is not part of the absorbed prefix.
+   */
+  #noteAbsorbedSnapshotsAfterCompression(promptId: string): void {
+    const history = this.#getCurrentChat().getHistoryShallow();
+    if (!this.#historyHasCompressedPrefix(history)) return;
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
+    let counted = snapshots.length;
+    if (snapshots.at(-1)?.promptId === promptId && counted > 0) {
+      counted -= 1;
+    }
+    const absorbed = Math.max(0, counted - visible);
+    const boundaryPromptId =
+      absorbed < snapshots.length
+        ? snapshots[absorbed]?.promptId
+        : snapshots.at(-1)?.promptId;
+    this.#absorbedSnapshotOffset = absorbed;
+    this.#boundaryPromptId = boundaryPromptId ?? null;
+    this.#persistRewindOffset();
+  }
+
+  #rewindOffsetState(apiHistory: Content[]): {
+    start: number;
+    end: number;
+    failClosed: boolean;
+  } {
+    const visible = countApiUserPrompts(
+      apiHistory,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
+    const snapshotCount = this.config
+      .getFileHistoryService()
+      .getSnapshots().length;
+    if (!this.#historyHasCompressedPrefix(apiHistory)) {
+      return { start: 0, end: visible, failClosed: false };
+    }
+    if (this.#absorbedSnapshotOffset === null) {
+      return { start: 0, end: 0, failClosed: true };
+    }
+    if (snapshotCount === 0 && this.#absorbedSnapshotOffset > 0) {
+      return { start: 0, end: 0, failClosed: true };
+    }
+    const start = this.#absorbedSnapshotOffset;
+    if (snapshotCount > 0 && snapshotCount - visible - start > 0) {
+      return { start: 0, end: 0, failClosed: true };
+    }
+    const end =
+      snapshotCount > 0
+        ? Math.min(start + visible, snapshotCount)
+        : start + visible;
+    return { start, end, failClosed: false };
+  }
+
+  #reconcileRewindOffset(
+    apiHistory: Content[],
+    mode: 'install' | 'restore',
+  ): void {
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    if (!this.#historyHasCompressedPrefix(apiHistory)) {
+      if (
+        mode === 'install' &&
+        apiHistory.length === 0 &&
+        snapshots.length === 0 &&
+        this.#absorbedSnapshotOffset !== null
+      ) {
+        return;
+      }
+      this.#clearRewindOffset();
+      return;
+    }
+    if (this.#absorbedSnapshotOffset === null) return;
+    if (snapshots.length === 0 && this.#absorbedSnapshotOffset > 0) {
+      return;
+    }
+    const visible = countApiUserPrompts(
+      apiHistory,
+      ACP_API_USER_PROMPT_OPTIONS,
+    );
+    if (snapshots.length - visible - this.#absorbedSnapshotOffset > 0) {
+      this.#clearRewindOffset();
+    }
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -8739,6 +8901,7 @@ export class Session implements SessionContext {
       consumeInitialMemory?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
+    this.#activeCompressionPromptId = promptId;
     const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
@@ -9296,6 +9459,11 @@ export class Session implements SessionContext {
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
+      if (this.#activeCompressionPromptId !== undefined) {
+        this.#noteAbsorbedSnapshotsAfterCompression(
+          this.#activeCompressionPromptId,
+        );
+      }
       return;
     }
     this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
