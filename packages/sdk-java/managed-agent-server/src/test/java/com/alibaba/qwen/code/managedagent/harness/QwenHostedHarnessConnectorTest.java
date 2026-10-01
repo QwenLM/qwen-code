@@ -14,10 +14,12 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
+import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
@@ -159,6 +161,34 @@ class QwenHostedHarnessConnectorTest {
                 .isSameAs(transientFailure);
         verify(execution).authorize(session);
         verifyNoInteractions(client);
+    }
+
+    @Test
+    void recoverManagedRuntimeReusesAHealthyAttachment() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+        // A healthy Session attached to this very Harness is reused: the
+        // second turn of the same Session must not re-load it.
+        connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client, org.mockito.Mockito.times(1))
+                .loadSession(loads.capture());
+        // A non-cancellation recovery drives the parked Turn: the wire flag
+        // must say drive, not passive.
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
+                .containsEntry("driveRuntimeRecovery", true)
+                .doesNotContainKey("passiveManagedRuntimeRecovery");
     }
 
     @Test
@@ -320,6 +350,61 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessageContaining("Workspace execution authority is unavailable");
         verify(client, times(1)).resolveAction(any(), any(), any(), anyLong(), any());
         verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
+    }
+
+    @Test
+    void takeoverSnapshotIsReportedUntilItsContinuationIsAdmitted() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        PromptReceipt receipt = mock(PromptReceipt.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(client.continueManagedRuntime(any(), any(), any(), any()))
+                .thenReturn(receipt);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(session.getRuntimeRecovery()).thenReturn(recovery);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        assertThat(connector.recoverManagedRuntime("tenant-a", SESSION_ID,
+                false).runtimeRecovery()).isSameAs(recovery);
+        // Re-entered before the continuation was admitted: still pending.
+        assertThat(connector.recoverManagedRuntime("tenant-a", SESSION_ID,
+                false).runtimeRecovery()).isSameAs(recovery);
+        connector.continueManagedRuntime("tenant-a", SESSION_ID,
+                "44444444-4444-4444-8444-444444444444", "checkpoint",
+                "activation");
+        // Re-entered after admission (stream gap, lost reply): the Turn is
+        // already continuing, so it must not be retracted and continued again.
+        assertThat(connector.recoverManagedRuntime("tenant-a", SESSION_ID,
+                false).runtimeRecovery()).isNull();
+        verify(client).loadSession(any(LoadHarnessSession.class));
+    }
+
+    @Test
+    void cancellationRecoveryLoadsPassivelyWithoutDriving() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(session);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        connector.recoverManagedRuntime("tenant-a", SESSION_ID, true);
+
+        ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).loadSession(loads.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
+                .containsEntry("passiveManagedRuntimeRecovery", true)
+                .doesNotContainKey("driveRuntimeRecovery");
     }
 
     private static QwenHostedHarnessConnector connector(
