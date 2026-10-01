@@ -385,6 +385,7 @@ describe('recoverHostedRuntimeTurn', () => {
 
   it('reports parked executions without dispatching on a passive load', async () => {
     await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
     const execute = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'execute')
       .mockRejectedValue(new Error('must not dispatch'));
@@ -401,6 +402,7 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: true,
       });
+      expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
       expect(recovered).toBeDefined();
       expect(execute).not.toHaveBeenCalled();
       // A passive load only reads: nothing may be journaled for the prompt.
@@ -435,6 +437,7 @@ describe('recoverHostedRuntimeTurn', () => {
 
   it('reports an execution the Broker cannot account for as unknown', async () => {
     await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
       undefined,
     );
@@ -448,6 +451,7 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: true,
       });
+      expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
       expect(recovered!.report.executions).toEqual([
         expect.objectContaining({
           executionCallId: EXECUTION_ID,
@@ -680,6 +684,7 @@ describe('recoverHostedRuntimeTurn', () => {
 
   it('reports only the state, never the result payload, from a passive read', async () => {
     await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'settled',
     });
@@ -693,6 +698,7 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: true,
       });
+      expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalled();
       // A passive load only reads: nothing may be journaled for the prompt.
       expect(
         (await replacement.sink.project()).filter(

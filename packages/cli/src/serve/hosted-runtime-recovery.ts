@@ -243,14 +243,40 @@ export async function recoverHostedRuntimeTurn(input: {
   const pending = items.filter((item) => item.state === 'in_progress');
   const states = new Map<string, { state: string } | undefined>();
   let acquiredRuntime = false;
+  if (passive && items.length > 0) {
+    // A replacement Broker answers status, cancel and release only for a
+    // Runtime Session it has adopted, so the cancellation path re-attaches
+    // to the dead owner's one first. Acquiring dispatches nothing.
+    try {
+      await broker.acquire();
+      acquiredRuntime = true;
+    } catch (cause) {
+      await broker.release().catch((releaseCause) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
+        );
+      });
+      throw cause;
+    }
+  }
   if (pending.length > 0) {
     if (passive) {
-      for (const item of pending) {
-        const status = await broker.status(item.executionCallId);
-        states.set(
-          item.executionCallId,
-          status === undefined ? undefined : { state: status.state },
-        );
+      try {
+        for (const item of pending) {
+          const status = await broker.status(item.executionCallId);
+          states.set(
+            item.executionCallId,
+            status === undefined ? undefined : { state: status.state },
+          );
+        }
+      } catch (cause) {
+        await broker.release().catch((releaseCause) => {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
+          );
+        });
+        acquiredRuntime = false;
+        throw cause;
       }
     } else {
       // The Shell profile's drives need the original publisher, which a

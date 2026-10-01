@@ -4839,7 +4839,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
       .mockResolvedValue();
     const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(200);
-    expect(acquireSpy).not.toHaveBeenCalled();
+    // The cancellation path adopts the Runtime Session; it still dispatches nothing.
+    expect(acquireSpy).toHaveBeenCalled();
     const recovery = loaded.body._meta?.[
       'qwen.daemon.managedRuntimeRecovery'
     ] as {
@@ -4868,8 +4869,8 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(cancelled.status).toBe(200);
     expect(cancelled.body.accepted).toBe(true);
     expect(cancel).toHaveBeenCalledWith('66666666-6666-4666-8666-666666666666');
-    // The passive takeover never re-acquired the Runtime Session, so the
-    // cancel route itself must release the original owner's one.
+    // The passive takeover adopted the Runtime Session on load, and the
+    // cancel route releases it once the executions are confirmed stopped.
     expect(release).toHaveBeenCalled();
     const transcript = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),

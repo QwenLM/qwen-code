@@ -2154,7 +2154,7 @@ export function registerHostedHarnessSessionRoutes(
           });
         }
         // The original owner's Runtime Session keeps the Workspace lease
-        // pinned; a passive takeover never re-acquired it, so release it
+        // pinned; the passive takeover adopted it on load, so release it
         // here once the executions are confirmed stopped.
         await broker.release().catch((cause: unknown) => {
           if (
