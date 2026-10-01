@@ -94,6 +94,9 @@ describe('managed operation grant gate', () => {
               0,
             ),
           ).toBe(true);
+          // The refusal left the previous grant installed, not the refused
+          // one: installing it again is idempotent, so it answers unchanged.
+          expect(gate.install(each.previous)).toBe('unchanged');
         } else {
           expect(thrown).toBeInstanceOf(ManagedSessionConflictError);
         }
