@@ -37,6 +37,10 @@ function update(id: number): ManagedAgentSessionEvent {
   };
 }
 
+function gap(id: number): ManagedAgentSessionEvent {
+  return { id, at: id, type: 'stream_gap', sessionId: 'session-1', turnId: '' };
+}
+
 describe('useManagedActions', () => {
   let root: Root | undefined;
 
@@ -309,6 +313,58 @@ describe('useManagedActions', () => {
       expect(listPending).toHaveBeenCalledTimes(2);
     },
   );
+
+  it('re-reads pending approvals when the transcript reports a stream gap', async () => {
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([pending]);
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(1));
+    expect(hook.latest?.action).toBeUndefined();
+
+    // A gap arrives through the durable transcript: the live stream is broken
+    // on before merging, so the snapshot's `stream.reconciled` row is the only
+    // thing that reports one here.
+    hook.rerender({ events: [gap(7)] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(listPending).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops the previous Session card and its warnings when the selection changes', async () => {
+    const respond = vi.fn().mockRejectedValue(new Error('offline'));
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      // The new Session's read never returns, so nothing but the switch itself
+      // can clear what the previous Session left behind.
+      .mockImplementation(() => new Promise(() => {}));
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(async () => {
+      await expect(
+        hook.latest!.respond('tool_approval_1', 'allow'),
+      ).rejects.toThrow('offline');
+    });
+    expect(hook.latest?.answerError).toEqual(new Error('offline'));
+
+    hook.rerender({ sessionId: 'session-2' });
+    expect(hook.latest?.action).toBeUndefined();
+    expect(hook.latest?.answerError).toBeUndefined();
+    expect(hook.latest?.loadError).toBeUndefined();
+    expect(hook.latest?.loaded).toBe(false);
+    expect(listPending).toHaveBeenCalledTimes(2);
+    // The previous Session's Action is not answerable from the new one.
+    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    expect(respond).toHaveBeenCalledTimes(1);
+  });
 
   it('reports whether the read landed so a failure can name what it broke', async () => {
     const listPending = vi

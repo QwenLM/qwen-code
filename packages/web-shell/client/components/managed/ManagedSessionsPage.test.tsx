@@ -37,17 +37,24 @@ vi.mock('../MessageList', () => ({
     hasOlderHistory,
     onLoadOlderHistory,
     onToolResultOpen,
+    pendingApproval,
   }: {
     messages: unknown[];
     hasOlderHistory: boolean;
     onLoadOlderHistory: () => Promise<void>;
     onToolResultOpen?: (itemId: string) => void;
+    pendingApproval?: unknown;
   }) => (
     <>
       <button onClick={() => onToolResultOpen?.('item-1')}>
         Open tool output
       </button>
       <pre data-testid="messages">{JSON.stringify(messages)}</pre>
+      {/* The real MessageList keys its folding off this prop, so the mock has
+          to expose it for the join between the two to be observed. */}
+      <pre data-testid="message-list-pending-approval">
+        {JSON.stringify(pendingApproval ?? null)}
+      </pre>
       {hasOlderHistory && (
         <button onClick={() => void onLoadOlderHistory()}>Older history</button>
       )}
@@ -270,6 +277,12 @@ describe('ManagedSessionsPage', () => {
       .getAttribute('id') as string;
     expect(caveatId).toBeTruthy();
     expect(dialog.getAttribute('aria-describedby')).toContain(caveatId);
+    // The transcript row that carries the tool call keeps the approval card
+    // reachable: MessageList folds turns by this prop.
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toContain('tool_approval_1');
     const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Yes, allow once'),
     );
@@ -297,6 +310,12 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+    // The answered Action left, so the warning that described it leaves too.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toBe('null');
   });
 
   it.each([
