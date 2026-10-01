@@ -2979,6 +2979,12 @@ export class ChatRecordingService {
         this.currentSessionApprovalMode =
           normalizeSessionApprovalModePayload(sessionApprovalMode);
       }
+      if (targetTurnIndex >= this.turnParentUuids.length) {
+        debugLogger.error(
+          `Refusing rewind past the recorded turns: ${targetTurnIndex} >= ${this.turnParentUuids.length}`,
+        );
+        return;
+      }
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
       const projectionStart = Math.max(
@@ -3055,11 +3061,19 @@ export class ChatRecordingService {
   }
 
   recordedTurnIndexForPrompt(promptId: string): number | undefined {
-    let index = 0;
+    const mirror: ChatRecord[] = [];
     for (const record of this.activeBranchRecords) {
-      if (!isRewindUserTurn(record)) continue;
-      if (record.promptId === promptId) return index;
-      index++;
+      if (isRewindUserTurn(record)) mirror.push(record);
+    }
+    if (mirror.length > this.turnParentUuids.length) return undefined;
+    const base = this.turnParentUuids.length - mirror.length;
+    const mirrorParent = mirror[0]?.parentUuid ?? null;
+    const boundaryParent = this.turnParentUuids[base] ?? null;
+    if (mirror.length > 0 && mirrorParent !== boundaryParent) {
+      return undefined;
+    }
+    for (let index = 0; index < mirror.length; index++) {
+      if (mirror[index]?.promptId === promptId) return base + index;
     }
     return undefined;
   }

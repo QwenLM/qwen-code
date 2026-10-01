@@ -140,6 +140,9 @@ import {
   isSystemReminderContent,
   findApiRewindCutPoint,
   countApiUserPrompts,
+  isApiUserPrompt,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
   getStartupContextLength,
   isAbsorbedSnapshotOffsetPayload,
   type AbsorbedSnapshotOffsetRecordPayload,
@@ -4766,20 +4769,39 @@ export class Session implements SessionContext {
     const chat = llmClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const rewindWindow = this.#rewindOffsetState(apiHistory);
-    const visibleOrdinal = targetTurnIndex - rewindWindow.start;
-    const recorderIndex =
-      this.#boundaryTurnIndex === null
-        ? targetTurnIndex
-        : this.#boundaryTurnIndex + visibleOrdinal;
-    const apiTruncateIndex =
-      rewindWindow.failClosed ||
-      targetTurnIndex < rewindWindow.start ||
-      targetTurnIndex >= rewindWindow.end
-        ? -1
-        : this.#computeApiTruncationIndexForUserTurn(
-            apiHistory,
-            visibleOrdinal,
-          );
+    const compressed = this.#historyHasCompressedPrefix(apiHistory);
+    const targetPromptId = compressed
+      ? this.#snapshotList()[targetTurnIndex]?.promptId
+      : undefined;
+    const recorder = this.config.getChatRecordingService();
+    let recorderIndex = targetTurnIndex;
+    let apiTruncateIndex = -1;
+    if (
+      !rewindWindow.failClosed &&
+      targetTurnIndex >= rewindWindow.start &&
+      targetTurnIndex < rewindWindow.end
+    ) {
+      if (!compressed) {
+        apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
+          apiHistory,
+          targetTurnIndex,
+        );
+      } else if (targetPromptId) {
+        apiTruncateIndex = findApiHistoryPromptIndex(
+          apiHistory,
+          targetPromptId,
+        );
+        const lookup = recorder?.recordedTurnIndexForPrompt;
+        if (lookup) {
+          const found = lookup.call(recorder, targetPromptId);
+          if (found === undefined) {
+            apiTruncateIndex = -1;
+          } else {
+            recorderIndex = found;
+          }
+        }
+      }
+    }
 
     if (apiTruncateIndex < 0) {
       throw RequestError.invalidParams(
@@ -4819,27 +4841,6 @@ export class Session implements SessionContext {
     const survivingSnapshots = rewindFiles
       ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
-    // A lap-1 boundary is the first live snapshot, and a conversation-only
-    // rewind to `start` drops that snapshot. Point the boundary at the
-    // predecessor and mark it exclusive so the same start still resolves.
-    if (
-      !rewindFiles &&
-      !this.#boundaryExclusive &&
-      this.#boundaryPromptId &&
-      targetTurnIndex === rewindWindow.start &&
-      rewindWindow.start > 0 &&
-      !survivingSnapshots.some(
-        (snapshot) => snapshot.promptId === this.#boundaryPromptId,
-      )
-    ) {
-      const predecessor = snapshotsBeforeRewind[rewindWindow.start - 1];
-      if (predecessor) {
-        this.#boundaryPromptId = predecessor.promptId;
-        this.#boundaryExclusive = true;
-        this.#absorbedSnapshotOffset = rewindWindow.start;
-        this.#persistRewindOffset();
-      }
-    }
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();
@@ -5006,72 +5007,75 @@ export class Session implements SessionContext {
     const history = this.#getCurrentChat().getHistoryShallow();
     if (!this.#historyHasCompressedPrefix(history)) return;
     const snapshots = this.#snapshotList();
-    const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
-    let counted = snapshots.length;
-    if (
-      promptNotYetInHistory &&
-      snapshots.at(-1)?.promptId === promptId &&
-      counted > 0
-    ) {
-      counted -= 1;
-    }
-    const absorbed = Math.max(0, counted - visible);
-    const boundaryExclusive =
-      absorbed === snapshots.length && snapshots.length > 0;
-    const boundaryPromptId = boundaryExclusive
-      ? snapshots[snapshots.length - 1]?.promptId
-      : snapshots[absorbed]?.promptId;
+    const liveIds = this.#countedPromptIds(history);
+    if (promptNotYetInHistory) liveIds.add(promptId);
     const recorder = this.config.getChatRecordingService();
-    const turnCount = recorder?.getRecordedUserTurnCount?.();
-    let boundaryTurnIndex: number | null = null;
-    if (typeof turnCount === 'number') {
-      if (boundaryExclusive) {
-        boundaryTurnIndex = turnCount;
-      } else if (boundaryPromptId && recorder?.recordedTurnIndexForPrompt) {
-        const found = recorder.recordedTurnIndexForPrompt(boundaryPromptId);
-        if (found === undefined) {
-          this.#clearRewindOffset();
-          return;
-        }
-        boundaryTurnIndex = found;
-      }
+    const lookup = recorder?.recordedTurnIndexForPrompt?.bind(recorder);
+    let boundaryIndex = -1;
+    for (let index = 0; index < snapshots.length; index++) {
+      const id = snapshots[index]?.promptId;
+      if (!id || !liveIds.has(id)) continue;
+      if (lookup && lookup(id) === undefined) continue;
+      boundaryIndex = index;
+      break;
     }
-    this.#absorbedSnapshotOffset = absorbed;
+    if (boundaryIndex < 0) {
+      if (
+        !promptNotYetInHistory &&
+        liveIds.size === 0 &&
+        snapshots.length > 0
+      ) {
+        const boundaryPromptId = snapshots[snapshots.length - 1]?.promptId;
+        const turnCount = recorder?.getRecordedUserTurnCount?.();
+        this.#absorbedSnapshotOffset = snapshots.length;
+        this.#boundaryPromptId = boundaryPromptId ?? null;
+        this.#boundaryExclusive = true;
+        this.#boundaryTurnIndex =
+          typeof turnCount === 'number' ? turnCount : null;
+        this.#persistRewindOffset();
+        return;
+      }
+      this.#clearRewindOffset();
+      return;
+    }
+    const boundaryPromptId = snapshots[boundaryIndex]?.promptId;
+    this.#absorbedSnapshotOffset = boundaryIndex;
     this.#boundaryPromptId = boundaryPromptId ?? null;
-    this.#boundaryExclusive = boundaryExclusive;
-    this.#boundaryTurnIndex = boundaryTurnIndex;
+    this.#boundaryExclusive = false;
+    this.#boundaryTurnIndex =
+      boundaryPromptId && lookup ? (lookup(boundaryPromptId) ?? null) : null;
     this.#persistRewindOffset();
   }
 
-  #resolvedRewindStart(snapshots: ReadonlyArray<{ promptId: string }>): {
-    start: number;
-    missingBoundary: boolean;
-    deferred: boolean;
-  } {
-    if (this.#absorbedSnapshotOffset === null && !this.#boundaryPromptId) {
-      return { start: 0, missingBoundary: true, deferred: false };
-    }
-    if (snapshots.length === 0) {
-      return { start: 0, missingBoundary: false, deferred: true };
-    }
-    if (!this.#boundaryPromptId) {
-      const start = this.#absorbedSnapshotOffset ?? 0;
-      if (start > snapshots.length) {
-        return { start: 0, missingBoundary: true, deferred: false };
+  #countedPromptIds(apiHistory: Content[]): Set<string> {
+    const ids = new Set<string>();
+    const start = getStartupContextLength(apiHistory, {
+      includeCompressed: true,
+    });
+    for (let index = start; index < apiHistory.length; index++) {
+      const content = apiHistory[index];
+      if (!content || !isApiUserPrompt(content, ACP_API_USER_PROMPT_OPTIONS)) {
+        continue;
       }
-      return { start, missingBoundary: false, deferred: false };
+      const promptId = getApiHistoryPromptId(content);
+      if (promptId) ids.add(promptId);
     }
-    const index = snapshots.findIndex(
-      (snapshot) => snapshot.promptId === this.#boundaryPromptId,
-    );
-    if (index < 0) {
-      return { start: 0, missingBoundary: true, deferred: false };
+    return ids;
+  }
+
+  #corroboratedSuffix(apiHistory: Content[]): { start: number; end: number } {
+    const snapshots = this.#snapshotList();
+    const liveIds = this.#countedPromptIds(apiHistory);
+    const recorder = this.config.getChatRecordingService();
+    const lookup = recorder?.recordedTurnIndexForPrompt?.bind(recorder);
+    let start = snapshots.length;
+    for (let index = snapshots.length - 1; index >= 0; index--) {
+      const id = snapshots[index]?.promptId;
+      if (!id || !liveIds.has(id)) break;
+      if (lookup && lookup(id) === undefined) break;
+      start = index;
     }
-    return {
-      start: this.#boundaryExclusive ? index + 1 : index,
-      missingBoundary: false,
-      deferred: false,
-    };
+    return { start, end: snapshots.length };
   }
 
   #rewindOffsetState(apiHistory: Content[]): {
@@ -5088,21 +5092,14 @@ export class Session implements SessionContext {
     if (!this.#historyHasCompressedPrefix(apiHistory)) {
       return { start: 0, end: visible, failClosed: false };
     }
-    if (this.#absorbedSnapshotOffset === null && !this.#boundaryPromptId) {
+    if (snapshotCount === 0) {
       return { start: 0, end: 0, failClosed: true };
     }
-    const resolved = this.#resolvedRewindStart(snapshots);
-    if (resolved.deferred || resolved.missingBoundary) {
+    const suffix = this.#corroboratedSuffix(apiHistory);
+    if (suffix.start >= suffix.end) {
       return { start: 0, end: 0, failClosed: true };
     }
-    if (snapshotCount - visible - resolved.start !== 0) {
-      return { start: 0, end: 0, failClosed: true };
-    }
-    const end =
-      snapshotCount > 0
-        ? Math.min(resolved.start + visible, snapshotCount)
-        : resolved.start + visible;
-    return { start: resolved.start, end, failClosed: false };
+    return { start: suffix.start, end: suffix.end, failClosed: false };
   }
 
   #reconcileRewindOffset(
@@ -5122,23 +5119,14 @@ export class Session implements SessionContext {
       this.#clearRewindOffset();
       return;
     }
-    if (this.#absorbedSnapshotOffset === null && !this.#boundaryPromptId) {
-      return;
-    }
-    const resolved = this.#resolvedRewindStart(snapshots);
-    if (resolved.deferred) return;
-    if (resolved.missingBoundary) {
+    if (
+      snapshots.length > 0 &&
+      this.#boundaryPromptId &&
+      !snapshots.some(
+        (snapshot) => snapshot.promptId === this.#boundaryPromptId,
+      )
+    ) {
       this.#clearRewindOffset();
-      return;
-    }
-    const visible = countApiUserPrompts(
-      apiHistory,
-      ACP_API_USER_PROMPT_OPTIONS,
-    );
-    if (snapshots.length - visible - resolved.start !== 0) {
-      this.#clearRewindOffset();
-    } else {
-      this.#absorbedSnapshotOffset = resolved.start;
     }
   }
 

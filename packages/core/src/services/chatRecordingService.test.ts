@@ -1174,6 +1174,31 @@ describe('ChatRecordingService', () => {
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
 
+    it('counts projected pre-resume turns in the prompt index', () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, 'u1'],
+      });
+      service.recordUserMessage([{ text: 'p2' }], undefined, undefined, 'p2');
+      service.recordUserMessage([{ text: 'p3' }], undefined, undefined, 'p3');
+
+      expect(service.getRecordedUserTurnCount()).toBe(4);
+      expect(service.recordedTurnIndexForPrompt('p2')).toBe(2);
+      expect(service.recordedTurnIndexForPrompt('p3')).toBe(3);
+    });
+
+    it('refuses a rewind index past the recorded turns', async () => {
+      user('a');
+      user('b');
+      user('c');
+      svc.rewindRecording(3, { truncatedCount: 0 });
+      await svc.flush();
+
+      expect(writes().filter((record) => record.subtype === 'rewind')).toEqual(
+        [],
+      );
+    });
+
     it('drops display projections from rewound user turns', async () => {
       displayed('A');
       displayed('B');
