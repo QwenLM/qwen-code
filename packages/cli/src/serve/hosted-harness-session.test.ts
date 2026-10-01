@@ -404,39 +404,53 @@ describe('Hosted Harness no-tool session', () => {
     ).toHaveLength(1);
   });
 
-  it('refuses a prompt with a Hook diagnostic while a Hook operation runs', async () => {
-    const { server, authorize } = await hookApp();
-    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
-    const original = control.getMockImplementation()!;
-    let dispatched!: () => void;
-    const started = new Promise<void>((resolve) => (dispatched = resolve));
-    let finish!: () => void;
-    const held = new Promise<void>((resolve) => (finish = resolve));
-    control.mockImplementation(async (operation) => {
-      if (operation.kind === 'hook-execute') {
-        dispatched();
-        await held;
+  it.each([
+    ['a Hook operation', 200],
+    ['Session deletion', 204],
+  ])(
+    'refuses a prompt with a Hook diagnostic while %s runs',
+    async (trigger, settled) => {
+      const { server, authorize } = await hookApp();
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+      const original = control.getMockImplementation()!;
+      let dispatched!: () => void;
+      const started = new Promise<void>((resolve) => (dispatched = resolve));
+      let finish!: () => void;
+      const held = new Promise<void>((resolve) => (finish = resolve));
+      control.mockImplementation(async (operation) => {
+        if (operation.kind === 'hook-execute') {
+          dispatched();
+          await held;
+        }
+        return original(operation);
+      });
+      const running = (
+        trigger === 'Session deletion'
+          ? headers(supertest(server).delete(`/session/${SESSION_ID}`))
+          : authorize(
+              supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+            ).send({
+              operationId: randomUUID(),
+              event: 'Notification',
+              input: { message: 'ready', notification_type: 'test' },
+            })
+      ).then(
+        (response) => response,
+        () => undefined,
+      );
+      await started;
+      try {
+        const refused = await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/prompt`),
+        ).send({});
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('hosted_hook_operation_active');
+      } finally {
+        finish();
       }
-      return original(operation);
-    });
-    const running = authorize(
-      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
-    )
-      .send({
-        operationId: randomUUID(),
-        event: 'Notification',
-        input: { message: 'ready', notification_type: 'test' },
-      })
-      .then((response) => response);
-    await started;
-    const refused = await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/prompt`),
-    ).send({});
-    expect(refused.status).toBe(409);
-    expect(refused.body.code).toBe('hosted_hook_operation_active');
-    finish();
-    expect((await running).status).toBe(200);
-  });
+      expect((await running)?.status).toBe(settled);
+    },
+  );
 
   it.each([1, 2])(
     'recovers Hook activation after %s failed installation(s) without accepting stranded prompts',
@@ -1059,6 +1073,9 @@ describe('Hosted Harness no-tool session', () => {
         state: 'outcome_unknown',
       };
     });
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     const operationId = randomUUID();
     const send = (id: string) =>
       authorize(
@@ -1075,10 +1092,40 @@ describe('Hosted Harness no-tool session', () => {
     const replay = await send(operationId);
     expect(replay.status).toBe(503);
     expect(replay.body.code).toBe('hosted_hook_operation_failed');
+    const blocked = `qwen serve: Hosted Hook operation ${operationId} is recovery blocked: Error: Hosted Hook requires reconciliation of its original execution.`;
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .filter((line) => line.includes('Hosted Hook operation')),
+    ).toEqual([blocked, blocked]);
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
     expect(state.model).not.toHaveBeenCalled();
+  });
+
+  it('logs the cause of a failed Hook operation before answering 503', async () => {
+    const { server, authorize } = await hookApp();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'installActivation',
+    ).mockRejectedValueOnce(new Error('activation unavailable'));
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const operationId = randomUUID();
+    const failed = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    ).send({
+      operationId,
+      event: 'Notification',
+      input: { message: 'ready', notification_type: 'test' },
+    });
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('hosted_hook_operation_failed');
+    expect(log).toHaveBeenCalledWith(
+      `qwen serve: Hosted Hook operation ${operationId} failed: Error: activation unavailable`,
+    );
   });
 
   it('settles End and Delete before releasing the Hook Runtime', async () => {
@@ -1636,55 +1683,71 @@ describe('Hosted Harness no-tool session', () => {
     expect((await closed).status).toBe(204);
   });
 
-  it('refuses a prompt with an MCP diagnostic while an MCP configuration runs', async () => {
-    const { server, authorize } = await mcpApp();
-    await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
-    )
-      .send({
-        operationId: randomUUID(),
-        serverId: 'demo',
-        request: { kind: 'resource_read', uri: 'memory://note' },
-      })
-      .expect(202);
-    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
-    const original = control.getMockImplementation()!;
-    let dispatched!: () => void;
-    const started = new Promise<void>((resolve) => (dispatched = resolve));
-    let finish!: () => void;
-    const held = new Promise<void>((resolve) => (finish = resolve));
-    control.mockImplementation(async function (
-      this: HostedWorkspaceBroker,
-      operation,
-    ) {
-      if (operation.kind === 'mcp-configure') {
-        dispatched();
-        await held;
-      }
-      return original.call(this, operation);
-    });
-    const running = authorize(
-      supertest(server).post(`/session/${SESSION_ID}/mcp/configurations`),
-    )
-      .send({
-        operationId: randomUUID(),
-        expectedRevision: 1,
-        server: {
+  it.each([
+    ['an MCP configuration', 'mcp-configure', 202],
+    ['Session deletion', 'mcp-release', 204],
+  ] as const)(
+    'refuses a prompt with an MCP diagnostic while %s runs',
+    async (trigger, parked, settled) => {
+      const { server, authorize } = await mcpApp();
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+      )
+        .send({
+          operationId: randomUUID(),
           serverId: 'demo',
-          serverRevision: 1,
-          definitionDigest: 'a'.repeat(64),
-        },
-      })
-      .then((response) => response);
-    await started;
-    const refused = await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/prompt`),
-    ).send({});
-    expect(refused.status).toBe(409);
-    expect(refused.body.code).toBe('hosted_mcp_operation_active');
-    finish();
-    expect((await running).status).toBe(202);
-  });
+          request: { kind: 'resource_read', uri: 'memory://note' },
+        })
+        .expect(202);
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+      const original = control.getMockImplementation()!;
+      let dispatched!: () => void;
+      const started = new Promise<void>((resolve) => (dispatched = resolve));
+      let finish!: () => void;
+      const held = new Promise<void>((resolve) => (finish = resolve));
+      control.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === parked) {
+          dispatched();
+          await held;
+        }
+        return original.call(this, operation);
+      });
+      const running = (
+        trigger === 'Session deletion'
+          ? headers(supertest(server).delete(`/session/${SESSION_ID}`))
+          : authorize(
+              supertest(server).post(
+                `/session/${SESSION_ID}/mcp/configurations`,
+              ),
+            ).send({
+              operationId: randomUUID(),
+              expectedRevision: 1,
+              server: {
+                serverId: 'demo',
+                serverRevision: 1,
+                definitionDigest: 'a'.repeat(64),
+              },
+            })
+      ).then(
+        (response) => response,
+        () => undefined,
+      );
+      await started;
+      try {
+        const refused = await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/prompt`),
+        ).send({});
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('hosted_mcp_operation_active');
+      } finally {
+        finish();
+      }
+      expect((await running)?.status).toBe(settled);
+    },
+  );
 
   it.each(['invoke', 'close'])(
     'restores the owner before %s after an idle Broker restart',

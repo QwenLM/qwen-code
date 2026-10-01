@@ -1760,7 +1760,9 @@ export function registerHostedHarnessSessionRoutes(
           if (cause instanceof HostedHookInputConflictError)
             return error(res, 409, 'hosted_hook_operation_conflict');
           writeStderrLineSafe(
-            `qwen serve: Hosted Hook operation ${operationId} failed: ${String(cause)}`,
+            cause instanceof HostedHookRecoveryRequiredError
+              ? `qwen serve: Hosted Hook operation ${operationId} is recovery blocked: ${String(cause)}`
+              : `qwen serve: Hosted Hook operation ${operationId} failed: ${String(cause)}`,
           );
           error(res, 503, 'hosted_hook_operation_failed');
         },
@@ -2340,20 +2342,25 @@ export function registerHostedHarnessSessionRoutes(
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
-      if (req.method === 'DELETE') {
-        await session.hooks?.drain();
-        await runHostedLifecycleHook(
-          session,
-          HookEventName.SessionEnd,
-          `session-end:${req.params['id']}`,
-          { reason: 'other' },
-        );
-        await runHostedLifecycleHook(
-          session,
-          HookEventName.SessionDelete,
-          `session-delete:${req.params['id']}`,
-          { deleted_session_id: req.params['id'] },
-        );
+      if (req.method === 'DELETE' && session.hooks) {
+        session.hooksBusy = true;
+        try {
+          await session.hooks.drain();
+          await runHostedLifecycleHook(
+            session,
+            HookEventName.SessionEnd,
+            `session-end:${req.params['id']}`,
+            { reason: 'other' },
+          );
+          await runHostedLifecycleHook(
+            session,
+            HookEventName.SessionDelete,
+            `session-delete:${req.params['id']}`,
+            { deleted_session_id: req.params['id'] },
+          );
+        } finally {
+          session.hooksBusy = false;
+        }
       }
       await session.hooks?.close();
       await session.mcp?.close();

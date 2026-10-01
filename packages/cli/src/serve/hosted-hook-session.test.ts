@@ -31,6 +31,7 @@ import {
 } from './hosted-workspace-broker.js';
 import {
   HostedHookSession,
+  HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
@@ -810,7 +811,7 @@ it('rejects a changed input while the same occurrence is still running', async (
       { tool_name: 'write_file' },
       signal(),
     ),
-  ).rejects.toThrow('input conflict');
+  ).rejects.toThrow(HostedHookInputConflictError);
   expect(hooks.hasPendingOperations).toBe(true);
   finish!({ success: true, outcome: 'success', duration: 0 });
   await firing;
