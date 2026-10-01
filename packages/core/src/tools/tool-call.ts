@@ -11,6 +11,7 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { getCurrentAgentChat } from '../agents/runtime/agent-context.js';
 import {
   canonicalToolName,
   resolveRegisteredToolName,
@@ -97,7 +98,8 @@ export async function declareTargetAfterEmptyBridgedCall(
   args: Record<string, unknown> | undefined,
 ): Promise<boolean> {
   if (args && Object.keys(args).length > 0) return false;
-  if (!client || isSubagentLikeExecutionContext()) return false;
+  if (!client || getCurrentAgentChat() || isSubagentLikeExecutionContext())
+    return false;
   if (
     typeof registry.revealDeferredTool !== 'function' ||
     !registry.isDeferredAndHidden(targetName)

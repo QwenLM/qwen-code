@@ -6,7 +6,12 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { MockTool } from '../test-utils/mock-tool.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  getCurrentAgentId,
+  runWithAgentChat,
+  runWithAgentContext,
+} from '../agents/runtime/agent-context.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import {
   deferredDeclarationFingerprint,
@@ -188,6 +193,19 @@ describe('declareTargetAfterEmptyBridgedCall (#12889)', () => {
     for (const registry of [visible, noClient, subagent]) {
       expect(registry.revealDeferredTool).not.toHaveBeenCalled();
     }
+    expect(setTools).not.toHaveBeenCalled();
+  });
+
+  it('keeps primary declarations unchanged in an agent chat without an agent ID', async () => {
+    const registry = revealRegistry();
+    const setTools = vi.fn(async () => {});
+
+    await runWithAgentChat({} as LlmChat, async () => {
+      expect(getCurrentAgentId()).toBeNull();
+      await expect(declare(registry, { setTools }, {})).resolves.toBe(false);
+    });
+
+    expect(registry.revealDeferredTool).not.toHaveBeenCalled();
     expect(setTools).not.toHaveBeenCalled();
   });
 
