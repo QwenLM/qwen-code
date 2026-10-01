@@ -289,6 +289,12 @@ public class ManagedAgentService {
                 // command.
                 if (error instanceof RuntimeBrokerException refusal
                         && !refusal.isRetryable()) {
+                    // Retire the command row this refusal would leave
+                    // PENDING: nothing else clears it, so every later rename
+                    // with a fresh key would die in
+                    // requireNoOpenOperation for the Session's life.
+                    store.abandonSessionMutation(tenantId, RENAME,
+                            idempotencyKey, sessionId);
                     HttpStatus status = HttpStatus.resolve(
                             refusal.getStatusCode());
                     throw new ApiException(
@@ -555,7 +561,7 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId, true)));
+                        maySubmitWorkspaceTurn(session, actorId)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -711,11 +717,6 @@ public class ManagedAgentService {
         }
     }
 
-    private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            String actorId) {
-        return maySubmitWorkspaceTurn(session, actorId, false);
-    }
-
     // Cancelling aborts work that is already running, so it needs only what
     // identifies the creator, not the grants that admit new work: the
     // creator who can still read the Workspace may cancel while can_create is
@@ -733,11 +734,8 @@ public class ManagedAgentService {
         }
     }
 
-    // readGranted is true on the read paths (session get/list), where the
-    // page query or requireReadGrant already established the caller's
-    // can_read for a bound row, so the clause would re-ask a fixed true.
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            String actorId, boolean readGranted) {
+            String actorId) {
         if (session.workspace() == null || !harness.isWorkspaceFilesAvailable()) {
             return false;
         }
@@ -751,15 +749,16 @@ public class ManagedAgentService {
                         session.workspace().getContextConfigRef())) {
             return false;
         }
-        if ((!readGranted && !workspaces.canRead(session.tenantId(), actorId,
-                session.workspace().getWorkspaceId()))
-                || !workspaces.createdSession(session.tenantId(), actorId,
-                        session.sessionId())) {
+        // createdSession precedes findReadable: it answers false for an actor
+        // id the registry key cannot encode, where findReadable throws.
+        if (!workspaces.createdSession(session.tenantId(), actorId,
+                session.sessionId())) {
             return false;
         }
         // The caller is the Session's creator, so this reads the creator's
-        // grant row, as the execution authority's join does: can_create on a
-        // registry whose state is ACTIVE.
+        // grant row, as the execution authority's join does: can_read (the
+        // join's own filter) and can_create, on a registry whose state is
+        // ACTIVE.
         ManagedWorkspaceRegistry.WorkspaceSummary summary =
                 workspaces.findReadable(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId());

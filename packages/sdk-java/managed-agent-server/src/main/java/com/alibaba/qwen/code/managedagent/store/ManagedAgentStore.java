@@ -580,6 +580,18 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
+    public void abandonSessionMutation(String tenantId, String operation,
+            String idempotencyKey, String sessionId) {
+        // Only a still-PENDING row is retired: a completed mutation is the
+        // recorded outcome and must stay replayable.
+        jdbc.update("DELETE FROM managed_agent_command WHERE tenant_id = ?"
+                        + " AND operation = ? AND idempotency_key = ?"
+                        + " AND session_id = ? AND command_status = 'PENDING'",
+                tenantId, operation, idempotencyKey, sessionId);
+    }
+
+    @Override
+    @Transactional
     public OperationAdmission beginOperation(String tenantId,
             String sessionId, OperationKind kind, String actorDigest,
             String idempotencyKey, String requestDigest) {
