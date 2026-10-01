@@ -149,6 +149,9 @@ export function managedEventsToMessages(
       if (typeof callId === 'string') tool.toolCallId = callId;
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
+      // The Harness titles each call itself; the approval card shows it as
+      // the description, so keep it instead of dropping it on the floor.
+      if (typeof data['title'] === 'string') tool.title = data['title'];
       if (data['input'] !== undefined) {
         const input =
           typeof data['input'] === 'string' && data['truncated'] === true

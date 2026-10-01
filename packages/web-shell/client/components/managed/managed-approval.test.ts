@@ -115,4 +115,29 @@ describe('Managed approval presentation', () => {
       content: 'turn-2',
     });
   });
+
+  it('carries the Harness call title into the approval description', () => {
+    const messages = managedEventsToMessages(
+      [
+        {
+          id: 8,
+          at: 8,
+          type: 'tool_requested',
+          sessionId: 's1',
+          turnId: 'turn-2',
+          data: {
+            itemId: 'item_tool_1',
+            toolCallId: 'call-1',
+            toolName: 'write_file',
+            title: 'Write notes.md',
+            input: { file_path: 'notes.md', content: 'turn-2' },
+          },
+        },
+      ],
+      '[truncated]',
+    );
+    expect(toManagedPermissionRequest(action, messages).title).toBe(
+      'Write notes.md',
+    );
+  });
 });
