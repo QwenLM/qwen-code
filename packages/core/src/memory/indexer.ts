@@ -36,8 +36,9 @@ const MAX_INDEX_LINES = 200;
 const MAX_INDEX_BYTES = 25_000;
 const MAX_INDEX_FIELD_CHARS = 120;
 // The description is the only optional part of an entry, so it absorbs all the
-// shortening. Below this length a hook is not worth the bytes it costs, and the
-// entry is emitted without one.
+// shortening. A hook that would have to be CUT below this length is not worth
+// the bytes it costs, so the entry is then emitted without one — but a hook
+// that fits whole in the leftover room is kept however small that room is.
 const MIN_INDEX_HOOK_CHARS = 24;
 const INDEX_HOOK_SEPARATOR = ' — ';
 const INDEX_ALSO_OPEN = ' (also: ';
@@ -51,10 +52,15 @@ function truncateIndexField(value: string, limit: number): string {
   if (value.length <= limit) {
     return value;
   }
-  return `${value
-    .slice(0, limit - 1)
-    .replace(/\s+\S*$/, '')
-    .trimEnd()}…`;
+  const head = value.slice(0, limit - 1);
+  // Back off to a word boundary only when the boundary keeps most of the
+  // window (the same guard compressFindingSummary applies): an unconditional
+  // backoff deletes everything after the last whitespace, collapsing a field
+  // whose tail is one long unbroken run — the normal shape of CJK prose,
+  // which has no word-separating spaces — to its leading token plus `…`.
+  const boundary = head.replace(/\s+\S*$/, '').trimEnd();
+  const cut = boundary.length >= limit * 0.6 ? boundary : head;
+  return `${cut.trimEnd()}…`;
 }
 
 /**
@@ -143,7 +149,10 @@ function docIndexLine(
       link.length + INDEX_ALSO_OPEN.length + next.length + 1 >
       MAX_INDEX_LINE_CHARS
     ) {
-      break;
+      // Drop THIS sibling whole and keep measuring the rest: a later, shorter
+      // target may still fit, and a grouped member has no index line of its
+      // own — skipping the rest here would hide it from the index entirely.
+      continue;
     }
     also = next;
   }
@@ -153,10 +162,12 @@ function docIndexLine(
     link.length -
     suffix.length -
     INDEX_HOOK_SEPARATOR.length;
-  if (room < MIN_INDEX_HOOK_CHARS) {
+  const description = sanitizeIndexField(doc.description) || doc.type;
+  // A hook that FITS whole costs nothing beyond its bytes — keep it. Drop the
+  // hook only when it would have to be CUT below MIN_INDEX_HOOK_CHARS.
+  if (description.length > room && room < MIN_INDEX_HOOK_CHARS) {
     return `${link}${suffix}`;
   }
-  const description = sanitizeIndexField(doc.description) || doc.type;
   return `${link}${INDEX_HOOK_SEPARATOR}${truncateIndexField(description, room)}${suffix}`;
 }
 

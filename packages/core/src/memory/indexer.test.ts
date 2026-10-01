@@ -671,4 +671,101 @@ describe('managed auto-memory indexer', () => {
       'carol/c.md',
     ]);
   });
+
+  it('lists a later fitting "(also: …)" sibling even when an earlier one overflows', () => {
+    // Regression: the fit loop broke at the FIRST sibling whose target did not
+    // fit, so a short sibling sorted behind a long one was never measured and
+    // — since grouped members have no index line of their own — appeared
+    // nowhere in the index at all.
+    const shared = 'shared fact';
+    const doc = (relativePath: string, title: string) => ({
+      scope: 'team' as const,
+      type: 'feedback' as const,
+      filePath: `/tmp/${relativePath}`,
+      relativePath,
+      filename: relativePath.split('/').pop()!,
+      title,
+      description: shared,
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: [],
+      body: '',
+      mtimeMs: 0,
+    });
+    const content = buildTeamAutoMemoryIndex([
+      doc('alice/a.md', 'Alpha'),
+      doc(`bob/${'b'.repeat(120)}.md`, 'Bravo'),
+      doc('c-short.md', 'Carol'),
+    ]);
+
+    const [line] = content.split('\n');
+    expect(decodeURIComponent(linkTarget(line))).toBe('alice/a.md');
+    // The long sibling is dropped whole; the short one still fits and must
+    // be listed.
+    expect(line).not.toContain('bob/');
+    expect(alsoTargets(line).map(decodeURIComponent)).toEqual(['c-short.md']);
+  });
+
+  it('keeps a hook that fits whole even when the leftover room is small', () => {
+    // Regression: the hook guard compared the ROOM against
+    // MIN_INDEX_HOOK_CHARS, so a description short enough to fit whole was
+    // discarded whenever the link happened to be long. A complete hook costs
+    // nothing beyond its bytes; only a hook that would have to be CUT below
+    // MIN_INDEX_HOOK_CHARS is dropped.
+    const description = 'D'.repeat(20);
+    const relativePath = `f/${'q'.repeat(16)}.md`;
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: `${'q'.repeat(16)}.md`,
+        title: 'T'.repeat(100),
+        description,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    // room = 150 - 127 (link) - 3 (separator) = 20, exactly the hook length:
+    // the hook ships whole and the line still lands inside the budget.
+    expect(line).toContain(`— ${description}`);
+    expect(line.length).toBeLessThanOrEqual(150);
+    expect(decodeURIComponent(linkTarget(line))).toBe(relativePath);
+  });
+
+  it('does not collapse an unbroken CJK field run to its leading token', () => {
+    // Regression: the word-boundary backoff in truncateIndexField was
+    // unconditional, so a field whose tail is one long unbroken run — the
+    // normal shape of CJK prose, which has no word-separating spaces — was
+    // shortened to its leading token plus "…" instead of keeping the window.
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: '/tmp/feedback/cjk.md',
+        relativePath: 'feedback/cjk.md',
+        filename: 'cjk.md',
+        title: `修复 ${'登录问题'.repeat(40)}`,
+        description: 'd',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    // The boundary guard keeps the full window when no usable word boundary
+    // exists near the limit…
+    expect(line).toContain('登录问题'.repeat(10));
+    // …rather than collapsing to the 3-character stub "- [修复…](…)".
+    expect(line).not.toContain('[修复…]');
+  });
 });
