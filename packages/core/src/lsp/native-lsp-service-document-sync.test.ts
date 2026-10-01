@@ -21,6 +21,7 @@ import { sortJsonValue } from './sort-json-value.js';
 import { NativeLspService } from './native-lsp-service.js';
 import { NativeLspClient } from './NativeLspClient.js';
 import { LspTool, type LspToolParams } from '../tools/lsp.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import type { LspServerManager } from './lsp-server-manager.js';
 import type { Config } from '../config/config.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
@@ -2208,7 +2209,9 @@ describe('NativeLspService disk document synchronization', () => {
       async (operation) => {
         connection.request.mockRejectedValue(new Error('server exploded'));
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('server exploded');
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
@@ -2220,7 +2223,9 @@ describe('NativeLspService disk document synchronization', () => {
         handle.status = 'FAILED';
         handle.error = new Error('command not found: test-server');
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         // The state word, not the tool's `LSP diagnostics failed:` prefix,
         // plus the recorded cause the service is already holding.
         expect(result.error?.message).toContain('test is failed');
@@ -2237,7 +2242,9 @@ describe('NativeLspService disk document synchronization', () => {
       async (operation) => {
         handle.status = 'IN_PROGRESS';
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('in progress');
         expect(result.llmContent).not.toContain('No diagnostics found');
         expect(connection.request).not.toHaveBeenCalled();
@@ -2335,7 +2342,9 @@ describe('NativeLspService disk document synchronization', () => {
         ]);
         connection.request.mockRejectedValue(new Error('server exploded'));
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('server exploded');
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
@@ -2358,7 +2367,9 @@ describe('NativeLspService disk document synchronization', () => {
         const result = await run(queryDiagnosticsTool(operation));
         // The ready server was queried; the pending one is named, not dropped.
         expect(connection.request).toHaveBeenCalled();
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('pyright is in progress');
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
@@ -2403,7 +2414,9 @@ describe('NativeLspService disk document synchronization', () => {
               },
         );
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('unusable');
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
@@ -2414,7 +2427,9 @@ describe('NativeLspService disk document synchronization', () => {
       async (operation) => {
         connection.request.mockRejectedValue(new Error('x'.repeat(5000)));
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         // getErrorMessage caps the detail at 1000 chars; the rendered message
         // must stay bounded even with the wrapper text around it.
         expect(result.error!.message.length).toBeLessThan(1100);
@@ -2429,7 +2444,9 @@ describe('NativeLspService disk document synchronization', () => {
           new Error('outer', { cause: new Error('inner root cause') }),
         );
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('(cause: inner root cause)');
       },
     );
@@ -2483,7 +2500,9 @@ describe('NativeLspService disk document synchronization', () => {
           ['pendingtwo', pendingHandle],
         ]);
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeDefined();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
         expect(result.error?.message).toContain('failedone is failed');
         expect(result.error?.message).toContain('pendingtwo is in progress');
       },
@@ -2549,7 +2568,9 @@ describe('NativeLspService disk document synchronization', () => {
           expect(result.llmContent).toMatch(/^No diagnostics found/);
         } else {
           // A workspace report would silently certify pyright's slice clean.
-          expect(result.error).toBeDefined();
+          expect(result.error).toMatchObject({
+            type: ToolErrorType.EXECUTION_FAILED,
+          });
           expect(result.error?.message).toContain('pyright is failed');
         }
       },
