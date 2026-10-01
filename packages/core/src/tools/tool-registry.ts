@@ -340,10 +340,28 @@ export class ToolRegistry {
   }
 
   /**
+   * A Managed session never runs a tool's side effect in the host process,
+   * so its registry takes no tool from any path, including tools registered
+   * after the session starts (image generation, workflows, advisor).
+   */
+  private refusesHostTools(): boolean {
+    return this.config.getSessionExecutionEngine?.() === 'managed';
+  }
+
+  private refusesHostTool(name: string): boolean {
+    if (!this.refusesHostTools()) return false;
+    debugLogger.info(
+      `Tool "${name}" skipped: a Managed session has no host tools.`,
+    );
+    return true;
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (this.refusesHostTool(tool.name)) return;
     if (
       this.isToolDisabled(
         tool.name,
@@ -414,6 +432,7 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -437,6 +456,7 @@ export class ToolRegistry {
    * tool while {@link preloadDeferredToolsWithinBudget} skips it.
    */
   registerPermissionDeferredFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -538,6 +558,13 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    // The writes below bypass registerTool, so this refusal covers them all.
+    if (this.refusesHostTools()) {
+      debugLogger.info(
+        'Discovered tools skipped: a Managed session has no host tools.',
+      );
+      return;
+    }
     for (const [key, tool] of source.mcpAppTools) {
       if (
         !this.mcpAppTools.has(key) &&
@@ -941,6 +968,9 @@ export class ToolRegistry {
     allowedNames?: ReadonlySet<string>,
   ): FunctionDeclaration[] {
     const plan = this.getCodeModeBindingPlan(allowedNames);
+    const searchAvailable =
+      !!this.getTool(ToolNames.TOOL_SEARCH) &&
+      (!allowedNames || allowedNames.has(ToolNames.TOOL_SEARCH));
     return Array.from(this.tools.values())
       .filter((tool) => {
         const exposure = getToolExposure(tool.name);
@@ -953,7 +983,7 @@ export class ToolRegistry {
       .sort(ToolRegistry.compareCodeModeTools)
       .map((tool) =>
         tool.name === ToolNames.EXEC
-          ? buildExecDeclaration(tool, plan)
+          ? buildExecDeclaration(tool, plan, searchAvailable)
           : tool.schema,
       );
   }
@@ -1085,9 +1115,11 @@ export class ToolRegistry {
    * reachable via ToolSearch + ToolCall. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    *
-   * Always empty in CodeModeOnly: every schema is already bound into the `exec`
-   * description and ToolSearch is hidden, so a reminder built from this summary
-   * would offer a lookup step the model has no way to take.
+   * Empty in CodeModeOnly: exec describes on-demand discovery without a full
+   * startup catalog or the Direct-mode reminders' tool_call instructions.
+   * The empty result also keeps the client's incomplete-bridge fallback, which
+   * reveals ordinary deferred tools, from rewriting the exec declaration and
+   * breaking the prompt cache when a deny rule removes tool_call.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {

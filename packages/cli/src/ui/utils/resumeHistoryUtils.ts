@@ -9,6 +9,7 @@ import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
   ConversationRecord,
+  ChatRecord,
   Config,
   AnyDeclarativeTool,
   ToolResultDisplay,
@@ -23,6 +24,7 @@ import {
   isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
+  computeInitialTurnFromHistory,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -266,6 +268,10 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    const promptId =
+      typeof record.promptId === 'string' && record.promptId.length > 0
+        ? record.promptId
+        : undefined;
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -419,7 +425,11 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
-            items.push({ type: 'user', text });
+            items.push({
+              type: 'user',
+              text,
+              ...(promptId ? { promptId } : {}),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -453,7 +463,11 @@ function convertToHistoryItems(
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
-          items.push({ type: 'user', text });
+          items.push({
+            type: 'user',
+            text,
+            ...(promptId ? { promptId } : {}),
+          });
         }
         break;
       }
@@ -723,6 +737,26 @@ export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
     ...item,
     display: Object.keys(rest).length > 0 ? rest : undefined,
   };
+}
+
+/** Seeds a resumed prompt counter past both recorded turns and claimed ids. */
+export function computeResumedPromptCountSeed(
+  records: readonly ChatRecord[],
+  sessionId: string,
+): number {
+  const userTurnCount = records.filter(
+    (m) =>
+      m.type === 'user' &&
+      m.subtype !== 'mid_turn_user_message' &&
+      m.subtype !== 'realtime_message',
+  ).length;
+  if (userTurnCount === 0) {
+    return 0;
+  }
+  return Math.max(
+    userTurnCount,
+    computeInitialTurnFromHistory(records, sessionId) + 1,
+  );
 }
 
 /**

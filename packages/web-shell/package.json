@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.24.6",
+  "version": "0.24.7",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
