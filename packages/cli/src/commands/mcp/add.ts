@@ -13,14 +13,16 @@ import type {
   MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
 
-// A negated flag (`--no-include-tools`) makes yargs put a boolean `false` in
-// the array. With no string values the list is unset (no filter), not empty
-// (allow none).
+// yargs reports a list flag in three shapes without usable values, and an
+// unset list (no filter) differs from an empty one (allow none): an omitted
+// flag is `undefined` (unset), a negated flag such as `--no-include-tools` is
+// `[false]` (unset), and a flag given with no value is `[]` (empty).
 function splitCommaList(values: unknown[] | undefined): string[] | undefined {
-  const strings = values?.filter(
+  if (values === undefined) return undefined;
+  const strings = values.filter(
     (value): value is string => typeof value === 'string',
   );
-  if (!strings?.length) return undefined;
+  if (strings.length === 0) return values.length ? undefined : [];
   return strings
     .flatMap((value) => value.split(','))
     .map((value) => value.trim())

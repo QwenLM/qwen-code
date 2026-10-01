@@ -297,6 +297,19 @@ describe('mcp add command', () => {
     });
   });
 
+  it.each(['--include-tools', '--include-tools='])(
+    'should keep a valueless %s as an empty array',
+    async (flag) => {
+      await parser.parseAsync(`add my-server /path/to/server ${flag}`);
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        { 'my-server': expect.objectContaining({ includeTools: [] }) },
+      );
+    },
+  );
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';
