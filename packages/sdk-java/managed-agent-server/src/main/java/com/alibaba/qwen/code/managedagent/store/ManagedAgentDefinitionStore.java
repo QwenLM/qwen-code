@@ -31,6 +31,25 @@ public class ManagedAgentDefinitionStore {
     public record Admission(DefinitionRevision revision, boolean replayed) {
     }
 
+    /**
+     * A concurrent request committed first. The losing transaction rolls
+     * back; the caller then reads the committed command and replays it when
+     * it is the same request, or answers {@link #code()}.
+     */
+    public static final class ConcurrentWriteException
+            extends RuntimeException {
+        private final String code;
+
+        public ConcurrentWriteException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+
+        public String code() {
+            return code;
+        }
+    }
+
     /** Creates a definition with revision 1 under a new agent ID. */
     @Transactional
     public Admission create(String tenantId, String idempotencyKey,
@@ -71,8 +90,7 @@ public class ManagedAgentDefinitionStore {
             } catch (DuplicateKeyException error) {
                 // A concurrent update took this revision number first. The
                 // command was not recorded, so the same key can be retried.
-                throw new ApiException(HttpStatus.CONFLICT,
-                        "agent_revision_conflict",
+                throw new ConcurrentWriteException("agent_revision_conflict",
                         "The agent definition changed concurrently;"
                                 + " retry the update.");
             }
@@ -96,6 +114,15 @@ public class ManagedAgentDefinitionStore {
                 + " WHERE tenant_id = ? AND agent_id = ? AND revision = ?",
                 ManagedAgentDefinitionStore::row, tenantId, agentId,
                 revision));
+    }
+
+    /**
+     * Reads the command a concurrent request committed under this key. A
+     * different request answers {@code 409 idempotency_conflict}.
+     */
+    public Optional<Admission> replayCommitted(String tenantId,
+            String idempotencyKey, String requestDigest) {
+        return replay(tenantId, idempotencyKey, requestDigest);
     }
 
     private Optional<Admission> replay(String tenantId,
@@ -131,12 +158,9 @@ public class ManagedAgentDefinitionStore {
                     tenantId, idempotencyKey, requestDigest,
                     revision.agentId(), revision.revision(), now);
         } catch (DuplicateKeyException error) {
-            // A concurrent request recorded this key first; the caller
-            // retries and replays or conflicts against that command.
-            throw new ApiException(HttpStatus.CONFLICT,
-                    "idempotency_conflict",
-                    "The Idempotency-Key is being used by a concurrent"
-                            + " request.");
+            // A concurrent request recorded this key first.
+            throw new ConcurrentWriteException("idempotency_conflict",
+                    "The Idempotency-Key was used by a concurrent request.");
         }
         return new Admission(revision, false);
     }

@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.AgentDefinition;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore.Admission;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore.ConcurrentWriteException;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore.DefinitionRevision;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -11,7 +13,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 /**
@@ -48,11 +52,11 @@ public class ManagedAgentDefinitionService {
             AgentDefinitionRequest request) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         Map<String, Object> content = content(request);
-        Admission admission = store.create(tenantId, idempotencyKey,
-                requestDigest("create", null, content), newAgentId(),
-                contentDigest(content), json(content),
-                System.currentTimeMillis());
-        return result(admission);
+        String requestDigest = requestDigest("create", null, content);
+        return result(tenantId, idempotencyKey, requestDigest,
+                () -> store.create(tenantId, idempotencyKey, requestDigest,
+                        newAgentId(), contentDigest(content), json(content),
+                        System.currentTimeMillis()));
     }
 
     public Result update(String tenantId, String agentId,
@@ -60,11 +64,11 @@ public class ManagedAgentDefinitionService {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         requireAgentId(agentId);
         Map<String, Object> content = content(request);
-        Admission admission = store.update(tenantId, idempotencyKey,
-                requestDigest("update", agentId, content), agentId,
-                contentDigest(content), json(content),
-                System.currentTimeMillis());
-        return result(admission);
+        String requestDigest = requestDigest("update", agentId, content);
+        return result(tenantId, idempotencyKey, requestDigest,
+                () -> store.update(tenantId, idempotencyKey, requestDigest,
+                        agentId, contentDigest(content), json(content),
+                        System.currentTimeMillis()));
     }
 
     /** Reads the requested revision, or the latest when none is named. */
@@ -85,7 +89,21 @@ public class ManagedAgentDefinitionService {
         return publicDefinition(found);
     }
 
-    private Result result(Admission admission) {
+    /**
+     * Runs a write. When a concurrent request committed first, the same
+     * request replays that request's result instead of conflicting.
+     */
+    private Result result(String tenantId, String idempotencyKey,
+            String requestDigest, Supplier<Admission> write) {
+        Admission admission;
+        try {
+            admission = write.get();
+        } catch (ConcurrentWriteException conflict) {
+            admission = store.replayCommitted(tenantId, idempotencyKey,
+                    requestDigest).orElseThrow(() -> new ApiException(
+                            HttpStatus.CONFLICT, conflict.code(),
+                            conflict.getMessage()));
+        }
         return new Result(publicDefinition(admission.revision()),
                 admission.replayed());
     }

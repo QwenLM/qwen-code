@@ -178,6 +178,15 @@ class ManagedAgentDefinitionTest {
         create(tenant, "no-tools",
                 DEFINITION.replace("\"tools\":[{\"name\":\"read_file\"}],", ""))
                 .andExpect(status().isBadRequest());
+        // Array items must be objects; a null item is refused, not stored.
+        create(tenant, "null-tool", DEFINITION.replace(
+                "[{\"name\":\"read_file\"}]", "[null]"))
+                .andExpect(status().isBadRequest());
+        for (String field : new String[] {"skills", "mcp_servers"}) {
+            create(tenant, "null-" + field, DEFINITION.replace("\"metadata\"",
+                    "\"" + field + "\":[null],\"metadata\""))
+                    .andExpect(status().isBadRequest());
+        }
         assertThat(rows(tenant)).isZero();
     }
 

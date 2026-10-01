@@ -49,7 +49,8 @@ agent ID 由服务端生成，格式为 `agent_` 加 32 位十六进制；请求
 路径中的其他 ID 一律应答 `404 agent_not_found`，因此 `/v1/agents/` 下的保留名，
 以及带填充或大小写变化的变体，都不会命中已存储的行。
 
-内容是去掉缺省与 null 可选字段后的请求。digest 是规范化 JSON（每一层键都排序）
+内容是去掉缺省与 null 可选字段后的请求；为此契约把 `skills`、`mcp_servers` 与
+`metadata` 声明为可为 null。数组元素必须是对象，`null` 元素应答 `400`。digest 是规范化 JSON（每一层键都排序）
 的 SHA-256，因此键的顺序和显式 `null` 都不会改变它。请求 digest 还包含操作类型，
 更新时还包含 agent ID。
 
@@ -61,9 +62,10 @@ agent ID 由服务端生成，格式为 `agent_` 加 32 位十六进制；请求
 - **回放。** 相同键与相同请求 digest 应答已记录的 revision，并带
   `X-Qwen-Idempotent-Replay: true`。相同键配不同请求（包括把创建用过的键用于
   更新）应答 `409 idempotency_conflict`。
-- **并发。** revision 行与命令在同一事务中提交。若并发更新先占用了该 revision
-  号，本次更新应答 `409 agent_revision_conflict` 且不记录命令，因此可以用同一
-  键重试。
+- **并发。** revision 行与命令在同一事务中提交。并发请求先提交时，落败的写入
+  回滚，并读取该键下已提交的命令：相同请求回放其结果。否则，若并发更新先占用了
+  revision 号，应答 `409 agent_revision_conflict` 且不记录命令，可以用原键重试；
+  同一键下的不同请求应答 `409 idempotency_conflict`。
 - **读取** 读取最新 revision，或 `revision` 指定的那个（从 `1` 开始的十进制数）。
   其他值一律应答 `404 agent_not_found`。
 - 响应包含 `id`、`object: "agent"`、`revision`、`digest`、`created_at` 以及请求的
@@ -92,6 +94,8 @@ v1.29.0。该版本号假定 #13112 先以 v1.28 合入。
 
 - `ManagedAgentDefinitionTest`：创建与回放、内容不变与变化的更新、revision 读取、
   键冲突、租户范围、服务端生成的 ID、请求校验与规范化 digest。
+- `ManagedAgentDefinitionServiceTest`：竞争失败的写入，相同请求回放已提交的
+  结果，否则保留冲突。
 - `ManagedAgentApiContractTest`：三条路由按 schema 应答，包括 `400`、`404` 与
   `409`，以及不带斜杠的集合路径上的租户过滤拒绝。
 - `TenantContextFilterTest`：不带斜杠的路径要求租户，前缀相同的无关路径不被过滤。

@@ -123,7 +123,7 @@
       "post": {
         "tags": ["Public Resources"],
         "operationId": "updateAgent",
-        "description": "Stores the next immutable revision. Content whose digest equals the latest revision stores nothing and answers with that revision. A concurrent update answers 409 agent_revision_conflict, and the same Idempotency-Key can be retried.",
+        "description": "Stores the next immutable revision. Content whose digest equals the latest revision stores nothing and answers with that revision. An identical concurrent request replays the committed result; a different concurrent update answers 409 agent_revision_conflict, and its Idempotency-Key can be retried.",
         "x-qwen-implementation-status": "implemented",
         "parameters": [
           {
@@ -4088,7 +4088,8 @@
             }
           },
           "skills": {
-            "type": "array",
+            "description": "null is the same as omitting the field.",
+            "type": ["array", "null"],
             "maxItems": 1000,
             "items": {
               "type": "object",
@@ -4096,7 +4097,8 @@
             }
           },
           "mcp_servers": {
-            "type": "array",
+            "description": "null is the same as omitting the field.",
+            "type": ["array", "null"],
             "maxItems": 100,
             "items": {
               "type": "object",
@@ -4112,7 +4114,8 @@
             "maxLength": 128
           },
           "metadata": {
-            "type": "object",
+            "description": "null is the same as omitting the field.",
+            "type": ["object", "null"],
             "additionalProperties": true
           }
         }

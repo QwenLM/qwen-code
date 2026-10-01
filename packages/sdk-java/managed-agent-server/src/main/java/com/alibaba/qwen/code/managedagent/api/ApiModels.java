@@ -421,10 +421,11 @@ public final class ApiModels {
     public record AgentDefinitionRequest(
             @NotNull Map<String, Object> model,
             @NotNull @Size(max = 1_000_000) String instructions,
-            @NotNull @Size(max = 1000) List<Map<String, Object>> tools,
-            @Size(max = 1000) List<Map<String, Object>> skills,
+            @NotNull @Size(max = 1000)
+                    List<@NotNull Map<String, Object>> tools,
+            @Size(max = 1000) List<@NotNull Map<String, Object>> skills,
             @JsonProperty("mcp_servers") @Size(max = 100)
-                    List<Map<String, Object>> mcpServers,
+                    List<@NotNull Map<String, Object>> mcpServers,
             @JsonProperty("permission_policy") @NotNull
                     Map<String, Object> permissionPolicy,
             @JsonProperty("environment_template_id") @Size(max = 128)

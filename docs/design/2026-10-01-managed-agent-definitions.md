@@ -56,7 +56,9 @@ no ID field. Any other path ID answers `404 agent_not_found`, so the reserved
 names under `/v1/agents/` and padded or case-folded variants never resolve to
 a stored row.
 
-The content is the request with absent and null optional fields removed. Its
+The content is the request with absent and null optional fields removed; the
+contract declares `skills`, `mcp_servers` and `metadata` nullable for that
+reason. Array items must be objects, so a `null` item answers `400`. The
 digest is the SHA-256 of the canonical JSON (keys sorted at every level), so
 key order and an explicit `null` do not change it. The request digest also
 covers the operation and, for an update, the agent ID.
@@ -70,10 +72,13 @@ covers the operation and, for an update, the agent ID.
   with `X-Qwen-Idempotent-Replay: true`. The same key with a different request,
   including a create key reused for an update, answers
   `409 idempotency_conflict`.
-- **Concurrency.** Revision rows and the command commit in one transaction. If
-  a concurrent update takes the revision number first, the update answers
-  `409 agent_revision_conflict` without recording the command, so the same
-  key can be retried.
+- **Concurrency.** Revision rows and the command commit in one transaction.
+  When a concurrent request commits first, the losing write rolls back and
+  reads the command committed under its key: the same request replays that
+  result. Otherwise a concurrent update that took the revision number answers
+  `409 agent_revision_conflict` without recording the command, so its key can
+  be retried, and a different request under the same key answers
+  `409 idempotency_conflict`.
 - **Get** reads the latest revision, or the one named by `revision` (a decimal
   number from `1`). Anything else answers `404 agent_not_found`.
 - The response carries `id`, `object: "agent"`, `revision`, `digest`,
@@ -105,6 +110,8 @@ v1.28 first.
 - `ManagedAgentDefinitionTest`: creation and replay, unchanged and changed
   updates, revision reads, key conflicts, tenant scope, server-generated IDs,
   validation, and canonical digests.
+- `ManagedAgentDefinitionServiceTest`: a write that loses a race replays the
+  committed result for the same request and keeps its conflict otherwise.
 - `ManagedAgentApiContractTest`: the three routes against their schemas,
   including `400`, `404` and `409`, and the tenant filter refusal on the bare
   collection path.
