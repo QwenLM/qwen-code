@@ -687,6 +687,7 @@ describe('Gemini Client (client.ts)', () => {
       | 'revealDeferredTool'
       | 'preloadDeferredToolsWithinBudget'
       | 'clearRevealedDeferredTools'
+      | 'clearReviewedDeclarations'
       | 'getFunctionDeclarations'
       | 'ensureTool',
       Mock
@@ -842,6 +843,8 @@ describe('Gemini Client (client.ts)', () => {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
+      clearReviewedDeclarations: vi.fn(),
+      syncReviewedDeclarations: vi.fn(),
       revealDeferredTool: vi.fn(),
       preloadDeferredToolsWithinBudget: vi.fn().mockReturnValue(0),
       isDeferredToolRevealed: vi.fn().mockReturnValue(false),
@@ -1188,6 +1191,9 @@ describe('Gemini Client (client.ts)', () => {
       const resumedClient = await initializedClient();
 
       expect(resumedClient.getHistory().at(-1)).toEqual(apiHistory[0]);
+      expect(
+        mockConfig.getToolRegistry().syncReviewedDeclarations,
+      ).toHaveBeenCalledWith(apiHistory);
       const { resetSession, addEvent } = uiTelemetryService;
       expect(resetSession).toHaveBeenCalledWith('test-session-id');
       expect(addEvent).toHaveBeenCalledWith(uiEvent, 'test-session-id');
@@ -3426,10 +3432,12 @@ describe('Gemini Client (client.ts)', () => {
       // as phantom declarations, defeating the "clean slate" of `/clear`.
       const reg = registryMock();
       reg.clearRevealedDeferredTools.mockClear();
+      reg.clearReviewedDeclarations.mockClear();
 
       await client.resetChat();
 
       expect(reg.clearRevealedDeferredTools).toHaveBeenCalledTimes(1);
+      expect(reg.clearReviewedDeclarations).toHaveBeenCalledTimes(1);
     });
 
     it('fires SessionStart with Clear source when resetting chat', async () => {
