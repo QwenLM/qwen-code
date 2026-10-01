@@ -1727,7 +1727,9 @@ describe('CoreToolScheduler', () => {
       harness.scheduler,
       'bridge-wrong-args',
       harness.deferred.name,
-      { url: 42 },
+      // Non-empty but still missing `url`. A wrong type is no good here: the
+      // schema validator coerces `42` to `"42"` and the call succeeds.
+      { title: 'news' },
     );
 
     const completed = firstBatch(harness.onAllToolCallsComplete)[0];
