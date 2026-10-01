@@ -413,4 +413,28 @@ public final class ApiModels {
             List<WebShellEvent> events, long coveredSequence,
             String olderCursor, boolean hasMore, long lastSequence) {
     }
+
+    /**
+     * An AgentDefinition revision's content (D8a). The server stores and
+     * digests it; no field changes Session execution yet.
+     */
+    public record AgentDefinitionRequest(
+            @NotNull Map<String, Object> model,
+            @NotNull @Size(max = 1_000_000) String instructions,
+            @NotNull @Size(max = 1000) List<Map<String, Object>> tools,
+            @Size(max = 1000) List<Map<String, Object>> skills,
+            @JsonProperty("mcp_servers") @Size(max = 100)
+                    List<Map<String, Object>> mcpServers,
+            @JsonProperty("permission_policy") @NotNull
+                    Map<String, Object> permissionPolicy,
+            @JsonProperty("environment_template_id") @Size(max = 128)
+                    String environmentTemplateId,
+            Map<String, Object> metadata) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AgentDefinition(String id, String object, String revision,
+            String digest, @JsonProperty("created_at") long createdAt,
+            Map<String, Object> metadata) {
+    }
 }

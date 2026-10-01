@@ -33,7 +33,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return !path.startsWith("/v1/agents/")
+        // The bare collection route (POST /v1/agents) has no trailing slash,
+        // so the prefix alone would let it skip the tenant scope.
+        return !path.equals("/v1/agents")
+                && !path.startsWith("/v1/agents/")
                 && !path.startsWith("/api/agent/web-shell/v1/")
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 && !path.startsWith(TOOL_PUBLICATION_PREFIX);
