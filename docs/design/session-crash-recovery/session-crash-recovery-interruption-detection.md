@@ -221,8 +221,11 @@ Covered immediately:
   whose turn never ran (`deliveredTurn !== true`), reported even when it is
   `0`. `deliveredTurn` has exactly one producer —
   `LlmClient.sendMessageStream` (`packages/core/src/core/client.ts`) stamping
-  the user entry of a notification turn it is sending right now — so that
-  exclusion reaches the TUI and headless runtimes only. `session-recovery.ts`
+  the user entry of a notification turn it is sending right now — so the
+  stamp is written on the TUI and headless send paths only, and the
+  count-based exclusion reaches only callers that forward the count: today
+  the record-derived `buildSessionRecoveryPlan` callers (the TUI's resume
+  and session-switch paths). `session-recovery.ts`
   forwards that count and
   `effectiveHistoryEnd` narrows the trim to it, so an entry is only trimmed
   when its shape matches AND it falls inside the authoritative run. Callers
@@ -235,30 +238,44 @@ Not covered yet:
   ordinary model text.
 - Fine-grained distinction between graceful abort and unknown crash.
 - A live notification turn **the ACP/serve daemon** admitted, ran, then failed
-  mid-stream WITHOUT any reminder part alongside its envelope. Such an entry is
-  a single envelope, shape-identical to a cold notification record, so the trim
-  still removes it and the turn reports `clean` with no way to re-drive it.
-  The TUI/headless half of this shape IS closed: `LlmClient.sendMessageStream`
-  stamps the turn's own user entry `deliveredTurn: true`
-  (`packages/core/src/core/client.ts`), the projection excludes stamped entries
-  from `trailingSystemNotifications`, and the entry classifies as
-  `interrupted_prompt` with a Retry continuation. The daemon half is not,
-  because the daemon never enters `LlmClient.sendMessageStream`: it sends
-  through `Session.#sendMessageStreamWithAutoCompression` →
-  `LlmChat.sendMessageStream`, and persists the record BEFORE admission via
-  `recordNotificationStrict`, which has no stamp parameter. Closing it needs a
-  post-send marker record or a daemon-side re-drive (plus a retry-budget
-  decision); stamping the cold record is not an option, because it is written
-  before `assertCanStartTurn()` — so turns later refused or deferred would
-  carry the stamp — and an appended JSONL record cannot be mutated at send
-  time. This is the DEFAULT daemon exposure rather than a narrow edge case:
-  every reminder source that would keep the entry untrimmed is opt-in (plan
-  mode, an output style, an active todo chain), and a normal session's default
-  approval mode is `ApprovalMode.AUTO` (`packages/cli/src/config/config.ts`),
-  so a failed automatic turn writes a bare envelope unless the user turned one
-  of them on. With at least one reminder part the entry is NOT trimmed and
-  recovers as `interrupted_prompt` on every send path. Tracked in #12042
-  (shape A, daemon residual).
+  mid-stream. Such an entry is a single envelope, shape-identical to a cold
+  notification record, so the trim still removes it and the turn reports
+  `clean` with no way to re-drive it. The daemon never enters
+  `LlmClient.sendMessageStream`: it sends through
+  `Session.#sendMessageStreamWithAutoCompression` →
+  `LlmChat.sendMessageStream`, which records nothing, and its entry is written
+  either BEFORE admission by `recordNotificationStrict` (no stamp parameter)
+  or post-admission at send time by `recordNotification` (the unpersisted
+  registry-callback branch) — the latter overload takes the stamp, but both
+  sites write before the send commits, so an abort or a null `responseStream`
+  afterwards would stamp a turn that never ran. Closing it needs a marker
+  written after the send commits or a daemon-side re-drive (plus a
+  retry-budget decision); stamping the cold record is not an option, because
+  it is written before `assertCanStartTurn()` — so turns later refused or
+  deferred would carry the stamp — and an appended JSONL record cannot be
+  mutated at send time. This is the DEFAULT daemon exposure rather than a
+  narrow edge case: the reminder sources that would keep an entry untrimmed
+  (plan mode, an output style, an active todo chain) never reach a
+  daemon-persisted notification entry — both daemon write sites persist the
+  envelope alone, and the reminders built afterwards flow only into the
+  outgoing message parts — so the daemon residual is EVERY failed
+  notification turn, not only the reminder-less subset. On the `LlmClient`
+  path reminders do not reach the record either (they are built for
+  `UserQuery`/`Cron` sends, and the todo reminder is taken after the record
+  write); what keeps a delivered entry untrimmed there is the `deliveredTurn`
+  stamp, not a reminder. Tracked in #12042 (shape A, daemon residual).
+- The headless `continueInterrupted`/`continue_last_turn` half of the same
+  shape. Headless writes the stamp on send, but its recovery callers
+  (`nonInteractiveCli.ts`, `nonInteractive/session.ts`) build the plan from
+  live `Content[]` via `buildSessionRecoveryPlanFromApiHistory` and forward
+  no `trailingSystemNotifications` count, so the trim stays shape-only and a
+  stamped, failed delivered turn still reports `clean` ("No interrupted turn
+  to continue."). The closure this PR lands reaches only the record-derived
+  `buildSessionRecoveryPlan` callers (the TUI's resume and session-switch
+  paths): the stamp excludes the delivered entry from the projection's count
+  there and the plan classifies it `interrupted_prompt` with a
+  `retry_user_parts` continuation — which no consumer acts on yet (both
+  callers read only `kind`/`visibleNotice`).
 
 Completeness here does not come from adding a large amount of code at once. It
 comes from consolidating current capabilities into a unified plan so the states

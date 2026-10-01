@@ -1384,6 +1384,11 @@ describe('ChatRecordingService', () => {
           },
         },
       });
+      // The cold record must never carry the stamp: it is written before
+      // admission, so a stamp would also mark turns later refused or
+      // deferred (turn-interruption.ts). `toMatchObject` ignores extra
+      // keys, so the absence has to be pinned by key.
+      expect('deliveredTurn' in record).toBe(false);
     });
 
     it('rejects instead of acknowledging an inactive recorder', async () => {

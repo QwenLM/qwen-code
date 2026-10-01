@@ -153,22 +153,33 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * runs the turn with `backgroundTurnContext.exit(...)` — so the recorder
  * stamps the turn's own entry `deliveredTurn: true` when `client.ts` sends it
  * (chatRecordingService.ts), and the projection's count excludes delivered
- * entries. A failed delivered turn is therefore left in place and classifies
- * as the textbook `interrupted_prompt` documented above; only records whose
- * turn never ran are trimmed.
+ * entries. Wherever that count is forwarded — today only the record-derived
+ * `buildSessionRecoveryPlan` callers (the TUI's resume and session-switch
+ * paths) — a failed delivered turn is left in place and classifies as the
+ * textbook `interrupted_prompt` documented above. Callers that hold only raw
+ * `Content[]` (headless `continueInterrupted`/`continue_last_turn`, and the
+ * daemon) forward no count, keep the shape-only trim, and still trim a
+ * stamped envelope; only records whose turn never ran are trimmed, and only
+ * when the count is supplied.
  *
- * That closure is per send path, and only covers `LlmClient.sendMessageStream`
- * — the TUI and headless runtimes. The ACP/serve daemon sends its notification
+ * The stamp is written on the `LlmClient.sendMessageStream` send path — the
+ * TUI and headless runtimes. The ACP/serve daemon sends its notification
  * turns through `Session.#sendMessageStreamWithAutoCompression` →
- * `LlmChat.sendMessageStream` and persists them BEFORE admission via
- * `recordNotificationStrict`, which takes no stamp, so a reminder-less entry
- * the daemon delivered is still unmarked, still counted, still trimmed and
- * still reported `clean`. That daemon residual of #12042 shape A stays open
+ * `LlmChat.sendMessageStream`, which records nothing; its entry is written
+ * either pre-admission by `recordNotificationStrict` (no stamp parameter) or
+ * post-admission at send time by `recordNotification` (the unpersisted
+ * registry-callback branch) — the latter overload takes the stamp, but both
+ * sites write before the send commits, so an abort or a null `responseStream`
+ * afterwards would stamp a turn that never ran. A reminder-less entry the
+ * daemon delivered is therefore still unmarked, still counted, still trimmed
+ * and still reported `clean`. That daemon residual of #12042 shape A stays
+ * open
  * (`docs/design/session-crash-recovery/session-crash-recovery-interruption-detection.md`,
- * "Not covered yet"); closing it needs a post-send marker record or a
- * daemon-side re-drive, not a wider predicate here. Stamping the cold record
- * itself is not an option: it is written before `assertCanStartTurn()`, so
- * turns later refused or deferred would carry the stamp too.
+ * "Not covered yet"); closing it needs a marker written after the send
+ * commits or a daemon-side re-drive, not a stamp at either existing site.
+ * Stamping the cold record itself is not an option: it is written before
+ * `assertCanStartTurn()`, so turns later refused or deferred would carry the
+ * stamp too.
  *
  * Needed at all because the record's `subtype: 'notification'` and
  * `provenance: 'system'` cannot ride along on `Content` (that type comes from
