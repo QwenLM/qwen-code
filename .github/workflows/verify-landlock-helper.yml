@@ -8,6 +8,12 @@ on:
       - 'scripts/build_landlock_run.mjs'
       - 'scripts/tests/stdio-relay.test.py'
       - 'scripts/tests/sandbox-stdio.test.py'
+      - 'scripts/tests/native-sandbox-cli.mjs'
+      - 'packages/core/src/sandbox/**'
+      - 'packages/cli/src/commands/sandbox*'
+      - 'packages/cli/src/config/**'
+      - 'packages/cli/src/utils/write-with-backup*'
+      - 'packages/cli/src/utils/flush-output*'
   push:
     branches:
       - 'main'
@@ -17,12 +23,64 @@ on:
       - 'scripts/build_landlock_run.mjs'
       - 'scripts/tests/stdio-relay.test.py'
       - 'scripts/tests/sandbox-stdio.test.py'
+      - 'scripts/tests/native-sandbox-cli.mjs'
+      - 'packages/core/src/sandbox/**'
+      - 'packages/cli/src/commands/sandbox*'
+      - 'packages/cli/src/config/**'
+      - 'packages/cli/src/utils/write-with-backup*'
+      - 'packages/cli/src/utils/flush-output*'
   workflow_dispatch:
 
 permissions:
   contents: 'read'
 
 jobs:
+  cli:
+    name: 'Native Linux CLI boundary'
+    runs-on: 'ubuntu-24.04'
+    timeout-minutes: 30
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+      - name: 'Enable runner user namespaces'
+        run: |-
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: 'Build CLI'
+        run: |-
+          corepack pnpm install --frozen-lockfile
+          npm run bundle
+      - name: 'Verify public CLI and ordinary agent tool boundaries'
+        run: 'node --import tsx/esm scripts/tests/native-sandbox-cli.mjs --linux'
+      - name: 'Upload native CLI evidence'
+        if: 'always()'
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'native-sandbox-cli'
+          path: '.qwen/e2e-tests/issue-12417-native-cli-linux.json'
+          if-no-files-found: 'ignore'
+          include-hidden-files: true
+
+  windows:
+    name: 'Native Windows settings and streams'
+    runs-on: 'windows-2022'
+    timeout-minutes: 30
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+      - name: 'Build workspace prerequisites'
+        run: 'corepack pnpm install --frozen-lockfile'
+      - name: 'Verify native settings publication and real output pipes'
+        working-directory: 'packages/cli'
+        run: 'npx vitest run src/utils/write-with-backup.windows.test.ts src/utils/flush-output.test.ts'
+
   verify:
     name: '${{ matrix.arch }}'
     strategy:

@@ -21,10 +21,8 @@ describe.skipIf(process.platform !== 'win32')(
       const target = path.join(root, 'settings.json');
       const ready = path.join(root, 'ready');
       const policy = { filesystem: 'read-only', network: 'closed' };
-      fs.writeFileSync(
-        target,
-        JSON.stringify({ tools: { executionSandbox: policy } }),
-      );
+      let published = JSON.stringify({ tools: { executionSandbox: policy } });
+      fs.writeFileSync(target, published);
       const reader = spawn(
         process.execPath,
         [
@@ -63,13 +61,23 @@ fs.writeFileSync(ready, 'ready');`,
             throw new Error('Concurrent reader did not become ready');
           await delay(20);
         }
+        let successfulWrites = 0;
         for (let index = 0; index < 400; index++) {
-          writeWithBackupSync(
-            target,
-            JSON.stringify({ index, tools: { executionSandbox: policy } }),
-          );
+          const content = JSON.stringify({
+            index,
+            tools: { executionSandbox: policy },
+          });
+          try {
+            writeWithBackupSync(target, content);
+            published = content;
+            successfulWrites++;
+          } catch (error) {
+            expect(error).toMatchObject({ code: 'EPERM' });
+            expect(fs.readFileSync(target, 'utf8')).toBe(published);
+          }
           if (index % 10 === 0) await delay(5);
         }
+        expect(successfulWrites).toBeGreaterThan(0);
         reader.stdin.end('\n');
         const [code] = await closed;
         expect(code).toBe(0);

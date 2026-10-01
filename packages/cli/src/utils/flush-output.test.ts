@@ -5,11 +5,10 @@
  */
 
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { describe, expect, it } from 'vitest';
 
-const modulePath = fileURLToPath(new URL('./flush-output.ts', import.meta.url));
+const moduleUrl = new URL('./flush-output.ts', import.meta.url).href;
 
 describe('output completion through real OS pipes', () => {
   it('preserves distinct stdout/stderr tails after backpressure', async () => {
@@ -22,7 +21,7 @@ describe('output completion through real OS pipes', () => {
         '-e',
         `
       import { once } from 'node:events';
-      import { flushOutput } from ${JSON.stringify(modulePath)};
+      import { flushOutput } from ${JSON.stringify(moduleUrl)};
       const signal = new AbortController().signal;
       for (const [stream, byte, tail] of [[process.stdout, 65, 'OUT-TAIL'], [process.stderr, 66, 'ERR-TAIL']]) {
         if (!stream.write(Buffer.alloc(1024 * 1024, byte))) await once(stream, 'drain');
@@ -66,7 +65,7 @@ describe('output completion through real OS pipes', () => {
         '--input-type=module',
         '-e',
         `
-      import { flushOutput } from ${JSON.stringify(modulePath)};
+      import { flushOutput } from ${JSON.stringify(moduleUrl)};
       const controller = new AbortController();
       process.stdout.on('error', (error) => {
         if (error.code !== 'EPIPE') throw error;

@@ -28,6 +28,8 @@ Both backend relays consume the input helper; other Linux architectures retain d
 
 Use isolated global-CLI baseline cases and repeat against the built CLI for interactive, headless, MCP, serve and ACP startup. Require one actionable refusal, a nonzero exit and unchanged malformed operator files. Cover named flags, aliases, boolean flags and tokens after `--`; BOM reload and Workspace recovery; final stdout/stderr bytes through slow real pipes; downstream close; zero-read and partial-read regular files; FIFO exit with a live idle writer; inherited connected descriptors; and preservation of original files on native Windows sharing violations. Run Linux kernel boundary checks separately from fake-backend transport tests. Build, typecheck, focused unit tests, independent verification and review are required. Platform cases are not considered verified until exercised on that platform.
 
+Native CI also runs the public CLI verification matrix and ordinary shell tool calls under the runner's own UID. A local fake model endpoint drives the real agent/tool loop; it does not establish authenticated provider or full-session viability. Run native Windows publication tests independently so unrelated full-suite failures cannot hide their result.
+
 ## Release communication
 
 Document that malformed SystemDefaults, User and System settings block startup rather than silently resetting. The generated changelog is not edited by hand; include this behavior in the fix's release description and user documentation. Keep #12417 open until the tracking acceptance matrix, including native platform evidence, is complete.
