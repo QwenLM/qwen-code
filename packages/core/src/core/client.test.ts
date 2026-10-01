@@ -7730,20 +7730,13 @@ Other open files:
                 // results and hands the carrier over as `steerInput`.
                 ...(steerThisRound ? steer.input.parts : []),
               ];
-        const events = await fromAsync(
-          client.sendMessageStream(
-            contents as never,
-            new AbortController().signal,
-            promptId,
-            {
-              type:
-                round === 0
-                  ? SendMessageType.UserQuery
-                  : SendMessageType.ToolResult,
-              ...(steerThisRound ? { steerInput: steer.input } : {}),
-            },
-          ),
-        );
+        const events = await run(contents as never, promptId, {
+          type:
+            round === 0
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+          ...(steerThisRound ? { steerInput: steer.input } : {}),
+        });
         allEvents.push(...(events as Array<{ type: string; value?: unknown }>));
         if (
           allEvents.some((e) => e.type === LlmEventType.LoopDetected) ||
