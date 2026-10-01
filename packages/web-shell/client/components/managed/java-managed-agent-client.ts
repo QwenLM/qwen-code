@@ -55,6 +55,8 @@ export type JavaAgentItem = Schemas['WebShellItem'];
 export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
 
 export type JavaAgentTranscript = Schemas['WebShellTranscript'];
+export type JavaAgentAction = Schemas['WebShellAction'];
+export type JavaAgentActionPage = Schemas['WebShellActionPage'];
 
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
@@ -147,6 +149,20 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/turns/cancel', request, signal);
+  }
+
+  queryActions(
+    request: Schemas['WebShellActionQueryRequest'],
+    signal?: AbortSignal,
+  ): Promise<JavaAgentActionPage> {
+    return this.post('/actions/query', request, signal);
+  }
+
+  respondAction(
+    request: Schemas['WebShellActionRespondRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellCommandOperation']> {
+    return this.post('/actions/respond', request, signal);
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
