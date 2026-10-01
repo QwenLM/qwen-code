@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -476,6 +477,74 @@ describe('ManagedHookRuntime', () => {
     });
     expect(instance.hasHolds('runtime-session')).toBe(false);
   });
+
+  it.each(['response', 'timeout', 'lost-reply', 'shutdown'])(
+    'waits for HTTP completion evidence after cancel (%s)',
+    async (completion) => {
+      let response!: ServerResponse;
+      let calls = 0;
+      let started!: () => void;
+      const dispatched = new Promise<void>((resolve) => (started = resolve));
+      const server = createServer((req, res) => {
+        req.resume();
+        response = res;
+        calls++;
+        started();
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: `http://127.0.0.1:${address.port}/hook`,
+            timeout: completion === 'timeout' ? 1 : 60,
+          },
+        },
+      ]);
+      const call = request();
+      try {
+        await instance.control('runtime-session', call);
+        await dispatched;
+        expect(
+          await instance.control('runtime-session', {
+            kind: 'hook-cancel',
+            sessionKey: key,
+            operationId: 'cancel',
+            targetOperationId: call.operationId,
+          }),
+        ).toMatchObject({ state: 'running' });
+        expect(instance.hasHolds('runtime-session')).toBe(true);
+        if (completion === 'response') {
+          response.writeHead(200, { 'Content-Type': 'application/json' });
+          response.end('{"continue":false}');
+        } else if (completion === 'lost-reply') response.destroy();
+        else if (completion === 'shutdown') await instance.close();
+        const receipt = await settled(instance);
+        if (completion === 'response')
+          expect(receipt).toMatchObject({
+            state: 'settled',
+            result: { outcome: 'success', output: { continue: false } },
+          });
+        else expect(receipt.state).toBe('outcome_unknown');
+        expect(instance.hasHolds('runtime-session')).toBe(
+          completion !== 'response',
+        );
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(calls).toBe(1);
+      } finally {
+        await instance.close();
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
 
   it('settles an HTTP runner construction failure without dispatch or replay', async () => {
     const execute = vi.spyOn(HttpHookRunner.prototype, 'execute');

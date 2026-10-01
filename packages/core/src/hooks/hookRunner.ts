@@ -682,6 +682,7 @@ export class HookRunner {
       cgroupRoot?: string;
       environment?: NodeJS.ProcessEnv;
       trackHttpRequest?: true;
+      httpRequestSignal?: AbortSignal;
     },
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
@@ -736,6 +737,7 @@ export class HookRunner {
             input,
             signal,
             options?.trackHttpRequest,
+            options?.httpRequestSignal,
           );
         case HookType.Function: {
           // Function hooks accept context, not just signal

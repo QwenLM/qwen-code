@@ -143,6 +143,7 @@ describe('HttpHookRunner', () => {
         createMockInput(),
         abort.signal,
         true,
+        new AbortController().signal,
       );
       abort.abort();
       expect(await pending).toMatchObject({
@@ -151,6 +152,65 @@ describe('HttpHookRunner', () => {
       });
       expect(mockFetch).not.toHaveBeenCalled();
     });
+
+    it.each(['response', 'body-loss', 'timeout', 'shutdown'])(
+      'preserves an in-flight managed response after user cancellation (%s)',
+      async (completion) => {
+        vi.useFakeTimers();
+        const caller = new AbortController();
+        const shutdown = new AbortController();
+        let stream!: ReadableStreamDefaultController<Uint8Array>;
+        let transport!: AbortSignal;
+        let started!: () => void;
+        const dispatched = new Promise<void>((resolve) => (started = resolve));
+        mockFetch.mockImplementationOnce(async (_url, options) => {
+          transport = options.signal;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+              transport.addEventListener('abort', () =>
+                controller.error(transport.reason),
+              );
+            },
+          });
+          started();
+          return new Response(body, {
+            headers: { 'content-type': 'application/json' },
+          });
+        });
+        try {
+          const pending = httpRunner.execute(
+            createMockConfig({ timeout: 1 }),
+            HookEventName.PreToolUse,
+            createMockInput(),
+            caller.signal,
+            true,
+            shutdown.signal,
+          );
+          await dispatched;
+          caller.abort();
+          expect(transport.aborted).toBe(false);
+          if (completion === 'response') {
+            stream.enqueue(new TextEncoder().encode('{"continue":false}'));
+            stream.close();
+          } else if (completion === 'body-loss') {
+            stream.error(new TypeError('response disconnected'));
+          } else if (completion === 'timeout') {
+            await vi.advanceTimersByTimeAsync(1000);
+          } else shutdown.abort();
+          const result = await pending;
+          expect(mockFetch).toHaveBeenCalledTimes(1);
+          expect(result.httpRequestState).toBe(
+            completion === 'response' ? 'response_received' : 'outcome_unknown',
+          );
+          if (completion === 'response')
+            expect(result.output).toMatchObject({ continue: false });
+          if (completion === 'timeout') expect(result.outcome).toBe('timeout');
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     it('keeps a partially received JSON response unknown', async () => {
       const stream = new ReadableStream<Uint8Array>({

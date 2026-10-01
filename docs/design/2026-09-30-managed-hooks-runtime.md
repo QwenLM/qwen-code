@@ -138,6 +138,12 @@ HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
 refused. A local runner-construction failure before dispatch is a settled failure
 under the saved fail policy. A received failure response can settle; a lost response after sending
 remains unknown and cannot be retried automatically. Hook outputs are bounded.
+For an in-flight managed HTTP Hook, user cancellation keeps the original request
+and body read alive until the configured HTTP timeout so a complete response can
+provide settlement evidence. The occurrence still ends as cancelled. Cancellation
+before dispatch sends no request. Runtime shutdown aborts the transport immediately;
+shutdown, timeout and disconnected or partial responses after dispatch remain
+unknown. Native HTTP cancellation keeps its existing immediate-abort behavior.
 Individual receipts and aggregate outputs use a 60 KiB bound. An oversized
 initial plan (including event input, descriptors and snapshot references) saves a
 bounded blocking receipt and a digest of the original semantic input. Recovery
