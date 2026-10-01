@@ -494,7 +494,6 @@ export const legacyFilenames = [
   'worktreeSessionService',
   'worktreeStartup',
   'writeContextFile',
-  'writeWithBackup',
   'CodeColorizer',
   'SKILL',
   'TeamManager',
