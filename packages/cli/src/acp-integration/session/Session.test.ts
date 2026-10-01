@@ -43542,6 +43542,88 @@ describe('Session', () => {
       ]);
     });
 
+    it.each([false, true])(
+      'recovers from an automatic Host refusal, preserving user cancellation (agent-host=%s)',
+      async (agentHost) => {
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          agentHost ? 'agent-host' : undefined,
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        const deniedExecute = vi.fn();
+        const allowedExecute = vi.fn().mockResolvedValue({
+          llmContent: 'ALLOWED_HOST_DIRECTORY',
+          returnDisplay: 'ALLOWED_HOST_DIRECTORY',
+        });
+        const deniedTool = mockConfirmingTool(
+          core.ToolNames.READ_FILE,
+          deniedExecute,
+          'info',
+        );
+        deniedTool.kind = core.Kind.Read;
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.READ_FILE
+            ? deniedTool
+            : mockAllowedTool(name, allowedExecute),
+        );
+        const guard = vi.fn().mockResolvedValue({ allowed: true });
+        mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+        vi.mocked(mockClient.requestPermission).mockImplementation(
+          async (p) => {
+            const reject = p.options.find(
+              (option: PermissionOption) => option.kind === 'reject_once',
+            );
+            expect(reject).toBeDefined();
+            return {
+              outcome: { outcome: 'selected', optionId: reject!.optionId },
+            };
+          },
+        );
+
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, 'prompt-host-refusal', [
+          {
+            id: 'outside_read',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/outside/denied.txt' },
+          },
+          {
+            id: 'inside_list',
+            name: core.ToolNames.LS,
+            args: { path: process.cwd() },
+          },
+        ]);
+
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(deniedExecute).not.toHaveBeenCalled();
+        expect(result.stopAfterPermissionCancel).toBe(!agentHost);
+        expect(allowedExecute).toHaveBeenCalledTimes(agentHost ? 1 : 0);
+        expect(guard).toHaveBeenCalledTimes(agentHost ? 1 : 0);
+        if (agentHost) {
+          expect(guard).toHaveBeenCalledWith(
+            expect.objectContaining({
+              toolName: core.ToolNames.LS,
+              permissionChecked: true,
+            }),
+          );
+          expect(result.parts[1]?.functionResponse?.response).toEqual({
+            output: 'ALLOWED_HOST_DIRECTORY',
+          });
+        }
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[0]],
+          expect.objectContaining({
+            callId: 'outside_read',
+            status: agentHost ? 'error' : 'cancelled',
+            executionStatus: 'not_started',
+            errorType: agentHost
+              ? core.ToolErrorType.EXECUTION_DENIED
+              : undefined,
+          }),
+        );
+      },
+    );
+
     it('skips later tools after non-question permission cancellation', async () => {
       const cancelledExecute = vi.fn();
       const laterExecute = vi.fn().mockResolvedValue({
@@ -43852,73 +43934,81 @@ describe('Session', () => {
       );
     });
 
-    it('does not treat a parent abort during permission as explicit rejection', async () => {
-      const permissionExecute = vi.fn();
-      const laterExecute = vi.fn().mockResolvedValue({
-        llmContent: 'should not execute',
-        returnDisplay: 'should not execute',
-      });
-      mockToolRegistry.getTool.mockImplementation((name: string) =>
-        name === core.ToolNames.SHELL
-          ? mockConfirmingTool(name, permissionExecute, 'exec')
-          : mockAllowedTool(name, laterExecute),
-      );
-      vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
-        new Promise<never>(() => {
-          // requestPermissionWithAbort owns cancellation of this pending call.
-        }),
-      );
-      const abortController = new AbortController();
+    it.each([false, true])(
+      'does not treat a parent abort during permission as explicit rejection (agent-host=%s)',
+      async (agentHost) => {
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          agentHost ? 'agent-host' : undefined,
+        );
+        const permissionExecute = vi.fn();
+        const laterExecute = vi.fn().mockResolvedValue({
+          llmContent: 'should not execute',
+          returnDisplay: 'should not execute',
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.SHELL
+            ? mockConfirmingTool(name, permissionExecute, 'exec')
+            : mockAllowedTool(name, laterExecute),
+        );
+        vi.mocked(mockClient.requestPermission).mockReturnValueOnce(
+          new Promise<never>(() => {
+            // requestPermissionWithAbort owns cancellation of this pending call.
+          }),
+        );
+        const abortController = new AbortController();
 
-      const runPromise = (session as unknown as ToolCallInternals).runToolCalls(
-        abortController.signal,
-        'prompt-shell-permission-parent-abort',
-        [
-          {
-            id: 'shell_call',
-            name: core.ToolNames.SHELL,
-            args: { command: 'echo denied' },
-          },
-          {
-            id: 'read_call',
-            name: core.ToolNames.READ_FILE,
-            args: { file_path: '/tmp/should-not-run' },
-          },
-        ],
-      );
+        const runPromise = (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          abortController.signal,
+          'prompt-shell-permission-parent-abort',
+          [
+            {
+              id: 'shell_call',
+              name: core.ToolNames.SHELL,
+              args: { command: 'echo denied' },
+            },
+            {
+              id: 'read_call',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: '/tmp/should-not-run' },
+            },
+          ],
+        );
 
-      await vi.waitFor(() =>
-        expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
-      );
-      abortController.abort();
-      const result = await runPromise;
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        abortController.abort();
+        const result = await runPromise;
 
-      expect(result.stopAfterPermissionCancel).toBe(false);
-      expect(
-        result.parts.map((part) => part.functionResponse?.response),
-      ).toEqual([
-        { error: 'Tool call was cancelled before execution.' },
-        { error: 'Tool call was cancelled before execution.' },
-      ]);
-      expect(permissionExecute).not.toHaveBeenCalled();
-      expect(laterExecute).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
-        [result.parts[0]],
-        expect.objectContaining({
-          callId: 'shell_call',
-          status: 'cancelled',
-          executionStatus: 'not_started',
-        }),
-      );
-      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
-        [result.parts[1]],
-        expect.objectContaining({
-          callId: 'read_call',
-          status: 'cancelled',
-          executionStatus: 'not_started',
-        }),
-      );
-    });
+        expect(result.stopAfterPermissionCancel).toBe(false);
+        expect(
+          result.parts.map((part) => part.functionResponse?.response),
+        ).toEqual([
+          { error: 'Tool call was cancelled before execution.' },
+          { error: 'Tool call was cancelled before execution.' },
+        ]);
+        expect(permissionExecute).not.toHaveBeenCalled();
+        expect(laterExecute).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[0]],
+          expect.objectContaining({
+            callId: 'shell_call',
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[1]],
+          expect.objectContaining({
+            callId: 'read_call',
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          }),
+        );
+      },
+    );
 
     it('keeps plan mode and gives manual guidance when switch_mode approval is unavailable', async () => {
       const execute = vi.fn();
