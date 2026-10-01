@@ -10,9 +10,11 @@ import { createHash } from 'node:crypto';
 import type { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
+import { createServer } from 'node:http';
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import express from 'express';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
@@ -7427,6 +7429,22 @@ describe('batch workspace session live-state route', () => {
     expect(secondaryBridge.listCalls).toEqual([]);
   });
 
+  it('returns 503 for a member whose entry lost its current generation while preserving a healthy member', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    // The trust reconciler reaches this state when a contained replacement
+    // fails to activate: the entry stays resolvable but has no generation.
+    entry.current = undefined;
+    registry.blockReplacement(entry, 'apply failed');
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(secondaryBridge.listCalls).toEqual([]);
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
   it('fails closed if the selected runtime is replaced during its read', async () => {
     const { app, registry, secondaryBridge } = makeHarness();
     const entry = registry.getEntryByWorkspaceId('secondary-id')!;
@@ -7565,6 +7583,99 @@ describe('batch workspace session live-state route', () => {
     } finally {
       pending.abort();
       for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('skips the response when the client disconnects during the last member read', async () => {
+    const { app, primaryBridge } = makeHarness();
+    const server = app.listen(0);
+    const sockets = new Set<Socket>();
+    server.on('connection', (socket) => sockets.add(socket));
+    let responseClosed = false;
+    const jsonSpies: Array<ReturnType<typeof vi.fn>> = [];
+    server.on('request', (_req, res) => {
+      res.once('close', () => {
+        responseClosed = true;
+      });
+      const jsonSpy = vi.fn();
+      jsonSpies.push(jsonSpy);
+      (res as unknown as { json: unknown }).json = jsonSpy;
+    });
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    telemetryMocks.span.mockImplementation(
+      async (
+        _name: string,
+        _attributes: Record<string, string>,
+        read: () => unknown,
+      ) => {
+        for (const socket of sockets) socket.destroy();
+        // Hold the last member read until the disconnect has been delivered,
+        // so the post-loop abort check — not the in-loop one — decides.
+        await readGate;
+        return read();
+      },
+    );
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() => expect(responseClosed).toBe(true));
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The member read itself always completes; the guard is what keeps the
+      // response from being written to the destroyed socket.
+      expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+      expect(jsonSpies).toHaveLength(1);
+      expect(jsonSpies[0]).not.toHaveBeenCalled();
+    } finally {
+      releaseRead();
+      pending.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('skips every member read when the client disconnects before the handler runs', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    let dispatched = false;
+    // Parse the body while the socket is alive, then dispatch to the serve
+    // app only after the disconnect has been delivered, so the handler
+    // observes an already-destroyed response instead of attaching its close
+    // listener in time. The app's own json parser skips the re-parse because
+    // the body is already read.
+    const outer = express();
+    outer.use(express.json());
+    outer.use((req, res, _next) => {
+      res.once('close', () => {
+        dispatched = true;
+        app(req, res);
+      });
+      req.socket.destroy();
+    });
+    const server = createServer(outer);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id', 'secondary-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() => expect(dispatched).toBe(true));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(primaryBridge.listCalls).toEqual([]);
+      expect(secondaryBridge.listCalls).toEqual([]);
+    } finally {
+      pending.abort();
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );

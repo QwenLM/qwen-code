@@ -12,7 +12,7 @@ import {
   SESSION_TRANSCRIPT_MAX_LIMIT,
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
-import { DaemonClient } from '@qwen-code/sdk/daemon';
+import { DaemonClient, WorkspaceDaemonClient } from '@qwen-code/sdk/daemon';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
@@ -566,6 +566,43 @@ describe('REST integration documentation contract', () => {
       expect(cells[4]).toBe(`\`${operation['x-qwen-sdk-method']}\``);
     }
     expect([...operations.keys()].filter((key) => !seen.has(key))).toEqual([]);
+  });
+
+  it('pins the grouped reference rows to registered capabilities and SDK methods', () => {
+    // The grouped "Additional documented APIs" rows begin with an Area name
+    // rather than a link, so the OpenAPI row check above never sees them.
+    const capabilities = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
+    const sdkPrototypes = {
+      DaemonClient: DaemonClient.prototype as unknown as Record<
+        string,
+        unknown
+      >,
+      WorkspaceDaemonClient:
+        WorkspaceDaemonClient.prototype as unknown as Record<string, unknown>,
+    };
+    const rows = readFileSync(REFERENCE, 'utf8')
+      .split('\n')
+      .filter((line) => /^\| [A-Z]/.test(line) && line.includes('[`'));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const cells = row.split('|').map((cell) => cell.trim());
+      const area = cells[1];
+      for (const match of (cells[3] ?? '').matchAll(/`([a-z][a-z0-9_]*)`/g)) {
+        expect(
+          capabilities.has(match[1]),
+          `${area}: \`${match[1]}\` is not a registered serve capability`,
+        ).toBe(true);
+      }
+      for (const match of (cells[4] ?? '').matchAll(
+        /`(DaemonClient|WorkspaceDaemonClient)\.([A-Za-z0-9_]+)`/g,
+      )) {
+        const [, className, method] = match;
+        expect(
+          typeof sdkPrototypes[className as keyof typeof sdkPrototypes][method],
+          `${area}: \`${className}.${method}\` is not an SDK method`,
+        ).toBe('function');
+      }
+    }
   });
 
   it('indexes every operation with a dedicated protocol section', () => {
