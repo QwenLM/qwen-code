@@ -305,7 +305,9 @@ describe('ManagedSessionsPage', () => {
     'shows available %s arguments inside the approval card',
     async (toolName, input) => {
       mocks.client.getSession.mockResolvedValue(
-        summary('s1', { capabilities: { canSend: false, actions: true } }),
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false, actions: true },
+        }),
       );
       mocks.client.getTranscript.mockResolvedValue({
         events: [
@@ -339,7 +341,9 @@ describe('ManagedSessionsPage', () => {
 
   it('offers a direct retry when pending approvals could not be loaded', async () => {
     mocks.client.getSession.mockResolvedValue(
-      summary('s1', { capabilities: { canSend: false, actions: true } }),
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
     );
     const listPending = vi
       .fn()
@@ -374,7 +378,9 @@ describe('ManagedSessionsPage', () => {
 
   it('explains that a reader cannot answer a creator-only approval', async () => {
     mocks.client.getSession.mockResolvedValue(
-      summary('s1', { capabilities: { canSend: false, actions: true } }),
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
     );
     provider = {
       ...provider,
