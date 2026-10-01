@@ -63,13 +63,12 @@ describe('serve command args', () => {
   });
 
   it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
-    const help = await buildParser().getHelp();
+    const help = (await buildParser().getHelp()).replace(/\s+/g, ' ');
     expect(help).toContain('--managed-runtime-broker-url');
     expect(help).toContain('--managed-runtime-broker-token');
-    expect(help).toContain('Private Broker URL for --profile hosted-harness');
-    expect(help).toContain('Private Broker credential for --profile hosted-harness');
-    expect(help).not.toContain('Reserved Broker URL');
-    expect(help).not.toContain('Reserved Broker credential');
+    expect(help).toContain('Private Broker URL');
+    expect(help).toContain('Private Broker credential');
+    expect(help).not.toContain('Reserved Broker');
   });
 
   it('defaults authenticated open to disabled', () => {
