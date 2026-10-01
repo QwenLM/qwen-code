@@ -157,6 +157,19 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * as the textbook `interrupted_prompt` documented above; only records whose
  * turn never ran are trimmed.
  *
+ * That closure is per send path, and only covers `LlmClient.sendMessageStream`
+ * — the TUI and headless runtimes. The ACP/serve daemon sends its notification
+ * turns through `Session.#sendMessageStreamWithAutoCompression` →
+ * `LlmChat.sendMessageStream` and persists them BEFORE admission via
+ * `recordNotificationStrict`, which takes no stamp, so a reminder-less entry
+ * the daemon delivered is still unmarked, still counted, still trimmed and
+ * still reported `clean`. That daemon residual of #12042 shape A stays open
+ * (`docs/design/session-crash-recovery/session-crash-recovery-interruption-detection.md`,
+ * "Not covered yet"); closing it needs a post-send marker record or a
+ * daemon-side re-drive, not a wider predicate here. Stamping the cold record
+ * itself is not an option: it is written before `assertCanStartTurn()`, so
+ * turns later refused or deferred would carry the stamp too.
+ *
  * Needed at all because the record's `subtype: 'notification'` and
  * `provenance: 'system'` cannot ride along on `Content` (that type comes from
  * `@google/genai`), so the live history tail carries no metadata to read and
@@ -185,8 +198,12 @@ function isSystemNotificationContent(content: Content): boolean {
  * @param history - Chat history in Gemini `Content[]` form, oldest first.
  * @param trailingSystemNotifications - Optional authoritative count of trailing
  *   `history` entries whose source record the recorder stamped
- *   `provenance: 'system'` + `subtype: 'notification'`, as reported by
- *   `buildSessionHistoryFromConversation`. When supplied it NARROWS the trim:
+ *   `provenance: 'system'` + `subtype: 'notification'` AND whose turn never
+ *   ran (`deliveredTurn !== true`; see `isSystemNotificationRecord` in
+ *   `session-api-history.ts`), as reported by
+ *   `buildSessionHistoryFromConversation`. A delivered-but-unanswered entry is
+ *   an `interrupted_prompt`, not a cold notification, so it is excluded from
+ *   the count and survives the trim. When supplied it NARROWS the trim:
  *   an entry is only trimmed if its shape matches AND it falls inside that
  *   authoritative run. Passing `undefined` (what every caller that has no
  *   record metadata does) preserves the shape-only behaviour exactly, so the

@@ -63,8 +63,12 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
   completedToolCallIds?: readonly string[];
   /**
    * Authoritative count of trailing `apiHistory` entries whose source record
-   * the recorder stamped as a system-injected notification, as reported by
-   * `buildSessionHistoryFromConversation`. Forwarded to
+   * the recorder stamped as a system-injected notification AND whose turn
+   * never ran (`deliveredTurn !== true`), as reported by
+   * `buildSessionHistoryFromConversation`. A delivered-but-unanswered entry is
+   * an `interrupted_prompt` — a turn that ran and errored — rather than a cold
+   * notification nobody owes a response, so it is excluded from the count and
+   * survives the trim. Forwarded to
    * `detectTurnInterruption` so the notification trim narrows to entries that
    * really are notifications instead of trusting the `<task-notification>`
    * shape — without it, a real user prompt whose whole text is a bare envelope

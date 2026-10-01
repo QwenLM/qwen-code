@@ -738,6 +738,47 @@ describe('ChatRecordingService', () => {
         },
       });
     });
+
+    it('persists deliveredTurn only on the delivered notification turn', async () => {
+      // Producer guard for the `deliveredTurn` stamp. Session recovery reads
+      // it back off the persisted JSONL record
+      // (`isSystemNotificationRecord`, session-api-history.ts), so the
+      // argument has to survive recordNotification -> recordNotificationLike
+      // -> createNotificationRecord -> appendRecord. Without this case the
+      // reader-side tests in session-recovery.test.ts and
+      // session-api-history.test.ts stay green on hand-built records even if
+      // no record on disk ever carries the stamp.
+      chatRecordingService.recordNotification(
+        [{ text: 'dependency completed' }],
+        'Dependency completed',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+      );
+      chatRecordingService.recordNotification(
+        [{ text: 'persisted before the turn ran' }],
+        'Persisted early',
+      );
+      await chatRecordingService.flush();
+
+      const [delivered, cold] = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(delivered).toMatchObject({
+        subtype: 'notification',
+        provenance: 'system',
+        deliveredTurn: true,
+      });
+      expect(cold).toMatchObject({
+        subtype: 'notification',
+        provenance: 'system',
+      });
+      // Absence, not `false`: a `deliveredTurn: false` key would satisfy the
+      // reader just as well, but undelivered records must stay byte-identical
+      // to pre-stamp transcripts so old and new cold records compare equal.
+      expect(cold).toBeDefined();
+      expect('deliveredTurn' in (cold as object)).toBe(false);
+    });
   });
 
   describe('recordBranchCheckpointTransaction', () => {
