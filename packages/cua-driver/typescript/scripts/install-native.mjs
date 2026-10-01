@@ -168,19 +168,49 @@ async function requireValidAuthenticodeSignature(source) {
     if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {
       throw error
     }
-    await run("pwsh", args, { timeout: 30_000 })
+    try {
+      await run("pwsh", args, { timeout: 30_000 })
+    } catch (retryError) {
+      // The population that hits the 5.1 autoload failure is largely the
+      // population without pwsh — chain the original diagnostic or the user
+      // is sent chasing a missing pwsh instead of the autoload failure. The
+      // entry renderer prints only error.message, so interpolate it.
+      throw new Error(
+        `Get-AuthenticodeSignature failed under Windows PowerShell (${error.message}) and the pwsh retry failed: ${retryError.message}`,
+        { cause: error },
+      )
+    }
   }
 }
 
-async function installUiAccessWorker(source, version, env) {
-  await requireValidAuthenticodeSignature(source)
+// `verifySignature`/`mkdirImpl` are injectable (same pattern as
+// ensureNativePayload's fetchImpl) so the deploy path is testable off
+// Windows.
+export async function installUiAccessWorker(
+  source,
+  version,
+  env,
+  verifySignature = requireValidAuthenticodeSignature,
+  mkdirImpl = mkdir,
+) {
+  await verifySignature(source)
   const destination = uiAccessWorkerPath(version, env)
   const installed = await stat(destination).catch(() => undefined)
   if (installed?.isFile()) {
-    await requireValidAuthenticodeSignature(destination)
+    await verifySignature(destination)
     return destination
   }
-  await mkdir(dirname(destination), { recursive: true })
+  try {
+    await mkdirImpl(dirname(destination), { recursive: true })
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      throw new Error(
+        `Installing the UIAccess worker requires an elevated terminal: the worker must be deployed under Program Files (${error.message}). Run packages/cua-driver/scripts/install.ps1 once from an elevated terminal — it deploys the byte-identical path, and this installer then short-circuits on the already-installed worker.`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
   const temporary = `${destination}.${process.pid}.tmp`
   await copyFile(source, temporary)
   await rename(temporary, destination)

@@ -36,8 +36,11 @@ The SDK installation leaves `package.json` and the lockfile unchanged, but it
 does write to the workspace's `node_modules`. Its postinstall downloads and
 verifies the native payload for the current platform.
 
-On Windows, run the SDK installation from an elevated terminal: the signed
-UIAccess worker must be installed under `Program Files\Qwen\CuaDriver`.
+On Windows, the signed UIAccess worker must be installed under
+`Program Files\Qwen\CuaDriver`, which requires elevation — so arrange one of
+these before using the skill there: start Qwen Code itself elevated, or run
+`install.ps1` once from an elevated terminal (it deploys the same path, and
+the SDK installer then short-circuits on the already-installed worker).
 An unsigned worker cannot enable UIAccess; do not bypass the signature check.
 Older unsigned releases need a new signed driver release, not a reinstall of
 the same version.

@@ -173,6 +173,18 @@ describe('CUA release workflow', () => {
     expect(signingScript).toContain(
       "throw 'A trusted Windows code-signing certificate is required",
     );
+    // Fail closed on a half-configured pair instead of silently falling
+    // through to the other identity (desktop-release.yml has the same guard).
+    expect(signingScript).toContain(
+      '([bool]$env:WINDOWS_CERTIFICATE) -ne ([bool]$env:WINDOWS_CERTIFICATE_PASSWORD)',
+    );
+    expect(signingScript).toContain(
+      '([bool]$env:LEGACY_WIN_CSC_LINK) -ne ([bool]$env:LEGACY_WIN_CSC_KEY_PASSWORD)',
+    );
+    // The imported leaf must not stay in Cert:\CurrentUser\My past the
+    // sign + verify lines: the clean-install step later in the job runs
+    // registry-fetched scripts under the same user.
+    expect(signingScript).toMatch(/Remove-Item[^\n]*Cert:\\CurrentUser\\My/);
     expect(signingScript).toContain("$signature.Status -ne 'Valid'");
     // `EnhancedKeyUsageList` holds provider display strings and `Oid` exposes
     // only FriendlyName/Value, so filtering on `.ObjectId` selects nothing and
@@ -190,16 +202,39 @@ describe('CUA release workflow', () => {
     expect(steps[installIndex].run).toContain(
       "throw 'Windows SDK postinstall failed'",
     );
+    // Pin the whole signature guard, not a token inside it: the cmdlet name
+    // alone matches an inverted `-eq 'Valid'` verdict too.
     expect(steps[installIndex].run).toContain(
-      'Get-AuthenticodeSignature -LiteralPath $worker',
+      "if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {",
+    );
+    expect(steps[installIndex].run).toContain(
+      "throw 'Installed UIAccess worker must have a valid signature'",
+    );
+    // With the gate now requiring `Valid`, a stale signed PE restored from
+    // the cargo cache would pass it — the Remove-Item before `cargo build`
+    // is the only thing forcing a relink, so pin the ordering.
+    const buildIndex = steps.findIndex(
+      (step) => step.name === 'Build (release)',
+    );
+    expect(buildIndex).toBeGreaterThan(-1);
+    expect(steps[buildIndex].run).toMatch(
+      /Remove-Item[^\n]*cua-driver-uia\.exe[^\n]*\n[^\n]*cargo build/,
     );
     expect(cuaSdkInstallScript).toContain('await run("powershell", args');
-    // Retry only on the non-localized 5.1 module-autoload failure. The broader
-    // `Microsoft.PowerShell.Security` substring also appears in ordinary
-    // Get-AuthenticodeSignature errors, where retrying hides the real result
-    // behind a missing pwsh.
-    expect(cuaSdkInstallScript).toContain('CouldNotAutoloadMatchingModule');
-    expect(cuaSdkInstallScript).not.toContain('Microsoft.PowerShell.Security');
+    // Retry only on the non-localized 5.1 module-autoload failure: the
+    // `pwsh` retry is reachable solely through the CouldNotAutoloadMatchingModule
+    // branch, never on an ordinary Get-AuthenticodeSignature error. (The
+    // module name itself stays legal in this file — a deeper fix that
+    // force-loads Microsoft.PowerShell.Security inside 5.1 needs it.)
+    expect(cuaSdkInstallScript).toMatch(
+      /CouldNotAutoloadMatchingModule[\s\S]*?run\("pwsh"/,
+    );
+    // Pin the guard's polarity, not just the ordering: dropping the `!`
+    // would send ordinary signature failures into the retry and rethrow the
+    // autoload case — exactly inverted.
+    expect(cuaSdkInstallScript).toContain(
+      'if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {',
+    );
     expect(cuaSdkInstallScript).toContain('await run("pwsh", args');
   });
 
