@@ -45,6 +45,7 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedHookSession,
+  HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
@@ -1421,7 +1422,9 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.mcpBusy || session.mcpRecovering || session.hooksBusy)
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
+    if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
@@ -1680,7 +1683,10 @@ export function registerHostedHarnessSessionRoutes(
     void runHostedLifecycleHook(session, event, operationId, input)
       .then(
         (output) => res.json({ operationId, output: output ?? null }),
-        () => error(res, 503, 'hosted_hook_operation_failed'),
+        (cause) =>
+          cause instanceof HostedHookInputConflictError
+            ? error(res, 409, 'hosted_hook_operation_conflict')
+            : error(res, 503, 'hosted_hook_operation_failed'),
       )
       .finally(() => {
         session.hooksBusy = false;

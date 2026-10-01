@@ -373,6 +373,11 @@ describe('Hosted Harness no-tool session', () => {
         ).send(operation)
       ).status,
     ).toBe(200);
+    const conflict = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    ).send({ ...operation, input: { ...operation.input, message: 'changed' } });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('hosted_hook_operation_conflict');
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -390,6 +395,40 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
+  });
+
+  it('refuses a prompt with a Hook diagnostic while a Hook operation runs', async () => {
+    const { server, authorize } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    let dispatched!: () => void;
+    const started = new Promise<void>((resolve) => (dispatched = resolve));
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => (finish = resolve));
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-execute') {
+        dispatched();
+        await held;
+      }
+      return original(operation);
+    });
+    const running = authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        event: 'Notification',
+        input: { message: 'ready', notification_type: 'test' },
+      })
+      .then((response) => response);
+    await started;
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({});
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_hook_operation_active');
+    finish();
+    expect((await running).status).toBe(200);
   });
 
   it.each([

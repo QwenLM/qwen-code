@@ -98,7 +98,11 @@ Commands reuse native output, timeout and TERM/KILL handling. Managed execution
 requires Linux cgroup v2 delegation: set `QWEN_MANAGED_HOOK_CGROUP_ROOT` to a
 writable domain with `cgroup.kill`. A clean launcher enters a fresh unit before
 starting the command. Membership survives `setsid` and detached descendants;
-completion requires `cgroup.events` to report no remaining processes. Cancellation
+completion requires `cgroup.events` to report no remaining processes. A background
+descendant that outlives the command keeps the unit nonempty, so a command that
+has already printed its output and exited still settles as `timeout` when its
+Hook timeout expires; the unit is then killed and the output is not applied. Hook
+commands must not leave background processes behind. Cancellation
 sends TERM, then uses `cgroup.kill` if needed, and retains the owner when emptiness
 cannot be proved. This is lifecycle isolation for deployment-owned trusted Hooks,
 not a sandbox against scripts deliberately modifying the cgroup control plane.
@@ -190,7 +194,10 @@ attachment, while retaining original-owner recovery barriers.
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
-cannot overlap a turn or another control operation. The public tenant/actor-scoped
+cannot overlap a turn or another control operation. A prompt refused while a Hook
+operation runs returns 409 `hosted_hook_operation_active`. Reusing an operation ID
+with different input returns 409 `hosted_hook_operation_conflict`, which a retry
+cannot resolve. The public tenant/actor-scoped
 `GET /v1/agents/sessions/{sessionId}/hook-catalog` projects only display metadata;
 it exposes no recipes, credentials, module paths or handler references. Existing
 Sessions without a Hook pin retain their current behavior.

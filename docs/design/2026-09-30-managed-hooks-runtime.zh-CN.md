@@ -76,7 +76,9 @@ owner。已 attach 的空闲 owner 仍像 MCP 一样保留 Workspace 租约；�
 命令复用原生输出、超时和 TERM/KILL 处理。Managed 执行要求 Linux cgroup v2 委派：
 将 `QWEN_MANAGED_HOOK_CGROUP_ROOT` 指向可写且提供 `cgroup.kill` 的 domain。干净的
 launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进程不会脱离该 unit；
-只有 `cgroup.events` 确认无剩余进程后才完成。取消先发送 TERM，必要时调用
+只有 `cgroup.events` 确认无剩余进程后才完成。比命令存活更久的后台子进程会让 unit
+保持非空：即使命令已输出结果并退出，也会在 Hook 超时到期时以 `timeout` 结算，
+随后 unit 被终止，输出不会生效。Hook 命令不得遗留后台进程。取消先发送 TERM，必要时调用
 `cgroup.kill`；无法证明排空时保留 owner。这是面向部署方可信 Hook 的生命周期隔离，
 不是防止脚本故意篡改 cgroup 控制面的安全沙箱。
 
@@ -146,7 +148,9 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
-扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开
+扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。Hook
+操作运行期间被拒的 prompt 返回 409 `hosted_hook_operation_active`。同一 operation ID
+携带不同输入时返回 409 `hosted_hook_operation_conflict`，重试无法解决。公开
 tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投影展示
 元数据，不暴露 recipe、凭据、模块路径或 handler 引用。未配置 Hook pin 的 Session
 保持原有行为。
