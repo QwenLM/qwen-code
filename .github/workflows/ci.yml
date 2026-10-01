@@ -1362,9 +1362,9 @@ jobs:
     # document performance budget on ECS, while both gates passed on hosted.
     # Keep this browser job hosted without relaxing its test assertions.
     runs-on: 'ubuntu-latest'
-    # Browser dependencies took 22 min on a slow hosted mirror; leave time
-    # for the 208 smoke tests and artifact cleanup after installation.
-    timeout-minutes: 45
+    # Slow hosted mirrors kept downloading past 23 min; reserve time for
+    # the 208 smoke tests and artifact cleanup after installation.
+    timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
@@ -1533,7 +1533,7 @@ jobs:
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
-        timeout-minutes: 25
+        timeout-minutes: 30
         run: |-
           printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
           node node_modules/playwright/cli.js install --with-deps chromium webkit
