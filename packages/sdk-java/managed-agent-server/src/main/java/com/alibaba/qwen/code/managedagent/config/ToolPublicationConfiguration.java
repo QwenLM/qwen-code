@@ -20,6 +20,8 @@ import com.aliyun.oss.common.comm.SignVersion;
 import java.net.URI;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
+import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -115,6 +117,11 @@ public class ToolPublicationConfiguration {
     public ToolPublicationRetentionObserver toolPublicationRetentionObserver(ToolPublicationRetentionStore retention,
             ManagedAgentProperties properties) {
         return new ToolPublicationRetentionObserver(retention, properties);
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler managedToolOutputScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-tool-output-").build();
     }
 
     @Bean

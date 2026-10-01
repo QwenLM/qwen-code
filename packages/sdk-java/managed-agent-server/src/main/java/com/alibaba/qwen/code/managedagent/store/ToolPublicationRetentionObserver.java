@@ -17,7 +17,7 @@ public final class ToolPublicationRetentionObserver {
         this.properties = properties;
     }
 
-    @Scheduled(fixedDelay = 60_000)
+    @Scheduled(fixedDelay = 60_000, scheduler = "managedToolOutputScheduler")
     public void tick() {
         try {
             var sample = retention.observe(properties.getToolPublication().getDeletionGrace());
@@ -31,7 +31,7 @@ public final class ToolPublicationRetentionObserver {
             }
             LOG.info("tool_output_retention sample={} eligible_bytes={} reasons={}", sample.size(), eligibleBytes, blockers);
         } catch (RuntimeException error) {
-            LOG.warn("Tool output retention observation failed: {}", error.getClass().getSimpleName());
+            LOG.warn("Tool output retention observation failed", error);
         }
     }
 }

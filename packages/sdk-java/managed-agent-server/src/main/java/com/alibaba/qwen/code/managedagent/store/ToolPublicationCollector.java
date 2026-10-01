@@ -32,12 +32,12 @@ public final class ToolPublicationCollector {
         this.properties = properties;
     }
 
-    @Scheduled(fixedDelay = 1000)
+    @Scheduled(fixedDelay = 1000, scheduler = "managedToolOutputScheduler")
     public synchronized void tick() {
         try {
             runOnce();
         } catch (RuntimeException error) {
-            LOG.warn("Tool output collection will retry: {}", error.getClass().getSimpleName());
+            LOG.warn("Tool output collection will retry owner={}", owner, error);
         }
     }
 
@@ -149,10 +149,10 @@ public final class ToolPublicationCollector {
             return false;
         }
         String cursor = page.isEmpty() ? claim.cursor() : page.getLast().slot();
-        Long remaining = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
-                        + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ?", Long.class,
+        var remaining = jdbc.queryForList("SELECT 1 FROM qwen_tool_publication_object"
+                        + " WHERE scope_key = ? AND publication_id = ? AND slot_key > ? LIMIT 1",
                 claim.scope(), claim.publication(), cursor);
-        if (remaining != 0) {
+        if (!remaining.isEmpty()) {
             jdbc.update("UPDATE qwen_tool_publication SET gc_cursor = ? WHERE scope_key = ? AND publication_id = ?",
                     cursor, claim.scope(), claim.publication());
             return true;
@@ -163,9 +163,10 @@ public final class ToolPublicationCollector {
         long released = ToolPublicationRetentionStore.number(row, "capture_held_bytes")
                 + ToolPublicationRetentionStore.number(row, "producer_held_bytes")
                 + ToolPublicationRetentionStore.number(row, "admission_held_bytes");
-        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL WHERE tenant_id = ?"
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL WHERE session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND resource_id IN (SELECT resource_id FROM qwen_tool_publication_object"
                         + " WHERE scope_key = ? AND publication_id = ?)",
+                ManagedSessionStore.sessionScopeKey(claim.tenant(), claim.session()),
                 claim.tenant(), claim.session(), claim.scope(), claim.publication());
         jdbc.update("UPDATE qwen_tool_publication_object SET inline_bytes = NULL, state = 'COLLECTED'"
                 + " WHERE scope_key = ? AND publication_id = ?", claim.scope(), claim.publication());
