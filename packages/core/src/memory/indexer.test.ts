@@ -686,7 +686,7 @@ describe('managed auto-memory indexer', () => {
       filename: relativePath.split('/').pop()!,
       title,
       description: shared,
-      category: 'uncategorized',
+      category: 'uncategorized' as const,
       keywords: [],
       usageScenarios: [],
       body: '',
