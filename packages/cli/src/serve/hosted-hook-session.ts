@@ -346,6 +346,13 @@ export class HostedHookSession {
     });
   }
 
+  get hasUnsettledExecutions(): boolean {
+    return this.executions().some(
+      (record) =>
+        !record.resultRef && record.run.execution !== 'not_started_proven',
+    );
+  }
+
   hasCompletedOccurrence(event: HookEventName, occurrenceId: string): boolean {
     const saved = this.session.authority.extensionRecord(
       'hook_execution',
@@ -570,7 +577,6 @@ export class HostedHookSession {
     } else {
       if (this.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
-      signal.throwIfAborted();
       const { messages: suppliedMessages, ...eventFields } = fields;
       const input: HookInput = {
         ...eventFields,

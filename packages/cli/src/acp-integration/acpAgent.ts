@@ -1101,18 +1101,21 @@ async function resolvePersistedSessionIdForRestore(
 }
 
 /**
- * A paired Bridge names the engine it selected; this host only executes
- * Legacy sessions, so any other selection is refused before session work.
+ * A paired Bridge names the engine it selected; a host executes only its own
+ * engine, so any other selection is refused before session work. A Managed
+ * host serves only its paired Bridge, which always names the engine.
  */
 function requestedExecutionEngine(
   meta: Record<string, unknown> | null | undefined,
   sessionId: string | undefined,
+  hostEngine: SessionExecutionEngine,
 ): SessionExecutionEngine | undefined {
   const engine = meta?.[SESSION_EXECUTION_ENGINE_META_KEY];
-  if (engine === undefined || engine === 'legacy') return engine;
+  if (engine === hostEngine) return hostEngine;
+  if (hostEngine === 'legacy' && engine === undefined) return undefined;
   throw new RequestError(
     -32024,
-    'This ACP host only executes legacy sessions.',
+    `This ACP host only executes ${hostEngine} sessions.`,
     {
       errorKind: 'session_execution_engine_unavailable',
       ...(sessionId !== undefined ? { sessionId } : {}),
@@ -1130,6 +1133,16 @@ function withExecutionEngineReceipt<
   };
 }
 
+function mapSessionExecutionEngineRequestError(
+  error: SessionExecutionEngineError,
+  sessionId: string | undefined,
+): RequestError {
+  return new RequestError(-32024, error.message, {
+    errorKind: error.errorKind,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  });
+}
+
 function mapSessionRestoreRequestError(
   error: unknown,
   sessionId: string,
@@ -1137,10 +1150,7 @@ function mapSessionRestoreRequestError(
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
   if (error instanceof SessionExecutionEngineError) {
-    return new RequestError(-32024, error.message, {
-      errorKind: error.errorKind,
-      sessionId,
-    });
+    return mapSessionExecutionEngineRequestError(error, sessionId);
   }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
@@ -3013,6 +3023,8 @@ export async function runAcpAgent(
   options?: {
     privateParentCapability?: string;
     conversationsRuntimeProvenance?: boolean;
+    /** Accepted by the CLI entry point only from a private ACP parent. */
+    executionEngine?: 'managed';
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
   },
@@ -3027,11 +3039,14 @@ export async function runAcpAgent(
   // process lifetime alongside the writer-lease snapshot.
   const conversationsRuntimeProvenance =
     options?.conversationsRuntimeProvenance === true;
+  const hostExecutionEngine: SessionExecutionEngine =
+    options?.executionEngine ?? 'legacy';
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
-  // within one ACP process lifetime.
+  // within one ACP process lifetime. A Managed Session log requires the lease.
   const sessionWriterLeaseEnabledAtStartup =
     conversationsRuntimeProvenance ||
+    hostExecutionEngine === 'managed' ||
     (typeof config.isSessionWriterLeaseEnabled === 'function'
       ? config.isSessionWriterLeaseEnabled()
       : settings.merged.experimental?.sessionWriterLease === true);
@@ -3049,6 +3064,14 @@ export async function runAcpAgent(
   if (externalToolGuardRequired && privateParentCapability === undefined) {
     throw new Error(
       'Required external tool guard is available only to a private managed ACP parent.',
+    );
+  }
+  if (
+    hostExecutionEngine === 'managed' &&
+    privateParentCapability === undefined
+  ) {
+    throw new Error(
+      'A Managed ACP host is available only to a private managed ACP parent.',
     );
   }
 
@@ -3191,6 +3214,7 @@ export async function runAcpAgent(
         managedToolInvocationGuard,
         externalToolGuardProviderAttached,
         conversationsRuntimeProvenance,
+        hostExecutionEngine,
       );
       return agentInstance;
     }, stream);
@@ -5144,6 +5168,7 @@ class QwenAgent implements Agent {
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
+    private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
   ) {
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
@@ -5620,6 +5645,7 @@ class QwenAgent implements Agent {
     const executionEngine = requestedExecutionEngine(
       params._meta,
       requestedSessionId,
+      this.hostExecutionEngine,
     );
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
@@ -5762,7 +5788,11 @@ class QwenAgent implements Agent {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
-    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      sessionId,
+      this.hostExecutionEngine,
+    );
     const parentContext = extractDaemonTraceContext(params);
     return withExecutionEngineReceipt(
       await withDaemonSpan(
@@ -6334,7 +6364,11 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
-    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      sessionId,
+      this.hostExecutionEngine,
+    );
     const parentContext = extractDaemonTraceContext(params);
     return withExecutionEngineReceipt(
       await withDaemonSpan(
@@ -15135,9 +15169,15 @@ class QwenAgent implements Agent {
           errorKind: writerError.errorKind,
         });
       }
-      throw sessionId && restoreOptions
-        ? mapSessionRestoreRequestError(error, sessionId)
-        : error;
+      if (sessionId && restoreOptions) {
+        throw mapSessionRestoreRequestError(error, sessionId);
+      }
+      // A session the host's engine cannot record or own, such as a Managed
+      // one without chat recording, is refused rather than degraded.
+      if (error instanceof SessionExecutionEngineError) {
+        throw mapSessionExecutionEngineRequestError(error, sessionId);
+      }
+      throw error;
     }
   }
 

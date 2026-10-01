@@ -22,9 +22,15 @@ import {
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
   createHttpManagedSessionStores,
+  ManagedSessionStoreHttpError,
   type HttpToolPublicationOwner,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-projection.js';
+import {
+  readHostedFileHistory,
+  commitHostedFileHistory,
+} from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { HostedHookSession } from './hosted-hook-session.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -47,6 +53,7 @@ import {
 } from './hosted-tool-approval.js';
 
 const broker = vi.hoisted(() => ({
+  fileHistory: vi.fn(),
   warm: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
@@ -63,6 +70,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
+    fileHistory = broker.fileHistory;
     warm = broker.warm;
     acquire = broker.acquire;
     prepare = broker.prepare;
@@ -165,6 +173,11 @@ beforeEach(async () => {
     workerId: 'worker',
     activationLeaseDurationMs: 60_000,
     create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+  });
+  broker.fileHistory.mockResolvedValue({
+    ownerSessionId: sessionKey.sessionId,
+    snapshots: [],
+    files: {},
   });
   harness = createManagedHarnessHandle(session);
   await harness.ensureRunnable();
@@ -1186,6 +1199,34 @@ it.each(['refresh', 'warmup'] as const)(
     );
   },
 );
+
+it('keeps native file tools in the MCP profile on their existing shared runtime', async () => {
+  const mcp = {
+    broker: { ...broker, runtimeSessionId: 'mcp:session' },
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [],
+    toolInput: () => undefined,
+  };
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+  );
+  await mcpTurn.execute(calls, parts, 'model', new AbortController().signal);
+  await mcpTurn.consumeResults();
+  await mcpTurn.finish();
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  expect(broker.fileHistory).not.toHaveBeenCalled();
+  expect(broker.release).not.toHaveBeenCalled();
+});
 
 it('executes against the declarations actually advertised before a catalog replacement', async () => {
   let name = 'mcp_old';
@@ -2670,6 +2711,123 @@ function hookSession(fire: HostedHookSession['fire']): HostedHookSession {
   } as unknown as HostedHookSession;
 }
 
+it.each(['assistant-commit', 'second-call'] as const)(
+  'settles every tool refusal when cancelled before a new Hook plan (%s)',
+  async (window) => {
+    const controller = new AbortController();
+    const reason = new Error('turn cancelled');
+    const pin = {
+      catalogId: 'pre-cancel',
+      catalogRevision: 1,
+      definitionDigest: 'a'.repeat(64),
+    };
+    const hookControl = vi.fn<HostedWorkspaceBroker['hookControl']>(
+      async (operation) => {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog: {
+              ...pin,
+              hooks: [
+                {
+                  hookId: 'before',
+                  eventName: HookEventName.PreToolUse,
+                  sequential: false,
+                  async: false,
+                  failClosed: true,
+                  onceKey: null,
+                  config: { type: 'command' },
+                },
+              ],
+            },
+          };
+        expect(operation.kind).toBe('hook-execute');
+        controller.abort(reason);
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: { success: true, outcome: 'success', duration: 0 },
+        };
+      },
+    );
+    const hookBroker = {
+      ...broker,
+      runtimeSessionId: 'prompt',
+      runtime: {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      },
+      hookControl,
+    } as unknown as HostedWorkspaceBroker;
+    const hooks = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pin,
+      hookBroker,
+    );
+    await hooks.ensureReady();
+    if (window === 'assistant-commit') {
+      const originalCommit = commit;
+      commit = async (...args) => {
+        const id = await originalCommit(...args);
+        if (args[0] === 'assistant') controller.abort(reason);
+        return id;
+      };
+    }
+    turn = createTurn(false, { mode: 'yolo' }, hooks);
+    await expect(
+      turn.execute(calls, parts, 'model', controller.signal),
+    ).rejects.toBe(reason);
+    await expect(turn.finish()).resolves.toBeUndefined();
+    const history = await session.sink.project();
+    expect(history.map((record) => record.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history[1].message?.parts).toEqual(
+      calls.map((call) => ({
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { error: 'Hook execution cancelled.' },
+        },
+      })),
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(hooks.hasPendingOperations).toBe(false);
+    const restored = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pin,
+      hookBroker,
+    );
+    for (const call of calls) {
+      expect(
+        await restored.fire(
+          HookEventName.PreToolUse,
+          `prompt:${call.callId}`,
+          {
+            tool_name: call.name,
+            tool_input: call.args,
+            tool_use_id: call.callId,
+            permission_mode: 'yolo',
+            prompt_id: 'prompt',
+          },
+          new AbortController().signal,
+        ),
+      ).toMatchObject({ continue: false, reason: 'Hook execution cancelled.' });
+    }
+    expect(
+      hookControl.mock.calls.filter(
+        ([operation]) => operation.kind === 'hook-execute',
+      ),
+    ).toHaveLength(window === 'assistant-commit' ? 0 : 1);
+  },
+);
+
 it('recovers committed tool results through the Hook owner acquisition', async () => {
   const hooks = hookSession(vi.fn());
   const acquire = vi.spyOn(hooks, 'acquire');
@@ -3371,3 +3529,290 @@ it.each([
     ]);
   },
 );
+it('persists the prepared history before effects and settled history before continuation', async () => {
+  broker.execute.mockImplementation(async () => {
+    expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
+    return { executionStatus: 'success', responseParts: [{ text: 'written' }] };
+  });
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+  const projected = await readManagedSessionRecords({
+    runtimeBaseDir: root,
+    transcriptPath: path.join(root, 'transcript.jsonl'),
+    sessionKey: session.authority.sessionHeader.sessionKey,
+  });
+  expect(
+    projected.filter((record) => record.subtype === 'file_history_snapshot'),
+  ).toHaveLength(2);
+  expect(
+    broker.fileHistory.mock.calls.map(([operation]) => operation.action),
+  ).toEqual(['bind', 'prepare', 'snapshot']);
+});
+
+it.each(['backup', 'persistence'])(
+  'never dispatches when prepared-history %s fails',
+  async (failure) => {
+    if (failure === 'persistence')
+      vi.spyOn(session.authority, 'commitDomainRecord').mockRejectedValueOnce(
+        new Error('history persistence unavailable'),
+      );
+    broker.fileHistory.mockImplementation(async (operation) => {
+      if (failure === 'backup' && operation.action === 'prepare')
+        throw new Error('backup unavailable');
+      return {
+        ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        snapshots: [],
+        files: {},
+      };
+    });
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+  },
+);
+
+it('keeps a durable pending history when post-execution settlement fails', async () => {
+  broker.fileHistory.mockImplementation(async (operation) => {
+    if (operation.action === 'snapshot')
+      throw new Error('history response lost');
+    return {
+      ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      snapshots: [],
+      files: {},
+    };
+  });
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(broker.execute).toHaveBeenCalledTimes(2);
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(broker.release).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'settles a definite preparation refusal (mixed batch: %s)',
+  async (mixed) => {
+    broker.fileHistory.mockImplementation(async (operation) => {
+      if (operation.action === 'prepare')
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'managed_runtime_provider_operation_failed',
+          undefined,
+          'ordinary files only',
+        );
+      return {
+        ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        snapshots: [],
+        files: {},
+      };
+    });
+    const responses = await turn.execute(
+      mixed ? calls : [calls[1]],
+      mixed ? parts : [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain('ordinary files only');
+    expect(broker.prepare).toHaveBeenCalledTimes(mixed ? 1 : 0);
+    expect(broker.execute).toHaveBeenCalledTimes(mixed ? 1 : 0);
+    expect(await readHostedFileHistory(session)).toBeUndefined();
+    expect(
+      (await session.sink.project())
+        .filter((record) => record.type === 'tool_result')
+        .flatMap((record) => record.message?.parts ?? []),
+    ).toEqual(responses);
+    if (mixed) await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
+
+it.each([
+  [409, 'managed_runtime_provider_operation_failed'],
+  [400, 'runtime_control_operation_invalid'],
+] as const)(
+  'releases a definite bind rejection %s %s without blocking',
+  async (status, code) => {
+    broker.fileHistory.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(status, code),
+    );
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toThrow('Runtime Broker returned HTTP');
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+    expect(broker.release).toHaveBeenCalledOnce();
+    expect(await session.sink.project()).toEqual([]);
+  },
+);
+
+it.each(['bind', 'prepare', 'release', 'store'] as const)(
+  'keeps uncertain history %s failures blocked',
+  async (phase) => {
+    if (phase === 'store') {
+      vi.spyOn(session.authority, 'commitDomainRecord').mockRejectedValueOnce(
+        new ManagedSessionStoreHttpError(
+          503,
+          'store_unavailable',
+          'commit outcome unknown',
+        ),
+      );
+    } else {
+      broker.fileHistory.mockImplementation(async (operation) => {
+        if (
+          operation.action === phase ||
+          (phase === 'release' && operation.action === 'bind')
+        )
+          throw new HostedWorkspaceBrokerRejection(
+            phase === 'release' ? 409 : 503,
+            'managed_runtime_provider_operation_failed',
+          );
+        return {
+          ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+          snapshots: [],
+          files: {},
+        };
+      });
+      if (phase === 'release')
+        broker.release.mockRejectedValueOnce(
+          new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+        );
+    }
+    await expect(
+      turn.execute(calls, parts, 'model', new AbortController().signal),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    await expect(turn.finish()).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.release).toHaveBeenCalledTimes(phase === 'release' ? 1 : 0);
+  },
+);
+
+it.each([false, true])(
+  'settles definite reservation conflicts (mixed: %s)',
+  async (mixed) => {
+    if (mixed) broker.prepare.mockResolvedValueOnce('read-execution');
+    broker.prepare.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_execution_conflict',
+        undefined,
+        'execution identity already in use',
+      ),
+    );
+    const responses = await turn.execute(
+      mixed ? calls : [calls[1]],
+      mixed ? parts : [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain('before dispatch');
+    expect(broker.execute).toHaveBeenCalledTimes(mixed ? 1 : 0);
+    expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+    if (mixed) await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
+
+it('recovers settled file history by observing the original runtime without rebinding or executing', async () => {
+  broker.fileHistory.mockImplementation(async (operation) => {
+    if (operation.action === 'snapshot') throw new Error('response lost');
+    return {
+      ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      snapshots: [],
+      files: {},
+    };
+  });
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const saved = await readHostedFileHistory(session);
+  expect(saved?.pendingMessageId).toEqual(
+    (await session.sink.project()).find((item) => item.type === 'assistant')
+      ?.uuid,
+  );
+  broker.fileHistory.mockResolvedValue(saved!.state);
+  broker.fileHistory.mockClear();
+  broker.execute.mockClear();
+  const recovered = createTurn();
+  await recovered.resumeCommittedResults();
+  expect(
+    broker.fileHistory.mock.calls.map(([operation]) => operation.action),
+  ).toEqual(['snapshot']);
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+  expect(
+    (await readHostedFileHistory(session))?.pendingMessageId,
+  ).toBeUndefined();
+  await recovered.consumeResults();
+  await recovered.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it.each([
+  'previous-batch',
+  'missing-message-id',
+  'incomplete-results',
+  'changed-snapshots',
+  'missing-runtime',
+])('does not clear pending history for %s', async (failure) => {
+  broker.fileHistory.mockImplementation(async (operation) => {
+    if (operation.action === 'snapshot') throw new Error('response lost');
+    return {
+      ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      snapshots: [],
+      files: {},
+    };
+  });
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const saved = (await readHostedFileHistory(session))!;
+  if (failure === 'previous-batch')
+    saved.pendingMessageId = await commit('assistant', parts, 'model');
+  if (failure === 'missing-message-id') delete saved.pendingMessageId;
+  if (failure === 'incomplete-results') {
+    const project = session.sink.project.bind(session.sink);
+    vi.spyOn(session.sink, 'project').mockImplementation(async (...args) => {
+      const records = await project(...args);
+      const lastResult = records.findLastIndex(
+        (item) => item.type === 'tool_result',
+      );
+      return records.filter((_, index) => index !== lastResult);
+    });
+  }
+  await commitHostedFileHistory(session, saved);
+  broker.fileHistory.mockResolvedValue(
+    failure === 'changed-snapshots'
+      ? { ...saved.state, snapshots: [{ promptId: 'unexpected' }] }
+      : saved.state,
+  );
+  if (failure === 'missing-runtime')
+    broker.fileHistory.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'managed_runtime_provider_operation_failed',
+      ),
+    );
+  broker.fileHistory.mockClear();
+  const recovered = createTurn();
+  await expect(recovered.resumeCommittedResults()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
+  expect(broker.release).not.toHaveBeenCalled();
+  if (
+    ['previous-batch', 'missing-message-id', 'incomplete-results'].includes(
+      failure,
+    )
+  )
+    expect(broker.fileHistory).not.toHaveBeenCalled();
+});

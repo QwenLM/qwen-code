@@ -33,6 +33,11 @@ ordinal、registration、plan、有效输入、原 Runtime Session、取消意�
 聚合。保存结果前应用 fail-open/fail-closed，包括由 status 对账取得的回执。失败或
 未知的 once 尝试不会重新获得资格。
 
+目录就绪且没有待恢复操作时，即使取消发生在新 occurrence 建立前，也会保存计划和
+取消结果，不派发子 Hook，也不消耗其 once key。PreToolUse 因而可以先持久化拒绝
+每个已提交的 assistant 工具调用（包括同批次的后续调用），再以 cancelled 结束
+turn。已有未知副作用或 journal 写入失败仍会阻塞该续行。
+
 目录替换是带预期 registration 数量的幂等操作。同一目录命名空间内 revision 递增。
 重试旧操作只确认原结果，不恢复旧的有效目录。新 revision 删除 Hook 只影响未来事件。
 部署的 Session/agent 条目携带明确 owner；先做 owner 过滤，再复用原生配置去重，避免
@@ -98,9 +103,20 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 是结束证据，仅有 abort signal 不是。超过宽限期仍未结束的回调保留 unknown 结果和
 原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
 
+Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
+快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
+及 snapshot 并行；撤销和释放 owner 仍要求全部 Hook 执行结束。撤销也排除 Hook
+目录/模型操作和非 active activation。冷加载时，先用匹配 checkpoint 工具输入中
+保存的原 Runtime owner 观察未决文件历史，再释放此前的 Hook owner。缺失或冲突的
+owner 证据继续阻塞恢复，不增加新的持久化字段。
+
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
 执行器在派发前构造失败时，按保存的失败策略结算；
-发送后丢失响应保持 unknown，不自动重试。单项回执和聚合输出上限均为 60 KiB。
+发送后丢失响应保持 unknown，不自动重试。Managed HTTP Hook 已派发后，用户取消
+保留原请求及响应体读取，最多等待配置的 HTTP 超时，用完整响应作为结算证据；
+occurrence 仍以 cancelled 结束。派发前取消不发送请求。Runtime 关闭时立即中止
+transport；派发后的关闭、超时、断连或不完整响应均保持 unknown。原生 HTTP 的取消
+仍立即中止请求。单项回执和聚合输出上限均为 60 KiB。
 初始计划（含事件输入、descriptor 和快照引用）超限时，保存有界 blocking 回执及原始
 语义输入的摘要。恢复直接返回该拒绝，不派发或消费 once，即使没有匹配 handler 也能
 完成结算；同一 occurrence 携带变化后的输入仍会冲突。
@@ -116,6 +132,17 @@ blocking 回执，PermissionRequest 始终返回 deny，不受失败策略影响
 持久化该结果。立即返回的已结算拒绝必须先返回，不能被异步准入成功掩盖。这个永久容量上限区别于临时并发拒绝。容量回收需要持久确认协议，
 留待后续实现；
 未保存的拒绝若丢失响应，查询仍保持 unknown。
+
+H2 明确接受真正 unknown 带来的无期限可用性损失。SessionEnd 或 SessionDelete
+结果未知时，DELETE 返回 503，保留已 attach 的 Session 和原 Workspace owner。
+重试观察同一个已保存的 occurrence，不重新派发。Detach 也要求全部 Hook 副作用
+已结算。保留的 owner 可能阻塞同 Workspace 的其他 Session 的工具执行，不会阻塞
+不同 Workspace 的 Runtime worker。未知操作在 worker 生命周期内持续占用 16 个
+准入名额之一并保留 hold；包括已结算结果在内的全部已保存回执都计入 4096 条生命周期
+上限。超时、用户取消、DELETE 或进程替换都不能证明完成或允许重放。H2 不提供运维
+放弃 unknown 的接口；回执对账和有持久化屏障的回收在
+[#13133](https://github.com/QwenLM/qwen-code/issues/13133) 跟踪。这是明确接受的恢复
+限制，不代表有界恢复或可用性保证，也不表示原评审问题已解决。
 
 ## 模型 activation
 

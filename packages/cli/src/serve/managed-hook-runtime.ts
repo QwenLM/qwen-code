@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { createAbortController } from '@qwen-code/qwen-code-core/utils/abortController.js';
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -385,6 +386,7 @@ export class ManagedHookRuntime {
   private readonly manifest: ManagedHookManifest;
   private readonly operations = new Map<string, Operation>();
   private readonly gates = new ManagedOperationGrantGate();
+  private readonly shutdown = createAbortController();
   private closing = false;
 
   constructor(
@@ -680,6 +682,7 @@ export class ManagedHookRuntime {
 
   async close(): Promise<void> {
     this.closing = true;
+    this.shutdown.abort();
     for (const entry of this.operations.values()) entry.controller.abort();
     await Promise.all([...this.operations.values()].map((entry) => entry.done));
   }
@@ -806,7 +809,11 @@ export class ManagedHookRuntime {
               },
             }
           : config.type === HookType.Http
-            ? { trackHttpRequest: true }
+            ? {
+                trackHttpRequest: true,
+                // Preserve the response as completion proof after user cancel.
+                httpRequestSignal: this.shutdown.signal,
+              }
             : undefined,
       );
       if (result.error instanceof HookCommandIsolationUnavailableError) {
