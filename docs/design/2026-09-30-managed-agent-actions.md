@@ -2,8 +2,7 @@
 
 [English](2026-09-30-managed-agent-actions.md) | [简体中文](2026-09-30-managed-agent-actions.zh-CN.md)
 
-Status: D6a (Hosted Harness) implemented; D6b (Java server) designed and lands
-separately.
+Status: D6a (Hosted Harness) and D6b (Java server) implemented.
 Date: 2026-09-30
 Issue: [#12867](https://github.com/QwenLM/qwen-code/issues/12867), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 Decisions: [#12867 comment](https://github.com/QwenLM/qwen-code/issues/12867#issuecomment-5895205811)
@@ -19,7 +18,7 @@ Harness requested can be answered through either surface and the Turn
 continues, a replayed response returns the original result, and a responder
 without the right gets `403`.
 
-`main` has the durable pieces but nothing that uses them:
+Before D6, `main` had the durable pieces but nothing that used them:
 
 - The Session authority has `requestToolAction`, a permission ticket only the
   current Harness activation may open, and `resolveAction`, the trusted
@@ -96,8 +95,8 @@ of which the Hosted path has. A timeout outside its range answers the same, and
 `yolo` ignores the timeout because it never waits. A Session without a tool
 profile keeps ignoring the mode, because it runs no tools.
 
-Java keeps refusing Workspace files with any mode but `yolo` until D6b can
-answer an Action, so no Session waits for an approval that nobody can answer.
+D6b enables `default` and `auto-edit` for Workspace files and serves their
+Actions. `yolo` remains the deployment default.
 
 ### 5.2 Where the Turn waits
 
@@ -125,8 +124,8 @@ decision is made in the Harness before dispatch: the Runtime worker runs a
 Workspace Session's calls pre-approved and has nobody to ask.
 
 The Workspace is acquired once per Turn and stays held while the Turn waits,
-as it does while the model thinks between rounds. The approval's expiry bounds
-that wait.
+as it does while the model thinks between rounds. Each approval's expiry bounds
+that individual wait; cumulative waiting is described in section 8.
 
 `commitDurableWait` today copies the previous checkpoint's Turn identity, so
 an approval in a Turn's first round would leave the next Runtime batch
@@ -174,6 +173,21 @@ Session routes. Its body names the option and both revisions. The Harness then:
   bytes with the recorded decision. For the same reason the waiting call tells
   `allow` from the recorded digest without reading the decision back.
 
+The decision bytes are the UTF-8 encoding of
+`JSON.stringify({ v: 1, optionId, inputRevision, policyRevision })`, in exactly
+that key order, without whitespace or a trailing newline. `v` and
+`inputRevision` are JSON numbers; `inputRevision` is the Action record's own
+value, not the checkpoint's string revision. `optionId` and `policyRevision`
+are strings. For example:
+
+```text
+{"v":1,"optionId":"allow","inputRevision":1,"policyRevision":"hosted-tool-approval/1"}
+```
+
+The decision digest is SHA-256 of those bytes, encoded as lowercase hexadecimal
+without a `sha256:` prefix. D6b uses this same encoding when comparing a
+response with the projected Action's decision digest.
+
 A failure before the decision is written answers `503 action_resolution_failed`
 and leaves the Action as it was, so the caller can retry. A failed journal
 write stops every later write of the Session, as any failed write does, so
@@ -185,6 +199,8 @@ stopped for another reason, so it does not wait for its expiry either.
 A recovery-blocked Session still answers what it has already recorded, as
 above: a repeated decision, a different decision and an ended Action. Where an
 answer would write, it answers `409 hosted_turn_recovery_required` instead.
+Both decision and expiry writes recheck this condition inside the authority's
+serial queue, so blocking while a write waits its turn admits no new outcome.
 
 ### 5.5 Expiry and cancellation
 
@@ -211,8 +227,12 @@ H records. It also projects `action.changed` into a new Actions table in the
 same transaction, reading the options from the `optionsRef` resource that the
 Harness publishes before it commits the request, and appends an
 `action.updated` Session event. The table
-needs a Flyway migration; open pull requests hold V19 to V21, so its number is
-settled at merge.
+uses Flyway migration V24; tool publication uses V20–V22 and the Session MCP
+catalog uses V23.
+Projection validates the original options resource and immutable revision chain.
+Decision receipt IDs are opaque product handles derived from the recorded
+decision, never raw storage resource IDs. The public Turn ID is resolved from
+the Hosted prompt ID when a matching Java Turn exists.
 
 ### 6.2 Routes
 
@@ -234,10 +254,10 @@ settled at merge.
   commits the decision before it answers `200`, so the projection already
   shows it. The operation completes once the projected Action is final: with
   `action_resolution` (`decided`, with the decision receipt) when it is
-  decided with this response's decision (the decision bytes are
-  deterministic, so Java compares their digest), and with its end state
+  decided with this response's decision (Java compares the digest using the
+  exact decision encoding in section 5.4), and with its end state
   (`action_expired`, `action_cancelled` or `action_already_resolved`)
-  otherwise. A `400` from the Harness completes it with that error. While the
+  otherwise, exposed as `failure_code` (`failureCode` on WebShell). A `400` from the Harness completes it with that error. While the
   Action stays `requested`, for example on a recovery-blocked Session, the
   operation stays `running`. The WebShell request gains `requestId`.
 
@@ -250,7 +270,13 @@ settled at merge.
   `409 action_already_resolved`, and an unknown Action gets
   `404 action_not_found`. The contract gains these codes.
 - The Session capability `actions` reads `true` for a Session whose approval
-  mode can ask.
+  mode can ask. Java pins that mode on Workspace Session admission; migrated
+  Sessions default to `yolo`. Owner checks use the existing creator record
+  without adding grants or owners. Unknown creators fail closed.
+- `allow` and `deny` are stable option IDs. Actions expose both revisions, the
+  function call ID, tool name and expiry. Arguments come from Items. Only one
+  Hosted approval is pending per Turn; list returns requested Actions, newest
+  first, without locally expiring them.
 
 The Turn keeps reading `running` while it waits; its pending Actions are what
 tells a client that it is waiting.
@@ -258,8 +284,8 @@ tells a client that it is waiting.
 ### 6.4 Java configuration
 
 A deployment with Workspace files enabled may set `default` or `auto-edit`.
-Java sends a deployment-wide approval timeout with the mode, and `yolo` stays
-the default. For a Session with a tool profile, Java records the mode it sent
+Java sends `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` (default `10m`, between `1s`
+and `24h`) with the mode, and `yolo` stays the default. For a Session with a tool profile, Java records the mode it sent
 at creation and uses the Session only when the Harness reports that mode as
 `approvalMode` on create and on every load: a Harness from before D6a omits
 it, and would ignore the mode and run every call unasked.
@@ -275,17 +301,23 @@ it, and would ignore the mode and run every call unasked.
   call in `auto-edit` mode leaves the edit to run, an expired approval stops
   later questions in the Turn, a failed journal write blocks the Session at
   once, a write failure elsewhere is noticed within a second, a
-  recovery-blocked Session answers what it already recorded, a cancel request
+  recovery-blocked Session answers what it already recorded and admits no
+  decision or expiry write that was queued before it blocked, a cancel request
   releases the Workspace, and a load keeps and reports the saved mode.
-- **D6b:** projection and route tests on H2 and MySQL, owner and non-owner
+- **D6b:** projection and route tests on H2 and MariaDB (MySQL driver), owner and non-owner
   responses, replay, expiry and the contract test's traffic on both surfaces,
   and a Hosted process test in which the owner answers through the public API
-  and the Turn completes.
+  and WebShell, and the Turn completes.
 
 ## 8. Risks and follow-up
 
 - The Workspace stays held while a Turn waits for an answer, up to about one
-  approval timeout for a Turn nobody answers.
+  approval timeout of waiting for a Turn nobody answers. If the owner keeps
+  answering near each expiry, cumulative approval waiting can approach the
+  number of asked calls times the timeout, across up to 16 model rounds per
+  Turn, in addition to model and tool execution time. There is no cumulative
+  approval-wait budget; a prompt deadline or cancellation can end the wait
+  earlier.
 - A Harness restart strands a waiting approval until Stage G can take the
   Session over.
 - A Harness rolled back to a build before D6a would ignore a saved mode; D6b

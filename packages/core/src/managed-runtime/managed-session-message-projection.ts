@@ -104,7 +104,7 @@ export class ManagedSessionMessageProjection {
    * than silently dropping a record, which would present a short history as a
    * complete one.
    */
-  async project(): Promise<ChatRecord[]> {
+  async project(throughSequence?: number): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
     const checkpoints = new Map<string, number>();
     let after = 0;
@@ -115,12 +115,14 @@ export class ManagedSessionMessageProjection {
       });
       if (page.length === 0) break;
       for (const event of page) {
+        if (throughSequence !== undefined && event.sequence > throughSequence)
+          return records;
         after = event.sequence;
         const branch = await readManagedBranchCheckpoint(
           event,
           this.resources,
           (id) => checkpoints.get(id),
-          this.authority.committedSequence,
+          throughSequence ?? this.authority.committedSequence,
         );
         if (event.kind === 'checkpoint.committed') {
           checkpoints.set(

@@ -843,6 +843,32 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('binds a Hosted Runtime wait to its original turn', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const commit = await runtimeCommit(session);
+    await handle.commitAwaitRuntimeBatch([commit], {
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+    });
+    const wait = parseHarnessCheckpointV1(
+      (await session.authority.readCheckpointState())!,
+    );
+    expect(wait.identity).toMatchObject({
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+      activationId: session.activation.activationId,
+    });
+    await expect(
+      handle.commitAwaitRuntimeBatch([commit], {
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      }),
+    ).rejects.toThrow(/cannot change the current unfinished turn/);
+    await session.close();
+  });
+
   it('marks settled Runtime receipts consumed without a second dispatch', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
@@ -1165,6 +1191,48 @@ describe('managed harness factory', () => {
         turnId: 'turn-1',
         promptId: 'turn-1',
       }),
+    ).resolves.toMatchObject({ kind: 'durable_wait' });
+    await session.close();
+  });
+
+  it('lets the activation that consumed a taken-over batch commit the next one', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    await previous.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    await previous.detach();
+    await session.replaceActivation();
+    const next = createManagedHarnessHandle(session);
+    await next.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    const consumed = await next.consumeRuntimeResults();
+    expect(consumed?.identity.activationId).toBe(
+      session.activation.activationId,
+    );
+
+    await expect(
+      next.commitAwaitRuntimeBatch(
+        [
+          {
+            ...(await runtimeCommit(session)),
+            functionCallId: 'fc-2',
+            executionCallId: 'ex-2',
+            invocationBindingId: 'bind-2',
+            modelMessageId: 'msg-2',
+            attemptId: 'att-fc-2',
+          },
+        ],
+        turn,
+      ),
     ).resolves.toMatchObject({ kind: 'durable_wait' });
     await session.close();
   });

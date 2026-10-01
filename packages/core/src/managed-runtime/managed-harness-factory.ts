@@ -546,6 +546,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
           'approval wait must resolve before Runtime dispatch.',
         );
       }
+      if (
+        turn &&
+        (turn.turnId !== previous.identity.turnId ||
+          turn.promptId !== previous.identity.promptId) &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot change the current unfinished turn.',
+        );
+      }
 
       if (
         turn &&
@@ -720,15 +731,31 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         return null;
       }
       const items = previous.tools?.items ?? [];
+      // A replacement owner that took the Turn over and now feeds the settled
+      // batch to the model adopts the Turn. Without this its next tool batch
+      // is refused as Runtime work of a prior activation.
+      const adopt =
+        previous.identity.activationId !== this.activation.activationId &&
+        items.length > 0 &&
+        items.every((item) => item.state === 'settled');
       if (
         items.length === 0 ||
-        items.every((item) => item.state !== 'settled' || item.consumed)
+        (!adopt &&
+          items.every((item) => item.state !== 'settled' || item.consumed))
       ) {
         return previous;
       }
       const identity = this.nextCheckpointIdentity();
       const checkpoint = createConsumedRuntimeResultsHarnessCheckpoint({
-        previous,
+        previous: adopt
+          ? {
+              ...previous,
+              identity: {
+                ...previous.identity,
+                activationId: this.activation.activationId,
+              },
+            }
+          : previous,
         ...identity,
       });
       await this.commitHarnessCheckpoint(
