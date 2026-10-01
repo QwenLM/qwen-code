@@ -38,6 +38,9 @@ export function managedEventsToMessages(
     textMessage = undefined;
   };
   for (const event of events) {
+    // Approval updates carry no Turn and render outside the transcript, so
+    // they must not settle or split the Turn being streamed.
+    if (event.type === 'action_updated') continue;
     if (
       event.type !== 'tool_result_updated' &&
       event.turnId !== currentTurnId
@@ -143,8 +146,12 @@ export function managedEventsToMessages(
       tools.set(key, tool);
       if (legacyKey) tools.set(legacyKey, tool);
       if (typeof itemId === 'string') tool.callId = key;
+      if (typeof callId === 'string') tool.toolCallId = callId;
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
+      // The Harness titles each call itself; the approval card shows it as
+      // the description, so keep it instead of dropping it on the floor.
+      if (typeof data['title'] === 'string') tool.title = data['title'];
       if (data['input'] !== undefined) {
         const input =
           typeof data['input'] === 'string' && data['truncated'] === true

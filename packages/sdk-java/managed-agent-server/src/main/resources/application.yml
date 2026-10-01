@@ -30,6 +30,7 @@ management:
 qwen:
   managed-agent:
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
+    trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
     session-store:
       enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'

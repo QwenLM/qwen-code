@@ -19,6 +19,7 @@ public class ManagedAgentProperties {
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private String agentRevision = "1";
+    private String trustedActorHeader = "";
 
     public Harness getHarness() {
         return harness;
@@ -54,6 +55,14 @@ public class ManagedAgentProperties {
 
     public void setAgentRevision(String agentRevision) {
         this.agentRevision = agentRevision;
+    }
+
+    public String getTrustedActorHeader() {
+        return trustedActorHeader;
+    }
+
+    public void setTrustedActorHeader(String trustedActorHeader) {
+        this.trustedActorHeader = trustedActorHeader;
     }
 
     @PostConstruct
