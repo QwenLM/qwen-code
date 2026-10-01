@@ -38,15 +38,10 @@ export function findManagedApprovalTool(
   return found;
 }
 
-/**
- * Presents a pending Hosted approval through the shared approval card. When
- * the call's arguments are not in the transcript, `unavailableNotice` becomes
- * the card's content, so the card itself says what is missing.
- */
+/** Presents a pending Hosted approval through the shared approval card. */
 export function toManagedPermissionRequest(
   action: ManagedAgentPendingAction,
   messages: readonly Message[],
-  unavailableNotice?: string,
 ): PermissionRequest {
   const tool = findManagedApprovalTool(messages, action);
   const toolCallId =
@@ -57,13 +52,10 @@ export function toManagedPermissionRequest(
     sessionId: action.sessionId,
     ...(toolCallId ? { toolCallId } : {}),
     toolName: action.toolName,
-    // Managed tool rows carry no per-call title, so the card names the tool.
-    title: action.toolName,
+    title: tool?.title ?? action.toolName,
     content: tool?.args
       ? [{ type: 'text', text: JSON.stringify(tool.args, null, 2) }]
-      : unavailableNotice
-        ? [{ type: 'text', text: unavailableNotice }]
-        : [],
+      : [],
     ...(tool?.args ? { rawInput: tool.args, contentIsInput: true } : {}),
     options: action.options.map((option) => ({
       id: option.id,

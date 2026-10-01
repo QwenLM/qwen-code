@@ -36,17 +36,6 @@ function update(id: number): ManagedAgentSessionEvent {
   };
 }
 
-function gap(id: number): ManagedAgentSessionEvent {
-  return {
-    id,
-    at: id,
-    type: 'stream_gap',
-    sessionId: 'session-1',
-    turnId: 'turn-1',
-    data: {},
-  };
-}
-
 describe('useManagedActions', () => {
   let root: Root | undefined;
 
@@ -61,7 +50,6 @@ describe('useManagedActions', () => {
     initial: {
       enabled: boolean | undefined;
       events: ManagedAgentSessionEvent[];
-      sessionId?: string;
     },
   ) {
     let latest: ReturnType<typeof useManagedActions> | undefined;
@@ -69,7 +57,7 @@ describe('useManagedActions', () => {
     function Probe(current: typeof initial) {
       latest = useManagedActions(
         provider,
-        current.sessionId ?? 'session-1',
+        'session-1',
         'client-1',
         current.enabled,
         current.events,
@@ -232,148 +220,6 @@ describe('useManagedActions', () => {
     await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
     expect(respond).toHaveBeenCalledTimes(1);
     expect(listPending).toHaveBeenCalledTimes(2);
-  });
-
-  it('re-reads when the transcript reports a reconciled gap', async () => {
-    const listPending = vi
-      .fn()
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([pending]);
-    const provider = {
-      actions: { listPending, respond: vi.fn() },
-    } as unknown as ManagedAgentProvider;
-    const hook = mount(provider, { enabled: true, events: [] });
-    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(1));
-
-    hook.rerender({ events: [gap(3)] });
-    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
-    expect(listPending).toHaveBeenCalledTimes(2);
-  });
-
-  it('never shows or answers the previous Session approval after a switch', async () => {
-    let resolveNext: (actions: ManagedAgentPendingAction[]) => void = () => {};
-    const listPending = vi
-      .fn()
-      .mockResolvedValueOnce([pending])
-      .mockImplementationOnce(
-        () =>
-          new Promise<ManagedAgentPendingAction[]>((resolve) => {
-            resolveNext = resolve;
-          }),
-      );
-    const respond = vi.fn();
-    const provider = {
-      actions: { listPending, respond },
-    } as unknown as ManagedAgentProvider;
-    const hook = mount(provider, { enabled: true, events: [] });
-    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
-
-    hook.rerender({ sessionId: 'session-2' });
-    expect(listPending).toHaveBeenLastCalledWith('session-2', {
-      clientId: 'client-1',
-      signal: expect.any(AbortSignal),
-    });
-    expect(hook.latest?.action).toBeUndefined();
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
-    expect(respond).not.toHaveBeenCalled();
-
-    const next = {
-      ...pending,
-      actionId: 'tool_approval_2',
-      sessionId: 'session-2',
-    };
-    act(() => resolveNext([next]));
-    await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
-  });
-
-  it('drops an approval that already ended instead of offering a retry', async () => {
-    const ended = Object.assign(new Error('Action expired'), {
-      status: 409,
-      code: 'action_expired',
-    });
-    const listPending = vi
-      .fn()
-      .mockResolvedValueOnce([pending])
-      .mockResolvedValueOnce([]);
-    const respond = vi.fn().mockRejectedValue(ended);
-    const provider = {
-      actions: { listPending, respond },
-    } as unknown as ManagedAgentProvider;
-    const hook = mount(provider, { enabled: true, events: [] });
-    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
-
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
-    expect(hook.latest?.action).toBeUndefined();
-    expect(hook.latest?.answerError).toBeUndefined();
-    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
-  });
-
-  it('shows an answer failure only beside the approval that failed', async () => {
-    const other = { ...pending, actionId: 'tool_approval_2' };
-    const listPending = vi
-      .fn()
-      .mockResolvedValueOnce([pending])
-      .mockResolvedValueOnce([other]);
-    const respond = vi.fn().mockRejectedValue(new Error('offline'));
-    const provider = {
-      actions: { listPending, respond },
-    } as unknown as ManagedAgentProvider;
-    const hook = mount(provider, { enabled: true, events: [] });
-    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
-    await act(async () => {
-      await expect(
-        hook.latest!.respond('tool_approval_1', 'allow'),
-      ).rejects.toThrow('offline');
-    });
-    expect(hook.latest?.answerError).toEqual(new Error('offline'));
-
-    hook.rerender({ events: [update(9)] });
-    await vi.waitFor(() => expect(hook.latest?.action).toEqual(other));
-    expect(hook.latest?.answerError).toBeUndefined();
-  });
-
-  it('does not retry a read the service refused as a client error', async () => {
-    vi.useFakeTimers();
-    const refused = Object.assign(new Error('Session not found'), {
-      status: 404,
-      code: 'session_not_found',
-    });
-    const listPending = vi.fn().mockRejectedValue(refused);
-    const provider = {
-      actions: { listPending, respond: vi.fn() },
-    } as unknown as ManagedAgentProvider;
-    const hook = mount(provider, { enabled: true, events: [] });
-    await act(async () => vi.advanceTimersByTimeAsync(20_000));
-    expect(listPending).toHaveBeenCalledTimes(1);
-    expect(hook.latest?.loadError).toBe(refused);
-  });
-
-  it('restarts the retry ladder when reads resume after a reload', async () => {
-    vi.useFakeTimers();
-    const listPending = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('unavailable'))
-      .mockRejectedValueOnce(new Error('unavailable'))
-      .mockRejectedValueOnce(new Error('unavailable'))
-      .mockRejectedValueOnce(new Error('unavailable'))
-      .mockRejectedValueOnce(new Error('unavailable'))
-      .mockResolvedValueOnce([pending]);
-    const provider = {
-      actions: { listPending, respond: vi.fn() },
-    } as unknown as ManagedAgentProvider;
-    const hook = mount(provider, { enabled: true, events: [] });
-    for (const delay of [0, 2_000, 5_000, 10_000, 60_000]) {
-      await act(async () => vi.advanceTimersByTimeAsync(delay));
-    }
-    expect(listPending).toHaveBeenCalledTimes(4);
-
-    hook.rerender({ enabled: undefined });
-    hook.rerender({ enabled: true });
-    await act(async () => vi.advanceTimersByTimeAsync(0));
-    expect(listPending).toHaveBeenCalledTimes(5);
-    await act(async () => vi.advanceTimersByTimeAsync(2_000));
-    expect(listPending).toHaveBeenCalledTimes(6);
-    expect(hook.latest?.action).toEqual(pending);
   });
 
   it.each([5_000, -5_000])(

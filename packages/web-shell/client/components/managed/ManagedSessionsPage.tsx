@@ -11,10 +11,7 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
-import {
-  isNonRetryableClientError,
-  useManagedActions,
-} from './use-managed-actions';
+import { useManagedActions } from './use-managed-actions';
 import { toManagedPermissionRequest } from './managed-approval';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
@@ -60,6 +57,20 @@ function persistPending(key: string, value: PendingPrompt | undefined): void {
   } catch {
     // The in-memory attempt still preserves retries when storage is disabled.
   }
+}
+
+function isNonRetryableClientError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('status' in error)) {
+    return false;
+  }
+  const status = (error as { status?: unknown }).status;
+  return (
+    typeof status === 'number' &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  );
 }
 
 export function ManagedSessionsPage({
@@ -147,13 +158,9 @@ function ManagedSessionsContent({
   const pendingApproval = useMemo(
     () =>
       approvals.action
-        ? toManagedPermissionRequest(
-            approvals.action,
-            messages,
-            t('managed.approval.argumentsUnavailable'),
-          )
+        ? toManagedPermissionRequest(approvals.action, messages)
         : null,
-    [approvals.action, messages, t],
+    [approvals.action, messages],
   );
   const approvalCause = approvals.answerError;
   const approvalForbidden =
@@ -509,20 +516,22 @@ function ManagedSessionsContent({
                   approvals.respond(actionId, optionId)
                 }
               />
+              {pendingApproval.rawInput === undefined && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  {t('managed.approval.argumentsUnavailable')}
+                </p>
+              )}
             </div>
           )}
-          {/* A failed background re-read keeps the shown approval usable. */}
-          {approvals.loadError !== undefined && !pendingApproval && (
+          {approvals.loadError !== undefined && (
             <div
               role="alert"
               className="flex items-center gap-2 text-sm text-destructive"
             >
               <span>{t('managed.approval.loadFailed')}</span>
-              {!isNonRetryableClientError(approvals.loadError) && (
-                <Button variant="outline" size="sm" onClick={approvals.retry}>
-                  {t('managed.approval.retry')}
-                </Button>
-              )}
+              <Button variant="outline" size="sm" onClick={approvals.retry}>
+                {t('managed.approval.retry')}
+              </Button>
             </div>
           )}
           {approvals.answerError !== undefined && (
