@@ -450,16 +450,21 @@ describe('standalone-update', () => {
         runnable?: boolean;
         reportedVersion?: string;
         manifestVersion?: string;
+        nameless?: boolean;
       } = {},
     ) {
       const fixture = path.join(tempDir, 'fixture');
       fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
+      const manifest: Record<string, string> = {
+        target: 'linux-x64',
+        version: options.manifestVersion ?? '1.2.3',
+      };
+      if (!options.nameless) {
+        manifest['name'] = '@qwen-code/qwen-code';
+      }
       fs.writeFileSync(
         path.join(fixture, 'qwen-code', 'manifest.json'),
-        JSON.stringify({
-          target: 'linux-x64',
-          version: options.manifestVersion ?? '1.2.3',
-        }),
+        JSON.stringify(manifest),
       );
       // `runnable` prints the version the archive was built for;
       // `reportedVersion` stages a mismatch against it instead.
@@ -511,6 +516,20 @@ describe('standalone-update', () => {
     );
 
     it.skipIf(process.platform === 'win32')(
+      'preserves the installation when the smoke-tested binary reports a non-semver version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({ reportedVersion: '01.2.3' });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'Smoke test failed: unexpected version output "01.2.3"',
+        );
+        expectInstallationPreserved();
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
       'preserves the installation when the archive manifest version disagrees with the requested version',
       async () => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
@@ -518,7 +537,34 @@ describe('standalone-update', () => {
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
-          'Smoke test failed: manifest version 9.9.9 does not match expected version 1.2.3',
+          'Archive manifest does not match the requested release',
+        );
+        expectInstallationPreserved();
+      },
+    );
+
+    it('preserves the installation when the archive manifest omits the package name', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // A nameless manifest would install fine and only break later: the
+      // directory would stop classifying as a managed standalone install.
+      await serveArchive({ nameless: true });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved();
+    });
+
+    it.each(['01.2.3', '1.2.3-01'])(
+      'preserves the installation when the archive manifest version is not valid semver: %s',
+      async (manifestVersion) => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({ manifestVersion });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'Archive manifest does not match the requested release',
         );
         expectInstallationPreserved();
       },
@@ -614,6 +660,62 @@ describe('standalone-update', () => {
         } finally {
           pending.cleanup();
         }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'installs an explicit downgrade and keeps the newer installation for rollback',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        vi.stubEnv('SHELL', '');
+        await serveArchive({
+          manifestVersion: '0.0.9',
+          reportedVersion: '0.0.9',
+        });
+
+        await expect(
+          performStandaloneUpdate(standaloneDir, '0.0.9'),
+        ).resolves.toBe('done');
+
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '0.0.9' });
+        expect(
+          fs.readFileSync(
+            path.join(`${standaloneDir}.old`, 'manifest.json'),
+            'utf8',
+          ),
+        ).toBe(originalManifest);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'reinstalls when the explicit target equals the installed version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        vi.stubEnv('SHELL', '');
+        await serveArchive({
+          manifestVersion: '0.1.0',
+          reportedVersion: '0.1.0',
+        });
+
+        await expect(
+          performStandaloneUpdate(standaloneDir, '0.1.0'),
+        ).resolves.toBe('done');
+
+        // The version alone cannot distinguish a reinstall from a no-op; the
+        // archive's lib/cli.js only exists if the replacement really ran.
+        expect(fs.existsSync(path.join(standaloneDir, 'lib', 'cli.js'))).toBe(
+          true,
+        );
+        expect(
+          fs.readFileSync(
+            path.join(`${standaloneDir}.old`, 'manifest.json'),
+            'utf8',
+          ),
+        ).toBe(originalManifest);
       },
     );
 

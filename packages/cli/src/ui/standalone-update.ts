@@ -499,7 +499,7 @@ async function smokeTest(
     );
   }
   const version = stdout.trim();
-  if (!SEMVER_RE.test(version)) {
+  if (!SEMVER_RE.test(version) || !semver.valid(version)) {
     throw new Error(
       `Smoke test failed: unexpected version output "${version}"`,
     );
@@ -1284,21 +1284,29 @@ async function applyStandaloneUpdate(
         'Extracted archive does not contain expected qwen-code directory',
       );
     }
-    // The smoke test pins the version the executable reports; the manifest is
-    // the field the installation reads back (and the prepared-update gate
-    // compares against), so it must agree with the requested version too.
-    const manifestVersion = (
-      JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
-        version?: unknown;
-      }
-    ).version;
+    // The smoke test pins the version the executable reports; the manifest
+    // is what isStandaloneInstallDir reads back to keep recognising the
+    // directory as a managed standalone install (name and target) and what
+    // the prepared-update gate compares against (version) — installation
+    // does not rewrite it, so the archive must carry all three. The version
+    // predicates mirror normalizeVersion's own so the comparison can only
+    // evaluate, never throw.
+    const manifest = JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
+      name?: unknown;
+      target?: unknown;
+      version?: unknown;
+    };
+    const manifestVersion = manifest.version;
     if (
+      manifest.name !== '@qwen-code/qwen-code' ||
+      manifest.target !== target ||
       typeof manifestVersion !== 'string' ||
       !SEMVER_RE.test(manifestVersion) ||
+      !semver.valid(manifestVersion) ||
       normalizeVersion(manifestVersion) !== normalizeVersion(newVersion)
     ) {
       throw new Error(
-        `Smoke test failed: manifest version ${String(manifestVersion)} does not match expected version ${newVersion}`,
+        `Archive manifest does not match the requested release: ${JSON.stringify(manifest)}`,
       );
     }
 

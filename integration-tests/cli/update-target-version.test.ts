@@ -10,11 +10,23 @@
 // The run must install exactly the requested version and must not touch the
 // registry — the sink server fails the test if any request reaches it.
 //
-// The standalone install lives outside the repository checkout on purpose:
-// getInstallationInfo classifies a CLI launched from inside a git worktree as
-// "local git clone" before it ever considers the standalone layout.
+// The scratch root stays in os.tmpdir(), outside the repository checkout.
+// getInstallationInfo only reports "local git clone" — which disables
+// standalone update — when the CLI's cwd sits inside a git worktree AND the
+// resolved CLI path lies inside that same cwd (installationInfo.ts). Keeping
+// cwd under os.tmpdir() defeats the first half, and install/ and cwd/ being
+// siblings defeats the second, so the fixture classifies as standalone
+// regardless of where this suite itself runs from.
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -141,16 +153,14 @@ describe.skipIf(process.platform === 'win32')(
     let registrySink: http.Server;
     let releaseRequests: string[];
     let registryRequests: string[];
+    let caPath: string;
+    let homeDir: string;
 
-    beforeAll(async () => {
-      target = standaloneTarget();
-      tmpRoot = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'qwen-update-target-e2e-'),
-      );
-
-      // Disposable standalone installation at INSTALLED_VERSION, running the
-      // real bundled CLI as its lib/cli.js.
-      installDir = path.join(tmpRoot, 'install', 'qwen-code');
+    // (Re)builds the disposable standalone installation at INSTALLED_VERSION,
+    // running the real bundled CLI as its lib/cli.js.
+    function seedInstallation() {
+      fs.rmSync(installDir, { recursive: true, force: true });
+      fs.rmSync(`${installDir}.old`, { recursive: true, force: true });
       fs.mkdirSync(path.join(installDir, 'lib'), { recursive: true });
       fs.mkdirSync(path.join(installDir, 'bin'));
       fs.mkdirSync(path.join(installDir, 'node', 'bin'), { recursive: true });
@@ -185,6 +195,43 @@ describe.skipIf(process.platform === 'win32')(
         '#!/bin/sh\n',
         { mode: 0o755 },
       );
+    }
+
+    // Per-spawn environment. The pins after the spread keep the run hermetic:
+    // the fixture serves no SHA256SUMS.sig, so an ambient
+    // QWEN_REQUIRE_SIGNATURE=1 would abort the update; QWEN_CODE_LANG
+    // outranks the fixture's language setting, so an ambient zh turns the
+    // asserted English output Chinese; and QWEN_HOME must point at the
+    // isolated home or the child refills cleared variables from the host's
+    // settings.json.
+    function updateEnv(): NodeJS.ProcessEnv {
+      const releasePort = (releaseServer.address() as { port: number }).port;
+      const sinkPort = (registrySink.address() as { port: number }).port;
+      return {
+        ...process.env,
+        QWEN_UPDATE_BASE_URL: `https://127.0.0.1:${releasePort}`,
+        npm_config_registry: `http://127.0.0.1:${sinkPort}`,
+        NODE_EXTRA_CA_CERTS: caPath,
+        HOME: homeDir,
+        SHELL: '',
+        NO_COLOR: '1',
+        QWEN_REQUIRE_SIGNATURE: '',
+        QWEN_CODE_LANG: 'en',
+        QWEN_HOME: path.join(homeDir, '.qwen'),
+      };
+    }
+
+    beforeAll(async () => {
+      target = standaloneTarget();
+      tmpRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-update-target-e2e-'),
+      );
+
+      installDir = path.join(tmpRoot, 'install', 'qwen-code');
+      caPath = path.join(tmpRoot, 'loopback-ca.pem');
+      fs.writeFileSync(caPath, SELF_SIGNED_CERT);
+      homeDir = path.join(tmpRoot, 'home');
+      fs.mkdirSync(homeDir, { recursive: true });
 
       // Project dir the CLI runs in: settings only, auto-update off so no
       // background check can fire.
@@ -205,9 +252,16 @@ describe.skipIf(process.platform === 'win32')(
         recursive: true,
       });
       fs.mkdirSync(path.join(fixtureDir, 'qwen-code', 'lib'));
+      // Mirrors the official archive manifest — create-standalone-package.js
+      // always writes name/target/version, and the updater's manifest gate
+      // rejects archives missing any of them.
       fs.writeFileSync(
         path.join(fixtureDir, 'qwen-code', 'manifest.json'),
-        JSON.stringify({ target, version: TARGET_VERSION }),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target,
+          version: TARGET_VERSION,
+        }),
       );
       fs.writeFileSync(
         path.join(fixtureDir, 'qwen-code', 'node', 'bin', 'node'),
@@ -263,10 +317,27 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
+    beforeEach(() => {
+      // vitest retries the test task, not the file: without re-seeding, a
+      // retry after a successful activation would run the update against the
+      // archive's own fixture body and report a fabricated empty-stdout
+      // failure.
+      seedInstallation();
+      releaseRequests.length = 0;
+      registryRequests.length = 0;
+    });
+
     afterAll(async () => {
+      // Either server is still undefined when beforeAll threw before creating
+      // it; an unconditional close-promise would never settle, hanging the
+      // hook until timeout and leaking tmpRoot.
       await Promise.all([
-        new Promise<void>((resolve) => releaseServer?.close(() => resolve())),
-        new Promise<void>((resolve) => registrySink?.close(() => resolve())),
+        releaseServer
+          ? new Promise<void>((resolve) => releaseServer.close(() => resolve()))
+          : Promise.resolve(),
+        registrySink
+          ? new Promise<void>((resolve) => registrySink.close(() => resolve()))
+          : Promise.resolve(),
       ]);
       if (tmpRoot && process.env['KEEP_OUTPUT'] !== 'true') {
         fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -274,21 +345,26 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     it('installs exactly the requested version with zero registry access', async () => {
-      const releasePort = (releaseServer.address() as { port: number }).port;
-      const sinkPort = (registrySink.address() as { port: number }).port;
-      const caPath = path.join(tmpRoot, 'loopback-ca.pem');
-      fs.writeFileSync(caPath, SELF_SIGNED_CERT);
-      const homeDir = path.join(tmpRoot, 'home');
-      fs.mkdirSync(homeDir, { recursive: true });
-
-      const result = await runUpdate(installDir, path.join(tmpRoot, 'cwd'), {
-        ...process.env,
-        QWEN_UPDATE_BASE_URL: `https://127.0.0.1:${releasePort}`,
-        npm_config_registry: `http://127.0.0.1:${sinkPort}`,
-        NODE_EXTRA_CA_CERTS: caPath,
-        HOME: homeDir,
-        SHELL: '',
-        NO_COLOR: '1',
+      // Stage the hostile ambient environment the per-spawn pins must
+      // defeat: with any one of the three pins removed, the spawned CLI
+      // picks the ambient value up and this test fails — a zh locale flips
+      // the asserted English output, QWEN_REQUIRE_SIGNATURE=1 aborts on the
+      // missing .sig, and the hostile home's settings env block refills it.
+      const hostileHome = path.join(tmpRoot, 'hostile-home');
+      fs.mkdirSync(hostileHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(hostileHome, 'settings.json'),
+        JSON.stringify({ env: { QWEN_REQUIRE_SIGNATURE: '1' } }),
+      );
+      vi.stubEnv('QWEN_CODE_LANG', 'zh');
+      vi.stubEnv('QWEN_REQUIRE_SIGNATURE', '1');
+      vi.stubEnv('QWEN_HOME', hostileHome);
+      const result = await runUpdate(
+        installDir,
+        path.join(tmpRoot, 'cwd'),
+        updateEnv(),
+      ).finally(() => {
+        vi.unstubAllEnvs();
       });
 
       expect(
@@ -326,6 +402,28 @@ describe.skipIf(process.platform === 'win32')(
           `/v${TARGET_VERSION}/SHA256SUMS.sig`,
         ]).toContain(url);
       }
+    }, 180_000);
+
+    it('re-runs the update cleanly after a previous activation', async () => {
+      // Witness for the beforeEach re-seed: without it this runs against the
+      // post-activation tree the first test left behind — lib/cli.js is then
+      // the archive's fixture body — and fails on fabricated empty stdout.
+      const result = await runUpdate(
+        installDir,
+        path.join(tmpRoot, 'cwd'),
+        updateEnv(),
+      );
+
+      expect(
+        result.code,
+        `update failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      ).toBe(0);
+      expect(result.stdout).toContain('Update successful');
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(installDir, 'manifest.json'), 'utf-8'),
+      ) as { version?: string };
+      expect(manifest.version).toBe(TARGET_VERSION);
+      expect(registryRequests).toEqual([]);
     }, 180_000);
   },
 );
