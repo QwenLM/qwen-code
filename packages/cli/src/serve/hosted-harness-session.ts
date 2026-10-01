@@ -341,30 +341,48 @@ async function recoverCancelledPreToolHook(
   }
   if (!cancelled) return false;
   const missing = calls.filter((call) => !responded.has(call.id!));
-  if (missing.length)
-    await sink.write(
-      record(
-        session,
-        authority.sessionHeader.sessionKey.sessionId,
-        'tool_result',
-        current.at(-1)!.uuid,
-        {
-          daemonPromptId: promptId,
-          model: assistant.model,
-          message: {
-            role: 'user',
-            parts: missing.flatMap((call) =>
-              convertToFunctionErrorResponse(
-                call.name!,
-                call.id!,
-                [],
-                'The turn was cancelled before this tool call ran.',
-              ),
-            ),
-          },
-        },
-      ),
+  if (missing.length) {
+    let parts: Part[] = [];
+    let result = record(
+      session,
+      authority.sessionHeader.sessionKey.sessionId,
+      'tool_result',
+      current.at(-1)!.uuid,
+      {
+        daemonPromptId: promptId,
+        model: assistant.model,
+        message: { role: 'user', parts },
+      },
     );
+    let bytes = Buffer.byteLength(JSON.stringify(result));
+    const limit = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+    for (const part of missing.flatMap((call) =>
+      convertToFunctionErrorResponse(
+        call.name!,
+        call.id!,
+        [],
+        'The turn was cancelled before this tool call ran.',
+      ),
+    )) {
+      const partBytes = Buffer.byteLength(JSON.stringify(part));
+      if (parts.length && bytes + 1 + partBytes > limit) {
+        await sink.write(result);
+        parts = [];
+        result = {
+          ...result,
+          uuid: randomUUID(),
+          parentUuid: result.uuid,
+          message: { role: 'user', parts },
+        };
+        bytes = Buffer.byteLength(JSON.stringify(result));
+      }
+      bytes += partBytes + (parts.length ? 1 : 0);
+      if (bytes > limit)
+        throw new Error('Cancelled tool response exceeds the Session limit.');
+      parts.push(part);
+    }
+    await sink.write(result);
+  }
   return true;
 }
 
@@ -418,7 +436,12 @@ async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
       )) {
         const execution = parseHookExecution(record);
         if (
-          !occurrenceIds.has(execution.occurrenceId) ||
+          (!occurrenceIds.has(execution.occurrenceId) &&
+            !(
+              execution.eventName === HookEventName.InstructionsLoaded &&
+              execution.hookId !== '__plan__' &&
+              execution.cancelRequested
+            )) ||
           execution.run.state !== 'cancelled' ||
           execution.run.execution !== 'not_started_proven'
         )

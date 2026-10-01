@@ -472,6 +472,24 @@ describe('Hosted Harness no-tool session', () => {
       false,
     ],
     [
+      'managed_hook_handler_unavailable',
+      HookEventName.InstructionsLoaded,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.InstructionsLoaded,
+      true,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.InstructionsLoaded,
+      false,
+      true,
+    ],
+    [
       'managed_hook_command_isolation_unavailable',
       HookEventName.SessionStart,
       false,
@@ -550,7 +568,9 @@ describe('Hosted Harness no-tool session', () => {
             event,
             event === HookEventName.SessionStart
               ? `session-start:${SESSION_ID}`
-              : promptId!,
+              : event === HookEventName.InstructionsLoaded
+                ? `${promptId}:native:instructions:0`
+                : promptId!,
             { prompt_id: promptId },
             signal,
           );
@@ -665,6 +685,7 @@ describe('Hosted Harness no-tool session', () => {
   it.each([
     'single',
     'batch',
+    'large-batch',
     'result-write-failure',
     'result-ack-failure',
     'terminal-write-failure',
@@ -676,6 +697,21 @@ describe('Hosted Harness no-tool session', () => {
   ])(
     'recovers only proven-unstarted cancelled PreToolUse (%s)',
     async (mode) => {
+      if (mode === 'large-batch') {
+        const publish = LocalManagedSessionResourceStore.prototype.publish;
+        vi.spyOn(
+          LocalManagedSessionResourceStore.prototype,
+          'publish',
+        ).mockImplementation(function (
+          this: LocalManagedSessionResourceStore,
+          kind,
+          bytes,
+        ) {
+          if (bytes.byteLength > 64 * 1024)
+            throw new Error('Session resource exceeds 64 KiB.');
+          return publish.call(this, kind, bytes);
+        });
+      }
       const { server, authorize, catalog, requests, definition } =
         await hookApp();
       Object.assign(catalog, {
@@ -725,11 +761,14 @@ describe('Hosted Harness no-tool session', () => {
         };
       });
       const calls = Array.from(
-        { length: mode === 'single' ? 1 : 2 },
+        { length: mode === 'single' ? 1 : mode === 'large-batch' ? 650 : 2 },
         (_, i) => ({
-          name: 'write_file',
+          name: mode === 'large-batch' ? 'read_file' : 'write_file',
           callId: `call-${i}`,
-          args: { file_path: `notes-${i}.txt`, content: 'hello' },
+          args:
+            mode === 'large-batch'
+              ? { file_path: 'a' }
+              : { file_path: `notes-${i}.txt`, content: 'hello' },
           isClientInitiated: false,
           prompt_id: PROMPT_ID,
         }),
@@ -3311,84 +3350,121 @@ describe('Hosted Harness no-tool session', () => {
     );
   });
 
-  it('rejects an oversized complete assistant record before acquisition and permits retry and reload', async () => {
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
-    const acquire = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
-      .mockResolvedValue();
-    const server = await app(true);
-    const toolProfile = 'hosted-workspace-files/1';
-    const created = await headers(supertest(server).post('/session')).send({
-      sessionId: SESSION_ID,
-      sessionScope: 'thread',
-      managedSessionStore: store(),
-      toolProfile,
-    });
-    expect(created.status).toBe(200);
-    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
-      const call = {
-        name: 'read_file',
-        callId: 'call',
-        args: { file_path: 'a' },
-        isClientInitiated: false,
-        prompt_id: PROMPT_ID,
-      };
-      await toolTurn!.execute(
-        [call],
-        [
-          { text: 'x'.repeat(65_100) },
-          {
-            functionCall: { id: call.callId, name: call.name, args: call.args },
-          },
-        ],
-        'test-model',
-        signal,
-      );
-      throw new Error('oversized record was accepted');
-    });
-    const prompt = [{ type: 'text', text: 'read a' }];
-    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
-    const clientId = created.body.clientId as string;
-    const send = async (promptId: string) => {
-      const response = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/prompt`),
-      )
-        .set('X-Qwen-Client-Id', clientId)
-        .send({ prompt, promptId, payloadDigest });
-      expect(response.status).toBe(202);
-      await vi.waitFor(async () => {
-        const status = await headers(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.hasActivePrompt).toBe(false);
-        expect(status.body.recoveryBlocked).toBe(false);
+  it.each(['assistant', 'cancellation'] as const)(
+    'rejects an oversized complete %s record before acquisition and permits retry and reload',
+    async (mode) => {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      const acquire = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockResolvedValue();
+      const server = await app(true);
+      const toolProfile = 'hosted-workspace-files/1';
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile,
       });
-    };
-    await send(PROMPT_ID);
-    expect(acquire).not.toHaveBeenCalled();
-    const transcript = await headers(
-      supertest(server).get(`/session/${SESSION_ID}/transcript`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expect(transcript.body.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'turn_error', promptId: PROMPT_ID }),
-      ]),
-    );
-    await send('44444444-4444-4444-8444-444444444444');
-    expect(state.model).toHaveBeenCalledTimes(2);
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
-      'X-Qwen-Client-Id',
-      clientId,
-    );
-    const loaded = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store(), toolProfile });
-    expect(loaded.status).toBe(200);
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
-      'X-Qwen-Client-Id',
-      loaded.body.clientId as string,
-    );
-  });
+      expect(created.status).toBe(200);
+      const writes = vi.spyOn(ManagedSessionRecordSink.prototype, 'write');
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        const call = {
+          name: 'read_file',
+          callId: 'call',
+          args: { file_path: 'a' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        if (mode === 'cancellation') {
+          const user = writes.mock.calls.find(
+            ([record]) => record.type === 'user',
+          )![0];
+          const assistant = {
+            ...user,
+            uuid: randomUUID(),
+            parentUuid: user.uuid,
+            type: 'assistant',
+            model: 'test-model',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: call.callId,
+                    name: call.name,
+                    args: call.args,
+                  },
+                },
+              ],
+            },
+          };
+          call.callId = 'c'.repeat(
+            65_535 -
+              Buffer.byteLength(JSON.stringify(assistant)) +
+              call.callId.length,
+          );
+        }
+        await toolTurn!.execute(
+          [call],
+          [
+            ...(mode === 'assistant' ? [{ text: 'x'.repeat(65_100) }] : []),
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        throw new Error('oversized record was accepted');
+      });
+      const prompt = [{ type: 'text', text: 'read a' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      const clientId = created.body.clientId as string;
+      const send = async (promptId: string) => {
+        const response = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/prompt`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ prompt, promptId, payloadDigest });
+        expect(response.status).toBe(202);
+        await vi.waitFor(async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        });
+      };
+      await send(PROMPT_ID);
+      expect(acquire).not.toHaveBeenCalled();
+      const transcript = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'turn_error', promptId: PROMPT_ID }),
+        ]),
+      );
+      await send('44444444-4444-4444-8444-444444444444');
+      expect(state.model).toHaveBeenCalledTimes(2);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        clientId,
+      );
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), toolProfile });
+      expect(loaded.status).toBe(200);
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+        'X-Qwen-Client-Id',
+        loaded.body.clientId as string,
+      );
+    },
+  );
 
   it('omits settled output when only the complete tool result record exceeds the limit', async () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();

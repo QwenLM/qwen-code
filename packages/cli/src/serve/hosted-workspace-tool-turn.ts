@@ -793,6 +793,24 @@ export class HostedWorkspaceToolTurn {
       throw new Error(
         'Hosted assistant record exceeds the inline Session Store limit.',
       );
+    if (
+      calls.some(
+        (call) =>
+          !this.messageFitsInline(
+            'tool_result',
+            convertToFunctionErrorResponse(
+              call.name,
+              call.callId,
+              [],
+              'The turn was cancelled before this tool call ran.',
+            ),
+            model,
+          ),
+      )
+    )
+      throw new Error(
+        'Hosted tool cancellation exceeds the inline Session Store limit.',
+      );
     signal.throwIfAborted();
     if (requests.some((request) => request.validationError)) {
       const responses = requests.flatMap((request) =>
