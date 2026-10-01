@@ -274,8 +274,8 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
     const plan = buildSessionRecoveryPlan({
       sessionId: 'session-1',
       conversation: conversationFromRecords([
-        promptRecord(0, 'run the agent in the background'),
-        modelRecord(1, { role: 'model', parts: [{ text: 'started' }] }),
+        record(0, userText('run the agent in the background')),
+        record(1, modelText('started')),
         notificationRecord(2, 'Agent "explore" completed.'),
         {
           ...notificationRecord(3, 'Agent "explore" completed.'),
@@ -303,8 +303,8 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
     const plan = buildSessionRecoveryPlan({
       sessionId: 'session-1',
       conversation: conversationFromRecords([
-        promptRecord(0, 'run the agent in the background'),
-        modelRecord(1, { role: 'model', parts: [{ text: 'started' }] }),
+        record(0, userText('run the agent in the background')),
+        record(1, modelText('started')),
         {
           ...notificationRecord(2, 'Agent "explore" completed.'),
           deliveredTurn: true,
@@ -335,12 +335,12 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
     const plan = buildSessionRecoveryPlan({
       sessionId: 'session-1',
       conversation: conversationFromRecords([
-        promptRecord(0, 'run the agent in the background'),
+        record(0, userText('run the agent in the background')),
         {
           ...notificationRecord(1, 'Agent "explore" completed.'),
           deliveredTurn: true,
         },
-        modelRecord(2, { role: 'model', parts: [{ text: 'acknowledged' }] }),
+        record(2, modelText('acknowledged')),
       ]),
     });
 

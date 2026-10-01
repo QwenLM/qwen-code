@@ -733,22 +733,19 @@ describe('ChatRecordingService', () => {
       // reader-side tests in session-recovery.test.ts and
       // session-api-history.test.ts stay green on hand-built records even if
       // no record on disk ever carries the stamp.
-      chatRecordingService.recordNotification(
+      svc.recordNotification(
         [{ text: 'dependency completed' }],
         'Dependency completed',
         undefined,
         undefined,
         /* deliveredTurn */ true,
       );
-      chatRecordingService.recordNotification(
+      svc.recordNotification(
         [{ text: 'persisted before the turn ran' }],
         'Persisted early',
       );
-      await chatRecordingService.flush();
 
-      const [delivered, cold] = vi
-        .mocked(jsonl.writeLine)
-        .mock.calls.map((call) => call[1] as ChatRecord);
+      const [delivered, cold] = await flushedAll();
       expect(delivered).toMatchObject({
         subtype: 'notification',
         provenance: 'system',
@@ -1182,7 +1179,7 @@ describe('ChatRecordingService', () => {
       // admission, so a stamp would also mark turns later refused or
       // deferred (turn-interruption.ts). `toMatchObject` ignores extra
       // keys, so the absence has to be pinned by key.
-      expect('deliveredTurn' in record).toBe(false);
+      expect('deliveredTurn' in written()).toBe(false);
     });
 
     it('rejects instead of acknowledging an inactive recorder', async () => {
