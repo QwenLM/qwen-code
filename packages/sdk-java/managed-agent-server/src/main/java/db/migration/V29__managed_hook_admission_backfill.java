@@ -115,6 +115,12 @@ public class V29__managed_hook_admission_backfill extends BaseJavaMigration {
     private static AdmissionKeys keys(ResultSet row) throws SQLException {
         String domain = row.getString("domain");
         byte[] bytes = row.getBytes("inline_bytes");
+        // Only rows written before the admission index existed reach this,
+        // and admission had already checked each of them for everything
+        // this checks (ManagedSessionStore.storedResource and
+        // ManagedExtensionRecordStore.apply). Never check more than that,
+        // including in the parser and validator called below: a stricter
+        // check would block Sessions whose records are valid.
         if (bytes == null || !"REFERENCED".equals(row.getString("state"))
                 || !row.getString("tenant_id").equals(row.getString("resource_tenant"))
                 || !row.getString("session_id").equals(row.getString("resource_session"))
