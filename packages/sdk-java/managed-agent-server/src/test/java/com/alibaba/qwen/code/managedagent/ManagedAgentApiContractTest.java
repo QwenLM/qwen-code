@@ -240,7 +240,10 @@ class ManagedAgentApiContractTest {
                     .header(TENANT, "contract-tenant").principal(actor("other-tenant"));
             exchange(drift, operation.operationId(), 403, request, null);
         }
-        assertThat(drift).isEmpty();
+        assertThat(drift)
+                .as("Actor-scope drift is not deferrable; fix it instead of recording a gap in %s",
+                        KNOWN_GAPS)
+                .isEmpty();
     }
 
     @Test
@@ -1651,6 +1654,9 @@ class ManagedAgentApiContractTest {
     }
 
     private static List<String> knownGaps() {
+        assertThat(GAP_CATEGORIES)
+                .as("actor-scope code drift must stay unwaivable")
+                .doesNotContain("code");
         try (InputStream input = ManagedAgentApiContractTest.class
                 .getClassLoader().getResourceAsStream(KNOWN_GAPS)) {
             List<String> gaps = new String(input.readAllBytes(),
