@@ -88,15 +88,9 @@ export async function runHostedHarnessTextTurn(input: {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
     // Safe mode stays on; the Session's Workspace instructions arrive through
-    // the context slot instead of the Harness host's filesystem. getUserMemory
-    // is read per request, so a fetch that lands during the first tool batch
-    // reaches the very next request.
+    // the context slot instead of the Harness host's filesystem. The loop below
+    // injects them before the first request too.
     let injectedContext: string | undefined;
-    const contextNow = input.workspaceContext?.read();
-    if (contextNow) {
-      config.setUserMemory(contextNow);
-      injectedContext = contextNow;
-    }
     const historyRecords = input.resumeFromToolResults
       ? input.history.slice(
           0,
@@ -143,7 +137,10 @@ export async function runHostedHarnessTextTurn(input: {
       input.signal.throwIfAborted();
       const contextAvailable = input.workspaceContext?.read();
       if (contextAvailable && contextAvailable !== injectedContext) {
+        // setUserMemory alone never reaches the wire: the system instruction
+        // was assembled during initialize() and is cached on the chat.
         config.setUserMemory(contextAvailable);
+        await client.refreshSystemInstruction();
         injectedContext = contextAvailable;
       }
       if (input.toolTurn)

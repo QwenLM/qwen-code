@@ -49,6 +49,7 @@ function config(
   const shutdown = vi.fn(async () => undefined);
   const setHistory = vi.fn();
   const setUserMemory = vi.fn();
+  const refreshSystemInstruction = vi.fn(async () => undefined);
   state.config = {
     initialize: vi.fn(async () => undefined),
     getModelsConfig: () => ({ getCurrentAuthType: () => 'test-auth' }),
@@ -61,6 +62,7 @@ function config(
     }),
     getLlmClient: () => ({
       setTools,
+      refreshSystemInstruction,
       getChat: () => ({ setHistory }),
       async *sendMessageStream() {
         for (const event of events) yield event;
@@ -70,7 +72,14 @@ function config(
     setUserMemory,
     shutdown,
   };
-  return { unregisterTool, setTools, shutdown, setHistory, setUserMemory };
+  return {
+    unregisterTool,
+    setTools,
+    shutdown,
+    setHistory,
+    setUserMemory,
+    refreshSystemInstruction,
+  };
 }
 
 describe('Hosted Harness model boundary', () => {
@@ -163,6 +172,9 @@ describe('Hosted Harness model boundary', () => {
     hooks.setUserMemory.mockImplementation(() => {
       order.push('inject');
     });
+    hooks.refreshSystemInstruction.mockImplementation(async () => {
+      order.push('refresh');
+    });
     const client = state.config.getLlmClient();
     const stream = client.sendMessageStream.bind(client);
     state.config.getLlmClient = () => ({
@@ -179,7 +191,9 @@ describe('Hosted Harness model boundary', () => {
       }),
     ).resolves.toMatchObject({ text: 'answer' });
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
-    expect(order).toEqual(['inject', 'request']);
+    // setUserMemory only writes the field; without the refresh the cached
+    // system instruction still carries the pre-injection prompt.
+    expect(order).toEqual(['inject', 'refresh', 'request']);
   });
 
   it('picks up the Workspace context a tool batch fetched, on the next request', async () => {
@@ -211,6 +225,9 @@ describe('Hosted Harness model boundary', () => {
     let requests = 0;
     state.config.getLlmClient = () => ({
       setTools: vi.fn(async () => undefined),
+      refreshSystemInstruction: vi.fn(async () => {
+        order.push('refresh');
+      }),
       getChat: () => ({ setHistory: vi.fn(), setTools: vi.fn() }),
       getHistory: () => [
         {
@@ -252,7 +269,7 @@ describe('Hosted Harness model boundary', () => {
     ).resolves.toMatchObject({ text: 'done', model: 'test-model' });
     expect(toolTurn.execute).toHaveBeenCalledOnce();
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
-    expect(order).toEqual(['request', 'inject', 'request']);
+    expect(order).toEqual(['request', 'inject', 'refresh', 'request']);
   });
 });
 
@@ -299,6 +316,7 @@ describe('Hosted Harness resume and retraction', () => {
         },
       }),
       getModel: () => 'test-model',
+      setUserMemory: vi.fn(),
       shutdown: vi.fn(async () => undefined),
     };
     return { requests, types };
