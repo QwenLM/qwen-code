@@ -22,6 +22,7 @@ Use the `/language ui` command:
 
 ```bash
 /language ui zh-CN    # Chinese
+/language ui zh-TW    # Traditional Chinese
 /language ui en-US    # English
 /language ui ru-RU    # Russian
 /language ui de-DE    # German
@@ -29,6 +30,7 @@ Use the `/language ui` command:
 /language ui pt-BR    # Portuguese (Brazil)
 /language ui fr-FR    # French
 /language ui ca-ES    # Catalan
+/language ui az-AZ    # Azerbaijani
 ```
 
 Aliases are also supported:
@@ -42,6 +44,7 @@ Aliases are also supported:
 /language ui pt       # Portuguese
 /language ui fr       # French
 /language ui ca       # Catalan
+/language ui az       # Azerbaijani
 ```
 
 ### Auto-detection
