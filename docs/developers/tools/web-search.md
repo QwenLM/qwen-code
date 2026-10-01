@@ -376,7 +376,7 @@ Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environ
 
 ### SerpApi
 
-The official hosted MCP server by SerpApi, providing real-time structured search results from Google, Baidu, Bing and other search engines through a single tool.
+The official hosted MCP server by SerpApi, providing real-time structured search results from Google, Baidu, Bing and other search engines through a single tool. Search queries and their parameters are sent to SerpApi.
 
 - **Documentation:** https://serpapi.com/integrations/mcp
 - **Cost:** Paid (free plan available)
@@ -414,7 +414,5 @@ qwen mcp add serpapi \
 ```
 
 Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
-
-Search queries and their parameters are sent to SerpApi.
 
 ---
