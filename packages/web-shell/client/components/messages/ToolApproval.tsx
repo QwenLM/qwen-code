@@ -44,6 +44,14 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Id of an extra description the caller renders beside this panel, added to
+   * `aria-describedby`. The Managed approvals card states there that the tool
+   * arguments are unavailable, which is exactly the case where the panel's own
+   * description (tool name only) would let a screen-reader user confirm blind.
+   * Pass it only while that element is mounted, so no IDREF dangles.
+   */
+  extraDescriptionId?: string;
   planTodos?: readonly TodoItem[];
   planExecutionMode?: string;
   generateContent?: SessionContentGenerator;
@@ -247,6 +255,7 @@ export function ToolApproval({
   variant = 'inline',
   disabled = false,
   keyboardActive = true,
+  extraDescriptionId,
   planTodos = [],
   planExecutionMode,
   generateContent,
@@ -598,6 +607,7 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
+        extraDescriptionId ?? null,
         showsCommandBlock || isGoal ? commandId : null,
         execWarningsText ? contentId : null,
       ]

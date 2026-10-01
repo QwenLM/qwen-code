@@ -51,6 +51,12 @@ export interface HostedHarnessModelResult {
   model: string;
 }
 
+export interface HostedHarnessTextDeltas {
+  delta(text: string): Promise<void>;
+  /** Whether the current model message already published durable text. */
+  published(): boolean;
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
@@ -68,6 +74,7 @@ export async function runHostedHarnessTextTurn(input: {
     Partial<
       Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
     >;
+  textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -257,6 +264,15 @@ export async function runHostedHarnessTextTurn(input: {
           queued.signal,
         );
     }
+    const textDeltas = input.hooks
+      ?.getCatalog()
+      ?.hooks.some(
+        (hook) =>
+          hook.eventName === HookEventName.Stop ||
+          hook.eventName === HookEventName.MessageDisplay,
+      )
+      ? undefined
+      : input.textDeltas;
     const client = config.getLlmClient();
     const registry = config.getToolRegistry();
     await registry.warmAll();
@@ -357,14 +373,28 @@ export async function runHostedHarnessTextTurn(input: {
                 : SendMessageType.ToolResult,
           },
         )) {
-          if (event.type === LlmEventType.Content) text += event.value;
-          else if (event.type === LlmEventType.Finished) {
+          if (event.type === LlmEventType.Content) {
+            text += event.value;
+            await textDeltas?.delta(event.value);
+          } else if (event.type === LlmEventType.Finished) {
             finished = true;
             usage.push(event.value?.usageMetadata ?? null);
           } else if (event.type === LlmEventType.Retry) {
             calls = [];
-            if (!event.isContinuation) text = '';
+            if (!event.isContinuation) {
+              if (textDeltas?.published()) {
+                throw new Error(
+                  'Hosted Harness cannot retract a published model attempt.',
+                );
+              }
+              text = '';
+            }
           } else if (event.type === LlmEventType.ModelFallback) {
+            if (textDeltas?.published()) {
+              throw new Error(
+                'Hosted Harness cannot retract a published model attempt.',
+              );
+            }
             calls = [];
             text = '';
           } else if (

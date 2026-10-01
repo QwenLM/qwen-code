@@ -190,12 +190,20 @@ Dispatcher 不在 Managed Config 中加载或执行环境中的 Legacy Hooks。H
 设置。显式 after/batch Hook stop 结束编排，同时保留物理回执和未被模型消费的状态，
 Session 仍可开始下一轮。
 
+已加载目录包含 Stop 或 MessageDisplay 时，模型文本在两者完成决策前保持缓冲。
+丢弃或隐藏的草稿不会成为持久化 text delta。没有这两类输出策略的 Session 保留增量流式输出。
+
 ## 接口与兼容性
 
 Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, definitionDigest}`，
 同时需要 Hosted Workspace tool profile 和 Broker。加载时省略初始 pin 会恢复保存值，
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
+
+Runtime-only 接管标志仍让 Hook Session 使用现有的 Hook 感知加载与核对路径。
+Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
+`hosted_hook_recovery_required` 拒绝 Hook Session；不能忽略待结算 Hook 副作用或
+模型 scope 来结束回合。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
 扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开

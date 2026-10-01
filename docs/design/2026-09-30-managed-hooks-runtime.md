@@ -249,6 +249,10 @@ flag; an ordinary tool round does not. An explicit after/batch Hook stop ends
 orchestration while preserving physical receipts and their unconsumed status,
 and leaves the Session ready for another turn.
 
+When the loaded catalog contains Stop or MessageDisplay, model text stays buffered
+until their decisions complete. Discarded or suppressed drafts never become durable
+text deltas. Sessions without either output policy retain incremental streaming.
+
 ## Interfaces and compatibility
 
 Session creation/load accepts `hookCatalog: {catalogId, catalogRevision,
@@ -257,6 +261,11 @@ initial pin is restored when omitted on load and must match when supplied; later
 committed registrations remain authoritative. Workspace cold load verifies Hook
 record resources and the complete function-message snapshot closure before
 attachment, while retaining original-owner recovery barriers.
+
+Runtime-only takeover flags keep Hook Sessions on the existing Hook-aware load
+reconciliation path. The Runtime-only continue/cancel routes refuse Hook Sessions
+with `hosted_hook_recovery_required` before changing records or Runtime ownership;
+they cannot settle a turn while ignoring its pending Hook effects or model scope.
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
