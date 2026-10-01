@@ -175,8 +175,10 @@ describe('useManagedActions', () => {
   it.each([
     ['Session switch', 'fails'],
     ['Session switch', 'succeeds'],
+    ['Session switch', 'ends'],
     ['Action replacement', 'fails'],
     ['Action replacement', 'succeeds'],
+    ['Action replacement', 'ends'],
   ])(
     'keeps the current warning after %s when an old answer %s',
     async (change, outcome) => {
@@ -228,7 +230,11 @@ describe('useManagedActions', () => {
 
       await act(async () => {
         if (outcome === 'fails') rejectAnswer(new Error('old-offline'));
-        else resolveAnswer();
+        else if (outcome === 'ends') {
+          rejectAnswer(
+            new JavaManagedAgentHttpError(409, 'action_expired', 'Expired'),
+          );
+        } else resolveAnswer();
         await oldAnswer;
       });
       expect(hook.latest?.action).toEqual(next);
@@ -449,6 +455,48 @@ describe('useManagedActions', () => {
     // The card that was loaded is still the one on screen.
     expect(hook.latest?.loaded).toBe(true);
     expect(hook.latest?.action).toEqual(pending);
+  });
+
+  it('drops an approval the service reports as ended and reads again', async () => {
+    const ended = Object.assign(new Error('Action expired'), {
+      status: 409,
+      code: 'action_expired',
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    expect(hook.latest?.action).toBeUndefined();
+    expect(hook.latest?.answerError).toBeUndefined();
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(hook.latest?.action).toBeUndefined();
+  });
+
+  it('shows an ended approval again when the next read still lists it', async () => {
+    const ended = Object.assign(new Error('Action cancelled'), {
+      status: 409,
+      code: 'action_cancelled',
+    });
+    const listPending = vi.fn().mockResolvedValue([pending]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(hook.latest?.answerError).toBeUndefined();
   });
 
   it('does not retry a read the service answered definitively', async () => {
