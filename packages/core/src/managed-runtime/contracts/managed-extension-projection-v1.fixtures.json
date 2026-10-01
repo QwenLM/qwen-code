@@ -1,7 +1,9 @@
 {
   "contractVersion": 1,
   "recordBodies": {
-    "monitor_run": "monitor"
+    "monitor_run": "monitor",
+    "mcp_configuration": null,
+    "mcp_operation": null
   },
   "taskStates": [
     "pending",

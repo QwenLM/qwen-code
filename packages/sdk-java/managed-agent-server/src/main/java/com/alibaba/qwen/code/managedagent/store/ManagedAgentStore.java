@@ -25,9 +25,12 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -50,6 +53,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import java.util.Locale;
 
 @Repository
 public class ManagedAgentStore implements AgentStateStore {
@@ -70,12 +74,17 @@ public class ManagedAgentStore implements AgentStateStore {
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     private static final List<String> ACTIVE_TURN_STATES = List.of(
             "ACCEPTED", "RUNNING", "CANCELLING");
+    private static final String TURN_SUMMARY_COLUMNS = "session_id,"
+            + " turn_id, status, created_at, completed_at, error_code";
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final String approvalMode;
     private final CommittedEventPublisher eventPublisher;
     private final ManagedWorkspaceRegistry workspaces;
     private final String agentRevision;
+    private final boolean workspaceFilesEnabled;
+    private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -92,6 +101,12 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getLong("updated_at"),
                     nullableLong(result, "deleted_at"),
                     result.getLong("version"), readBinding(result));
+    private final RowMapper<TurnSummary> turnSummaryMapper =
+            (result, row) -> new TurnSummary(result.getString("session_id"),
+                    result.getString("turn_id"), result.getString("status"),
+                    result.getLong("created_at"),
+                    nullableLong(result, "completed_at"),
+                    result.getString("error_code"));
     private final RowMapper<TurnRecord> turnMapper = (result, row) ->
             new TurnRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -180,9 +195,13 @@ public class ManagedAgentStore implements AgentStateStore {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.approvalMode =
+                properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         this.eventPublisher = eventPublisher;
         this.workspaces = workspaces;
         this.agentRevision = properties.getAgentRevision();
+        this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
+        this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         if (agentRevision == null || agentRevision.isBlank()
                 || agentRevision.length() > 128) {
             throw new IllegalArgumentException(
@@ -211,7 +230,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
             WorkspaceSelection selection) {
-        if (!input.isEmpty()) {
+        if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
@@ -224,6 +243,15 @@ public class ManagedAgentStore implements AgentStateStore {
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
+        if (!input.isEmpty()
+                && (!"qwen-code".equals(agentId)
+                        || !WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
+                        || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
+                        || workspaceMounts.stream().noneMatch(mount ->
+                                tenantId.equals(mount.tenantId())
+                                        && workspace.binding().getStorageId().equals(mount.storageId())))) {
+            throw workspaceExecutionUnavailable();
+        }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId);
@@ -371,6 +399,14 @@ public class ManagedAgentStore implements AgentStateStore {
                     tenantId, ManagedWorkspaceRegistry.actorKey(tenantId,
                             actorId), idempotencyKey, requestDigest,
                     sessionId, turnId, now);
+        }
+        if (workspace != null) {
+            jdbc.update(
+                    "UPDATE managed_agent_session SET approval_mode = ? WHERE tenant_id = ? AND"
+                            + " session_id = ?",
+                    approvalMode,
+                    tenantId,
+                    sessionId);
         }
         appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
@@ -611,18 +647,26 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public List<OperationTarget> findDeliverableOperations(long now,
             int limit) {
-        List<OperationTarget> targets = new ArrayList<>(jdbc.query("SELECT"
-                        + " tenant_id, session_id, operation_id FROM"
-                        + " managed_agent_operation WHERE delivery_state ="
-                        + " 'PENDING' AND available_at <= ? ORDER BY"
-                        + " available_at LIMIT ?",
-                operationTargetMapper, now, limit));
+        List<OperationTarget> targets =
+                new ArrayList<>(
+                        jdbc.query(
+                                "SELECT tenant_id, session_id, operation_id FROM"
+                                        + " managed_agent_operation WHERE operation_kind <>"
+                                        + " 'ACTION_RESPONSE' AND delivery_state = 'PENDING' AND"
+                                        + " available_at <= ? ORDER BY available_at LIMIT ?",
+                                operationTargetMapper,
+                                now,
+                                limit));
         if (targets.size() < limit) {
-            targets.addAll(jdbc.query("SELECT tenant_id, session_id,"
-                            + " operation_id FROM managed_agent_operation"
-                            + " WHERE delivery_state = 'LEASED' AND"
-                            + " lease_until < ? ORDER BY lease_until LIMIT ?",
-                    operationTargetMapper, now, limit - targets.size()));
+            targets.addAll(
+                    jdbc.query(
+                            "SELECT tenant_id, session_id, operation_id FROM"
+                                + " managed_agent_operation WHERE operation_kind <>"
+                                + " 'ACTION_RESPONSE' AND delivery_state = 'LEASED' AND lease_until"
+                                + " < ? ORDER BY lease_until LIMIT ?",
+                            operationTargetMapper,
+                            now,
+                            limit - targets.size()));
         }
         return List.copyOf(targets);
     }
@@ -863,6 +907,44 @@ public class ManagedAgentStore implements AgentStateStore {
         return rows.stream().findFirst();
     }
 
+    // Reads leave the Turn's input out; the public view never shows it.
+    @Override
+    public TurnPage listTurns(String tenantId, String sessionId,
+            Long beforeCreatedAt, String beforeTurnId, int limit) {
+        List<Object> arguments = new ArrayList<>(List.of(tenantId,
+                sessionId));
+        String before = "";
+        if (beforeCreatedAt != null) {
+            before = " AND (created_at < ? OR (created_at = ? AND"
+                    + " turn_id < ?))";
+            arguments.add(beforeCreatedAt);
+            arguments.add(beforeCreatedAt);
+            arguments.add(beforeTurnId);
+        }
+        arguments.add(limit + 1);
+        List<TurnSummary> rows = jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS
+                        + " FROM managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ?" + before + " ORDER BY created_at"
+                        + " DESC, turn_id DESC LIMIT ?",
+                turnSummaryMapper, arguments.toArray());
+        boolean hasMore = rows.size() > limit;
+        return new TurnPage(hasMore ? List.copyOf(rows.subList(0, limit))
+                : rows, hasMore);
+    }
+
+    @Override
+    public Optional<TurnSummary> findTurnSummary(String tenantId,
+            String sessionId, String turnId) {
+        return jdbc.query("SELECT " + TURN_SUMMARY_COLUMNS + " FROM"
+                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ?",
+                turnSummaryMapper, tenantId, sessionId, turnId).stream()
+                // The binary collation ignores trailing spaces, so the
+                // database also matches an ID that adds some.
+                .filter(turn -> turn.turnId().equals(turnId))
+                .findFirst();
+    }
+
     public List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit) {
         requireSession(tenantId, sessionId);
@@ -901,7 +983,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " sequence_id <= ? AND event_type NOT IN"
                         + " ('turn.accepted', 'item.output_text.delta',"
                         + " 'item.reasoning.delta',"
-                        + " 'item.tool_call.updated') ORDER BY sequence_id"
+                        + " 'item.tool_call.updated', 'item.tool_result.updated') ORDER BY sequence_id"
                         + " ASC",
                 eventMapper, tenantId, sessionId, throughSequence);
     }
@@ -1604,7 +1686,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "output_text");
             case "item.reasoning.delta" -> materializeText(event,
                     "reasoning");
-            case "item.tool_call.updated" -> materializeTool(event);
+            case "item.tool_call.updated", "item.tool_result.updated" -> materializeTool(event);
             case "turn.completed", "turn.failed", "turn.cancelled" ->
                     settleTurnItems(event);
             default -> {
@@ -1674,10 +1756,20 @@ public class ManagedAgentStore implements AgentStateStore {
             default -> "in_progress";
         };
         Map<String, Object> attributes = existingAttributes(event, itemId);
+        if (attributes.get("result") instanceof Map<?, ?> previous) {
+            if (!(event.data().get("result") instanceof Map<?, ?> next)
+                    || number(next.get("projection_revision")) <= number(previous.get("projection_revision"))) {
+                return;
+            }
+        }
         attributes.putAll(event.data());
         attributes.remove("itemId");
         upsertItem(event, itemId, "tool_call", "assistant", status,
                 Map.copyOf(attributes));
+    }
+
+    private static long number(Object value) {
+        return value instanceof Number numeric ? numeric.longValue() : 0;
     }
 
     private Map<String, Object> existingAttributes(EventRecord event,
@@ -1976,6 +2068,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "CLOSING";
             case ARCHIVE -> "ARCHIVING";
             case DELETE -> "DELETING";
+            case ACTION_RESPONSE -> throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
 
@@ -1984,6 +2077,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.close.requested";
             case ARCHIVE -> "session.archive.requested";
             case DELETE -> "session.delete.requested";
+            case ACTION_RESPONSE -> throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
 
@@ -1992,6 +2086,7 @@ public class ManagedAgentStore implements AgentStateStore {
             case CLOSE -> "session.closed";
             case ARCHIVE -> "session.archived";
             case DELETE -> "session.deleted";
+            case ACTION_RESPONSE -> throw new IllegalArgumentException("Not a lifecycle operation");
         };
     }
 

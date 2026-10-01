@@ -23,6 +23,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +40,7 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -874,12 +877,89 @@ class ManagedAgentMySqlIT {
         assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
     }
 
+    @Test
+    @Order(11)
+    void pagesTurnsNewestFirstOnMySql() {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        String tenant = "mysql-turns-" + UUID.randomUUID();
+        String sessionId = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
+                null, List.of(), null).sessionId();
+        // Turn IDs that differ only by case compare by their bytes, as the
+        // binary collation stores them. The oldest Turn has the largest ID.
+        for (String[] turn : List.of(new String[] {"turn_z", "500"},
+                new String[] {"turn_a", "1000"},
+                new String[] {"turn_B", "5000"},
+                new String[] {"turn_b", "5000"},
+                new String[] {"turn_c", "9000"})) {
+            jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+                            + " session_id, turn_id, prompt_id, input_json,"
+                            + " payload_digest, status, created_at,"
+                            + " updated_at, completed_at) VALUES (?, ?, ?, ?,"
+                            + " 'not json', 'digest', 'COMPLETED', ?, ?, ?)",
+                    tenant, sessionId, turn[0], UUID.randomUUID().toString(),
+                    Long.parseLong(turn[1]), Long.parseLong(turn[1]),
+                    Long.parseLong(turn[1]) + 1);
+        }
+
+        List<String> order = new ArrayList<>();
+        TurnPage page = store.listTurns(tenant, sessionId, null, null, 2);
+        while (true) {
+            page.turns().forEach(turn -> order.add(turn.turnId()));
+            if (!page.hasMore()) {
+                break;
+            }
+            TurnSummary last = page.turns().getLast();
+            page = store.listTurns(tenant, sessionId, last.createdAt(),
+                    last.turnId(), 2);
+        }
+        assertThat(order).containsExactly("turn_c", "turn_b", "turn_B",
+                "turn_a", "turn_z");
+        assertThat(store.findTurnSummary(tenant, sessionId, "turn_B"))
+                .get().extracting(TurnSummary::createdAt,
+                        TurnSummary::completedAt)
+                .containsExactly(5000L, 5001L);
+        assertThat(store.findTurnSummary(tenant, sessionId, "TURN_B"))
+                .isEmpty();
+        // The collation pads with spaces; the lookup still wants the exact ID.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = 'turn_B  '",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
+        assertThat(store.findTurnSummary(tenant, sessionId, "turn_B  "))
+                .isEmpty();
+        assertThat(store.listTurns(tenant.toUpperCase(), sessionId, null,
+                null, 10).turns()).isEmpty();
+    }
+
     private static int count(JdbcTemplate jdbc, String table, String tenant,
             String session) {
         Integer rows = jdbc.queryForObject("SELECT COUNT(*) FROM " + table
                         + " WHERE tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session);
         return rows == null ? 0 : rows;
+    }
+
+    @Test
+    @Order(11)
+    void originalWorkspaceHoldersRecoverWithoutCurrentAuthority() throws Exception {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var jdbc = new JdbcTemplate(source);
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        var authority = new com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore(jdbc,
+                new DataSourceTransactionManager(source));
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verifyOperatorPrepare(
+                source, jdbc, store, authority);
     }
 
     private static Process startWorkspaceProcess(String action,
