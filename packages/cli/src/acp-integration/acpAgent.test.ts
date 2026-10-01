@@ -2458,7 +2458,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
-        getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         getRewindableTurnRange: ReturnType<typeof vi.fn>;
         applyRecordedRewindOffset: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
@@ -5355,7 +5354,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .fn()
             .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
           beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
-          getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
           getRewindableTurnRange: vi.fn().mockReturnValue({ start: 0, end: 8 }),
           applyRecordedRewindOffset: vi.fn(),
           clearActiveTodoPlanRevision: vi.fn(),

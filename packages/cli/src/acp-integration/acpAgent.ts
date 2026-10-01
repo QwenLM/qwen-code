@@ -6238,6 +6238,8 @@ class QwenAgent implements Agent {
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
                 );
+                // Snapshots are restored after primeSession. An empty list
+                // defers corroboration instead of dropping the offset.
                 createdSession.applyRecordedRewindOffset?.(
                   projection.runtime.absorbedSnapshotOffset,
                 );
@@ -6561,6 +6563,7 @@ class QwenAgent implements Agent {
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
                 );
+                // Same deferral as load: file history is restored after this.
                 createdSession.applyRecordedRewindOffset?.(
                   projection.runtime.absorbedSnapshotOffset,
                 );

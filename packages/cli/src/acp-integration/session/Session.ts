@@ -2212,7 +2212,11 @@ export class Session implements SessionContext {
   private lastPromptTokenCountRouteKey: string | undefined = undefined;
   #absorbedSnapshotOffset: number | null = null;
   #boundaryPromptId: string | null = null;
+  #boundaryExclusive = false;
+  #boundaryTurnIndex: number | null = null;
   #activeCompressionPromptId: string | undefined;
+  #userPromptInHistory = false;
+  #userPromptInHistoryFor: string | undefined;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
   // ACP can continue one logical conversation through prompt, cron, and
@@ -4754,6 +4758,10 @@ export class Session implements SessionContext {
     const apiHistory = chat.getHistoryShallow();
     const rewindWindow = this.#rewindOffsetState(apiHistory);
     const visibleOrdinal = targetTurnIndex - rewindWindow.start;
+    const recorderIndex =
+      this.#boundaryTurnIndex === null
+        ? targetTurnIndex
+        : this.#boundaryTurnIndex + visibleOrdinal;
     const apiTruncateIndex =
       rewindWindow.failClosed ||
       targetTurnIndex < rewindWindow.start ||
@@ -4808,7 +4816,7 @@ export class Session implements SessionContext {
     this.config
       .getChatRecordingService()
       ?.rewindRecording(
-        visibleOrdinal,
+        recorderIndex,
         { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
         survivingSnapshots,
         {
@@ -4837,16 +4845,9 @@ export class Session implements SessionContext {
     return this.config.getLlmClient()!.getChat().getHistoryShallow();
   }
 
-  getRewindableUserTurnCount(): number {
-    return countApiUserPrompts(
-      this.captureHistorySnapshot(),
-      ACP_API_USER_PROMPT_OPTIONS,
-    );
-  }
-
   /**
    * Absolute file-history snapshot indexes a client may rewind to.
-   * `start` is the offset recorded when compression succeeded.
+   * `start` is the current index of the recorded boundary snapshot.
    */
   getRewindableTurnRange(): { start: number; end: number } {
     const window = this.#rewindOffsetState(this.captureHistorySnapshot());
@@ -4863,7 +4864,15 @@ export class Session implements SessionContext {
     if (!isAbsorbedSnapshotOffsetPayload(payload)) return;
     this.#absorbedSnapshotOffset = payload.absorbedSnapshotCount;
     this.#boundaryPromptId = payload.boundaryPromptId ?? null;
+    this.#boundaryExclusive = payload.boundaryExclusive === true;
+    this.#boundaryTurnIndex =
+      typeof payload.boundaryTurnIndex === 'number'
+        ? payload.boundaryTurnIndex
+        : null;
     this.#reconcileRewindOffset(this.captureHistorySnapshot(), 'install');
+    this.config
+      .getChatRecordingService()
+      ?.restoreAbsorbedSnapshotOffset?.(this.#offsetPayload());
   }
 
   restoreRecordedRewindOffset(records: readonly ChatRecord[]): void {
@@ -4921,39 +4930,115 @@ export class Session implements SessionContext {
   #clearRewindOffset(): void {
     this.#absorbedSnapshotOffset = null;
     this.#boundaryPromptId = null;
+    this.#boundaryExclusive = false;
+    this.#boundaryTurnIndex = null;
   }
 
-  #persistRewindOffset(): void {
-    const absorbed = this.#absorbedSnapshotOffset ?? 0;
-    this.config.getChatRecordingService()?.recordAbsorbedSnapshotOffset({
-      absorbedSnapshotCount: absorbed,
+  #offsetPayload(): AbsorbedSnapshotOffsetRecordPayload | undefined {
+    if (this.#absorbedSnapshotOffset === null) return undefined;
+    return {
+      absorbedSnapshotCount: this.#absorbedSnapshotOffset,
       ...(this.#boundaryPromptId
         ? { boundaryPromptId: this.#boundaryPromptId }
         : {}),
-    });
+      ...(this.#boundaryExclusive ? { boundaryExclusive: true } : {}),
+      ...(this.#boundaryTurnIndex !== null
+        ? { boundaryTurnIndex: this.#boundaryTurnIndex }
+        : {}),
+    };
+  }
+
+  #persistRewindOffset(): void {
+    const payload = this.#offsetPayload();
+    if (!payload) return;
+    this.config
+      .getChatRecordingService()
+      ?.recordAbsorbedSnapshotOffset(payload);
+  }
+
+  #snapshotList(): ReadonlyArray<{ promptId: string }> {
+    try {
+      return this.config.getFileHistoryService().getSnapshots();
+    } catch {
+      return [];
+    }
   }
 
   /**
-   * The snapshot opened for the prompt being sent is not in the counted tail
-   * yet, so it is not part of the absorbed prefix.
+   * Subtract the in-flight snapshot only when this prompt has not yet been
+   * pushed into model history. Later tool-loop laps and in-stream compaction
+   * already include that prompt in the absorbed prefix.
    */
-  #noteAbsorbedSnapshotsAfterCompression(promptId: string): void {
+  #noteAbsorbedSnapshotsAfterCompression(
+    promptId: string,
+    promptNotYetInHistory: boolean,
+  ): void {
     const history = this.#getCurrentChat().getHistoryShallow();
     if (!this.#historyHasCompressedPrefix(history)) return;
-    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const snapshots = this.#snapshotList();
     const visible = countApiUserPrompts(history, ACP_API_USER_PROMPT_OPTIONS);
     let counted = snapshots.length;
-    if (snapshots.at(-1)?.promptId === promptId && counted > 0) {
+    if (
+      promptNotYetInHistory &&
+      snapshots.at(-1)?.promptId === promptId &&
+      counted > 0
+    ) {
       counted -= 1;
     }
     const absorbed = Math.max(0, counted - visible);
-    const boundaryPromptId =
-      absorbed < snapshots.length
-        ? snapshots[absorbed]?.promptId
-        : snapshots.at(-1)?.promptId;
+    const boundaryExclusive =
+      absorbed === snapshots.length && snapshots.length > 0;
+    const boundaryPromptId = boundaryExclusive
+      ? snapshots[snapshots.length - 1]?.promptId
+      : snapshots[absorbed]?.promptId;
+    const recorder = this.config.getChatRecordingService();
+    const turnCount = recorder?.getRecordedUserTurnCount?.();
+    let boundaryTurnIndex: number | null = null;
+    if (typeof turnCount === 'number') {
+      if (boundaryExclusive) {
+        boundaryTurnIndex = turnCount;
+      } else if (boundaryPromptId) {
+        boundaryTurnIndex =
+          recorder?.recordedTurnIndexForPrompt?.(boundaryPromptId) ??
+          Math.max(0, turnCount - visible);
+      }
+    }
     this.#absorbedSnapshotOffset = absorbed;
     this.#boundaryPromptId = boundaryPromptId ?? null;
+    this.#boundaryExclusive = boundaryExclusive;
+    this.#boundaryTurnIndex = boundaryTurnIndex;
     this.#persistRewindOffset();
+  }
+
+  #resolvedRewindStart(snapshots: ReadonlyArray<{ promptId: string }>): {
+    start: number;
+    missingBoundary: boolean;
+    deferred: boolean;
+  } {
+    if (this.#absorbedSnapshotOffset === null && !this.#boundaryPromptId) {
+      return { start: 0, missingBoundary: true, deferred: false };
+    }
+    if (snapshots.length === 0) {
+      return { start: 0, missingBoundary: false, deferred: true };
+    }
+    if (!this.#boundaryPromptId) {
+      const start = this.#absorbedSnapshotOffset ?? 0;
+      if (start > snapshots.length) {
+        return { start: 0, missingBoundary: true, deferred: false };
+      }
+      return { start, missingBoundary: false, deferred: false };
+    }
+    const index = snapshots.findIndex(
+      (snapshot) => snapshot.promptId === this.#boundaryPromptId,
+    );
+    if (index < 0) {
+      return { start: 0, missingBoundary: true, deferred: false };
+    }
+    return {
+      start: this.#boundaryExclusive ? index + 1 : index,
+      missingBoundary: false,
+      deferred: false,
+    };
   }
 
   #rewindOffsetState(apiHistory: Content[]): {
@@ -4965,56 +5050,62 @@ export class Session implements SessionContext {
       apiHistory,
       ACP_API_USER_PROMPT_OPTIONS,
     );
-    const snapshotCount = this.config
-      .getFileHistoryService()
-      .getSnapshots().length;
+    const snapshots = this.#snapshotList();
+    const snapshotCount = snapshots.length;
     if (!this.#historyHasCompressedPrefix(apiHistory)) {
       return { start: 0, end: visible, failClosed: false };
     }
-    if (this.#absorbedSnapshotOffset === null) {
+    if (this.#absorbedSnapshotOffset === null && !this.#boundaryPromptId) {
       return { start: 0, end: 0, failClosed: true };
     }
-    if (snapshotCount === 0 && this.#absorbedSnapshotOffset > 0) {
+    const resolved = this.#resolvedRewindStart(snapshots);
+    if (resolved.deferred || resolved.missingBoundary) {
       return { start: 0, end: 0, failClosed: true };
     }
-    const start = this.#absorbedSnapshotOffset;
-    if (snapshotCount > 0 && snapshotCount - visible - start > 0) {
+    if (snapshotCount - visible - resolved.start !== 0) {
       return { start: 0, end: 0, failClosed: true };
     }
     const end =
       snapshotCount > 0
-        ? Math.min(start + visible, snapshotCount)
-        : start + visible;
-    return { start, end, failClosed: false };
+        ? Math.min(resolved.start + visible, snapshotCount)
+        : resolved.start + visible;
+    return { start: resolved.start, end, failClosed: false };
   }
 
   #reconcileRewindOffset(
     apiHistory: Content[],
     mode: 'install' | 'restore',
   ): void {
-    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const snapshots = this.#snapshotList();
     if (!this.#historyHasCompressedPrefix(apiHistory)) {
       if (
         mode === 'install' &&
         apiHistory.length === 0 &&
         snapshots.length === 0 &&
-        this.#absorbedSnapshotOffset !== null
+        (this.#absorbedSnapshotOffset !== null || this.#boundaryPromptId)
       ) {
         return;
       }
       this.#clearRewindOffset();
       return;
     }
-    if (this.#absorbedSnapshotOffset === null) return;
-    if (snapshots.length === 0 && this.#absorbedSnapshotOffset > 0) {
+    if (this.#absorbedSnapshotOffset === null && !this.#boundaryPromptId) {
+      return;
+    }
+    const resolved = this.#resolvedRewindStart(snapshots);
+    if (resolved.deferred) return;
+    if (resolved.missingBoundary) {
+      this.#clearRewindOffset();
       return;
     }
     const visible = countApiUserPrompts(
       apiHistory,
       ACP_API_USER_PROMPT_OPTIONS,
     );
-    if (snapshots.length - visible - this.#absorbedSnapshotOffset > 0) {
+    if (snapshots.length - visible - resolved.start !== 0) {
       this.#clearRewindOffset();
+    } else {
+      this.#absorbedSnapshotOffset = resolved.start;
     }
   }
 
@@ -8901,11 +8992,17 @@ export class Session implements SessionContext {
       consumeInitialMemory?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
+    if (this.#userPromptInHistoryFor !== promptId) {
+      this.#userPromptInHistoryFor = promptId;
+      this.#userPromptInHistory = false;
+    }
+    const promptNotYetInHistory = !this.#userPromptInHistory;
     this.#activeCompressionPromptId = promptId;
     const llmClient = this.config.getLlmClient()!;
     if (options.prepareBeforeCompression) {
       const decision = await options.prepareBeforeCompression();
       if (decision.kind === 'stop') {
+        this.#activeCompressionPromptId = undefined;
         return { responseStream: null, stopReason: decision.stopReason };
       }
       message = decision.message;
@@ -8915,6 +9012,7 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after pre-compression preparation for prompt ${promptId}`,
       );
+      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
@@ -8966,9 +9064,11 @@ export class Session implements SessionContext {
       } catch (compressionError) {
         if (abortSignal.aborted) {
           debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
+          this.#activeCompressionPromptId = undefined;
           return { responseStream: null, stopReason: 'cancelled' };
         }
         if (this.#isAbortError(compressionError)) {
+          this.#activeCompressionPromptId = undefined;
           throw compressionError;
         }
         debugLogger.warn(
@@ -8981,6 +9081,7 @@ export class Session implements SessionContext {
 
     if (abortSignal.aborted) {
       debugLogger.debug(`Auto-compression aborted for prompt ${promptId}`);
+      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
@@ -8993,13 +9094,18 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after request route key resolution for prompt ${promptId}`,
       );
+      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
     // Recorded with the resolved request route key: a COMPRESSED result
     // must invalidate every retained route count, not just the active
     // route's (see #invalidateRouteTokenCountsForCompression).
     if (compressionInfo) {
-      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
+      this.#recordCompressionTokenCount(
+        compressionInfo,
+        requestRouteKey,
+        promptNotYetInHistory,
+      );
     } else {
       this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     }
@@ -9022,6 +9128,7 @@ export class Session implements SessionContext {
             'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           `Failed to emit token limit diagnostic for prompt ${promptId}`,
         );
+        this.#activeCompressionPromptId = undefined;
         return { responseStream: null, stopReason: 'max_tokens' };
       }
     }
@@ -9037,12 +9144,14 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after compression diagnostic for prompt ${promptId}`,
       );
+      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
     if (options.beforeSend) {
       const decision = await options.beforeSend({ compressionFailed });
       if (decision.kind === 'stop') {
+        this.#activeCompressionPromptId = undefined;
         return { responseStream: null, stopReason: decision.stopReason };
       }
       message = decision.message;
@@ -9052,6 +9161,7 @@ export class Session implements SessionContext {
       debugLogger.debug(
         `Send aborted after pre-send validation for prompt ${promptId}`,
       );
+      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
@@ -9081,12 +9191,18 @@ export class Session implements SessionContext {
         : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      this.#activeCompressionPromptId = undefined;
       throw error;
     }
     if (!sourceStream) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
+      this.#activeCompressionPromptId = undefined;
       return { responseStream: null, stopReason: 'end_turn' };
     }
+    this.#userPromptInHistory = true;
+    const clearCompressionPromptId = () => {
+      this.#activeCompressionPromptId = undefined;
+    };
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
@@ -9123,6 +9239,7 @@ export class Session implements SessionContext {
         if (!committed) {
           llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
         }
+        clearCompressionPromptId();
       }
     })();
     return { responseStream, requestRouteKey };
@@ -9456,12 +9573,14 @@ export class Session implements SessionContext {
   #recordCompressionTokenCount(
     info: ChatCompressionInfo,
     requestRouteKey: string,
+    promptNotYetInHistory = false,
   ): void {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
       if (this.#activeCompressionPromptId !== undefined) {
         this.#noteAbsorbedSnapshotsAfterCompression(
           this.#activeCompressionPromptId,
+          promptNotYetInHistory,
         );
       }
       return;
