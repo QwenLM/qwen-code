@@ -245,6 +245,7 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { createAgentToolInvocationGuard } from '../agents/workspace-agents/capability.js';
 import type {
   ExecutionSandboxPolicy,
   ResolvedExecutionSandboxPolicy,
@@ -1258,6 +1259,17 @@ export interface ConfigParameters {
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
   proxy?: string;
+  /**
+   * Whether construction installs the process-global undici proxy
+   * dispatcher (and the runtime-fetch proxy slot) when `proxy` resolves.
+   * Defaults to `true`. Throwaway Configs that exist only to route
+   * telemetry events must pass `false`: they still expose the proxy via
+   * `getProxy()` for the RUM logger's own agent, but must not rewrite the
+   * host process's global network state — in `qwen serve` one long-lived
+   * process hosts many workspaces, and nothing ever restores the
+   * dispatcher (#12770).
+   */
+  installProxyDispatcher?: boolean;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
   includeDirectories?: string[];
@@ -1333,6 +1345,11 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /**
+   * Opt-in for persistent workspace Agents collaborating on shared threads.
+   * Separate from `agentTeamEnabled`: neither implies the other.
+   */
+  agentCollaborationEnabled?: boolean;
   workflowsEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
   sessionWorkflowEnabled?: boolean;
@@ -2392,6 +2409,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getFileService'
     | 'getEffectiveInputModalities'
     | 'getFileReadCache'
+    | 'getFileHistoryService'
     | 'getToolRegistry'
     | 'getPermissionManager'
     | 'getApprovalMode'
@@ -2410,6 +2428,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getDisableAllHooks'
     | 'getHookSystem'
     | 'getMessageBus'
+    | 'getToolInvocationGuard'
     | 'getAutoMemoryPrompt'
     | 'getUserMemory'
   >
@@ -2795,7 +2814,9 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
-  private readonly systemPrompt: string | undefined;
+  private systemPrompt: string | undefined;
+  private workspaceAgentName: string | undefined;
+  private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -3026,6 +3047,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
@@ -3460,6 +3482,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
@@ -3689,7 +3712,7 @@ export class Config {
     }
 
     const proxyUrl = this.getProxy();
-    if (proxyUrl) {
+    if (proxyUrl && (params.installProxyDispatcher ?? true)) {
       // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
       // honored. A bare ProxyAgent tunnels EVERY request — including local
       // MCP servers reached over `http://localhost:...` — through the proxy,
@@ -3751,6 +3774,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
       locale: params.locale,
+      usageStatisticsEnabled: this.usageStatisticsEnabled,
+      proxy: this.proxy,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
@@ -5888,6 +5913,51 @@ export class Config {
         );
       }
     }
+  }
+
+  /**
+   * Gives this session the persona of the workspace agent it *is*.
+   *
+   * The bridge's spawn request carries no persona, so an agent session is told
+   * only its identity and resolves the rest itself at boot. The main prompt
+   * reads systemPrompt, and the tool guard intersects the resolved execution
+   * allowlist with the workspace-agent capability ceiling and host policy.
+   *
+   * Refuses on anything but an agent session, and refuses a second call. A
+   * session's prompt is part of what its transcript means; changing it under a
+   * running conversation would make the record a lie.
+   */
+  applyWorkspaceAgentPersona(
+    systemPrompt: string,
+    agentName: string,
+    executionAllowedTools?: readonly string[],
+  ): void {
+    if (this.sessionSourceType !== 'agent') {
+      throw new Error(
+        'A workspace-agent persona may only be applied to an agent session.',
+      );
+    }
+    if (this.systemPrompt !== undefined) {
+      throw new Error(
+        'This session already has a persona; it cannot be changed in place.',
+      );
+    }
+    this.systemPrompt = systemPrompt;
+    this.workspaceAgentName = agentName;
+    this.workspaceAgentExecutionAllowedTools = executionAllowedTools
+      ? new Set(executionAllowedTools)
+      : undefined;
+  }
+
+  /**
+   * The roster name of the agent this session is, once its persona is applied.
+   *
+   * Carried on the config rather than passed between the spawn steps because
+   * the persona is resolved before the recorder exists and read after: the
+   * identity outlives both, and this is the one place both can see.
+   */
+  getWorkspaceAgentName(): string | undefined {
+    return this.workspaceAgentName;
   }
 
   setSessionSource(sourceType: string, sourceId?: string): void {
@@ -9767,6 +9837,20 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
+  /**
+   * Whether persistent workspace Agents may collaborate on shared threads.
+   *
+   * Independent of {@link isAgentTeamEnabled}: neither flag implies the other,
+   * and enabling this one permits collaboration without opening any Agent to
+   * an outside caller — that stays a separate, explicit act.
+   */
+  isAgentCollaborationEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1') {
+      return true;
+    }
+    return this.agentCollaborationEnabled;
+  }
+
   isArtifactEnabled(): boolean {
     if (this.shellExecutionSandbox) return false;
     // Publishing writes outside the project and opens a browser, so it is
@@ -11671,21 +11755,21 @@ export class Config {
 
   async resumeBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
-      initialMessage,
+      initialInput,
     );
   }
 
   async reviveCompletedBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().reviveCompletedBackgroundAgent(
       agentId,
-      initialMessage,
+      initialInput,
     );
   }
 
@@ -11839,8 +11923,24 @@ export class Config {
     return this.permissionManager;
   }
 
+  /**
+   * Whether this session runs as a workspace agent, inside the read-only
+   * capability boundary. The one source of truth for the tool registry, the
+   * invocation guard and skill side effects.
+   */
+  isWorkspaceAgentSession(): boolean {
+    return (
+      this.isAgentCollaborationEnabled() && this.sessionSourceType === 'agent'
+    );
+  }
+
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
-    return this.toolInvocationGuard;
+    return this.isWorkspaceAgentSession()
+      ? createAgentToolInvocationGuard(
+          this.toolInvocationGuard,
+          this.workspaceAgentExecutionAllowedTools,
+        )
+      : this.toolInvocationGuard;
   }
 
   getShellExecutionSandbox():
@@ -12459,6 +12559,49 @@ export class Config {
     // Same helper as the bare-mode branch above to keep the registration
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
+
+    // The six thread tools are the collaboration surface, so they are gated
+    // on the collaboration opt-in — not merely on being a subagent or on a
+    // session calling itself an agent. `sourceType` is attribution, not
+    // authorization: a client can set it when creating a session, so the
+    // opt-in, plus the server-binding check the dispatcher applies, are what
+    // decide whether these tools exist. The flag alone is not enough.
+    //
+    // Deliberately NOT `|| options?.forSubAgent`. A subagent runs on a
+    // `deriveConfig` child, and that is `Object.create(parent)`, so an agent's
+    // own subagent reads `sourceType === 'agent'` straight off the prototype
+    // chain and lands here anyway. Adding `forSubAgent` only widened the gate
+    // to subagents of *ordinary* conversations, which have no agent run frame
+    // — every one of these tools would have thrown "requires an active agent
+    // run context" on first use. Observed both ways with the six-combination
+    // probe: dropping the clause takes the plain-subagent row from six tools
+    // to zero and leaves the agent-subagent row at six.
+    if (this.isWorkspaceAgentSession()) {
+      await registerLazy(ToolNames.THREAD_POST, async () => {
+        const { ThreadPostTool } = await import('../tools/thread-tools.js');
+        return new ThreadPostTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_WAIT, async () => {
+        const { ThreadWaitTool } = await import('../tools/thread-tools.js');
+        return new ThreadWaitTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_BLOCK, async () => {
+        const { ThreadBlockTool } = await import('../tools/thread-tools.js');
+        return new ThreadBlockTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_REVIEW, async () => {
+        const { ThreadReviewTool } = await import('../tools/thread-tools.js');
+        return new ThreadReviewTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_CREATE, async () => {
+        const { ThreadCreateTool } = await import('../tools/thread-tools.js');
+        return new ThreadCreateTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_READ, async () => {
+        const { ThreadReadTool } = await import('../tools/thread-tools.js');
+        return new ThreadReadTool(this);
+      });
+    }
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {

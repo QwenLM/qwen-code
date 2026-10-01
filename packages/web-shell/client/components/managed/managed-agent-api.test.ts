@@ -46,6 +46,10 @@ describe('Managed Agent API types', () => {
           Request: { properties: { sessionId: { type: 'string' } } },
           Session: {
             required: ['sessionId', 'capabilities'],
+            allOf: [
+              { required: ['sessionId'] },
+              { required: ['capabilities'], ...planned },
+            ],
             properties: {
               sessionId: { type: 'string' },
               capabilities: { $ref: '#/components/schemas/Caps', ...planned },
@@ -66,6 +70,7 @@ describe('Managed Agent API types', () => {
     ]);
     expect(contract.components.schemas.Session).toEqual({
       required: ['sessionId'],
+      allOf: [{ required: ['sessionId'] }],
       properties: { sessionId: { type: 'string' } },
     });
   });

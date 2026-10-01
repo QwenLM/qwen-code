@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
@@ -9,6 +11,8 @@ import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -18,6 +22,9 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -59,6 +66,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             RuntimeSessionRepository sessionRepository,
             ToolExecutionRepository executionRepository,
             WorkspaceExecutionStore workspaceExecutionStore) {
+        this(store, properties, bindingRepository, sessionRepository,
+                executionRepository, workspaceExecutionStore, null, null);
+    }
+
+    public EmbeddedRuntimeBroker(AgentStateStore store,
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository,
+            WorkspaceExecutionStore workspaceExecutionStore,
+            ToolPublicationStore publications,
+            ToolPublicationDataStore publicationData) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -105,10 +124,37 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     properties.getHarness().getCapabilityDigest(),
                     broker.getIsolationClass()));
         };
+        ObjectMapper mapper = new ObjectMapper();
+        RuntimePublicationVerifier verifier = publications == null || publicationData == null
+                ? null : new RuntimePublicationVerifier() {
+                    @Override
+                    public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                            String id, String token) {
+                        var binding = publications.verifyDispatch(execution, id, token);
+                        var fields = mapper.convertValue(binding,
+                                new TypeReference<java.util.Map<String, Object>>() { });
+                        return new RuntimePublicationGrant(id, token,
+                                properties.getToolPublication().getServiceBaseUrl(), fields);
+                    }
+
+                    @Override
+                    public java.util.Map<String, Object> finished(ToolExecutionRecord execution) {
+                        var saved = publicationData.finishedForBroker(execution);
+                        return saved == null ? null : mapper.convertValue(saved.path("result"),
+                                new TypeReference<java.util.Map<String, Object>>() { });
+                    }
+
+                    @Override
+                    public java.util.Map<String, Object> receipt(ToolExecutionRecord execution) {
+                        var saved = publicationData.receiptForBroker(execution);
+                        return saved == null ? null : mapper.convertValue(saved,
+                                new TypeReference<java.util.Map<String, Object>>() { });
+                    }
+                };
         this.service = new RuntimeBrokerService(resolver, provisioner,
                 transport, bindingRepository, sessionRepository,
                 executionRepository, UUID.randomUUID().toString(), LEASE,
-                LEASE);
+                LEASE, verifier);
         try {
             this.server = new RuntimeBrokerHttpServer(
                     new InetSocketAddress(broker.getHost(), broker.getPort()),

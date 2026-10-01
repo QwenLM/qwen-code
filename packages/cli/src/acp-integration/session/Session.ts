@@ -26,6 +26,7 @@ import type {
   Part,
 } from '@google/genai';
 import {
+  type AgentRunContext,
   type Config,
   type ContentGeneratorConfig,
   type LlmChat,
@@ -118,6 +119,8 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  appendToolHookContextToParts,
+  boundToolHookContext,
   buildContextUsage,
   injectPermissionRulesIfMissing,
   NotificationType,
@@ -256,11 +259,16 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  runWithAgentRunContext,
+  requireAgentRunContext,
+  consumeAgentInput,
+  readThread,
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
+import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -571,12 +579,17 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
 
 /**
  * ACP rewind's binding of the shared user-prompt classifier
- * (`isApiUserPrompt` in core). The two deltas from the TUI binding are
+ * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
  * deliberate:
  *
  * - The todo-stop-guard's synthetic continuation prompts are injected as user
  *   entries but are not turns a client can rewind to, so they must not
  *   consume an ordinal.
+ * - Delivered background-notification turns (`[...systemReminders,
+ *   ...notificationParts]` as one user entry) likewise never produced a
+ *   client-visible turn or a per-prompt file-history snapshot, so counting
+ *   them inflates the rewindable count and shifts every cut point after
+ *   them (#9608).
  * - Microcompaction media-clear placeholders stay COUNTED here, unlike the
  *   TUI binding. ACP rewind maps against per-prompt file-history snapshots,
  *   which ARE created for media-only prompts, so a cleared entry still owns
@@ -584,6 +597,7 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
  */
 const ACP_API_USER_PROMPT_OPTIONS = {
   excludeTextPart: isTodoStopGuardPromptText,
+  excludeTaskNotifications: true,
 };
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
@@ -637,10 +651,15 @@ type RunToolResult = {
   memoryWriteCandidates?: MemoryWriteCandidate[];
   /**
    * A tool in this batch asked to end the turn once its result is recorded.
-   * Mirrors `ToolResult.terminateTurn`, which today only `update_goal` sets
-   * when verification or evidence checkpointing needs a turn boundary.
+   * Mirrors `ToolResult.terminateTurn` for tools that create a durable turn
+   * boundary, such as Goal checkpoints and workspace-agent hand-offs.
    */
   terminateTurn?: boolean;
+  /**
+   * Hook additionalContext of a code-mode nested call. Its parts are a value
+   * for the exec script, so the parent exec delivers this to the model.
+   */
+  hookContext?: string;
 };
 
 type MidTurnDrainResult = {
@@ -761,6 +780,12 @@ type PendingToolResultRecord = {
   toolName: string;
   toolArgs: Record<string, unknown>;
   responseParts: Part[];
+  /**
+   * `responseParts` without the hook additionalContext appended to them;
+   * set only when context was appended. Used instead of `responseParts` if
+   * the turn is aborted before the result is recorded.
+   */
+  responsePartsWithoutHookContext?: Part[];
   persistedOutputFiles?: string[];
   policyToolName?: string;
   toolType?: 'native' | 'mcp';
@@ -1147,6 +1172,8 @@ type DrainedMidTurnMessage =
       content: ContentBlock[];
       displayText: string;
       attachmentReferences?: SessionAttachmentReference[];
+      messageId?: string;
+      agentRun?: AgentRunContext;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1453,6 +1480,10 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
               willPersistReferences,
             ),
             ...(attachmentReferences ? { attachmentReferences } : {}),
+            ...(typeof item['messageId'] === 'string'
+              ? { messageId: item['messageId'] }
+              : {}),
+            agentRun: parsePromptAgentRun({ _meta: item['_meta'] }),
           },
         ];
       },
@@ -5722,6 +5753,22 @@ export class Session implements SessionContext {
    * error here would propagate up through `prompt()` and break the
    * primary response path.
    */
+  /**
+   * Whether this daemon opted into workspace-agent collaboration.
+   *
+   * Guarded rather than called directly. This layer is handed Config-shaped
+   * objects that are not always a full Config — derived configs, shims and
+   * test doubles among them — and the same unguarded pattern in `acpAgent.ts`
+   * turned a missing method into a failed session. Absent means off, which is
+   * the safe reading: no run frame is established, and every consumer of one
+   * refuses in turn.
+   */
+  #collaborationEnabled(): boolean {
+    return typeof this.config.isAgentCollaborationEnabled === 'function'
+      ? this.config.isAgentCollaborationEnabled()
+      : false;
+  }
+
   #maybeEmitFollowupSuggestion(result: PromptResponse): void {
     if (result.stopReason !== 'end_turn') return;
     if (
@@ -5829,20 +5876,39 @@ export class Session implements SessionContext {
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    const execute = () =>
-      runWithInvocationContext(invocationContext, () =>
-        sessionIdContext.run(sessionId, () =>
-          this.#executePromptInner(
-            params,
-            pendingSend,
-            responseCapture,
-            modelPrompt,
-            rejectOnLoopDetected,
-            goalTurn,
-            channelTurn,
+    // Per turn, not per session. An agent session works many threads over its
+    // life, so a frame established once at spawn would bind the body to its
+    // first thread forever — the exact failure `runWithAgentRunContext`
+    // refuses to allow. Wrapping here means every prompt carries its own, and
+    // a prompt with no agent-run metadata (a person typing into the session)
+    // establishes none, so the thread tools correctly refuse.
+    // Belt and braces, not the only defence. The frame can only arrive on the
+    // trusted daemon channel, and with collaboration off the daemon never
+    // mounts the routes that dispatch, so in practice none is sent. Refusing to
+    // read one anyway means a daemon whose operator did not opt in cannot be
+    // talked into running an agent turn by a frame from any other source — and
+    // because every downstream consumer (mid-turn input, the thread tools)
+    // requires the frame this establishes, this one line shuts all of them.
+    const agentRun = this.#collaborationEnabled()
+      ? parsePromptAgentRun(params)
+      : undefined;
+    const execute = () => {
+      const inner = () =>
+        runWithInvocationContext(invocationContext, () =>
+          sessionIdContext.run(sessionId, () =>
+            this.#executePromptInner(
+              params,
+              pendingSend,
+              responseCapture,
+              modelPrompt,
+              rejectOnLoopDetected,
+              goalTurn,
+              channelTurn,
+            ),
           ),
-        ),
-      );
+        );
+      return agentRun ? runWithAgentRunContext(agentRun, inner) : inner();
+    };
     return goalTurn
       ? goalTurnContext.run(goalTurn.permit, execute)
       : goalTurnContext.exit(execute);
@@ -6193,6 +6259,41 @@ export class Session implements SessionContext {
                 promptId,
                 daemonPromptId,
               );
+              const agentRun = this.#collaborationEnabled()
+                ? parsePromptAgentRun(params)
+                : undefined;
+              if (agentRun) {
+                try {
+                  const thread = await readThread(
+                    this.config.getWorkingDir(),
+                    agentRun.threadId,
+                  );
+                  const delivered = thread?.messages.find(
+                    (message) =>
+                      message.sequence === agentRun.contextThroughSequence,
+                  );
+                  if (!delivered) {
+                    throw new Error(
+                      'Agent input requires a delivery watermark',
+                    );
+                  }
+                  // With chat recording off there is no transcript to flush;
+                  // the thread itself keeps the input.
+                  await recorder?.flush();
+                  await consumeAgentInput(
+                    this.config.getWorkingDir(),
+                    delivered.id,
+                    delivered.sequence,
+                  );
+                } catch (error) {
+                  // The model may run twice after a receipt failure; losing the
+                  // task would be worse than replaying its durable input.
+                  debugLogger.warn(
+                    'Agent input receipt failed; replay remains pending',
+                    error,
+                  );
+                }
+              }
             }
 
             if (
@@ -7014,7 +7115,7 @@ export class Session implements SessionContext {
                     };
                   }
                   if (
-                    await this.#endGoalTurnAfterToolRun(
+                    await this.#endTurnAfterToolRun(
                       toolRun,
                       goalTurn,
                       channelTurn,
@@ -8160,7 +8261,7 @@ export class Session implements SessionContext {
           };
         }
         if (
-          await this.#endGoalTurnAfterToolRun(
+          await this.#endTurnAfterToolRun(
             toolRun,
             options.goalTurn,
             options.channelTurn ?? false,
@@ -8943,16 +9044,11 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Ends a Goal turn whose tool batch asked for it, mirroring the interactive
-   * and headless paths.
+   * Ends a turn whose tool batch asked for it.
    *
-   * `update_goal` sets the flag when verification or evidence checkpointing
-   * needs a turn boundary. Feeding a queued proposal back to the model leaves
-   * it parked: the objective is already satisfied, so the model has nothing
-   * left to do but call the Goal tools again, and the runtime rejects every
-   * later proposal for the same turn. Observed runs looped between the two
-   * Goal tools until a human cancelled them, with the turn count never leaving
-   * zero.
+   * Goal checkpoints and workspace-agent hand-offs both make later work in
+   * the same physical model turn stale. Feeding the tool response back to the
+   * model only invites rejected calls against an already-closed run.
    *
    * The batch's own responses are preserved so the transcript keeps a
    * response for every call, but mid-turn user input is deliberately left
@@ -8963,11 +9059,8 @@ export class Session implements SessionContext {
    * their final tool-free response; ending on the tool batch would return or
    * submit an empty response because only a tool-free response is committed
    * as the channel final.
-   *
-   * Returns false outside a Goal turn, where nothing sets the flag today and
-   * a turn has no verification boundary to reach.
    */
-  async #endGoalTurnAfterToolRun(
+  async #endTurnAfterToolRun(
     toolRun: RunToolResult,
     goalTurn: AcpGoalTurn | undefined,
     channelTurn: boolean,
@@ -8976,7 +9069,6 @@ export class Session implements SessionContext {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
     if (
-      !goalTurn ||
       toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
       channelTurn ||
@@ -8990,9 +9082,11 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
-    goalTurn.endingToolCallId = toolRun.parts.findLast(
-      (part) => part.functionResponse?.id,
-    )?.functionResponse?.id;
+    if (goalTurn) {
+      goalTurn.endingToolCallId = toolRun.parts.findLast(
+        (part) => part.functionResponse?.id,
+      )?.functionResponse?.id;
+    }
     return true;
   }
 
@@ -9615,6 +9709,16 @@ export class Session implements SessionContext {
     }
     const parts: Part[] = [];
     for (const message of messages) {
+      if (message.kind === 'structured' && message.agentRun) {
+        try {
+          requireAgentRunContext('mid-turn agent input');
+          // Refuse a different run before its text can enter this turn.
+          runWithAgentRunContext(message.agentRun, () => {});
+        } catch (error) {
+          debugLogger.warn('Rejected stale agent input', error);
+          continue;
+        }
+      }
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
@@ -9678,6 +9782,28 @@ export class Session implements SessionContext {
         }
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
+      }
+      if (message.kind === 'structured' && message.agentRun) {
+        try {
+          if (
+            !message.messageId ||
+            message.agentRun.contextThroughSequence === undefined
+          ) {
+            throw new Error('Agent input requires a delivery watermark');
+          }
+          await recorder?.flush();
+          await consumeAgentInput(
+            this.config.getWorkingDir(),
+            message.messageId,
+            message.agentRun.contextThroughSequence,
+          );
+        } catch (error) {
+          // No receipt means durable replay; don't discard other built inputs.
+          debugLogger.warn(
+            'Agent input receipt failed; replay remains pending',
+            error,
+          );
+        }
       }
       parts.push(...built);
     }
@@ -12393,19 +12519,38 @@ export class Session implements SessionContext {
     // end the turn asked no matter which of the exits below the batch takes,
     // and the exits that run before any tool does read it as false anyway.
     let batchTerminatesTurn = false;
-    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
-      if (records.length === 0) return [];
-      const finalized = await finalizeToolResponses(
+    const finalizeRecords = (
+      records: PendingToolResultRecord[],
+      withHookContext: boolean,
+    ) =>
+      finalizeToolResponses(
         this.config,
         records.map((record) => ({
           callId: record.callId,
           toolName: record.toolName,
-          responseParts: record.responseParts,
+          responseParts: withHookContext
+            ? record.responseParts
+            : (record.responsePartsWithoutHookContext ?? record.responseParts),
           persistedOutputFiles: record.persistedOutputFiles,
           artifacts: record.metadata.artifacts,
         })),
         new Map(records.map((record) => [record.callId, promptId])),
       );
+    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
+      if (records.length === 0) return [];
+      // A turn aborted before the result is recorded (e.g. while the result
+      // notification or the finalizer's persistence was awaited) keeps the
+      // tool output but not the hook context. Redo the budget without it
+      // rather than cutting it out of already-budgeted text.
+      const withHookContext =
+        !abortSignal.aborted &&
+        records.some(
+          (record) => record.responsePartsWithoutHookContext !== undefined,
+        );
+      let finalized = await finalizeRecords(records, withHookContext);
+      if (withHookContext && abortSignal.aborted) {
+        finalized = await finalizeRecords(records, false);
+      }
       records.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
         // dangling on disk so a later load can re-hang it; only the
@@ -13239,6 +13384,40 @@ export class Session implements SessionContext {
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
     const guardContext: { policyToolName?: string } = {};
+    // Sanitized hook additionalContext for this call (and, for exec, its
+    // nested calls), appended to the model-facing functionResponse only —
+    // never to UI/error projections. A nested call hands it to its parent
+    // exec instead, and an MCP App call has no model consumer at all.
+    let preToolUseContext: string | undefined;
+    let failureContext: string | undefined;
+    // One slot per nested call, reserved in dispatch order: nested calls run
+    // concurrently, and truncation must not depend on completion order.
+    const nestedHookContexts: Array<string | undefined> = [];
+    const hookContextFor = (
+      status: 'success' | 'error' | 'cancelled',
+    ): string | undefined =>
+      status === 'cancelled' ||
+      (!preToolUseContext &&
+        !failureContext &&
+        !nestedHookContexts.some(Boolean))
+        ? undefined
+        : boundToolHookContext(
+            [preToolUseContext, failureContext, ...nestedHookContexts],
+            this.config.getTruncateToolOutputThreshold(),
+          );
+    const withHookContext = (
+      parts: Part[],
+      status: 'success' | 'error' | 'cancelled',
+    ): Part[] =>
+      codeModeContext || appExecution
+        ? parts
+        : appendToolHookContextToParts(parts, callId, hookContextFor(status));
+    const nestedHookContextField = (
+      status: 'success' | 'error' | 'cancelled',
+    ): Pick<RunToolResult, 'hookContext'> => {
+      const hookContext = codeModeContext ? hookContextFor(status) : undefined;
+      return hookContext ? { hookContext } : {};
+    };
     if (toolLoopState?.loopDetected) {
       return {
         parts: [
@@ -13370,6 +13549,7 @@ export class Session implements SessionContext {
         opts.status,
         opts.errorType,
       );
+      const modelErrorParts = withHookContext(errorParts, opts.status);
       if (toolName !== ToolNames.TODO_WRITE) {
         try {
           if (opts.settledMetadata) {
@@ -13423,7 +13603,10 @@ export class Session implements SessionContext {
       queueToolResultRecord?.(fc, {
         callId,
         toolName,
-        responseParts: errorParts,
+        responseParts: modelErrorParts,
+        ...(modelErrorParts !== errorParts
+          ? { responsePartsWithoutHookContext: errorParts }
+          : {}),
         persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
         toolType,
@@ -13456,9 +13639,10 @@ export class Session implements SessionContext {
           error,
         );
       return {
-        parts: errorParts,
+        parts: modelErrorParts,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
         loopDetected,
+        ...nestedHookContextField(opts.status),
       };
     };
 
@@ -14814,6 +14998,7 @@ export class Session implements SessionContext {
               callId,
               hookOwner,
             );
+            preToolUseContext = preHookResult.additionalContext;
             const preHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (preHookCancellation) return preHookCancellation;
@@ -14840,15 +15025,6 @@ export class Session implements SessionContext {
                 errorType: ToolErrorType.EXECUTION_DENIED,
                 executionStatus: 'not_started',
               });
-            }
-
-            // Add additional context from PreToolUse hook if provided
-            // Note: This context would need to be passed to the tool invocation
-            // For now, we just log it as the tool execution proceeds
-            if (preHookResult.additionalContext) {
-              debugLogger.debug(
-                `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
-              );
             }
           }
 
@@ -15098,6 +15274,8 @@ export class Session implements SessionContext {
                   onResult?: (response: ToolCallResponseInfo) => void,
                 ): Promise<CodeModeToolResult> => {
                   const nestedCallId = `${callId}:code:${++this.codeModeNestedSequence}`;
+                  const hookContextSlot =
+                    nestedHookContexts.push(undefined) - 1;
                   const signal = AbortSignal.any([
                     activeToolAbortSignal,
                     nestedSignal,
@@ -15130,6 +15308,7 @@ export class Session implements SessionContext {
                     if (nested.stopAfterPermissionCancel) {
                       stopNestedAfterPermissionCancel();
                     }
+                    nestedHookContexts[hookContextSlot] = nested.hookContext;
                     const nestedParts = finalizeCodeModeToolResult
                       ? await finalizeCodeModeToolResult(nestedCallId, nested)
                       : nested.parts;
@@ -15522,11 +15701,7 @@ export class Session implements SessionContext {
                 elapsedExecutionMs(),
                 hookOwner,
               );
-              if (failureHookResult.additionalContext) {
-                debugLogger.debug(
-                  `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
-                );
-              }
+              failureContext = failureHookResult.additionalContext;
               await this.emitHookArtifactsNotification({
                 hookEventName: 'PostToolUseFailure',
                 toolName,
@@ -15688,10 +15863,14 @@ export class Session implements SessionContext {
             );
           }
 
+          const modelResponseParts = withHookContext(responseParts, status);
           queueToolResultRecord?.(fc, {
             callId,
             toolName,
-            responseParts,
+            responseParts: modelResponseParts,
+            ...(modelResponseParts !== responseParts
+              ? { responsePartsWithoutHookContext: responseParts }
+              : {}),
             persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
             toolType,
@@ -15732,7 +15911,8 @@ export class Session implements SessionContext {
             spanError = toolResult.error.message;
           }
           return {
-            parts: responseParts,
+            parts: modelResponseParts,
+            ...nestedHookContextField(status),
             ...('modelOverride' in toolResult && succeeded
               ? { modelOverride: toolResult.modelOverride }
               : {}),
@@ -15780,11 +15960,7 @@ export class Session implements SessionContext {
                 elapsedExecutionMs(),
                 hookOwner,
               );
-              if (failureHookResult.additionalContext) {
-                debugLogger.debug(
-                  `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
-                );
-              }
+              failureContext = failureHookResult.additionalContext;
               await this.emitHookArtifactsNotification({
                 hookEventName: 'PostToolUseFailure',
                 toolName,
