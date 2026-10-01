@@ -1621,3 +1621,187 @@ describe('a leading-underscore tool cannot borrow another key boundary (R4-2)', 
     }
   });
 });
+
+// The flatten-and-resplit collision the spelling layer cannot solve: server
+// `foo_`'s tool `_internal` registers verbatim as `mcp__foo____internal`
+// (`mcp__` + `foo_` + `__` + `_internal`), and re-deriving the boundary by
+// split('__') reads its server segment as `foo`
+// (R4-2/R13-1). The matcher therefore takes the boundary from the producer
+// (DiscoveredMCPTool.serverName/serverToolName, carried on the invocation and
+// resolvable from the registry) whenever the caller supplies it.
+describe('the producer-carried identity channel (R4-2)', () => {
+  const FOO_UNDERSCORE_TOOL = 'mcp__foo____internal';
+  const fooUnderscoreIdentity = {
+    serverName: 'foo_',
+    serverToolName: '_internal',
+  };
+
+  it('refuses a whole-server rule for foo against a foo_ tool when identity is present', () => {
+    expect(
+      matchesMcpPattern(
+        'mcp__foo',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(false);
+    expect(
+      matchesToolPattern(
+        'mcp__foo',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(false);
+  });
+
+  it('still matches the foo_ server own whole-server rule', () => {
+    expect(
+      matchesMcpPattern(
+        'mcp__foo_',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses a whole-server wildcard for foo against a foo_ tool when identity is present', () => {
+    expect(
+      matchesMcpPattern(
+        'mcp__foo__*',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(false);
+    // The foo_ whole-server spelling itself keeps working.
+    expect(
+      matchesMcpPattern(
+        'mcp__foo___*',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(true);
+  });
+
+  it('reads a pure-underscore tool prefix as separator continuation, not a tool filter', () => {
+    // `mcp__foo____*` is `mcp__foo__` + `_*`: without the guard it would act
+    // as a tool-prefix wildcard for underscore-led tools on server foo_.
+    expect(
+      matchesMcpPattern(
+        'mcp__foo____*',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(false);
+    // A tool prefix with real characters is a genuine filter.
+    expect(
+      matchesMcpPattern(
+        'mcp__foo____in*',
+        FOO_UNDERSCORE_TOOL,
+        undefined,
+        undefined,
+        fooUnderscoreIdentity,
+      ),
+    ).toBe(true);
+  });
+
+  it('does not over-restrict mid-name underscores: a foo_bar tool answers only its own server rule', () => {
+    // `split('__')` keeps `foo_bar` as one segment (single underscores are
+    // not separators), so the spelling layer already refuses `mcp__foo`
+    // here; the pin is that the identity compare stays exactly as strict —
+    // no `startsWith` on either side — while `mcp__foo_bar` keeps matching.
+    const fooBarIdentity = { serverName: 'foo_bar', serverToolName: 'baz' };
+    expect(
+      matchesMcpPattern(
+        'mcp__foo',
+        'mcp__foo_bar__baz',
+        undefined,
+        undefined,
+        fooBarIdentity,
+      ),
+    ).toBe(false);
+    expect(
+      matchesMcpPattern(
+        'mcp__foo_bar',
+        'mcp__foo_bar__baz',
+        undefined,
+        undefined,
+        fooBarIdentity,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the spelling-derived fallback unchanged when identity is absent', () => {
+    // Without the channel the boundary is re-derived from the flattened
+    // spelling and the collision is the accepted residual — exactly why every
+    // production caller threads the identity from the registry/invocation.
+    expect(matchesMcpPattern('mcp__foo', FOO_UNDERSCORE_TOOL)).toBe(true);
+    expect(matchesMcpPattern('mcp__foo__*', FOO_UNDERSCORE_TOOL)).toBe(true);
+  });
+
+  it('a whole-server allow for foo no longer auto-approves foo_ tools end-to-end', async () => {
+    const tool = prodTool('foo_', '_internal');
+    expect(tool.name).toBe(FOO_UNDERSCORE_TOOL);
+    const identity = {
+      serverName: tool.serverName,
+      serverToolName: tool.serverToolName,
+    };
+
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['mcp__foo'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: tool.name,
+        toolAliases: tool.permissionAliases,
+        mcpIdentity: identity,
+      }),
+    ).toBe('default');
+    // Registration-level check agrees: the foo_ tool is not disabled by a
+    // deny written for foo either.
+    const pmDeny = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__foo'] }),
+    );
+    pmDeny.initialize();
+    expect(
+      await pmDeny.getToolRegistrationStatus(
+        tool.name,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe('registered');
+
+    // Positive control: server foo's own tool is still covered by the rule.
+    const ownTool = prodTool('foo', 'deploy');
+    expect(
+      await pm.evaluate({
+        toolName: ownTool.name,
+        toolAliases: ownTool.permissionAliases,
+        mcpIdentity: {
+          serverName: ownTool.serverName,
+          serverToolName: ownTool.serverToolName,
+        },
+      }),
+    ).toBe('allow');
+    expect(
+      await pmDeny.getToolRegistrationStatus(
+        ownTool.name,
+        ownTool.permissionAliases,
+        {
+          serverName: ownTool.serverName,
+          serverToolName: ownTool.serverToolName,
+        },
+      ),
+    ).toBe('disabled');
+  });
+});

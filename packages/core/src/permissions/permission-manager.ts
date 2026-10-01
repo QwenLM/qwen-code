@@ -455,6 +455,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -493,21 +494,24 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity))
+          return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity))
+          return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
         ...this.activeSessionAllowRules(),
         ...this.persistentRules.allow,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'allow';
+        if (matchesRule(rule, ...matchArgs, undefined, mcpIdentity))
+          return 'allow';
       }
       return 'default';
     })();
@@ -824,10 +828,14 @@ export class PermissionManager {
   async isToolEnabled(
     toolName: string,
     toolAliases?: readonly string[],
+    mcpIdentity?: { serverName: string; serverToolName: string },
   ): Promise<boolean> {
     return (
-      (await this.getToolRegistrationStatus(toolName, toolAliases)) !==
-      'disabled'
+      (await this.getToolRegistrationStatus(
+        toolName,
+        toolAliases,
+        mcpIdentity,
+      )) !== 'disabled'
     );
   }
 
@@ -936,6 +944,7 @@ export class PermissionManager {
   async getToolRegistrationStatus(
     toolName: string,
     toolAliases?: readonly string[],
+    mcpIdentity?: { serverName: string; serverToolName: string },
   ): Promise<ToolRegistrationStatus> {
     const canonicalName = resolveToolName(toolName);
 
@@ -949,6 +958,7 @@ export class PermissionManager {
     const decision = await this.evaluate({
       toolName: canonicalName,
       toolAliases,
+      mcpIdentity,
     });
     if (decision === 'deny') {
       return 'disabled';
@@ -1002,6 +1012,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -1076,7 +1087,7 @@ export class PermissionManager {
     ] as const;
 
     for (const rule of denyRules) {
-      if (matchesRule(rule, ...matchArgs, 'canonical')) {
+      if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity)) {
         return rule.raw;
       }
     }
@@ -1158,6 +1169,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -1253,8 +1265,11 @@ export class PermissionManager {
 
     return (
       restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical'),
-      ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
+        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity),
+      ) ||
+      allowRules.some((rule) =>
+        matchesRule(rule, ...matchArgs, undefined, mcpIdentity),
+      )
     );
   }
 
@@ -1272,6 +1287,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -1350,7 +1366,7 @@ export class PermissionManager {
     ] as const;
 
     return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical'),
+      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity),
     );
   }
 

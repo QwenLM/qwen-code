@@ -1797,6 +1797,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         parentDisallowedTools,
         toolName,
         agentConfig.getToolRegistry().getPermissionAliases?.(toolName),
+        agentConfig.getToolRegistry().getMcpToolIdentity?.(toolName),
       );
     const defaultExecutionToolNames = buildInheritedForkExecutionToolNames(
       parentToolNames,

@@ -454,6 +454,7 @@ export function createMemoryScopedAgentConfig(
     async isToolEnabled(
       toolName: string,
       toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
     ): Promise<boolean> {
       if (toolName === ToolNames.SHELL) {
         return opts.allowShell;
@@ -462,12 +463,14 @@ export function createMemoryScopedAgentConfig(
         return true;
       }
       if (basePm) {
-        return basePm.isToolEnabled(toolName, toolAliases);
+        return basePm.isToolEnabled(toolName, toolAliases, mcpIdentity);
       }
       return true;
     },
     async getToolRegistrationStatus(
       toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
     ): Promise<ToolRegistrationStatus> {
       if (toolName === ToolNames.SHELL) {
         return opts.allowShell ? 'registered' : 'disabled';
@@ -477,7 +480,7 @@ export function createMemoryScopedAgentConfig(
       }
       if (basePm) {
         return typeof basePm.getToolRegistrationStatus === 'function'
-          ? basePm.getToolRegistrationStatus(toolName)
+          ? basePm.getToolRegistrationStatus(toolName, toolAliases, mcpIdentity)
           : Promise.resolve('registered' as ToolRegistrationStatus);
       }
       return 'registered';

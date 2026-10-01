@@ -1250,6 +1250,8 @@ async function runOverridePath(
         denies: await subagentMgr.resolveToolNames(
           augmented.disallowedTools ?? [],
         ),
+        getMcpIdentity: (name) =>
+          config.getToolRegistry().getMcpToolIdentity?.(name),
         schema: opts.schema !== undefined,
       });
     } catch (error) {

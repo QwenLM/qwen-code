@@ -673,6 +673,7 @@ export class AgentCore {
           pattern,
           name,
           toolRegistry.getPermissionAliases?.(name),
+          toolRegistry.getMcpToolIdentity?.(name),
         ),
       ) === true;
 
@@ -825,6 +826,7 @@ export class AgentCore {
             pattern,
             t.name!,
             toolRegistry.getPermissionAliases?.(t.name!),
+            toolRegistry.getMcpToolIdentity?.(t.name!),
           ),
         );
       });
@@ -1721,8 +1723,11 @@ export class AgentCore {
     const toolAliases = this.runtimeContext
       .getToolRegistry()
       .getPermissionAliases?.(toolName);
+    const mcpIdentity = this.runtimeContext
+      .getToolRegistry()
+      .getMcpToolIdentity?.(toolName);
     return disallowed.some((pattern) =>
-      matchesToolPattern(pattern, toolName, toolAliases),
+      matchesToolPattern(pattern, toolName, toolAliases, mcpIdentity),
     );
   }
 

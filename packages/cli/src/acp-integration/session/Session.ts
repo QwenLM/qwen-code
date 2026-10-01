@@ -14051,6 +14051,7 @@ export class Session implements SessionContext {
                     toolParams,
                     this.config.getTargetDir(),
                     invocation.permissionAliases,
+                    invocation.mcpIdentity,
                   ),
                   requiresUserInteraction: false,
                   denyMessage: undefined,
