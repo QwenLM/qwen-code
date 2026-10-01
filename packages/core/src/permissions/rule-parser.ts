@@ -1677,11 +1677,24 @@ export function matchesDomainPattern(
  * `disallowedTools`, which is why the gates thread the alias channel (the
  * `narrowAgentTools` carve-out is documented at `matchesToolPattern`).
  */
+/**
+ * The producer-carried identity of an MCP tool. `serverName` is the
+ * operator-facing server key from the config; `serverToolName` is the
+ * server's own tool name. Carrying these beats re-deriving the boundary
+ * from any flattened `mcp__<server>__<tool>` rendering, which cannot tell
+ * `foo` from `foo_` once underscores pile up around the separator.
+ */
+export interface McpToolIdentity {
+  serverName: string;
+  serverToolName: string;
+}
+
 export function matchesMcpPattern(
   pattern: string,
   toolName: string,
   rawToolName?: string,
   toolAliases?: readonly string[],
+  mcpIdentity?: McpToolIdentity,
 ): boolean {
   if (pattern === toolName) {
     return true;
@@ -1766,6 +1779,26 @@ export function matchesMcpPattern(
     if (prefix === '') {
       return false;
     }
+    if (mcpIdentity !== undefined) {
+      // The boundary comes from the producer, not from a flattened spelling:
+      // `mcp__foo_` + `__*` (server `foo_`) and `mcp__foo` + `__*` (server
+      // `foo`) are the same string family under startsWith, and a tool whose
+      // name starts with '_' reads as separator continuation there.
+      const serverPrefix = `mcp__${mcpIdentity.serverName}__`;
+      if (prefix === serverPrefix) {
+        return true;
+      }
+      if (!prefix.startsWith(serverPrefix)) {
+        return false;
+      }
+      const toolPrefix = prefix.slice(serverPrefix.length);
+      // A prefix of pure underscores is separator continuation, not a tool
+      // filter — otherwise a sibling server's whole-server spelling leaks in.
+      if (!/[^_]/.test(toolPrefix)) {
+        return false;
+      }
+      return mcpIdentity.serverToolName.startsWith(toolPrefix);
+    }
     return matchesPrefixLiterally(prefix);
   }
 
@@ -1783,6 +1816,11 @@ export function matchesMcpPattern(
   // window pins the boundary down (R12-1), so segment[1] is trustworthy.
   const patternParts = pattern.split('__');
   if (patternParts.length === 2 && patternParts[0] === 'mcp') {
+    if (mcpIdentity !== undefined) {
+      // Exact producer compare: no split of the tool side, so a rule for
+      // server `foo` can never reach server `foo_`'s tools and vice versa.
+      return patternParts[1] === mcpIdentity.serverName;
+    }
     // A server name containing '__' makes this split unreliable, but that is
     // the accepted provider-safe-name residual (see mcp-tool.ts). The tool
     // side must still be an MCP name, or a bare mcp__<server> rule reaches
@@ -1910,14 +1948,20 @@ export function matchesToolPattern(
   pattern: string,
   toolName: string,
   toolAliases?: readonly string[],
+  mcpIdentity?: McpToolIdentity,
 ): boolean {
   if (!toolName.startsWith('mcp__')) {
     return pattern === toolName;
   }
   const rawMcpToolName = resolveRawMcpIdentity(toolName, toolAliases);
   return (
-    matchesMcpPattern(pattern, toolName, rawMcpToolName, toolAliases) ||
-    matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName)
+    matchesMcpPattern(
+      pattern,
+      toolName,
+      rawMcpToolName,
+      toolAliases,
+      mcpIdentity,
+    ) || matchesAdvertisedExactName(pattern, toolAliases, rawMcpToolName)
   );
 }
 
@@ -1973,6 +2017,7 @@ export function matchesRule(
   toolParams?: Record<string, unknown>,
   toolAliases?: readonly string[],
   pathMatchMode: 'lexical' | 'canonical' = 'lexical',
+  mcpIdentity?: McpToolIdentity,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1996,6 +2041,7 @@ export function matchesRule(
         canonicalCtxToolName,
         rawMcpToolName,
         toolAliases,
+        mcpIdentity,
       ) ||
       matchesAdvertisedExactName(rule.toolName, toolAliases, rawMcpToolName);
     if (!matchesMcpName) {

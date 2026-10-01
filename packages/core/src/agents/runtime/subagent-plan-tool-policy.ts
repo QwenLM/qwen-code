@@ -265,12 +265,13 @@ export function matchesAgentToolBlocklist(
   blocklist: readonly string[] | undefined,
   toolName: string,
   toolAliases?: readonly string[],
+  mcpIdentity?: { serverName: string; serverToolName: string },
 ): boolean {
   if (!blocklist?.length) {
     return false;
   }
   return blocklist.some((pattern) =>
-    matchesToolPattern(pattern, toolName, toolAliases),
+    matchesToolPattern(pattern, toolName, toolAliases, mcpIdentity),
   );
 }
 

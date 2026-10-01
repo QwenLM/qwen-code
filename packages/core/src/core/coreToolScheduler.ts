@@ -3127,14 +3127,18 @@ export class CoreToolScheduler {
           const toolAliases = this.config
             .getToolRegistry?.()
             ?.getPermissionAliases?.(canonicalName);
+          const mcpIdentity = this.config
+            .getToolRegistry?.()
+            ?.getMcpToolIdentity?.(canonicalName);
           const permissionEnabled = pm
-            ? await pm.isToolEnabled(canonicalName, toolAliases)
+            ? await pm.isToolEnabled(canonicalName, toolAliases, mcpIdentity)
             : true;
           if (recordPrevalidationCancellation()) continue;
           if (pm && !permissionEnabled) {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
               toolAliases,
+              mcpIdentity,
             });
             let permissionErrorMessage: string;
             if (matchingRule) {

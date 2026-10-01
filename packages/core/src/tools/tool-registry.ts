@@ -355,6 +355,25 @@ export class ToolRegistry {
   }
 
   /**
+   * The producer-carried identity of an MCP tool (`serverName` /
+   * `serverToolName`), or `undefined` for non-MCP tools. Permission matchers
+   * prefer this over re-deriving the boundary from a flattened
+   * `mcp__<server>__<tool>` rendering, which cannot tell `foo` from `foo_`.
+   */
+  getMcpToolIdentity(
+    name: string,
+  ): { serverName: string; serverToolName: string } | undefined {
+    const tool = this.tools.get(name);
+    if (tool instanceof DiscoveredMCPTool) {
+      return {
+        serverName: tool.serverName,
+        serverToolName: tool.serverToolName,
+      };
+    }
+    return undefined;
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */

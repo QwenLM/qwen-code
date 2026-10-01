@@ -383,6 +383,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * The producer-carried identity permission matchers read the server
+   * boundary from; see {@link ToolInvocation.mcpIdentity}.
+   */
+  get mcpIdentity(): { serverName: string; serverToolName: string } {
+    return { serverName: this.serverName, serverToolName: this.serverToolName };
+  }
+
+  /**
    * MCP tool default permission based on trust:
    * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
    * - All other MCP tools → 'ask'

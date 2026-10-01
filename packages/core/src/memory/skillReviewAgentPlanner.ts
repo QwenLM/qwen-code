@@ -257,18 +257,22 @@ export function createSkillScopedAgentConfig(
     async isToolEnabled(
       toolName: string,
       toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
     ): Promise<boolean> {
       if (isScopedTool(toolName)) return true;
-      if (basePm) return basePm.isToolEnabled(toolName, toolAliases);
+      if (basePm)
+        return basePm.isToolEnabled(toolName, toolAliases, mcpIdentity);
       return true;
     },
     async getToolRegistrationStatus(
       toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
     ): Promise<ToolRegistrationStatus> {
       if (isScopedTool(toolName)) return 'registered';
       if (basePm) {
         return typeof basePm.getToolRegistrationStatus === 'function'
-          ? basePm.getToolRegistrationStatus(toolName)
+          ? basePm.getToolRegistrationStatus(toolName, toolAliases, mcpIdentity)
           : Promise.resolve('registered' as ToolRegistrationStatus);
       }
       return 'registered';
