@@ -937,6 +937,112 @@ describe('ToolCallTool', () => {
       });
     });
 
+    it('resolves the same tagged union written with $defs/$ref', async () => {
+      // The $ref form is what generated schemas actually use. Composition is
+      // non-lexical through it, so the relaxation must not descend into the
+      // shared definitions: flipping a branch's additionalProperties there
+      // makes {a,b} match both and oneOf (exactly one) fails. Mutation check:
+      // re-adding $defs to the name-keyed walk turns this red with "must match
+      // exactly one schema in oneOf".
+      const target = new MockTool({
+        name: 'mcp__srv__refunion',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          $defs: {
+            A: {
+              properties: { a: { type: 'string' } },
+              required: ['a'],
+              additionalProperties: false,
+            },
+            B: {
+              properties: { a: { type: 'string' }, b: { type: 'string' } },
+              required: ['a'],
+              additionalProperties: false,
+            },
+          },
+          oneOf: [{ $ref: '#/$defs/A' }, { $ref: '#/$defs/B' }],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: { a: 'x', b: 'y' } },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).toMatchObject({ arguments: { a: 'x', b: 'y' } });
+      if ('tool' in result) {
+        // The target's own validator (Ajv on the unmodified schema) accepts.
+        expect(() => result.tool.build(result.arguments)).not.toThrow();
+      }
+    });
+
+    it('relaxes additionalProperties inside allOf branches, which only widens', async () => {
+      // allOf branches do not discriminate — both must hold — so a per-branch
+      // additionalProperties: false is not load-bearing the way oneOf's is.
+      // args {a,b} fail each strict branch (each forbids the other key) and
+      // pass both relaxed ones. Mutation check: re-listing allOf as verbatim
+      // turns this red with a refusal.
+      class LenientTool extends MockTool {
+        override validateToolParams(): string | null {
+          return null;
+        }
+      }
+      const target = new LenientTool({
+        name: 'allof_target',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          allOf: [
+            {
+              properties: { a: { type: 'string' } },
+              required: ['a'],
+              additionalProperties: false,
+            },
+            {
+              properties: { b: { type: 'string' } },
+              required: ['b'],
+              additionalProperties: false,
+            },
+          ],
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: { a: 'x', b: 'y' } },
+      );
+
+      expect(result).not.toHaveProperty('error');
+      expect(result).toMatchObject({ arguments: { a: 'x', b: 'y' } });
+    });
+
+    it('never reads a constraint literally named additionalProperties as the keyword', async () => {
+      // `dependencies` maps a NAME to a constraint; a dependency named
+      // additionalProperties with a false schema forbids that property, and
+      // flipping the false to true would invert it into always-pass — the
+      // pre-check would then resolve a call the target's own validator
+      // refuses. The constraint must stay false after the walk.
+      const target = new MockTool({
+        name: 'dep_target',
+        shouldDefer: true,
+        params: {
+          type: 'object',
+          properties: { mode: { type: 'string' } },
+          dependencies: { additionalProperties: false },
+        },
+      });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([target], new Set([target.name])),
+        { name: target.name, arguments: { additionalProperties: 'x' } },
+      );
+
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'dep_target',
+      });
+      expect(result).not.toHaveProperty('tool');
+    });
+
     it('still attributes wrong field types when surplus keys are present', async () => {
       const target = makeWebFetchLike();
       const result = await resolveDeferredToolCall(

@@ -89,34 +89,37 @@ function bridgeRefusal(message: string): Error {
 
 /**
  * Schema keywords whose subtree the relaxation below must leave byte-identical.
- * Composition branches (`oneOf`/`anyOf`/`allOf`/`if`/`then`/`else`/`not`) use a
- * per-branch `additionalProperties: false` to tell the branches apart, so
- * relaxing it there inverts the schema's meaning instead of widening acceptance.
- * Annotation keywords hold data the schema compares against, not a subschema.
+ * `oneOf`/`not` discriminate: a per-branch `additionalProperties: false` tells
+ * branches apart, so relaxing it there inverts the schema's meaning instead of
+ * widening acceptance (`if` selects a branch by the same mechanism). Annotation
+ * keywords hold data the schema compares against, not a subschema. `$defs` and
+ * `definitions` are reached only through `$ref`: they are shared definitions,
+ * and relaxing inside one silently rewrites every branch that references it —
+ * each use site is already covered directly by the walk above.
+ * (`allOf`/`anyOf`/`then`/`else` are deliberately absent: relaxing under them
+ * only widens acceptance, so the walk descends.)
  */
 const VERBATIM_SCHEMA_KEYS: ReadonlySet<string> = new Set([
-  'allOf',
-  'anyOf',
   'oneOf',
   'not',
   'if',
-  'then',
-  'else',
   'const',
   'default',
   'enum',
   'example',
   'examples',
+  '$defs',
+  'definitions',
 ]);
 
 /**
- * Schema keywords whose value maps an arbitrary NAME to a subschema. The names
- * are data, so a property literally named `additionalProperties` keeps its own
- * schema rather than being read as the keyword: these are walked by value only.
+ * Schema keywords whose value maps an arbitrary NAME to a subschema or
+ * constraint. The names are data, so a property literally named
+ * `additionalProperties` keeps its own schema rather than being read as the
+ * keyword: these are walked by value only.
  */
 const NAME_TO_SCHEMA_KEYS: ReadonlySet<string> = new Set([
-  '$defs',
-  'definitions',
+  'dependencies',
   'dependentSchemas',
   'patternProperties',
   'properties',
