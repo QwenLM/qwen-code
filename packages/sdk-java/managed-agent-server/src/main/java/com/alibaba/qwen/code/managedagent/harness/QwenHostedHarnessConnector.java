@@ -22,6 +22,7 @@ import java.net.URI;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
@@ -215,6 +216,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         response.path("optionId").asText(),
                         response.path("inputRevision").asLong(),
                         response.path("policyRevision").asText());
+    }
+
+    @Override
+    public Optional<Attachment> liveAttachment(String tenantId,
+            String sessionId) {
+        HarnessSessionRef attached = attachments.get(
+                new AttachmentKey(tenantId, sessionId));
+        return attached == null ? Optional.empty()
+                : Optional.of(new Attachment(attached.getHarnessBootId(),
+                        attached.getRuntimeRecovery(),
+                        attached.getHarnessLastEventId(),
+                        attached.getHarnessEventEpoch()));
     }
 
     @Override

@@ -473,8 +473,11 @@ does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
 in G0 above and to later Turns submitted by the Session's creator under the same
 opt-in while they can still read the Workspace (the per-caller `workspaceTurns`
-capability flag reflects this); the creator may also cancel the Session's
-running Turns and rename the Session. Later Turns run
+capability flag reflects this); the creator may also rename the Session.
+Cancelling aborts work that is already running, so the creator may cancel a
+running Turn while they can still read the Workspace, even after their create
+grant is revoked, the Workspace starts draining or it is re-registered. Later
+Turns run
 under the creator's Workspace grants, so any other actor keeps the existing
 refusal: `workspace_unavailable` when the actor can read the Workspace,
 `session_not_found` when they cannot. Public close, archive, delete and

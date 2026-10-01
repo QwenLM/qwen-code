@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -61,6 +62,13 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
+    // A cancel the Harness did not take is re-sent with these delays (the
+    // last one repeating) while its Turn is still CANCELLING. The running
+    // dispatcher checks CANCELLING only once, before it starts streaming, so
+    // nothing else re-sends it.
+    private static final long[] CANCEL_RETRY_MILLIS = {1_000, 2_000, 5_000,
+            10_000};
+    private static final int CANCEL_RETRY_LIMIT = 60;
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService renewer =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -121,7 +129,7 @@ public class HarnessCoordinator {
     public void cancel(String tenantId, String sessionId, String turnId) {
         dispatch(tenantId, sessionId, turnId);
         executor.execute(() -> cancelAdmittedTurn(tenantId, sessionId,
-                turnId));
+                turnId, 0));
     }
 
     @Scheduled(fixedDelayString =
@@ -532,7 +540,7 @@ public class HarnessCoordinator {
     }
 
     private void cancelAdmittedTurn(String tenantId, String sessionId,
-            String turnId) {
+            String turnId, int attempt) {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
@@ -550,23 +558,46 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // A live cancel reuses the running Turn's attachment. A passive
-            // attach reloads the Session in the Harness, so the abort would
-            // reach a different attachment and the Turn would stay CANCELLING;
-            // only cancellation recovery, which has no live attachment, may
-            // attach passively.
-            Attachment attachment = harness.createOrLoad(
-                    session.tenantId(), session.sessionId(),
-                    session.harnessBootId() != null);
+            // A live cancel reuses the running Turn's attachment, which runs
+            // no Workspace authorization: aborting running work must not
+            // depend on the grants that admit new work. A passive attach
+            // would reload the Session in the Harness, so the abort would
+            // reach a different attachment and the Turn would stay
+            // CANCELLING; only cancellation recovery, which has no live
+            // attachment, may attach passively.
+            Attachment attachment = harness.liveAttachment(
+                    session.tenantId(), session.sessionId())
+                    .orElseGet(() -> harness.createOrLoad(session.tenantId(),
+                            session.sessionId(),
+                            session.harnessBootId() != null));
             if (store.bindHarness(tenantId, sessionId,
                     turnId, owner, attachment.bootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
-            LOG.warn("Managed Turn cancellation will recover tenant={}"
-                            + " session={} turn={} failure={}",
-                    tenantId, sessionId, turnId,
+            LOG.warn("Managed Turn cancellation will retry tenant={}"
+                            + " session={} turn={} attempt={} failure={}",
+                    tenantId, sessionId, turnId, attempt,
                     error.getClass().getSimpleName());
+            retryCancellation(tenantId, sessionId, turnId, attempt + 1);
+        }
+    }
+
+    private void retryCancellation(String tenantId, String sessionId,
+            String turnId, int attempt) {
+        if (attempt > CANCEL_RETRY_LIMIT) {
+            LOG.warn("Managed Turn cancellation stopped retrying tenant={}"
+                    + " session={} turn={}", tenantId, sessionId, turnId);
+            return;
+        }
+        long delay = CANCEL_RETRY_MILLIS[Math.min(attempt,
+                CANCEL_RETRY_MILLIS.length) - 1];
+        try {
+            renewer.schedule(() -> executor.execute(() -> cancelAdmittedTurn(
+                    tenantId, sessionId, turnId, attempt)), delay,
+                    TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException closed) {
+            // The coordinator is shutting down; recovery takes over.
         }
     }
 

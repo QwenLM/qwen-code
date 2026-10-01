@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.harness;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import com.fasterxml.jackson.databind.JsonNode;
 
 public interface HarnessConnector extends AutoCloseable {
@@ -18,6 +19,16 @@ public interface HarnessConnector extends AutoCloseable {
     default Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         return createOrLoad(tenantId, sessionId, loadExisting);
+    }
+
+    /**
+     * The attachment this connector already holds for the Session, if any.
+     * Reusing it runs no Workspace authorization, so aborting running work
+     * does not depend on the grants that admit new work.
+     */
+    default Optional<Attachment> liveAttachment(String tenantId,
+            String sessionId) {
+        return Optional.empty();
     }
 
     Admission submit(String tenantId, String sessionId, String promptId,

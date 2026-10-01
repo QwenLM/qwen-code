@@ -236,7 +236,7 @@ public class ManagedAgentService {
     public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
         validateIdempotencyKey(idempotencyKey);
-        requireSubmitter(tenantId, actorId, sessionId);
+        requireCanceller(tenantId, actorId, sessionId);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
         Admission replay = replay(tenantId, CANCEL, idempotencyKey,
@@ -700,8 +700,9 @@ public class ManagedAgentService {
 
     // Later Turns of a Workspace-bound Session run under the creator's
     // Workspace grants (WorkspaceExecutionStore.authorize), so only the
-    // creator may submit or cancel them or rename the Session, and only with
-    // Workspace files enabled. Everyone else keeps the existing refusal.
+    // creator may submit them or rename the Session, and only with Workspace
+    // files enabled. Everyone else keeps the existing refusal. Cancelling
+    // has its own, narrower rule (requireCanceller).
     private void requireSubmitter(String tenantId, String actorId,
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
@@ -713,6 +714,23 @@ public class ManagedAgentService {
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
         return maySubmitWorkspaceTurn(session, actorId, false);
+    }
+
+    // Cancelling aborts work that is already running, so it needs only what
+    // identifies the creator, not the grants that admit new work: the
+    // creator who can still read the Workspace may cancel while can_create is
+    // revoked, the Workspace is draining or it was re-registered.
+    private void requireCanceller(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if (session.workspace() == null
+                || !harness.isWorkspaceFilesAvailable()
+                || !workspaces.canRead(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                || !workspaces.createdSession(session.tenantId(), actorId,
+                        session.sessionId())) {
+            requireLegacyWorkspace(session, actorId);
+        }
     }
 
     // readGranted is true on the read paths (session get/list), where the
@@ -745,7 +763,14 @@ public class ManagedAgentService {
         ManagedWorkspaceRegistry.WorkspaceSummary summary =
                 workspaces.findReadable(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId());
-        return summary != null && summary.canCreateSession();
+        // Execution also requires the Workspace generation and storage the
+        // Session was bound to; after a re-registration it refuses, so
+        // admission must refuse first instead of accepting a Turn that fails.
+        return summary != null && summary.canCreateSession()
+                && workspaces.bindingCurrent(session.tenantId(),
+                        session.workspace().getWorkspaceId(),
+                        session.workspace().getWorkspaceGeneration(),
+                        session.workspace().getStorageId());
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

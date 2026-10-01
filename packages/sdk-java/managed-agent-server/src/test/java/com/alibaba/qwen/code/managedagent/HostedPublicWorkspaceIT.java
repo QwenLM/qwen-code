@@ -237,17 +237,30 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
 
-            // A creator whose can_create grant is revoked keeps read access but loses
-            // admission: submit, cancel and rename all answer workspace_unavailable,
-            // nothing new executes, and no PENDING command row is left behind.
+            // A creator whose can_create grant is revoked, with the Workspace draining, keeps
+            // read access but loses admission of new work: submit and rename answer
+            // workspace_unavailable, and no PENDING command row is left behind. Cancelling
+            // only aborts work already running, so a Turn started before the revocation is
+            // still cancelled and stops without running another tool.
+            int beforeRevokedCancel = modelRequests.size();
+            String revokedTurn = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "hold-revoked-" + workspace, "actor", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeRevokedCancel);
             jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            Map<String, Object> revokedCancel = Map.of("type", "agent.session.cancel", "turn_id", revokedTurn);
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "nocreate-cancel-" + workspace, "actor", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, revokedTurn)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "nocreate-later-" + workspace, "actor", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
-            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
-                    "nocreate-cancel-" + workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("workspace_unavailable");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "nocreate-rename-" + workspace, "actor", 409).path("error").path("code").asText())
@@ -259,6 +272,8 @@ class HostedPublicWorkspaceIT {
             jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE'"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
 
             // With the running Turn settled, revoking the creator's read grant hides the
             // bound Session from every later-Turn path: submit, cancel and rename all fall
@@ -279,7 +294,7 @@ class HostedPublicWorkspaceIT {
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 20);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -312,7 +327,7 @@ class HostedPublicWorkspaceIT {
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 20);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {

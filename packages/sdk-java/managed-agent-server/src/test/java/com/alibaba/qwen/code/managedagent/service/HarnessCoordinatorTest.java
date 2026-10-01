@@ -1,14 +1,18 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -249,6 +253,84 @@ class HarnessCoordinatorTest {
             verify(harness, never()).createOrLoad("tenant", "session", true,
                     true);
             verify(harness).cancel("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
+    void cancelsThroughTheLiveAttachmentWithoutReauthorizing() {
+        AgentStateStore store = boundCancellingStore();
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.liveAttachment("tenant", "session")).thenReturn(
+                Optional.of(new Attachment("boot", null, null, null)));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            // The live attachment runs no Workspace authorization, so a
+            // revoked grant or a draining Workspace cannot stop the abort.
+            verify(harness, never()).createOrLoad(anyString(), anyString(),
+                    anyBoolean());
+            verify(harness, never()).createOrLoad(anyString(), anyString(),
+                    anyBoolean(), anyBoolean());
+            verify(harness).cancel("tenant", "session");
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
+    void resendsACancelTheHarnessDidNotTake() {
+        AgentStateStore store = boundCancellingStore();
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.createOrLoad("tenant", "session", true))
+                .thenThrow(new IllegalStateException("refused"))
+                .thenReturn(new Attachment("boot", null, null, null));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            // The running dispatcher checks CANCELLING only once, so the
+            // retry is what delivers the cancel after the first failure.
+            verify(harness, timeout(5_000)).cancel("tenant", "session");
+            verify(harness, times(2)).createOrLoad("tenant", "session", true);
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
+    void stopsResendingOnceTheTurnIsNoLongerCancelling() {
+        AgentStateStore store = boundCancellingStore();
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(
+                Optional.of(turn("tenant", "session", "turn", "prompt",
+                        "epoch", 1, "CANCELLING")),
+                Optional.of(turn("tenant", "session", "turn", "prompt",
+                        "epoch", 1, "COMPLETED")));
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.createOrLoad("tenant", "session", true))
+                .thenThrow(new IllegalStateException("refused"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            verify(harness, after(2_500).times(1)).createOrLoad("tenant",
+                    "session", true);
+            verify(harness, never()).cancel("tenant", "session");
         } finally {
             coordinator.close();
         }

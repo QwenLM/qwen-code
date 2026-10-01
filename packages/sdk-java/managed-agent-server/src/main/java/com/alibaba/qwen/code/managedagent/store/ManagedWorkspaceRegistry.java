@@ -145,6 +145,19 @@ public class ManagedWorkspaceRegistry {
                         && "ACTIVE".equals(state));
     }
 
+    /**
+     * Whether the registry still holds the Workspace generation and storage a
+     * Session was bound to; a re-registration changes them.
+     */
+    public boolean bindingCurrent(String tenantId, String workspaceId,
+            long generation, String storageId) {
+        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_registry"
+                + " WHERE tenant_id = ? AND workspace_id = ?"
+                + " AND workspace_generation = ? AND storage_id = ?",
+                Integer.class, tenantId, workspaceId, generation, storageId)
+                .isEmpty();
+    }
+
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession) {
     }
