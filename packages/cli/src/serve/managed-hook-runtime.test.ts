@@ -129,76 +129,112 @@ async function settled(instance: ManagedHookRuntime, id = 'execution') {
   return view!;
 }
 describe('ManagedHookRuntime', () => {
-  it('retains quota refusals without dispatch or eviction and bounds grant storage', async () => {
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => (release = resolve));
-    const execute = vi
-      .spyOn(HttpHookRunner.prototype, 'execute')
-      .mockImplementation(async () => {
-        await pending;
-        return {
-          hookConfig: { type: HookType.Http, url: 'https://example.com/hook' },
-          eventName: HookEventName.PreToolUse,
-          success: true,
-          outcome: 'success',
-          httpRequestState: 'response_received',
-          duration: 1,
-        };
-      });
-    const install = vi.spyOn(ManagedOperationGrantGate.prototype, 'install');
-    const instance = runtime([
-      {
-        ...definition(),
-        config: { type: HookType.Http, url: 'https://example.com/hook' },
-      },
-    ]);
-    const calls = Array.from({ length: 17 }, (_, index) =>
-      request(`call-${index}`),
-    );
-    try {
-      const admitted = await Promise.all(
-        calls.map((call) => instance.control('runtime-session', call)),
+  it.each([HookEventName.PreToolUse, HookEventName.PermissionRequest])(
+    'retains quota refusals without dispatch or eviction and bounds grant storage (%s)',
+    async (eventName) => {
+      const hookRequest = (id: string) => {
+        const operation = request(id);
+        operation.input.hook_event_name = eventName;
+        return operation;
+      };
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => (release = resolve));
+      const execute = vi
+        .spyOn(HttpHookRunner.prototype, 'execute')
+        .mockImplementation(async () => {
+          await pending;
+          return {
+            hookConfig: {
+              type: HookType.Http,
+              url: 'https://example.com/hook',
+            },
+            eventName,
+            success: true,
+            outcome: 'success',
+            httpRequestState: 'response_received',
+            duration: 1,
+          };
+        });
+      const install = vi.spyOn(ManagedOperationGrantGate.prototype, 'install');
+      const instance = runtime([
+        {
+          ...definition(),
+          eventName,
+          failClosed: false,
+          config: { type: HookType.Http, url: 'https://example.com/hook' },
+        },
+      ]);
+      const calls = Array.from({ length: 17 }, (_, index) =>
+        hookRequest(`call-${index}`),
       );
-      expect(
-        admitted.slice(0, 16).every((view) => view.state === 'running'),
-      ).toBe(true);
-      const refused = admitted[16];
-      expect(refused).toMatchObject({
-        state: 'settled',
-        result: { success: false, outcome: 'non_blocking_error' },
-      });
-      expect(await settled(instance, calls[16].operationId)).toEqual(refused);
-      expect(execute).toHaveBeenCalledTimes(16);
-      for (let index = 17; index < 4096; index++)
+      try {
+        const admitted = await Promise.all(
+          calls.map((call) => instance.control('runtime-session', call)),
+        );
         expect(
-          (await instance.control('runtime-session', request(`call-${index}`)))
-            .result?.success,
-        ).toBe(false);
-      expect(install).toHaveBeenCalledTimes(4096);
-      release();
-      const original = await settled(instance, calls[0].operationId);
-      expect(original.result?.success).toBe(true);
-      expect(await instance.control('runtime-session', calls[0])).toEqual(
-        original,
-      );
-      expect(await instance.control('runtime-session', calls[16])).toEqual(
-        refused,
-      );
-      for (let index = 4096; index < 4100; index++)
-        expect(
-          (await instance.control('runtime-session', request(`call-${index}`)))
-            .result?.success,
-        ).toBe(false);
-      expect(install).toHaveBeenCalledTimes(4096);
-      expect(execute).toHaveBeenCalledTimes(16);
-      expect(instance.hasHolds('runtime-session')).toBe(false);
-      expect((await settled(instance, 'call-4096')).state).toBe(
-        'outcome_unknown',
-      );
-    } finally {
-      release();
-    }
-  });
+          admitted.slice(0, 16).every((view) => view.state === 'running'),
+        ).toBe(true);
+        const refused = admitted[16];
+        expect(refused).toMatchObject({
+          state: 'settled',
+          result: { success: false, outcome: 'non_blocking_error' },
+        });
+        expect(await settled(instance, calls[16].operationId)).toEqual(refused);
+        expect(execute).toHaveBeenCalledTimes(16);
+        for (let index = 17; index < 4096; index++)
+          expect(
+            (
+              await instance.control(
+                'runtime-session',
+                hookRequest(`call-${index}`),
+              )
+            ).result?.success,
+          ).toBe(false);
+        expect(install).toHaveBeenCalledTimes(4096);
+        release();
+        const original = await settled(instance, calls[0].operationId);
+        expect(original.result?.success).toBe(true);
+        expect(await instance.control('runtime-session', calls[0])).toEqual(
+          original,
+        );
+        expect(await instance.control('runtime-session', calls[16])).toEqual(
+          refused,
+        );
+        for (let index = 4096; index < 4100; index++)
+          expect(
+            await instance.control(
+              'runtime-session',
+              hookRequest(`call-${index}`),
+            ),
+          ).toMatchObject({
+            state: 'settled',
+            result: {
+              success: false,
+              outcome: 'blocking',
+              output: {
+                continue: false,
+                decision: 'block',
+                ...(eventName === HookEventName.PermissionRequest
+                  ? {
+                      hookSpecificOutput: {
+                        decision: { behavior: 'deny', interrupt: true },
+                      },
+                    }
+                  : {}),
+              },
+            },
+          });
+        expect(install).toHaveBeenCalledTimes(4096);
+        expect(execute).toHaveBeenCalledTimes(16);
+        expect(instance.hasHolds('runtime-session')).toBe(false);
+        expect((await settled(instance, 'call-4096')).state).toBe(
+          'outcome_unknown',
+        );
+      } finally {
+        release();
+      }
+    },
+  );
 
   it.each([
     [HookType.Command, 'cancel'],

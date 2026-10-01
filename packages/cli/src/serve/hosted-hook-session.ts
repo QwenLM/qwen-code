@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { HookAggregator } from '@qwen-code/qwen-code-core/hooks/hookAggregator.js';
@@ -214,6 +214,7 @@ export class HostedHookSession {
     }
   >();
   private readonly recoveredBrokers = new Map<string, HostedWorkspaceBroker>();
+  private readonly releasedOwners = new Set<string>();
   private readonly occurrences = new Map<
     string,
     {
@@ -234,7 +235,11 @@ export class HostedHookSession {
     this.ownsBroker = broker === undefined;
     this.broker =
       broker ??
-      new HostedWorkspaceBroker(options, this.key, `hooks-${randomUUID()}`);
+      new HostedWorkspaceBroker(
+        options,
+        this.key,
+        `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
+      );
   }
 
   private get key() {
@@ -270,10 +275,55 @@ export class HostedHookSession {
 
   async acquire(): Promise<void> {
     if (this.acquired) return;
+    await this.releaseEarlierOwners();
     await this.broker.warm();
     await this.broker.acquire();
     if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
     this.acquired = true;
+  }
+
+  private async releaseEarlierOwners(): Promise<void> {
+    if (!this.ownsBroker) return;
+    const owners = new Map<string, boolean>();
+    const { authority } = this.session;
+    // Activation is durable before even the first catalog request acquires.
+    for (const event of authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
+    )) {
+      if (event.kind !== 'activation.changed') continue;
+      const id = `hooks-activation-${digest([event.payload['activationId'], event.payload['epoch']])}`;
+      if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
+        owners.set(id, true);
+    }
+    for (const record of this.executions()) {
+      const id = record.runtimeSessionId;
+      if (id === this.broker.runtimeSessionId || this.releasedOwners.has(id))
+        continue;
+      const settled =
+        record.run.state !== 'recovery_blocked' &&
+        (record.resultRef !== null ||
+          record.run.execution === 'not_started_proven');
+      owners.set(id, (owners.get(id) ?? true) && settled);
+    }
+    for (const [id, settled] of owners) {
+      if (!settled) continue;
+      const broker =
+        this.recoveredBrokers.get(id) ??
+        new HostedWorkspaceBroker(this.options, this.key, id);
+      try {
+        await broker.release();
+      } catch (cause) {
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404 ||
+          cause.code !== 'runtime_session_not_found'
+        )
+          throw cause;
+      }
+      this.recoveredBrokers.delete(id);
+      this.releasedOwners.add(id);
+    }
   }
 
   get hasPendingOperations(): boolean {
@@ -929,11 +979,7 @@ export class HostedHookSession {
           }
         }
       } else response = await this.lookup(record);
-      if (
-        response.state === 'running' ||
-        (response.state === 'settled' && response.result)
-      )
-        admit!();
+      if (response.state === 'running') admit!();
       const deadline = Date.now() + 660_000;
       let cancelled = false;
       while (response.state === 'running' && Date.now() < deadline) {
@@ -1386,6 +1432,7 @@ export class HostedHookSession {
 
   async close(): Promise<void> {
     await this.drain();
+    await this.releaseEarlierOwners();
     for (const broker of this.recoveredBrokers.values()) await broker.release();
     this.recoveredBrokers.clear();
     if (this.ownsBroker && this.broker.runtime) {

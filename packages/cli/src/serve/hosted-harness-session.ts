@@ -222,6 +222,74 @@ function hasUnsettledInput(
   return accepted.size > 0;
 }
 
+async function settleCancelledPromptHook(
+  session: HostedSession,
+): Promise<void> {
+  if (
+    !session.blocked ||
+    session.active ||
+    !session.hooks ||
+    session.hooks.hasPendingOperations
+  )
+    return;
+  const { authority } = session.managed;
+  const events = authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  );
+  const pending = new Map<string, number>();
+  for (const event of events) {
+    if (event.kind === 'input.accepted')
+      pending.set(event.payload['turnId'] as string, event.sequence);
+    if (event.kind === 'turn.settled')
+      pending.delete(event.payload['turnId'] as string);
+  }
+  if (pending.size !== 1) return;
+  const [promptId, sequence] = [...pending][0];
+  const occurrenceId = hostedHookOccurrenceId(
+    HookEventName.UserPromptSubmit,
+    promptId,
+  );
+  if (
+    !authority.extensionRecordsInDomain('hook_execution').some(({ record }) => {
+      const execution = parseHookExecution(record);
+      return (
+        execution.occurrenceId === occurrenceId &&
+        execution.run.state === 'cancelled' &&
+        execution.run.execution === 'not_started_proven'
+      );
+    }) ||
+    events.some(
+      (event) =>
+        event.sequence > sequence &&
+        (event.kind === 'model.attempt' ||
+          event.kind === 'tool.intent' ||
+          event.kind === 'tool.receipt' ||
+          (event.kind === 'message.committed' &&
+            event.payload['role'] !== 'user')),
+    )
+  )
+    return;
+  await session.managed.sink.write(
+    record(
+      session,
+      authority.sessionHeader.sessionKey.sessionId,
+      'system',
+      null,
+      {
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId,
+          state: 'cancelled',
+          stopReason: 'cancelled',
+          endedAt: Date.now(),
+        },
+      },
+    ),
+  );
+  session.blocked = false;
+}
+
 async function readShellReceipt(
   session: HostedSession,
   receipt: ManagedSessionEvent,
@@ -1235,6 +1303,7 @@ export function registerHostedHarnessSessionRoutes(
         !settlePromptId
       )
         session.blocked = true;
+      await settleCancelledPromptHook(session);
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -1622,16 +1691,20 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
-    void session.hooks.status(req.params['operationId'], cancel).then(
-      (execution) =>
+    void session.hooks
+      .status(req.params['operationId'], cancel)
+      .then(async (execution) => {
+        if (execution.hookId !== '__plan__')
+          await session.hooks!.status(execution.occurrenceId);
+        await settleCancelledPromptHook(session);
         res.json({
           operationId: execution.hookExecutionId,
           state: execution.run.state,
           execution: execution.run.execution,
           cancelRequested: execution.cancelRequested,
-        }),
-      () => error(res, 409, 'hosted_hook_recovery_required'),
-    );
+        });
+      })
+      .catch(() => error(res, 409, 'hosted_hook_recovery_required'));
   };
   app.get('/session/:id/hooks/operations/:operationId', hookStatus(false));
   app.post(

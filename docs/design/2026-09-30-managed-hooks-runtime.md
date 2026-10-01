@@ -80,6 +80,19 @@ validates tenant, workspace and Session, resolves the saved Runtime, and checks
 workspace generation and the operation grant before new effects. Status and
 cancel only inspect the original execution. Missing or replaced owners remain
 unknown; no status request dispatches a replacement effect.
+A Hook owner ID is fixed at construction from the already durable activation ID
+and epoch. A new load installs a new activation, so it never reuses a released
+Runtime Session ID. Recovery can therefore find even an owner acquired only for
+a catalog request before the first Hook execution record. Earlier random owner
+IDs remain recoverable through execution records; an old random owner with no
+durable execution record requires operator recovery.
+Before a replacement Hook owner acquires the Workspace, it releases earlier
+owners whose Hook records are all terminal, including owners reconciled through
+status. Tool-result continuation uses the same acquisition path. Broker checks
+still reject release while shared physical work is active. Only an explicit
+`runtime_session_not_found` is accepted as an already absent owner. Detach also
+releases settled earlier owners. An attached idle owner retains the Workspace
+lease, as MCP does; changing that lifetime is a separate design task.
 
 Commands reuse native output, timeout and TERM/KILL handling. Managed execution
 requires Linux cgroup v2 delegation: set `QWEN_MANAGED_HOOK_CGROUP_ROOT` to a
@@ -93,7 +106,11 @@ not a sandbox against scripts deliberately modifying the cgroup control plane.
 Missing isolation, including macOS and Windows, returns
 `managed_hook_command_isolation_unavailable` before command execution. The ledger
 records `not_started_proven` with `handler_unavailable`, and cancellation can close
-the blocked occurrence. A process group alone is never accepted as proof.
+the blocked occurrence. For UserPromptSubmit, explicit cancellation also settles
+its admitted turn when no model attempt, tool intent/receipt or non-user message
+has followed admission, and no Hook remains pending. This recovery is durable
+and also runs on load for previously cancelled records; cancellation never
+abandons a model/tool continuation. A process group alone is never accepted as proof.
 Environment inheritance is restricted to execution necessities and explicit
 recipe entries. Async admission waits for the Runtime acknowledgement; it is not
 a completion receipt. Normal acknowledged async work may coexist with later
@@ -119,7 +136,12 @@ preserved, without writing or retrying an oversized history record.
 Runtime concurrency is limited to 16 active operations and catalogs to 128 Hooks.
 Concurrency refusals retain bounded failure receipts under the saved fail policy.
 Runtime keeps at most 4096 operation receipts, including these refusals, without
-eviction or replay. Once full, it refuses new executions before installing grants;
+eviction or replay. Once full, it returns an explicit blocking receipt before
+installing grants, including a PermissionRequest deny regardless of fail policy;
+the Harness persists that outcome. An immediate settled refusal is returned
+before asynchronous admission can report success. This permanent capacity limit is distinct from
+the temporary concurrency refusal. Capacity reclamation needs a durable
+acknowledgement protocol and is deferred;
 an unrecorded refusal whose response is lost remains unknown on lookup.
 
 ## Model activation

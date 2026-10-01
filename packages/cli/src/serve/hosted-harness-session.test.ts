@@ -67,6 +67,9 @@ const state = vi.hoisted(() => ({
     async (_input: {
       signal: AbortSignal;
       toolTurn?: HostedWorkspaceToolTurn;
+      hooks?: import('./hosted-hook-session.js').HostedHookSession;
+      promptId?: string;
+      modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
       resumeFromToolResults?: readonly unknown[];
     }) => ({
       text: 'hello back',
@@ -390,6 +393,179 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it.each([
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.UserPromptSubmit,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_command_isolation_unavailable',
+      HookEventName.UserPromptSubmit,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.PreToolUse,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.UserPromptSubmit,
+      true,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.UserPromptSubmit,
+      false,
+      true,
+    ],
+  ] as const)(
+    'settles only a cancelled pre-model prompt Hook (%s, %s)',
+    async (code, event, reload, modelStarted) => {
+      const { server, authorize, catalog, requests, definition } =
+        await hookApp();
+      Object.assign(catalog, {
+        hooks: [
+          {
+            ...catalog.hooks[0],
+            eventName: event,
+            onceKey: 'submit-once',
+          },
+        ],
+      });
+      const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+      const original = control.getMockImplementation()!;
+      control.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === 'hook-execute') {
+          requests.push(operation);
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            error: { code },
+          };
+        }
+        return original.call(this, operation);
+      });
+      state.model.mockImplementationOnce(
+        async ({ hooks, promptId, signal, modelScope }) => {
+          if (modelStarted) await modelScope!.beginMainAttempt('test-model');
+          await hooks!.fire(event, promptId!, { prompt_id: promptId }, signal);
+          throw new Error('The refused Hook must stop this turn.');
+        },
+      );
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      });
+      const child = requests.find((entry) => entry.kind === 'hook-execute')!;
+      const write = vi.spyOn(ManagedSessionRecordSink.prototype, 'write');
+      const originalWrite = write.getMockImplementation()!;
+      if (reload)
+        write.mockImplementation(function (
+          this: ManagedSessionRecordSink,
+          record,
+        ) {
+          if (record.subtype === 'turn_result')
+            throw new Error('settlement unavailable');
+          return originalWrite.call(this, record);
+        });
+      await authorize(
+        supertest(server).post(
+          `/session/${SESSION_ID}/hooks/operations/${child.operationId}/cancel`,
+        ),
+      ).expect(reload ? 409 : 200);
+      if (reload) {
+        const blocked = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(blocked.body.recoveryBlocked).toBe(true);
+        write.mockRestore();
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/detach`),
+        ).expect(204);
+        const replacement = await app(true);
+        const loaded = await headers(
+          supertest(replacement).post(`/session/${SESSION_ID}/load`),
+        )
+          .send(definition)
+          .expect(200);
+        expect(loaded.body.recoveryRequired).toBeUndefined();
+        await headers(
+          supertest(replacement).post(`/session/${SESSION_ID}/prompt`),
+        )
+          .set('X-Qwen-Client-Id', loaded.body.clientId)
+          .send({ prompt, promptId: randomUUID(), payloadDigest })
+          .expect(202);
+        await vi.waitFor(async () => {
+          const status = await headers(
+            supertest(replacement).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        });
+        return;
+      }
+      const status = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      );
+      if (event !== HookEventName.UserPromptSubmit || modelStarted) {
+        expect(status.body.recoveryBlocked).toBe(true);
+        await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .send({ prompt, promptId: randomUUID(), payloadDigest })
+          .expect(409);
+        return;
+      }
+      expect(status.body.recoveryBlocked).toBe(false);
+      const transcript = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      );
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+          }),
+        ]),
+      );
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: randomUUID(), payloadDigest })
+        .expect(202);
+      await vi.waitFor(async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      });
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send(definition)
+        .expect(200);
+      expect(loaded.body.recoveryRequired).toBeUndefined();
+    },
+  );
+
+  it.each([
     undefined,
     'managed-hook-message-chunks',
     'managed-hook-message-part',
@@ -697,8 +873,8 @@ describe('Hosted Harness no-tool session', () => {
   it('settles End and Delete before releasing the Hook Runtime', async () => {
     const { server, authorize, requests, release } = await hookApp();
     const order: string[] = [];
-    release.mockImplementation(async () => {
-      order.push('release');
+    release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      if (this.runtime) order.push('release');
     });
     const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
     const original = control.getMockImplementation()!;
