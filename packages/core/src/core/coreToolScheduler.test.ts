@@ -1195,6 +1195,7 @@ describe('CoreToolScheduler', () => {
       hasMatchingAskRule?: (ctx: unknown) => boolean;
     };
     deferredHiddenNames?: ReadonlySet<string>;
+    revealDeferredTool?: (name: string) => void;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
   }) {
@@ -1232,6 +1233,7 @@ describe('CoreToolScheduler', () => {
           getAllToolNames: () => [...options.toolsByName.keys()],
           isDeferredAndHidden: (name: string) =>
             options.deferredHiddenNames?.has(name) ?? false,
+          revealDeferredTool: options.revealDeferredTool,
         }),
         {
           getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
@@ -1694,6 +1696,47 @@ describe('CoreToolScheduler', () => {
     expect(message).toContain(`Deferred tool "${deferred.name}"`);
     expect(message).toContain("must have required property 'url'");
     expect(message).toContain(ToolNames.TOOL_SEARCH);
+  });
+
+  it('declares the target directly when the bridge delivered no arguments (#12889)', async () => {
+    const revealDeferredTool = vi.fn();
+    const setTools = vi.fn(async () => {});
+    const { completed, deferred } = await runBridgeCall(
+      'bridge-empty-args',
+      { params: URL_REQUIRED_PARAMS },
+      { revealDeferredTool, getLlmClient: () => ({ setTools }) },
+    );
+
+    expectStatus(completed, 'error');
+    expect(revealDeferredTool).toHaveBeenCalledWith(deferred.name);
+    expect(setTools).toHaveBeenCalledOnce();
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain("must have required property 'url'");
+    expect(message).toContain(`"${deferred.name}" is now declared directly`);
+  });
+
+  it('keeps the target hidden when the bridged arguments are present but wrong', async () => {
+    const revealDeferredTool = vi.fn();
+    const setTools = vi.fn(async () => {});
+    const harness = bridgeWithDeferred(
+      { params: URL_REQUIRED_PARAMS },
+      { revealDeferredTool, getLlmClient: () => ({ setTools }) },
+    );
+
+    await scheduleBridgeCall(
+      harness.scheduler,
+      'bridge-wrong-args',
+      harness.deferred.name,
+      { url: 42 },
+    );
+
+    const completed = firstBatch(harness.onAllToolCallsComplete)[0];
+    expectStatus(completed, 'error');
+    expect(revealDeferredTool).not.toHaveBeenCalled();
+    expect(setTools).not.toHaveBeenCalled();
+    expect(completed.response.error?.message ?? '').not.toContain(
+      'declared directly',
+    );
   });
 
   it("leaves a direct call's validation error unlabelled", async () => {

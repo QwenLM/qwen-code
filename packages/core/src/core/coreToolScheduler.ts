@@ -76,7 +76,9 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  declareTargetAfterEmptyBridgedCall,
   describeBridgedArgumentError,
+  describeDirectDeclaration,
   resolveDeferredToolCall,
 } from '../tools/tool-call.js';
 import type {
@@ -3305,13 +3307,26 @@ export class CoreToolScheduler {
           if (recordPrevalidationCancellation()) continue;
           if (invocationOrError instanceof Error) {
             // A target reached through tool_call reports its own validation
-            // error; name it so the model does not blame the envelope.
+            // error; name it so the model does not blame the envelope. If the
+            // bridge delivered no arguments at all, also declare the target
+            // directly so the model can fill its real schema (#12889).
+            const declaredDirectly =
+              reqInfo.modelFacingName !== undefined &&
+              (await declareTargetAfterEmptyBridgedCall(
+                this.toolRegistry,
+                this.config.getLlmClient?.(),
+                reqInfo.name,
+                reqInfo.args,
+              ));
             const targetMessage =
               reqInfo.modelFacingName !== undefined
                 ? describeBridgedArgumentError(
                     reqInfo.name,
                     invocationOrError.message,
-                  )
+                  ) +
+                  (declaredDirectly
+                    ? describeDirectDeclaration(reqInfo.name)
+                    : '')
                 : invocationOrError.message;
             const displayError = reqInfo.wasOutputTruncated
               ? new Error(`${targetMessage} ${TRUNCATION_PARAM_GUIDANCE}`)

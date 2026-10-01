@@ -112,7 +112,9 @@ import {
   ToolErrorType,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  declareTargetAfterEmptyBridgedCall,
   describeBridgedArgumentError,
+  describeDirectDeclaration,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -15949,13 +15951,24 @@ export class Session implements SessionContext {
         } catch (e) {
           const caught = e instanceof Error ? e : new Error(String(e));
           // Same labelling as the scheduler: a target reached through
-          // tool_call names itself when its own build() rejects the arguments.
-          const error =
-            bridgedThroughToolCall && !toolBuildSucceeded
-              ? new Error(
-                  describeBridgedArgumentError(toolName, caught.message),
-                )
-              : caught;
+          // tool_call names itself when its own build() rejects the arguments,
+          // and is declared directly when the bridge delivered none (#12889).
+          const bridgedBuildFailure =
+            bridgedThroughToolCall && !toolBuildSucceeded;
+          const declaredDirectly =
+            bridgedBuildFailure &&
+            (await declareTargetAfterEmptyBridgedCall(
+              this.config.getToolRegistry(),
+              this.config.getLlmClient?.(),
+              toolName,
+              args,
+            ));
+          const error = bridgedBuildFailure
+            ? new Error(
+                describeBridgedArgumentError(toolName, caught.message) +
+                  (declaredDirectly ? describeDirectDeclaration(toolName) : ''),
+              )
+            : caught;
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
           const executionTimeoutException =

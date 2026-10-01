@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
@@ -15,7 +15,9 @@ import {
 import type { AnyDeclarativeTool } from './tools.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  declareTargetAfterEmptyBridgedCall,
   describeBridgedArgumentError,
+  describeDirectDeclaration,
   resolveDeferredToolCall,
   ToolCallTool,
 } from './tool-call.js';
@@ -123,6 +125,89 @@ describe('describeBridgedArgumentError', () => {
       ),
     ).toBe(
       `Deferred tool "web_fetch" (called through ${ToolNames.TOOL_CALL}) rejected the arguments: params must have required property 'url'. Pass arguments matching the schema returned by ${ToolNames.TOOL_SEARCH} for "web_fetch".`,
+    );
+  });
+});
+
+describe('declareTargetAfterEmptyBridgedCall (#12889)', () => {
+  function revealRegistry(hidden = true) {
+    return {
+      isDeferredAndHidden: vi.fn(() => hidden),
+      revealDeferredTool: vi.fn(),
+      unrevealDeferredTool: vi.fn(),
+    };
+  }
+  const declare = (
+    registry: ReturnType<typeof revealRegistry>,
+    client: { setTools(): Promise<void> } | null,
+    args: Record<string, unknown> | undefined,
+  ) =>
+    declareTargetAfterEmptyBridgedCall(
+      registry as unknown as ToolRegistry,
+      client,
+      'web_fetch',
+      args,
+    );
+
+  it('declares a hidden target that the bridge delivered no arguments to', async () => {
+    const registry = revealRegistry();
+    const setTools = vi.fn(async () => {});
+
+    await expect(declare(registry, { setTools }, {})).resolves.toBe(true);
+    await expect(declare(registry, { setTools }, undefined)).resolves.toBe(
+      true,
+    );
+    expect(registry.revealDeferredTool).toHaveBeenCalledWith('web_fetch');
+    expect(setTools).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves the declaration list alone for an ordinary argument mistake', async () => {
+    const registry = revealRegistry();
+    const setTools = vi.fn(async () => {});
+
+    await expect(declare(registry, { setTools }, { url: 42 })).resolves.toBe(
+      false,
+    );
+    expect(registry.revealDeferredTool).not.toHaveBeenCalled();
+    expect(setTools).not.toHaveBeenCalled();
+  });
+
+  it('does nothing for a visible target, without a client, or in a subagent', async () => {
+    const setTools = vi.fn(async () => {});
+    const visible = revealRegistry(false);
+    await expect(declare(visible, { setTools }, {})).resolves.toBe(false);
+
+    const noClient = revealRegistry();
+    await expect(declare(noClient, null, {})).resolves.toBe(false);
+
+    const subagent = revealRegistry();
+    await expect(
+      runWithAgentContext('worker', () => declare(subagent, { setTools }, {})),
+    ).resolves.toBe(false);
+
+    for (const registry of [visible, noClient, subagent]) {
+      expect(registry.revealDeferredTool).not.toHaveBeenCalled();
+    }
+    expect(setTools).not.toHaveBeenCalled();
+  });
+
+  it('rolls the reveal back when the declaration refresh fails', async () => {
+    const registry = revealRegistry();
+    const setTools = vi.fn(async () => {
+      throw new Error('refresh failed');
+    });
+
+    await expect(declare(registry, { setTools }, {})).resolves.toBe(false);
+    expect(registry.revealDeferredTool).toHaveBeenCalledWith('web_fetch');
+    expect(registry.unrevealDeferredTool).toHaveBeenCalledWith('web_fetch');
+  });
+
+  it('tells the model to call the declared tool by name', () => {
+    expect(describeDirectDeclaration('web_fetch')).toContain(
+      'call "web_fetch" by name',
+    );
+    expect(describeDirectDeclaration('web_fetch')).toContain(
+      `not through ${ToolNames.TOOL_CALL}`,
     );
   });
 });

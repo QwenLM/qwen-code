@@ -874,16 +874,25 @@ export function convertGeminiToolsToResponsesTools(
  * helper patches such schemas (including nested object schemas) to include
  * `properties: {}` so Azure accepts them. Well-formed schemas pass through
  * unchanged.
+ *
+ * A nested object without `properties` means "any object" (JSON Schema's
+ * `additionalProperties` defaults to true). With only `properties: {}` added,
+ * a backend that constrains decoding to the schema reads it as "an empty
+ * object" and can produce nothing else — which is how the deferred-tool
+ * bridge's `tool_call.arguments` reached a Responses model as `{}` on every
+ * attempt (#12889). So a nested node patched here also gets an explicit
+ * `additionalProperties: true` unless it already states one. The root keeps
+ * the bare patch: a zero-arg tool's top level really is empty.
  */
 export function normalizeResponsesParameters(
   schema: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (schema === undefined) return undefined;
   if (schema === null || typeof schema !== 'object') return schema;
-  return normalizeResponsesSchemaNode(schema) as Record<string, unknown>;
+  return normalizeResponsesSchemaNode(schema, true) as Record<string, unknown>;
 }
 
-function normalizeResponsesSchemaNode(node: unknown): unknown {
+function normalizeResponsesSchemaNode(node: unknown, isRoot = false): unknown {
   if (Array.isArray(node)) {
     return node.map((item) => normalizeResponsesSchemaNode(item));
   }
@@ -913,6 +922,9 @@ function normalizeResponsesSchemaNode(node: unknown): unknown {
 
   if (out['type'] === 'object' && out['properties'] === undefined) {
     out['properties'] = {};
+    if (!isRoot && out['additionalProperties'] === undefined) {
+      out['additionalProperties'] = true;
+    }
   }
 
   return out;
