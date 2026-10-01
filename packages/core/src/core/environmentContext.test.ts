@@ -34,6 +34,8 @@ import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { SendMessageTool } from '../tools/send-message.js';
+import { MonitorTool } from '../tools/monitor.js';
+import { LspTool } from '../tools/lsp.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import {
   collectAvailableSkillEntries,
@@ -733,6 +735,45 @@ describe('startup reminder builders', () => {
       'completed tasks are revived',
     );
   });
+
+  // The resident guidance that recommends the competing tool survives while the
+  // deferred tool's own line is gated away, so the reminder line is the only
+  // place the model can see the other side of the choice before tool_search.
+  it.each([
+    [
+      'monitor',
+      () => new MonitorTool({} as Config),
+      ['is_background', 'as an event'],
+    ],
+    [
+      'lsp',
+      () => new LspTool({} as Config),
+      [ToolNames.GREP, ToolNames.GLOB, 'symbols'],
+    ],
+  ] as const)(
+    'keeps the %s selection rule in its summary line (#12702)',
+    (_name, build, clauses) => {
+      const tool = build();
+      const reminder = buildDeferredToolsReminder(
+        registry({
+          getDeferredToolSummary: vi
+            .fn()
+            .mockReturnValue([
+              { name: tool.name, description: tool.description },
+            ]),
+        }),
+      );
+      const line = reminder
+        ?.split('\n')
+        .find((entry) => entry.startsWith(`- "${tool.name}": `));
+
+      expect(line).toBeDefined();
+      expect(line).not.toMatch(/\.\.\."$/);
+      for (const clause of clauses) {
+        expect(line).toContain(clause);
+      }
+    },
+  );
 
   it('JSON-encodes deferred tool metadata before rendering', () => {
     const reminder = deferredReminder([
