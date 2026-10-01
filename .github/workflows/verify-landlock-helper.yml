@@ -65,7 +65,8 @@ jobs:
           file "${committed}"
 
       - name: 'Verify real stdin consumption and FIFO shutdown'
-        run: python3 scripts/tests/stdio-relay.test.py packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run
+        run: |-
+          python3 scripts/tests/stdio-relay.test.py packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run
 
       - name: 'Verify standard streams inside a closed-network sandbox'
         env:
