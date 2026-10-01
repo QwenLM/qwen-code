@@ -111,12 +111,48 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
-  async function glueTwoLines(filePath: string, index: number): Promise<void> {
+  type TranscriptRecord = {
+    subtype?: string;
+    managedSession?: {
+      kind?: string;
+      sequence?: number;
+      firstSequence?: number;
+      lastSequence?: number;
+    };
+  };
+
+  /**
+   * Glue the record matching `probe` onto the record on the next line, and
+   * return that next record so the caller can assert which pair was glued.
+   * Picking the site by content rather than by physical line index keeps these
+   * witnesses pointed at the same two records when the layout moves: the
+   * genesis records in `LocalManagedSessionAuthority.open` are conditional,
+   * and a domain transaction carries its `inputEvents` ahead of the marker.
+   */
+  async function glueRecordToNext(
+    filePath: string,
+    probe: (record: TranscriptRecord) => boolean,
+  ): Promise<TranscriptRecord> {
     const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
+    const records = lines.map((line) =>
+      line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
+    );
+    const index = records.findIndex(
+      (record) => record !== undefined && probe(record),
+    );
+    expect(index, 'no record matched the probe').toBeGreaterThanOrEqual(0);
+    const next = records[index + 1];
+    expect(next, 'the probed record is already on the last line').toBeDefined();
     lines[index] = lines[index] + lines[index + 1];
     lines.splice(index + 1, 1);
     await fs.writeFile(filePath, lines.join('\n'), 'utf8');
+    return next!;
   }
+
+  const domainEvent = (sequence: number) => (record: TranscriptRecord) =>
+    record.subtype === 'managed_session_event_v1' &&
+    record.managedSession?.kind === 'domain.committed' &&
+    record.managedSession?.sequence === sequence;
 
   it('still reads a renamed title after a line in the transcript is torn', async () => {
     const harness = await createHarness();
@@ -131,9 +167,14 @@ describe('managed session metadata', () => {
       );
     });
 
-    // A crash mid-append glues the next record onto this one, so the line
-    // holds two JSON objects and JSON.parse throws on it.
-    await glueTwoLines(harness.transcriptPath, 1);
+    // Damage can leave two records on one line, where a bare JSON.parse throws
+    // and the committed title is lost with them. Glue the header to the event
+    // that follows it.
+    const next = await glueRecordToNext(
+      harness.transcriptPath,
+      (record) => record.subtype === 'managed_session_header_v1',
+    );
+    expect(next.subtype).toBe('managed_session_event_v1');
 
     expect(
       readManagedSessionTitleInfoSync(
@@ -143,11 +184,10 @@ describe('managed session metadata', () => {
     ).toEqual({ title: 'Design review notes', source: 'manual' });
   });
 
-  // The harness writes `0 engine`, `1 header`, `2 event`, `3 marker`, so index 2
-  // is the tear the writer is most likely to leave: a transaction is appended
-  // events first and marker last, and a crash between the two appends glues the
-  // event onto its own marker. Reading that line in file order reaches the event
-  // before the marker that authorises it and drops a rename that did commit.
+  // A transaction is laid out events first and marker last, so the record
+  // after a committed event is the marker that authorises it. Reading a line
+  // holding that pair in file order reaches the event before the marker and
+  // drops a rename that did commit.
   it('still reads a renamed title when the event is glued to its own commit marker', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -161,7 +201,15 @@ describe('managed session metadata', () => {
       );
     });
 
-    await glueTwoLines(harness.transcriptPath, 2);
+    const marker = await glueRecordToNext(
+      harness.transcriptPath,
+      domainEvent(1),
+    );
+    expect(marker.subtype).toBe('managed_session_commit_v1');
+    expect(marker.managedSession).toMatchObject({
+      firstSequence: 1,
+      lastSequence: 1,
+    });
 
     expect(
       readManagedSessionTitleInfoSync(
@@ -192,10 +240,17 @@ describe('managed session metadata', () => {
       );
     });
 
-    // `4 event`, `5 marker`: the second transaction's event shares a line with
-    // its own marker. Returning the first title here would show the session list
-    // a name the user already replaced.
-    await glueTwoLines(harness.transcriptPath, 4);
+    // The newest event shares a line with its own marker. Returning the first
+    // title here would show the session list a name the user already replaced.
+    const marker = await glueRecordToNext(
+      harness.transcriptPath,
+      domainEvent(2),
+    );
+    expect(marker.subtype).toBe('managed_session_commit_v1');
+    expect(marker.managedSession).toMatchObject({
+      firstSequence: 2,
+      lastSequence: 2,
+    });
 
     expect(
       readManagedSessionTitleInfoSync(

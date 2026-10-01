@@ -880,17 +880,20 @@ function lastCommittedDomainRecord(
   let committed: { firstSequence: number; lastSequence: number } | undefined;
   for (let index = lines.length - 1; index >= 0; index--) {
     const line = lines[index];
-    // A crash mid-append glues two records onto one line, so a line can hold
-    // more than one record and a bare JSON.parse would throw away every
-    // record around the tear.
+    // A physical line can hold more than one record: `}{` glue is a documented
+    // corruption shape in this repo (#3606), and a bare JSON.parse would throw
+    // away every record around the tear. The managed writer cannot leave one
+    // behind. Each append is a single fsync'd `<record>\n`, and both the append
+    // and the lease acquire refuse a file whose last byte is not a newline, so
+    // the glue this tolerates is damage from outside the managed writer.
     //
     // Newest record first, like the recovered-record walk above: a transaction
-    // is appended events first and marker last, so the tear a crash mid-append
-    // most often leaves is an event sharing a line with the very marker that
-    // authorises it. Reading that line forwards reaches the event before the
-    // marker, with `committed` still undefined or still carrying an older
-    // window, and skips it. The writer's order is the authority here, so the
-    // reader has to follow it backwards instead of reordering the layout.
+    // is laid out events first and marker last, so on a glued line an event is
+    // most often followed by the marker that authorises it. Reading that line
+    // forwards reaches the event first, with `committed` still undefined or
+    // still carrying an older window, and skips a rename that did commit. The
+    // writer's order is the authority here, so the reader has to follow it
+    // backwards instead of reordering the layout.
     const records = parseLineTolerant<ManagedDomainEvent>(line, filePath);
     for (let i = records.length - 1; i >= 0; i--) {
       const record = records[i];
