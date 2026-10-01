@@ -74,16 +74,18 @@ const TEST_FILE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?\b|\.py\b/;
 // A Surefire id is a dotted `Class.method`, optionally with the parameter
 // types and invocation index of a parameterized case.
 const JAVA_ID_PATTERN = /^(?:[\w$]+\.)+[\w$]+(?:\([^)]*\))?(?:\[\d+])?$/;
-// The module half of a guard id is untrusted for the same reason: the line it
-// is parsed from may be a runner-decoded continuation of a migration FILENAME
-// (git carries LF, `:` and `\` in filenames). The genuine value always comes
-// from the invocation's repo-relative paths — the producer job and the
-// analyze job both run on ubuntu-latest, and this suite's fixtures normalize
-// their argument the same way — so it is slash-bearing with no whitespace or
-// backslashes; a filename-borne forgery can never contain `/`, and anything
-// backslash- or whitespace-shaped is a payload, including a forged Windows
-// drive prefix. Backticks are rejected outright because the id is rendered
-// inside a code span in the issue body.
+// The module half of a guard id is untrusted: the line it is parsed from may
+// be a runner-decoded continuation of a migration PATH (git carries LF, `:`
+// and `\` in names, and a directory component puts the forged text after a
+// real `/`). The timestamp gate in `extractFailingTests` rejects those
+// continuations outright; this shape is the second layer for every other
+// channel. The genuine value always comes from the invocation's repo-relative
+// paths — the producer job and the analyze job both run on ubuntu-latest, and
+// this suite's fixtures normalize their argument the same way — so it is
+// slash-bearing with no whitespace or backslashes, and anything else,
+// including a forged Windows drive prefix, is a payload. Backticks are
+// rejected outright because the id is rendered inside a code span in the
+// issue body.
 const GUARD_MODULE_UNSAFE = /[\s`\\]/;
 
 function guardModule(raw) {
@@ -119,6 +121,15 @@ function javaTestId(raw) {
 export function extractFailingTests(logText) {
   const seen = new Set();
   for (const rawLine of String(logText ?? '').split('\n')) {
+    // A flyway id is built from untrusted path text, so it is accepted only
+    // from a line the runner itself emitted — one carrying its timestamp.
+    // The guard prints file PATHS, so a LF inside a directory component
+    // leaves the forged text after a real `/` and past the module shape
+    // below; but a decoded annotation continuation is written without the
+    // runner's timestamp, which closes that door for both flyway arms.
+    const runnerLine = LOG_TIMESTAMP_PATTERN.test(
+      rawLine.replace(ANSI_PATTERN, ''),
+    );
     const line = cleanLine(rawLine);
     const vitest = VITEST_FAIL_PATTERN.exec(line);
     const pytest = PYTEST_FAIL_PATTERN.exec(line);
@@ -132,6 +143,7 @@ export function extractFailingTests(logText) {
     // validated before they become a dedupe identity, the way the Surefire
     // id is validated below.
     if (flyway) {
+      if (!runnerLine) continue;
       const module = guardModule(flyway[1]);
       if (module)
         seen.add(`flyway duplicate version ${flyway[2]} in ${module}`);
@@ -139,6 +151,7 @@ export function extractFailingTests(logText) {
     }
 
     if (flywayConfig) {
+      if (!runnerLine) continue;
       const module = guardModule(flywayConfig[1]);
       if (module) seen.add(`flyway ${flywayConfig[2]} in ${module}`);
       continue;

@@ -358,30 +358,67 @@ test('the module-shape validator rejects whitespace, backticks and backslashes',
   // A path-shaped capture (passes the `/` arm) that only the unsafe
   // character half rejects — pinned for both characters and both call
   // sites, because the rendered id sits inside a code span in the issue
-  // body: an odd backtick count leaves the span open.
+  // body: an odd backtick count leaves the span open. The lines carry the
+  // runner's timestamp so they reach the shape check past the gate.
+  const at = '2026-09-29T00:00:00.0000000Z ';
   assert.deepEqual(
     extractFailingTests(
-      '##[error]evil/mod`x: 2 migrations claim version 99: forged.sql',
+      `${at}##[error]evil/mod\`x: 2 migrations claim version 99: forged.sql`,
     ),
     [],
   );
   assert.deepEqual(
     extractFailingTests(
-      '##[error]evil/mod x: 2 migrations claim version 99: forged.sql',
+      `${at}##[error]evil/mod x: 2 migrations claim version 99: forged.sql`,
     ),
     [],
   );
   assert.deepEqual(
-    extractFailingTests('##[error]evil/mod`x: no such Maven module directory'),
+    extractFailingTests(
+      `${at}##[error]evil/mod\`x: no such Maven module directory`,
+    ),
     [],
   );
   assert.deepEqual(
     extractFailingTests(
-      '##[error]evil\\mod/x: 2 migrations claim version 99: forged.sql',
+      `${at}##[error]evil\\mod/x: 2 migrations claim version 99: forged.sql`,
     ),
     [],
   );
 });
+
+test(
+  'a directory-borne forgery cannot inject a slash-bearing flyway identity',
+  { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
+  () => {
+    // The guard prints file PATHS, so a LF inside a DIRECTORY component
+    // leaves the forged text after a real `/` — slash-bearing, past the
+    // module shape. Only the runner's own timestamp closes that door: a
+    // decoded annotation continuation is written without one.
+    const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-dirforge-'));
+    const moduleDir = slashPath(join(dir, 'managed-agent-server'));
+    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    const payloadDir = join(
+      migrationDir,
+      'sub\n::error::packages/evil: 2 migrations claim version 99: y.sql',
+    );
+    mkdirSync(payloadDir, { recursive: true });
+    writeFileSync(join(migrationDir, 'V16__a.sql'), '');
+    writeFileSync(join(payloadDir, 'V16__b.sql'), '');
+    const log = captureGuardLog(moduleDir);
+    const id = `flyway duplicate version 16 in ${moduleDir}`;
+    const decoded = log.raw
+      .replace('::error::', '')
+      .replace(/%0D/g, '\r')
+      .replace(/%0A/g, '\n')
+      .replace(/%25/g, '%')
+      .replace('Z ', 'Z ##[error]');
+    // The continuation is there and it IS slash-bearing — the shape accepts
+    // it; only the missing timestamp drops it.
+    assert.ok(decoded.includes('\n::error::packages/evil: 2 migrations claim'));
+    assert.deepEqual(extractFailingTests(decoded), [id]);
+  },
+);
 
 test('a guard diagnosis titles the issue and is searched even when its log sorts last', () => {
   // Job ids — and therefore the failed-logs glob order — do not follow the
