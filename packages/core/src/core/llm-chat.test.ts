@@ -43,6 +43,7 @@ import { StreamContentError } from './openaiContentGenerator/pipeline.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
+import { IMAGE_REATTACHMENT_START } from '../services/image-payload-references.js';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
@@ -2445,6 +2446,7 @@ describe('LlmChat', async () => {
               'Images read earlier in this session',
             ),
             partMetadata: { 'qwen-code:reattach-boundary': true },
+            [IMAGE_REATTACHMENT_START]: true,
           },
           {
             inlineData: {
