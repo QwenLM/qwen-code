@@ -304,3 +304,5 @@ Unknown physical or model outcomes remain blocked with their original evidence;
 passing a mocked event test alone does not establish a missing producer's support.
 
 Explicit Runtime recovery and cancellation retain the owner proven by the original durable tool inputs, including a shared MCP owner, rather than assuming the prompt ID. Missing or conflicting ownership evidence refuses recovery before any Broker call. Raw Shell intents without routing evidence can use the prompt owner only when the saved definition has no shared Hook or MCP owner.
+
+A Broker execution-unknown response remains an unknown outcome, distinct from a missing execution. Cancellation refuses this state before or after a cancel request; it cannot commit a cancelled result or release ownership based on unknown physical stopping. Passive recovery continues reporting the outcome as unknown.

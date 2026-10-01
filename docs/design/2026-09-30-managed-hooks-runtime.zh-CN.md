@@ -234,3 +234,5 @@ command 排空。
 阻塞；仅模拟事件的测试通过，不代表缺少生产者的能力已经受支持。
 
 显式 Runtime 恢复与取消保留原始持久工具输入证明的 owner（包括共用 MCP owner），不默认替换为 prompt ID。所有权证据缺失或冲突时，在任何 Broker 调用之前拒绝恢复。Raw Shell intent 缺少路由证据时，仅在保存定义没有共用 Hook 或 MCP owner 的情况下使用 prompt owner。
+
+Broker 的 execution-unknown 响应仍表示结果未知，与执行记录不存在区分。取消请求之前或之后观察到未知状态时都拒绝结算；不能据此提交 cancelled 结果或释放 owner。被动恢复仍把该结果报告为 unknown。

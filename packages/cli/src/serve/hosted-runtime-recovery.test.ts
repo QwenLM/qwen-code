@@ -434,38 +434,42 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('reports an execution the Broker cannot account for as unknown', async () => {
-    await parkAtAwaitRuntime();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
-      undefined,
-    );
-    const replacement = await open('boot-2', false);
-    try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
-      expect(recovered!.report.executions).toEqual([
-        expect.objectContaining({
-          executionCallId: EXECUTION_ID,
-          outcome: 'unknown',
-        }),
-      ]);
-      // A passive load only reads: nothing may be journaled for the prompt.
-      expect(
-        (await replacement.sink.project()).filter(
-          (entry) =>
-            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
-        ),
-      ).toHaveLength(0);
-    } finally {
-      await replacement.close();
-    }
-  });
+  it.each([undefined, { state: 'unknown' }])(
+    'reports an execution the Broker cannot account for as unknown (%s)',
+    async (status) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
+        status,
+      );
+      const replacement = await open('boot-2', false);
+      try {
+        const recovered = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        });
+        expect(recovered!.report.executions).toEqual([
+          expect.objectContaining({
+            executionCallId: EXECUTION_ID,
+            outcome: 'unknown',
+          }),
+        ]);
+        // A passive load only reads: nothing may be journaled for the prompt.
+        expect(
+          (await replacement.sink.project()).filter(
+            (entry) =>
+              entry.daemonPromptId === PROMPT_ID &&
+              entry.type === 'tool_result',
+          ),
+        ).toHaveLength(0);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('refuses a turn whose checkpoint is not a Runtime wait', async () => {
     const session = await open('boot-1', true);
@@ -649,6 +653,44 @@ describe('recoverHostedRuntimeTurn', () => {
       await replacement.close();
     }
   });
+
+  it.each([false, true])(
+    'refuses cancellation when an execution outcome is unknown (afterCancel=%s)',
+    async (afterCancel) => {
+      await parkAtAwaitRuntime();
+      const status = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'status')
+        .mockResolvedValue({ state: 'unknown' });
+      if (afterCancel) status.mockResolvedValueOnce({ state: 'executing' });
+      const cancel = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+        .mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const replacement = await open('boot-2', false);
+      try {
+        await expect(
+          stopParkedRuntimeExecutions({
+            session: replacement,
+            promptId: PROMPT_ID,
+            brokerOptions,
+          }),
+        ).rejects.toThrow('Runtime execution outcome is unknown.');
+        expect(cancel).toHaveBeenCalledTimes(afterCancel ? 1 : 0);
+        expect(release).not.toHaveBeenCalled();
+        const authorization =
+          await replacement.authority.harnessRunAuthorization();
+        expect(authorization.status).toBe('runnable');
+        if (authorization.status === 'runnable')
+          expect(authorization.checkpoint.continuation.phase).toBe(
+            'await_runtime',
+          );
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('does not journal a tool result twice across a recovery retry', async () => {
     await parkAtAwaitRuntime('write_file', true);
