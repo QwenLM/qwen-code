@@ -403,6 +403,37 @@ describe('Hosted Harness no-tool session', () => {
     ).toHaveLength(1);
   });
 
+  it.each(['continue', 'cancel'])(
+    'refuses Runtime-only %s for a Hook Session without changing its owner or records',
+    async (operation) => {
+      const { server, authorize, requests, release } = await hookApp();
+      const before = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      );
+      const control = await authorize(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/${operation}`,
+        ),
+      ).send({
+        promptId: PROMPT_ID,
+        checkpointId: 'checkpoint',
+        activationId: 'activation',
+      });
+      expect(control.status).toBe(409);
+      expect(control.body.code).toBe('hosted_hook_recovery_required');
+      expect(requests).toEqual([]);
+      expect(release).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+      const after = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      );
+      expect(after.body.events).toEqual(before.body.events);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
+
   it.each([1, 2])(
     'recovers Hook activation after %s failed installation(s) without accepting stranded prompts',
     async (failures) => {
@@ -633,7 +664,12 @@ describe('Hosted Harness no-tool session', () => {
         const loaded = await headers(
           supertest(replacement).post(`/session/${SESSION_ID}/load`),
         )
-          .send(definition)
+          .send({
+            ...definition,
+            ...(event === HookEventName.UserPromptSubmit
+              ? { driveRuntimeRecovery: true }
+              : { passiveManagedRuntimeRecovery: true }),
+          })
           .expect(200);
         expect(loaded.body.recoveryRequired).toBeUndefined();
         await headers(

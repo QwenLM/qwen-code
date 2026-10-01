@@ -433,6 +433,15 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Finished },
     ]);
     const hooks = hostedHooks([HookEventName.MessageDisplay]);
+    const getCatalog = hooks.session.getCatalog;
+    let ready = false;
+    vi.spyOn(hooks.session, 'getCatalog').mockImplementation(() =>
+      ready ? getCatalog() : undefined,
+    );
+    vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
+      ready = true;
+    });
+    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
     hooks.fire.mockImplementation(async (event) =>
       event === HookEventName.MessageDisplay
         ? { suppressOutput: true }
@@ -443,10 +452,6 @@ describe('Hosted Harness model boundary', () => {
       consumeResults: vi.fn(),
       declarations: vi.fn().mockResolvedValue([]),
       setPromptHookRunner: vi.fn(),
-    };
-    const textDeltas = {
-      delta: vi.fn(async () => undefined),
-      published: () => false,
     };
     await expect(
       runHostedHarnessTextTurn({
@@ -466,6 +471,46 @@ describe('Hosted Harness model boundary', () => {
       displayed_text: 'answer',
       is_final: true,
     });
+  });
+
+  it('buffers discarded Stop drafts until the final answer is accepted', async () => {
+    const model = config([]);
+    const hooks = hostedHooks([HookEventName.Stop]);
+    let attempts = 0;
+    model.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: LlmEventType.Content,
+        value: ++attempts === 1 ? 'discarded draft' : 'accepted answer',
+      };
+      yield { type: LlmEventType.Finished };
+    });
+    let stops = 0;
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.Stop && ++stops === 1
+        ? { decision: 'block', reason: 'Continue' }
+        : undefined,
+    );
+    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
+    ).resolves.toMatchObject({ text: 'accepted answer' });
+    expect(textDeltas.delta).not.toHaveBeenCalled();
+    expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('streams text when the Hook catalog has no output policy', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    const hooks = hostedHooks([HookEventName.Notification]);
+    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hooks.session,
+      textDeltas,
+    });
+    expect(textDeltas.delta).toHaveBeenCalledExactlyOnceWith('answer');
   });
 
   it('reconstructs after-Hook tool results after installing the authorized prompt runner', async () => {
@@ -885,6 +930,7 @@ it.each(['decision', 'continue'] as const)(
     ).toEqual([false, true]);
   },
 );
+
 describe('Hosted Harness resume and retraction', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -1045,32 +1091,4 @@ describe('Hosted Harness resume and retraction', () => {
       ' and two',
     ]);
   });
-});
-
-it('publishes only the accepted answer when a Stop Hook continues the model', async () => {
-  const model = config([]);
-  let round = 0;
-  model.sendMessageStream.mockImplementation(async function* () {
-    yield {
-      type: LlmEventType.Content,
-      value: ++round === 1 ? 'discarded' : 'accepted',
-    };
-    yield { type: LlmEventType.Finished };
-  });
-  const hooks = hostedHooks([HookEventName.Stop]);
-  let stops = 0;
-  hooks.fire.mockImplementation(async (event) =>
-    event === HookEventName.Stop && ++stops === 1
-      ? { decision: 'block', reason: 'Continue' }
-      : undefined,
-  );
-  const textDeltas = {
-    delta: vi.fn(async () => undefined),
-    published: () => false,
-  };
-  await expect(
-    runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
-  ).resolves.toMatchObject({ text: 'accepted' });
-  expect(textDeltas.delta).not.toHaveBeenCalled();
-  expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
 });

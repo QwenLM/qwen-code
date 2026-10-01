@@ -1456,8 +1456,9 @@ export function registerHostedHarnessSessionRoutes(
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover =
-        body?.['passiveManagedRuntimeRecovery'] === true ||
-        body?.['driveRuntimeRecovery'] === true;
+        !session.hooks &&
+        (body?.['passiveManagedRuntimeRecovery'] === true ||
+          body?.['driveRuntimeRecovery'] === true);
       const fileHistory = await readHostedFileHistory(managed);
       if (
         fileHistory?.pendingUndo ||
@@ -1502,8 +1503,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         restore.recoveryStatus === 'ok' &&
         unsettled !== undefined &&
-        takeover &&
-        !session.hooks?.hasPendingOperations
+        takeover
       ) {
         // A parked Runtime turn is taken over, not refused: settle its
         // executions under their original ids (or report them for a
@@ -1664,7 +1664,7 @@ export function registerHostedHarnessSessionRoutes(
         hasUnsettledInput(session, restore.throughSequence) &&
         !resume &&
         !settlePromptId &&
-        (!recovery || session.hooks?.hasPendingOperations)
+        !recovery
       )
         session.blocked = true;
       await settleCancelledHookTurn(session);
@@ -2397,6 +2397,7 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
@@ -2564,62 +2565,44 @@ export function registerHostedHarnessSessionRoutes(
             waiters: session.waiters,
           },
           session.mcp,
-          session.hooks,
         );
-        const resumedToolTurn = toolTurn;
-        await new ManagedHookActivationController(session.managed).runTurn(
-          promptId,
-          async (modelScope) => {
-            let state: 'completed' | 'cancelled' | 'error' = 'completed';
-            try {
-              // Reconcile the pending file-history obligation the recovered turn
-              // left behind before inference — a text-only continuation never
-              // re-acquires, so without this the marker outlives the turn and
-              // wedges every later cold load.
-              await resumedToolTurn.resumeCommittedResults();
-              const result = await runHostedHarnessTextTurn({
-                sessionId,
-                cwd,
-                history,
-                prompt: '',
-                promptId,
-                signal: abort.signal,
-                modelScope,
-                ...(session.hooks ? { hooks: session.hooks } : {}),
-                toolTurn: resumedToolTurn,
-                resumeFromToolResults: resumeParts,
-                textDeltas: deltas,
-              });
-              await commit(
-                'assistant',
-                result.parts ?? [{ text: result.text }],
-                result.model,
-              );
-            } catch (cause) {
-              if (
-                cause instanceof HostedToolRecoveryRequiredError ||
-                cause instanceof HostedMcpRecoveryRequiredError ||
-                cause instanceof HostedHookRecoveryRequiredError
-              )
-                throw cause;
-              state = abort.signal.aborted ? 'cancelled' : 'error';
-              if (state === 'error') {
-                writeStderrLineSafe(
-                  `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
-                );
-              }
-            }
-            await resumedToolTurn.finish();
-            await harness.settleConsumedRuntimeContinuation();
-            await session.managed.sink.write(turnResultRecord(state));
-          },
-        );
+        let state: 'completed' | 'cancelled' | 'error' = 'completed';
+        try {
+          // Reconcile the pending file-history obligation the recovered turn
+          // left behind before inference — a text-only continuation never
+          // re-acquires, so without this the marker outlives the turn and
+          // wedges every later cold load.
+          await toolTurn.resumeCommittedResults();
+          const result = await runHostedHarnessTextTurn({
+            sessionId,
+            cwd,
+            history,
+            prompt: '',
+            promptId,
+            signal: abort.signal,
+            toolTurn,
+            resumeFromToolResults: resumeParts,
+            textDeltas: deltas,
+          });
+          await commit(
+            'assistant',
+            result.parts ?? [{ text: result.text }],
+            result.model,
+          );
+        } catch (cause) {
+          if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
+          state = abort.signal.aborted ? 'cancelled' : 'error';
+          if (state === 'error') {
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness turn ${promptId} failed: ${String(cause)}`,
+            );
+          }
+        }
+        await toolTurn.finish();
+        await harness.settleConsumedRuntimeContinuation();
+        await session.managed.sink.write(turnResultRecord(state));
       } catch (cause) {
-        if (
-          cause instanceof HostedToolRecoveryRequiredError ||
-          cause instanceof HostedMcpRecoveryRequiredError ||
-          cause instanceof HostedHookRecoveryRequiredError
-        ) {
+        if (cause instanceof HostedToolRecoveryRequiredError) {
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
@@ -2652,6 +2635,7 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/managed-runtime/cancel', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
@@ -2700,7 +2684,6 @@ export function registerHostedHarnessSessionRoutes(
       releaseRecoveredRuntime(session);
       return error(res, 409, 'hosted_turn_recovery_required');
     }
-
     session.admissions.set(promptId, {
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,

@@ -264,6 +264,15 @@ export async function runHostedHarnessTextTurn(input: {
           queued.signal,
         );
     }
+    const textDeltas = input.hooks
+      ?.getCatalog()
+      ?.hooks.some(
+        (hook) =>
+          hook.eventName === HookEventName.Stop ||
+          hook.eventName === HookEventName.MessageDisplay,
+      )
+      ? undefined
+      : input.textDeltas;
     const client = config.getLlmClient();
     const registry = config.getToolRegistry();
     await registry.warmAll();
@@ -323,15 +332,6 @@ export async function runHostedHarnessTextTurn(input: {
           input.signal,
         )) ?? [...input.resumeFromToolResults])
       : [{ text: effectivePrompt }];
-    const textDeltas = input.hooks
-      ?.getCatalog()
-      ?.hooks.some((hook) =>
-        [HookEventName.Stop, HookEventName.MessageDisplay].includes(
-          hook.eventName,
-        ),
-      )
-      ? undefined
-      : input.textDeltas;
     let pendingToolResults = input.resumeFromToolResults !== undefined;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
@@ -382,17 +382,19 @@ export async function runHostedHarnessTextTurn(input: {
           } else if (event.type === LlmEventType.Retry) {
             calls = [];
             if (!event.isContinuation) {
-              if (textDeltas?.published())
+              if (textDeltas?.published()) {
                 throw new Error(
                   'Hosted Harness cannot retract a published model attempt.',
                 );
+              }
               text = '';
             }
           } else if (event.type === LlmEventType.ModelFallback) {
-            if (textDeltas?.published())
+            if (textDeltas?.published()) {
               throw new Error(
                 'Hosted Harness cannot retract a published model attempt.',
               );
+            }
             calls = [];
             text = '';
           } else if (

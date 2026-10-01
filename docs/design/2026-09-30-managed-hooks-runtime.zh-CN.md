@@ -190,12 +190,20 @@ Dispatcher 不在 Managed Config 中加载或执行环境中的 Legacy Hooks。H
 设置。显式 after/batch Hook stop 结束编排，同时保留物理回执和未被模型消费的状态，
 Session 仍可开始下一轮。
 
+已加载目录包含 Stop 或 MessageDisplay 时，模型文本在两者完成决策前保持缓冲。
+丢弃或隐藏的草稿不会成为持久化 text delta。没有这两类输出策略的 Session 保留增量流式输出。
+
 ## 接口与兼容性
 
 Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, definitionDigest}`，
 同时需要 Hosted Workspace tool profile 和 Broker。加载时省略初始 pin 会恢复保存值，
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
+
+Runtime-only 接管标志仍让 Hook Session 使用现有的 Hook 感知加载与核对路径。
+Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
+`hosted_hook_recovery_required` 拒绝 Hook Session；不能忽略待结算 Hook 副作用或
+模型 scope 来结束回合。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
 扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开
@@ -225,4 +233,4 @@ command 排空。
 契约测试。集成验证后进行两轮无新问题的自审及独立评审。未知物理或模型结果保留原证据并
 阻塞；仅模拟事件的测试通过，不代表缺少生产者的能力已经受支持。
 
-固定 catalog 包含 Stop 或 MessageDisplay 时，模型文本保持缓冲，直到 Hook 接受最终回答；持久文本 delta 不能提前发布随后被 Hook 丢弃或隐藏的回答。其他 catalog 保留流式输出。显式 Runtime 接管保留原始持久工具输入声明的 Runtime Session（包括 Hook 共用 owner），不替换为 prompt ID。所有权证据缺失或冲突时继续拒绝恢复。Raw Shell intent 缺少路由证据时，仅在保存的定义没有共用 Hook 或 MCP owner 的情况下使用 prompt owner。
+显式 Runtime 恢复与取消保留原始持久工具输入证明的 owner（包括共用 MCP owner），不默认替换为 prompt ID。所有权证据缺失或冲突时，在任何 Broker 调用之前拒绝恢复。Raw Shell intent 缺少路由证据时，仅在保存定义没有共用 Hook 或 MCP owner 的情况下使用 prompt owner。

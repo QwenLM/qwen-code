@@ -249,6 +249,10 @@ flag; an ordinary tool round does not. An explicit after/batch Hook stop ends
 orchestration while preserving physical receipts and their unconsumed status,
 and leaves the Session ready for another turn.
 
+When the loaded catalog contains Stop or MessageDisplay, model text stays buffered
+until their decisions complete. Discarded or suppressed drafts never become durable
+text deltas. Sessions without either output policy retain incremental streaming.
+
 ## Interfaces and compatibility
 
 Session creation/load accepts `hookCatalog: {catalogId, catalogRevision,
@@ -257,6 +261,11 @@ initial pin is restored when omitted on load and must match when supplied; later
 committed registrations remain authoritative. Workspace cold load verifies Hook
 record resources and the complete function-message snapshot closure before
 attachment, while retaining original-owner recovery barriers.
+
+Runtime-only takeover flags keep Hook Sessions on the existing Hook-aware load
+reconciliation path. The Runtime-only continue/cancel routes refuse Hook Sessions
+with `hosted_hook_recovery_required` before changing records or Runtime ownership;
+they cannot settle a turn while ignoring its pending Hook effects or model scope.
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
@@ -294,4 +303,4 @@ Two clean self-audit passes and independent review follow integration verificati
 Unknown physical or model outcomes remain blocked with their original evidence;
 passing a mocked event test alone does not establish a missing producer's support.
 
-When the pinned catalog contains Stop or MessageDisplay, model text stays buffered until the Hooks accept the answer; no durable text deltas can publish an answer that the Hooks later discard or hide. Other catalogs retain streaming. Explicit Runtime takeover retains the Runtime Session named by each original durable tool input, including a shared Hook owner, rather than substituting the prompt ID. Missing or conflicting owner evidence remains a recovery refusal. Raw Shell intents without routing evidence can only use the prompt owner when the saved definition has no shared Hook or MCP owner.
+Explicit Runtime recovery and cancellation retain the owner proven by the original durable tool inputs, including a shared MCP owner, rather than assuming the prompt ID. Missing or conflicting ownership evidence refuses recovery before any Broker call. Raw Shell intents without routing evidence can use the prompt owner only when the saved definition has no shared Hook or MCP owner.
