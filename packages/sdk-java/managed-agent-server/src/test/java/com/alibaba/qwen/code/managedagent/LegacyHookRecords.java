@@ -13,8 +13,8 @@ import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Hook records as a V26 store wrote them, without admission projections, and
- * the projections V28 must give them. Two Sessions consume the same once key:
+ * Hook records as a V27 store wrote them, without admission projections, and
+ * the projections V29 must give them. Two Sessions consume the same once key:
  * once keys are unique per Session only.
  */
 final class LegacyHookRecords {

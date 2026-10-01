@@ -92,6 +92,19 @@ validates tenant, workspace and Session, resolves the saved Runtime, and checks
 workspace generation and the operation grant before new effects. Status and
 cancel only inspect the original execution. Missing or replaced owners remain
 unknown; no status request dispatches a replacement effect.
+A Hook owner ID is fixed at construction from the already durable activation ID
+and epoch. A new load installs a new activation, so it never reuses a released
+Runtime Session ID. Recovery can therefore find even an owner acquired only for
+a catalog request before the first Hook execution record. Earlier random owner
+IDs remain recoverable through execution records; an old random owner with no
+durable execution record requires operator recovery.
+Before a replacement Hook owner acquires the Workspace, it releases earlier
+owners whose Hook records are all terminal, including owners reconciled through
+status. Tool-result continuation uses the same acquisition path. Broker checks
+still reject release while shared physical work is active. Only an explicit
+`runtime_session_not_found` is accepted as an already absent owner. Detach also
+releases settled earlier owners. An attached idle owner retains the Workspace
+lease, as MCP does; changing that lifetime is a separate design task.
 
 Commands reuse native output, timeout and TERM/KILL handling. Managed execution
 requires Linux cgroup v2 delegation: set `QWEN_MANAGED_HOOK_CGROUP_ROOT` to a
@@ -105,14 +118,21 @@ not a sandbox against scripts deliberately modifying the cgroup control plane.
 Missing isolation, including macOS and Windows, returns
 `managed_hook_command_isolation_unavailable` before command execution. The ledger
 records `not_started_proven` with `handler_unavailable`, and cancellation can close
-the blocked occurrence. A process group alone is never accepted as proof.
+the blocked occurrence. For SessionStart and UserPromptSubmit, explicit cancellation
+also settles the admitted turn identified by the Hook's durable input `prompt_id`
+when no model attempt, tool intent/receipt or non-user message has followed
+admission, and no Hook remains pending. An earlier SessionStart cancellation cannot
+settle a later turn. This recovery is durable
+and also runs on load for previously cancelled records; cancellation never
+abandons a model/tool continuation. A process group alone is never accepted as proof.
 Environment inheritance is restricted to execution necessities and explicit
 recipe entries. Async admission waits for the Runtime acknowledgement; it is not
 a completion receipt. Normal acknowledged async work may coexist with later
 turns; unknown work blocks new admission and retains its Runtime hold.
 
 HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
-refused. A received failure response can settle; a lost response after sending
+refused. A local runner-construction failure before dispatch is a settled failure
+under the saved fail policy. A received failure response can settle; a lost response after sending
 remains unknown and cannot be retried automatically. Hook outputs are bounded.
 Individual receipts and aggregate outputs use a 60 KiB bound. An oversized
 initial plan (including event input, descriptors and snapshot references) saves a
@@ -131,7 +151,12 @@ preserved, without writing or retrying an oversized history record.
 Runtime concurrency is limited to 16 active operations and catalogs to 128 Hooks.
 Concurrency refusals retain bounded failure receipts under the saved fail policy.
 Runtime keeps at most 4096 operation receipts, including these refusals, without
-eviction or replay. Once full, it refuses new executions before installing grants;
+eviction or replay. Once full, it returns an explicit blocking receipt before
+installing grants, including a PermissionRequest deny regardless of fail policy;
+the Harness persists that outcome. An immediate settled refusal is returned
+before asynchronous admission can report success. This permanent capacity limit is distinct from
+the temporary concurrency refusal. Capacity reclamation needs a durable
+acknowledgement protocol and is deferred;
 an unrecorded refusal whose response is lost remains unknown on lookup.
 
 ## Model activation
@@ -141,7 +166,9 @@ scope. Notification, expansion and closing events can acquire a `hook_operation`
 activation without creating a user turn, task completion, tool loop or startup
 Hook. Both subjects use the Session's monotonically increasing activation epoch.
 The scope remains held until the provider call actually settles, even if the
-provider ignores timeout cancellation.
+provider ignores timeout cancellation. If installing a Hook activation fails after
+release, the controller still restores the Session activation. If restoration
+also fails, new prompts are rejected before admission until activation recovery.
 
 Model attempts and usage are associated with the original Hook operation and
 originating turn when present. Budget accounting follows the existing Session
@@ -191,15 +218,15 @@ Sessions without a Hook pin retain their current behavior.
 
 Changed areas are Core Hook dispatch/activation/record validation, CLI Hosted
 orchestration and Runtime execution, Java Broker transport and Session Store
-projection, and their collocated tests. Migration V26 records the first admission
+projection, and their collocated tests. Migration V27 records the first admission
 journal sequence as `first_sequence`, which later revisions preserve. The latest
 settled catalog is chosen by this sequence, matching native registration order
 even when an older registration settles later, independently of clocks or UUIDs.
-Migration V27 adds the admission columns and indexes; V28 backfills them for records
-written under V26 from their verified bodies. A record whose body is missing or
-corrupt keeps no keys, and V28 blocks its Session as a missing resource does
+Migration V28 adds the admission columns and indexes; V29 backfills them for records
+written under V27 from their verified bodies. A record whose body is missing or
+corrupt keeps no keys, and V29 blocks its Session as a missing resource does
 (`BLOCKED_RESOURCE`), so no later admission can reuse a once key it consumed;
-other Sessions are unaffected. Running a binary older than V27 against a migrated
+other Sessions are unaffected. Running a binary older than V28 against a migrated
 database is unsupported: it writes Hook records without these keys, which the
 Session Store's checks then cannot see, although the Session authority still
 enforces them in memory.

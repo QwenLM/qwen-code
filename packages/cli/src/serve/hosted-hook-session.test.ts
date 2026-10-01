@@ -158,6 +158,21 @@ beforeEach(async () => {
   hooks = new HostedHookSession(options, session, pin);
 });
 
+async function reopenSession(): Promise<void> {
+  const key = session.authority.sessionHeader.sessionKey;
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'session.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'replacement',
+    activationLeaseDurationMs: 60_000,
+  });
+}
+
 afterEach(async () => {
   await session.close();
   vi.restoreAllMocks();
@@ -638,6 +653,7 @@ it('dispatches a recovered intent through its original Runtime Session', async (
       recoveredOwner = this.runtimeSessionId;
     return originalControl.call(this, operation);
   });
+  await reopenSession();
   const replacement = new HostedHookSession(options, session, pin);
   expect(replacement.broker.runtimeSessionId).not.toBe(owner);
   await replacement.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
@@ -710,6 +726,7 @@ it('applies failClosed when a lost reply is settled through status after reconst
       error: 'timeout',
     },
   });
+  await reopenSession();
   const replacement = new HostedHookSession(options, session, pin);
   const statuses = await Promise.all([
     replacement.status('call-1'),
@@ -1049,6 +1066,105 @@ it('releases its broker when a tool turn acquired it after catalog restoration',
   expect(release.mock.instances[0]).toBe(replacement.broker);
 });
 
+it.each(['catalog', 'settled', 'lost-ack'])(
+  'releases an earlier owner before acquiring a replacement (%s)',
+  async (phase) => {
+    const lostAck = phase === 'lost-ack';
+    let owner: string | undefined;
+    const acquire = vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire');
+    const originalAcquire = acquire.getMockImplementation()!;
+    acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      if (owner && owner !== this.runtimeSessionId)
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'workspace_execution_busy',
+        );
+      owner = this.runtimeSessionId;
+      await originalAcquire.call(this);
+    });
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      if (owner === this.runtimeSessionId) owner = undefined;
+    });
+    if (lostAck)
+      execute = async () => {
+        throw new Error('lost reply');
+      };
+    const firing =
+      phase === 'catalog'
+        ? hooks.ensureReady()
+        : hooks.fire(HookEventName.PreToolUse, 'old', {}, signal());
+    if (lostAck)
+      await expect(firing).rejects.toBeInstanceOf(
+        HostedHookRecoveryRequiredError,
+      );
+    else await firing;
+    await reopenSession();
+    const replacement = new HostedHookSession(options, session, pin);
+    await replacement.ensureReady();
+    if (lostAck) {
+      await expect(replacement.acquire()).rejects.toThrow(
+        'workspace_execution_busy',
+      );
+      expect(release).not.toHaveBeenCalled();
+      const child = requests.find(
+        (request) => request.kind === 'hook-execute',
+      )!;
+      replies.set(child.operationId, {
+        operationId: child.operationId,
+        state: 'settled',
+        result: { success: true, outcome: 'success', duration: 0 },
+      });
+      expect((await replacement.status('old')).resultRef).not.toBeNull();
+    }
+    await replacement.acquire();
+    expect(owner).toBe(replacement.broker.runtimeSessionId);
+    expect(release).toHaveBeenCalledOnce();
+    expect(release.mock.contexts[0]).toMatchObject({
+      runtimeSessionId: hooks.broker.runtimeSessionId,
+    });
+    await replacement.close();
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(owner).toBeUndefined();
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(phase === 'catalog' ? 0 : 1);
+  },
+);
+
+it.each([
+  { status: 404, code: 'runtime_session_not_found', allowed: true },
+  { status: 404, code: 'other_not_found', allowed: false },
+  { status: 409, code: 'runtime_session_busy', allowed: false },
+])(
+  'reconciles only absent earlier owners ($code)',
+  async ({ status, code, allowed }) => {
+    await hooks.ensureReady();
+    await hooks.close();
+    await reopenSession();
+    const unacquired = new HostedHookSession(options, session, pin);
+    await unacquired.fire(HookEventName.Notification, 'empty', {}, signal());
+    expect(unacquired.broker.runtime).toBeUndefined();
+    const refusal = new HostedWorkspaceBrokerRejection(status, code);
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockImplementation(async function (this: HostedWorkspaceBroker) {
+        if (this.runtimeSessionId === unacquired.broker.runtimeSessionId)
+          throw refusal;
+      });
+    await reopenSession();
+    const replacement = new HostedHookSession(options, session, pin);
+    if (allowed) await replacement.acquire();
+    else await expect(replacement.acquire()).rejects.toBe(refusal);
+    expect(release.mock.contexts).toContainEqual(
+      expect.objectContaining({
+        runtimeSessionId: unacquired.broker.runtimeSessionId,
+      }),
+    );
+    expect(Boolean(replacement.broker.runtime)).toBe(allowed);
+  },
+);
+
 it('leaves a shared MCP broker for its owner to release', async () => {
   const shared = new HostedWorkspaceBroker(
     options,
@@ -1384,6 +1500,54 @@ it.each([false, true])(
     } finally {
       await runtime.close();
     }
+  },
+);
+
+it.each([
+  [HookEventName.PreToolUse, false],
+  [HookEventName.PermissionRequest, false],
+  [HookEventName.PreToolUse, true],
+  [HookEventName.PermissionRequest, true],
+] as const)(
+  'persists a hard capacity refusal for fail-open %s Hooks across reconstruction (async: %s)',
+  async (eventName, async) => {
+    catalog = {
+      ...catalog,
+      hooks: [{ ...catalog.hooks[0], eventName, async, failClosed: false }],
+    };
+    execute = async () => ({
+      success: false,
+      outcome: 'blocking',
+      duration: 0,
+      output: {
+        continue: false,
+        decision: 'block',
+        reason: 'Managed Hook receipt capacity is exhausted.',
+        ...(eventName === HookEventName.PermissionRequest
+          ? {
+              hookSpecificOutput: {
+                decision: { behavior: 'deny', interrupt: true },
+              },
+            }
+          : {}),
+      },
+    });
+    const output = await hooks.fire(eventName, 'full', {}, signal());
+    if (eventName === HookEventName.PermissionRequest)
+      expect(output?.hookSpecificOutput?.['decision']).toMatchObject({
+        behavior: 'deny',
+        interrupt: true,
+      });
+    else expect(output?.decision).toBe('block');
+    expect(hooks.hasPendingOperations).toBe(false);
+    expect((await hooks.status('full')).resultRef).not.toBeNull();
+    const replacement = new HostedHookSession(options, session, pin);
+    expect(await replacement.fire(eventName, 'full', {}, signal())).toEqual(
+      output,
+    );
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
   },
 );
 

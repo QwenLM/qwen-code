@@ -90,7 +90,7 @@ class ManagedAgentMySqlIT {
                 LegacyLifecycleCommands.insert(jdbc, "mysql-lifecycle");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
-                .target(MigrationVersion.fromVersion("26")).load().migrate();
+                .target(MigrationVersion.fromVersion("27")).load().migrate();
         LegacyHookRecords.insert(jdbc, "mysql-hooks", "session_hooks");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();

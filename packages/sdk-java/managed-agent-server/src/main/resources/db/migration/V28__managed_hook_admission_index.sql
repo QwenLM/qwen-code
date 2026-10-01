@@ -1,7 +1,7 @@
 -- Hook admission checks the once key, the occurrence ordinal and the catalog
 -- pin of a new record through these projections, instead of reading every
 -- earlier Hook record of its Session. They never change across a record's
--- revisions. V28 backfills the rows written before them.
+-- revisions. V29 backfills the rows written before them.
 ALTER TABLE qwen_managed_session_extension_record
     ADD COLUMN hook_once_key_hash CHAR(64) NULL;
 ALTER TABLE qwen_managed_session_extension_record

@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import db.migration.V28__managed_hook_admission_backfill;
+import db.migration.V29__managed_hook_admission_backfill;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.ArrayList;
@@ -182,7 +182,7 @@ class ManagedHookAdmissionIndexTest {
         assertThat(written).filteredOn(row -> row.get("hook_definition_hash") != null)
                 .hasSize(1);
 
-        // Rows written before V27 hold no projection; the backfill, which
+        // Rows written before V28 hold no projection; the backfill, which
         // pages through more rows than one query reads, restores it exactly.
         clearProjection(jdbc);
         backfill(dataSource);
@@ -289,13 +289,13 @@ class ManagedHookAdmissionIndexTest {
     }
 
     @Test
-    void upgradesHookRecordsWrittenUnderV26() throws Exception {
+    void upgradesHookRecordsWrittenUnderV27() throws Exception {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:hook-index-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
-                .target(MigrationVersion.fromVersion("26")).load().migrate();
+                .target(MigrationVersion.fromVersion("27")).load().migrate();
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         LegacyHookRecords.insert(jdbc, "legacy-tenant", "legacy-session");
         Flyway.configure().dataSource(dataSource)
@@ -330,7 +330,7 @@ class ManagedHookAdmissionIndexTest {
 
     private static void backfill(JdbcDataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection()) {
-            new V28__managed_hook_admission_backfill().migrate(new Context() {
+            new V29__managed_hook_admission_backfill().migrate(new Context() {
                 @Override
                 public Configuration getConfiguration() {
                     return null;

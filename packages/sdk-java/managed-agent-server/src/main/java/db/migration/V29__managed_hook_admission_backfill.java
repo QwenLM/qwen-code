@@ -20,7 +20,7 @@ import org.flywaydb.core.api.migration.BaseJavaMigration;
 import org.flywaydb.core.api.migration.Context;
 
 /**
- * Gives the Hook records written before V27 the admission projection that
+ * Gives the Hook records written before V28 the admission projection that
  * the Session store now writes with each first revision. Each projection is
  * read from the record's committed body, verified as the store verifies a
  * resource it reads. A record that cannot be verified keeps no projection,
@@ -28,7 +28,7 @@ import org.flywaydb.core.api.migration.Context;
  * admission can reuse a once key the record consumed; other Sessions are
  * unaffected.
  */
-public class V28__managed_hook_admission_backfill extends BaseJavaMigration {
+public class V29__managed_hook_admission_backfill extends BaseJavaMigration {
     // Rows read per query, so memory does not grow with the record count.
     private static final int PAGE_SIZE = 500;
     static final String BLOCKED_DETAIL = "hook_admission_record_unverified";

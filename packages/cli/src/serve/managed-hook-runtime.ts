@@ -493,7 +493,31 @@ export class ManagedHookRuntime {
       return this.control(runtimeSessionId, control);
     if (this.closing) throw new ManagedHookError('managed_hook_closed');
     if (this.operations.size >= MAX_OPERATIONS)
-      return quotaExceeded(control.operationId);
+      return {
+        operationId: control.operationId,
+        state: 'settled',
+        result: {
+          success: false,
+          outcome: 'blocking',
+          duration: 0,
+          output: {
+            continue: false,
+            decision: 'block',
+            reason: 'Managed Hook receipt capacity is exhausted.',
+            ...(definition.eventName === HookEventName.PermissionRequest
+              ? {
+                  hookSpecificOutput: {
+                    decision: {
+                      behavior: 'deny',
+                      interrupt: true,
+                      message: 'Managed Hook receipt capacity is exhausted.',
+                    },
+                  },
+                }
+              : {}),
+          },
+        },
+      };
     try {
       this.gates.install(grant);
     } catch {
@@ -812,6 +836,19 @@ export class ManagedHookRuntime {
             outcome: 'non_blocking_error',
             duration: 0,
             error: 'Managed hook authorization expired before dispatch.',
+          },
+        };
+        return;
+      }
+      if (!dispatched && !(error instanceof ManagedHookError)) {
+        entry.view = {
+          operationId: control.operationId,
+          state: 'settled',
+          result: {
+            success: false,
+            outcome: 'non_blocking_error',
+            duration: 0,
+            error: 'Managed hook failed before dispatch.',
           },
         };
         return;

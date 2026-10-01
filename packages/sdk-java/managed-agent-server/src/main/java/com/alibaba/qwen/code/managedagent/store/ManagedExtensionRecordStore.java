@@ -165,11 +165,12 @@ public class ManagedExtensionRecordStore {
      * {@code eventCount} events, and its transaction must hold only those
      * events and then its commit marker, as the authority writes it.
      */
-    void apply(String tenantId, String workspaceId, String sessionId,
+    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
+        List<JsonNode> receipts = new ArrayList<>();
         boolean applied = false;
         boolean shaped = true;
         String lastSubtype = null;
@@ -188,6 +189,11 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
+            if ("tool.receipt".equals(event.path("kind").asText())) {
+                require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
+                        "Tool receipt has an invalid journal position");
+                receipts.add(event);
+            }
             if (!"domain.committed".equals(event.path("kind").textValue())) {
                 continue;
             }
@@ -209,6 +215,7 @@ public class ManagedExtensionRecordStore {
         require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
+        return receipts;
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,

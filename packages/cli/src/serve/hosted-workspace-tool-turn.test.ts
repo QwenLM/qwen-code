@@ -2666,8 +2666,18 @@ function hookSession(fire: HostedHookSession['fire']): HostedHookSession {
   return {
     fire,
     broker: { ...broker, runtimeSessionId: 'prompt' },
+    acquire: () => broker.acquire(),
   } as unknown as HostedHookSession;
 }
+
+it('recovers committed tool results through the Hook owner acquisition', async () => {
+  const hooks = hookSession(vi.fn());
+  const acquire = vi.spyOn(hooks, 'acquire');
+  const restored = createTurn(false, undefined, hooks);
+  await restored.resumeCommittedResults();
+  expect(acquire).toHaveBeenCalledOnce();
+  expect(broker.acquire).toHaveBeenCalledOnce();
+});
 
 it('refuses tool dispatch when fail-closed permission evaluation is combined with an allow', async () => {
   const pin = {

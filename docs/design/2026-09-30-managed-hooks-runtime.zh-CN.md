@@ -70,6 +70,16 @@ fallback 与信任决定。
 workspace 和 Session，定位已保存的 Runtime，并在新副作用之前检查 workspace generation
 和 operation grant。Status/cancel 只查询原执行。Owner 丢失或被替换时保持 unknown；
 状态查询不派发替代副作用。
+Hook owner ID 在构造时根据已经持久化的 activation ID 与 epoch 固定。每次 load
+安装新的 activation，因此不会复用已释放的 Runtime Session ID。即使 acquire 仅用于
+目录请求、尚无首条 Hook execution 记录，恢复也能找到 owner。旧随机 owner ID
+继续从 execution 记录恢复；旧版本若没有留下任何 execution 记录，则需要运维恢复。
+替换后的 Hook owner acquire Workspace 前，会释放所有 Hook 记录已终态的旧 owner，
+包括经 status 完成对账的 owner。工具结果 continuation 复用同一 acquire 入口。
+共享的物理工作仍在运行时，Broker 继续拒绝释放。仅明确的
+`runtime_session_not_found` 可以视为 owner 已不存在。Detach 同样释放已结算的旧
+owner。已 attach 的空闲 owner 仍像 MCP 一样保留 Workspace 租约；调整该生命周期
+作为独立设计任务处理。
 
 命令复用原生输出、超时和 TERM/KILL 处理。Managed 执行要求 Linux cgroup v2 委派：
 将 `QWEN_MANAGED_HOOK_CGROUP_ROOT` 指向可写且提供 `cgroup.kill` 的 domain。干净的
@@ -80,12 +90,17 @@ launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进�
 
 隔离能力不可用时（包括 macOS 和 Windows），在命令启动前返回
 `managed_hook_command_isolation_unavailable`。日志记录 `not_started_proven` 和
-`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。单个进程组消失不能作为
+`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 SessionStart 和
+UserPromptSubmit，若准入后没有 model attempt、tool intent/receipt 或非 user 消息，
+且没有未决 Hook，显式取消还会持久化结算 Hook 持久化输入 `prompt_id` 对应的已准入
+turn。此前 SessionStart 的取消不能结算后来的 turn。Load 同样修复此前已取消的记录；取消不会丢弃
+模型或工具 continuation。单个进程组消失不能作为
 进程树排空证明。环境继承限于执行必需变量和 recipe 显式条目。Async 准入等待 Runtime
 ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn 共存；未知工作阻塞新准入
 并保留 Runtime hold。
 
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
+执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。单项回执和聚合输出上限均为 60 KiB。
 初始计划（含事件输入、descriptor 和快照引用）超限时，保存有界 blocking 回执及原始
 语义输入的摘要。恢复直接返回该拒绝，不派发或消费 once，即使没有匹配 handler 也能
@@ -97,7 +112,10 @@ HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向�
 则保留原工具和 Hook 回执并停止编排，不写入或重试超限历史记录。
 Runtime 最多同时运行 16 个操作，每个目录最多 128 项 Hook。
 并发额度拒绝保留有界的失败回执，遵守保存的失败策略。Runtime 最多保留 4096 条
-操作回执（含这些拒绝），不淘汰或重放。达到上限后，在安装 grant 前拒绝新执行；
+操作回执（含这些拒绝），不淘汰或重放。达到上限后，在安装 grant 前返回明确的
+blocking 回执，PermissionRequest 始终返回 deny，不受失败策略影响；Harness
+持久化该结果。立即返回的已结算拒绝必须先返回，不能被异步准入成功掩盖。这个永久容量上限区别于临时并发拒绝。容量回收需要持久确认协议，
+留待后续实现；
 未保存的拒绝若丢失响应，查询仍保持 unknown。
 
 ## 模型 activation
@@ -106,6 +124,8 @@ Runtime 最多同时运行 16 个操作，每个目录最多 128 项 Hook。
 Notification、扩展和关闭事件可以领取 `hook_operation` activation，不创建用户 turn、
 任务完成、工具循环或 startup Hook。两种 subject 共用 Session 单调递增的 activation
 epoch。即使 provider 忽略超时取消，scope 也会保持占用直到调用实际结束。
+释放旧 activation 后若安装 Hook activation 失败，控制器仍会恢复 Session activation。
+如果恢复也失败，则在 activation 恢复前拒绝接收新的 prompt。
 
 模型尝试和用量关联原 Hook operation，并在存在时关联原 turn。预算记账沿用 Session
 与 turn 的现有语义；Hook operation 不得重置原预算。本变更不增加金额预算策略或独立
@@ -147,13 +167,13 @@ tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投
 保持原有行为。
 
 变更涉及 Core Hook dispatch/activation/record 校验、CLI Hosted 编排与 Runtime 执行、
-Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V26 将首次
+Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V27 将首次
 准入的日志序号保存为 `first_sequence`，后续修订保持不变。最新已结算目录按该序号选择，
 与原生注册顺序一致；即使旧注册较晚结算，也不受时钟或 UUID 排序影响。
-Migration V27 增加准入列与索引；V28 从经过校验的记录体为 V26 写入的记录回填。
-记录体缺失或损坏的记录不写入 key，V28 按资源缺失的方式阻塞其所属 Session
+Migration V28 增加准入列与索引；V29 从经过校验的记录体为 V27 写入的记录回填。
+记录体缺失或损坏的记录不写入 key，V29 按资源缺失的方式阻塞其所属 Session
 （`BLOCKED_RESOURCE`），使后续准入无法复用该记录已消费的 once key；其他 Session
-不受影响。迁移后不支持再运行早于 V27 的二进制：它写入的 Hook 记录不带这些 key，
+不受影响。迁移后不支持再运行早于 V28 的二进制：它写入的 Hook 记录不带这些 key，
 Session Store 的检查看不到这些记录，但 Session authority 仍在内存中执行这些约束。
 
 ## 验证与验收

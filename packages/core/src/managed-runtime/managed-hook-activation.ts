@@ -296,7 +296,7 @@ export class ManagedHookActivationController {
       () => modelOwners.get(this.session.authority) === scope,
     );
     modelOwners.set(this.session.authority, scope);
-    let changedActivation = false;
+    let restoreActivation = false;
     try {
       if (operation) {
         const authorization =
@@ -311,12 +311,12 @@ export class ManagedHookActivationController {
             'Prompt Hook cannot bypass pending Harness recovery.',
           );
         }
+        restoreActivation = true;
         await this.session.replaceActivation({
           type: 'hook_operation',
           operationId: operation.operationId,
           occurrenceId: operation.occurrenceId,
         });
-        changedActivation = true;
       }
       const activation = this.session.authority.currentActivation;
       if (
@@ -332,7 +332,7 @@ export class ManagedHookActivationController {
     } finally {
       await scope.close();
       try {
-        if (changedActivation) await this.session.replaceActivation();
+        if (restoreActivation) await this.session.replaceActivation();
       } finally {
         modelOwners.delete(this.session.authority);
       }

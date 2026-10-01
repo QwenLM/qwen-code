@@ -295,7 +295,8 @@ export class HostedWorkspaceToolTurn {
   private async acquire(): Promise<void> {
     this.uncertain = true;
     try {
-      await this.broker.acquire();
+      if (this.hooks && !this.mcp) await this.hooks.acquire();
+      else await this.broker.acquire();
       this.acquired = true;
     } catch (cause) {
       if (isRetryableWorkspaceAcquisition(cause)) {
