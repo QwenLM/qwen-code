@@ -1099,6 +1099,127 @@ it('truncates an oversized glob result to a fitting prefix with a narrowing hint
   expect(broker.release).toHaveBeenCalledOnce();
 });
 
+function contextSlot() {
+  return {
+    value: undefined as string | undefined,
+    read() {
+      return this.value;
+    },
+    write(context: string) {
+      this.value = context;
+    },
+  };
+}
+
+function turnWithContext(
+  slot: ReturnType<typeof contextSlot>,
+  prompt = 'prompt',
+) {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    prompt,
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    slot,
+  );
+}
+
+it('reads Workspace instructions once after the first acquisition', async () => {
+  const slot = contextSlot();
+  broker.execute.mockImplementation(async (_id: string, payload: string) => {
+    const parsed = JSON.parse(payload) as {
+      toolName: string;
+      input: { file_path?: string };
+    };
+    if (parsed.input.file_path === 'AGENTS.md')
+      return {
+        executionStatus: 'error',
+        responseParts: [],
+        error: { message: 'File does not exist' },
+      };
+    return {
+      executionStatus: 'success',
+      responseParts: [
+        {
+          text:
+            parsed.input.file_path === 'QWEN.md'
+              ? '# Project Rules\nAlways test.'
+              : 'original result',
+        },
+      ],
+    };
+  });
+  turn = turnWithContext(slot);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(slot.value).toContain('--- Context from: QWEN.md ---');
+  expect(slot.value).toContain('# Project Rules');
+  expect(slot.value).not.toContain('AGENTS.md');
+  // Two context reads precede the model's own dispatch.
+  expect(broker.execute).toHaveBeenCalledTimes(3);
+  await turn.consumeResults();
+  await turn.finish();
+
+  const second = turnWithContext(slot, 'prompt-2');
+  await second.execute(
+    [{ ...calls[0], callId: 'call-next' }],
+    [
+      {
+        functionCall: {
+          id: 'call-next',
+          name: 'read_file',
+          args: { file_path: 'file.txt' },
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  await second.consumeResults();
+  await second.finish();
+  // The fetched context is reused: no further context reads.
+  expect(broker.execute).toHaveBeenCalledTimes(4);
+});
+
+it('never blocks a turn when the Workspace context read fails', async () => {
+  const slot = contextSlot();
+  let first = true;
+  broker.execute.mockImplementation(async () => {
+    if (first) {
+      first = false;
+      throw new Error('Broker transport down');
+    }
+    return {
+      executionStatus: 'success',
+      responseParts: [{ text: 'original result' }],
+    };
+  });
+  turn = turnWithContext(slot);
+  const responses = await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response).toMatchObject({
+    output: 'original result',
+  });
+  expect(slot.value).toBeUndefined();
+  await turn.consumeResults();
+  await turn.finish();
+});
+
 it.each([
   ['file-first', false],
   ['file-last-with-shell', true],

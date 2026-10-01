@@ -33,6 +33,7 @@ export async function runHostedHarnessTextTurn(input: {
     HostedWorkspaceToolTurn,
     'execute' | 'consumeResults' | 'declarations'
   >;
+  workspaceContext?: { read(): string | undefined };
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -79,6 +80,16 @@ export async function runHostedHarnessTextTurn(input: {
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
+    // Safe mode stays on; the Session's Workspace instructions arrive through
+    // the context slot instead of the Harness host's filesystem. getUserMemory
+    // is read per request, so a fetch that lands during the first tool batch
+    // reaches the very next request.
+    let injectedContext: string | undefined;
+    const contextNow = input.workspaceContext?.read();
+    if (contextNow) {
+      config.setUserMemory(contextNow);
+      injectedContext = contextNow;
+    }
     const historyRecords = input.resumeFromToolResults
       ? input.history.slice(
           0,
@@ -123,6 +134,11 @@ export async function runHostedHarnessTextTurn(input: {
       : [{ text: input.prompt }];
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
+      const contextAvailable = input.workspaceContext?.read();
+      if (contextAvailable && contextAvailable !== injectedContext) {
+        config.setUserMemory(contextAvailable);
+        injectedContext = contextAvailable;
+      }
       if (input.toolTurn)
         client.getChat().setTools([
           {

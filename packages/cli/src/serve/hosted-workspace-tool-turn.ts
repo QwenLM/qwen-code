@@ -120,6 +120,19 @@ export interface HostedShellTurnOptions {
   assertWritable(): Promise<void>;
 }
 
+/**
+ * The attached Session's fetched Workspace project instructions. `read`
+ * returns undefined until the first fetch attempt completes; '' means the
+ * Workspace has none. Written at most once per attached Session.
+ */
+export interface HostedWorkspaceContextSlot {
+  read(): string | undefined;
+  write(context: string): void;
+}
+
+/** The instruction files a Hosted turn reads from the Workspace root. */
+export const HOSTED_WORKSPACE_CONTEXT_FILES = ['QWEN.md', 'AGENTS.md'];
+
 function shellHistoryId(executionCallId: string): string {
   const bytes = createHash('sha1')
     .update('qwen-hosted-shell-history/1:')
@@ -289,6 +302,7 @@ export class HostedWorkspaceToolTurn {
     private readonly approval?: HostedApprovalTurnOptions,
     private readonly mcp?: HostedMcpSession,
     private readonly profile?: string,
+    private readonly context?: HostedWorkspaceContextSlot,
   ) {
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -379,6 +393,12 @@ export class HostedWorkspaceToolTurn {
             cause.reason ?? cause.message,
           );
         }
+        // The Workspace is reachable exactly here, before the first dispatch:
+        // read its project instructions once, so this turn's later requests
+        // and every later turn start with them. A read failure never blocks
+        // the tool turn it rode in on.
+        if (!recovering && this.context?.read() === undefined)
+          await this.fetchWorkspaceContext();
       }
     } catch (cause) {
       if (
@@ -389,6 +409,53 @@ export class HostedWorkspaceToolTurn {
         throw cause;
       }
       throw new HostedToolRecoveryRequiredError(cause);
+    }
+  }
+
+  /**
+   * Reads the Workspace's root instruction files through the acquired Runtime
+   * and offers them to the Session's context slot. Best-effort: any failure
+   * leaves the slot untouched and is logged, never thrown into the turn.
+   */
+  private async fetchWorkspaceContext(): Promise<void> {
+    const slot = this.context;
+    if (!slot) return;
+    try {
+      const sections: string[] = [];
+      for (const name of HOSTED_WORKSPACE_CONTEXT_FILES) {
+        const payloadJson = JSON.stringify({
+          toolName: 'read_file',
+          input: { file_path: name },
+        });
+        const callId = randomUUID();
+        const executionCallId = await this.broker.prepare(
+          callId,
+          `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
+          undefined,
+          this.promptId,
+        );
+        const result = await this.broker.execute(
+          executionCallId,
+          payloadJson,
+          new AbortController().signal,
+        );
+        if (result.executionStatus !== 'success') continue;
+        const text = (result.responseParts as Array<{ text?: unknown }>)
+          .flatMap((part) =>
+            part && typeof part.text === 'string' ? [part.text] : [],
+          )
+          .join('\n')
+          .trim();
+        if (text)
+          sections.push(
+            `--- Context from: ${name} ---\n${text}\n--- End of Context from: ${name} ---`,
+          );
+      }
+      slot.write(sections.join('\n\n'));
+    } catch (cause) {
+      writeStderrLineSafe(
+        'qwen serve: Hosted Workspace context read failed: ' + String(cause),
+      );
     }
   }
 

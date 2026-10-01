@@ -1585,7 +1585,10 @@ describe('Hosted Harness no-tool session', () => {
       );
       try {
         expect(descriptor).toBeDefined();
-        expect(execute).toHaveBeenCalledOnce();
+        // The model's Shell call plus the one-time Workspace context reads.
+        expect(execute).toHaveBeenCalledTimes(
+          ending === 'execution-error' ? 2 : 3,
+        );
         expect(close).toHaveBeenCalledOnce();
         await expect(
           fetch(descriptor!.url, {
@@ -3795,7 +3798,9 @@ describe('Hosted Harness tool approvals', () => {
     expect((await answer(clientId, second, 'allow')).status).toBe(200);
     await finished(clientId);
 
-    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(2);
+    // Two turns dispatch one Write each; each attach's first acquisition also
+    // reads the Workspace instruction files (two reads per attach).
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(6);
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
@@ -3902,7 +3907,19 @@ describe('Hosted Harness tool approvals', () => {
         recoveryBlocked: true,
       }),
     );
-    expect(HostedWorkspaceBroker.prototype.prepare).not.toHaveBeenCalled();
+    // The model's Edit was never dispatched: the only dispatches are the
+    // one-time Workspace instruction reads after the first acquisition.
+    const dispatched = vi
+      .mocked(HostedWorkspaceBroker.prototype.execute)
+      .mock.calls.map(
+        ([, payload]) =>
+          (JSON.parse(payload) as { input?: { file_path?: string } }).input
+            ?.file_path,
+      );
+    expect(dispatched.length).toBeGreaterThan(0);
+    expect(
+      dispatched.every((file) => file === 'QWEN.md' || file === 'AGENTS.md'),
+    ).toBe(true);
     expect((await answer('allow')).body.code).toBe(
       'hosted_turn_recovery_required',
     );
@@ -3980,7 +3997,8 @@ describe('Hosted Harness tool approvals', () => {
           recoveryBlocked: true,
         }),
       );
-      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      // The original Edit plus the first attach's two context reads.
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
       await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .set('X-Qwen-Client-Id', clientId)
         .send({})
@@ -4012,7 +4030,8 @@ describe('Hosted Harness tool approvals', () => {
           recoveryBlocked: false,
         });
       });
-      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      // The original Edit plus the first attach's two context reads.
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
       expect(HostedWorkspaceBroker.prototype.fileHistory).toHaveBeenCalledWith(
         expect.objectContaining({
           action: phase === 'pending-snapshot' ? 'snapshot' : 'bind',
@@ -4034,7 +4053,8 @@ describe('Hosted Harness tool approvals', () => {
           ).send({ managedSessionStore: store(), toolProfile: files })
         ).status,
       ).toBe(200);
-      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      // The original Edit plus the first attach's two context reads.
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
       expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
     },
   );
@@ -4050,7 +4070,19 @@ describe('Hosted Harness tool approvals', () => {
         recoveryBlocked: false,
       }),
     );
-    expect(HostedWorkspaceBroker.prototype.prepare).not.toHaveBeenCalled();
+    // The model's Edit was never dispatched: the only dispatches are the
+    // one-time Workspace instruction reads after the first acquisition.
+    const dispatched = vi
+      .mocked(HostedWorkspaceBroker.prototype.execute)
+      .mock.calls.map(
+        ([, payload]) =>
+          (JSON.parse(payload) as { input?: { file_path?: string } }).input
+            ?.file_path,
+      );
+    expect(dispatched.length).toBeGreaterThan(0);
+    expect(
+      dispatched.every((file) => file === 'QWEN.md' || file === 'AGENTS.md'),
+    ).toBe(true);
     expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -4117,7 +4149,8 @@ describe('Hosted Harness tool approvals', () => {
     await submit(second);
     expect((await answer('allow')).status).toBe(200);
     await finished();
-    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+    // The allowed Edit plus the first attach's two context reads.
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
@@ -4187,7 +4220,8 @@ describe('Hosted Harness tool approvals', () => {
     await submit(randomUUID());
     expect((await answer('allow')).status).toBe(200);
     await finished();
-    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+    // The allowed Edit plus the first attach's two context reads.
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
   });
   it.each([
     'success',

@@ -63,6 +63,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
+  type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
@@ -107,6 +108,8 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
+  /** Fetched Workspace instructions; undefined until the first fetch. */
+  workspaceContext?: string;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -683,6 +686,12 @@ async function executeHostedTurn(
       parentUuid = message.uuid;
       return message.uuid;
     };
+    const workspaceContext: HostedWorkspaceContextSlot = {
+      read: () => session.workspaceContext,
+      write: (context) => {
+        session.workspaceContext = context;
+      },
+    };
     toolTurn =
       session.toolProfile && brokerOptions
         ? new HostedWorkspaceToolTurn(
@@ -703,6 +712,7 @@ async function executeHostedTurn(
             },
             session.mcp,
             session.toolProfile,
+            workspaceContext,
           )
         : undefined;
     if (resumeFromToolResults) {
@@ -726,6 +736,7 @@ async function executeHostedTurn(
         prompt: text,
         promptId,
         signal: abort.signal,
+        workspaceContext,
         ...(toolTurn ? { toolTurn } : {}),
         ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
       });
