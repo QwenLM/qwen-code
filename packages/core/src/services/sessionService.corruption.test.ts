@@ -30,6 +30,7 @@ import {
   vi,
 } from 'vitest';
 import { SessionService, SessionStorageEntryError } from './sessionService.js';
+import type { RemoveSessionOptions } from './sessionService.js';
 import { SessionTranscriptIdentityUnavailableError } from './session-writer-lease.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
@@ -66,6 +67,17 @@ function recordFor(
     gitBranch: 'main',
   };
 }
+
+const R1 = JSON.stringify(recordFor('u1', 'user', null));
+const R2 = JSON.stringify(recordFor('u2', 'assistant', 'u1'));
+
+/** One JSONL line: a user record for `uuid` with `fields` overriding its keys. */
+const recordLine = (fields: Record<string, unknown>, uuid = 'u1') =>
+  `${JSON.stringify({ ...recordFor(uuid, 'user', null), ...fields })}\n`;
+const owned = (sessionId: string, cwd: string, uuid = 'u1') =>
+  recordLine({ sessionId, cwd }, uuid);
+
+const read = (file: string) => fs.readFileSync(file, 'utf8');
 
 function writeJsonl(name: string, content: string): string {
   const p = path.join(tmpRoot, name);
@@ -158,11 +170,9 @@ describe('SessionService.readCreationMetadataIfReadable', () => {
 });
 
 describe('SessionService.countSessionMessagesFromPath (corruption recovery)', () => {
-  // The method is private; cast is the cheapest way to test the unit
-  // without exposing it on the public surface. The public
-  // `countSessionMessages(sessionId)` enforces the SESSION_FILE_PATTERN
-  // and project-scoping check before delegating here, neither of which
-  // is what these corruption-recovery tests are about.
+  // Private: the cast tests the unit directly, skipping the public
+  // `countSessionMessages(sessionId)` SESSION_FILE_PATTERN and
+  // project-scoping checks, which these tests are not about.
   type Privates = {
     countSessionMessagesFromPath: (filePath: string) => Promise<number>;
   };
@@ -173,34 +183,26 @@ describe('SessionService.countSessionMessagesFromPath (corruption recovery)', ()
   });
 
   it('counts both records of a `}{`-glued physical line', async () => {
-    // The exact #3606 corruption shape: two well-formed objects glued onto
-    // one line because the writer was interrupted between `JSON.stringify`
-    // and the trailing `\n`.
-    const r1 = JSON.stringify(recordFor('u1', 'user', null));
-    const r2 = JSON.stringify(recordFor('u2', 'assistant', 'u1'));
+    // The exact #3606 shape: the writer was interrupted between
+    // `JSON.stringify` and the trailing `\n`.
     const r3 = JSON.stringify(recordFor('u3', 'user', 'u2'));
-    const file = writeJsonl('glued.jsonl', `${r1}${r2}\n${r3}\n`);
+    const file = writeJsonl('glued.jsonl', `${R1}${R2}\n${r3}\n`);
 
     expect(await svc.countSessionMessagesFromPath(file)).toBe(3);
   });
 
   it('does not zero out the count when a line is valid JSON but not an object', async () => {
-    // Old `JSON.parse + catch { continue }` would skip a bare `null` line
-    // because `null.type` threw. After the parseLineTolerant refactor, a
-    // missing object-filter would propagate that TypeError to the outer
-    // catch and zero the whole count — regression guard.
-    const r1 = JSON.stringify(recordFor('u1', 'user', null));
-    const r2 = JSON.stringify(recordFor('u2', 'assistant', 'u1'));
-    const file = writeJsonl('scalar-line.jsonl', `${r1}\nnull\n${r2}\n`);
+    // Regression guard: without the object filter after the
+    // parseLineTolerant refactor, `null.type` throws to the outer catch and
+    // zeroes the whole count (old `JSON.parse + catch { continue }` skipped it).
+    const file = writeJsonl('scalar-line.jsonl', `${R1}\nnull\n${R2}\n`);
 
     expect(await svc.countSessionMessagesFromPath(file)).toBe(2);
   });
 
   it('deduplicates uuids across recovered fragments', async () => {
-    // Same uuid appearing twice (e.g. record was re-emitted during recovery)
-    // must still count as one logical message.
-    const r1 = JSON.stringify(recordFor('u1', 'user', null));
-    const file = writeJsonl('dup.jsonl', `${r1}${r1}\n`);
+    // A uuid re-emitted during recovery still counts as one message.
+    const file = writeJsonl('dup.jsonl', `${R1}${R1}\n`);
 
     expect(await svc.countSessionMessagesFromPath(file)).toBe(1);
   });
@@ -222,21 +224,25 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
     svc = new SessionService('/tmp/x') as unknown as Privates;
   });
 
+  // A record larger than TAIL_READ_SIZE (64 KiB) whose payload nests a
+  // balanced `{"uuid":"fake-from-payload"}`. The filler is ~80k zeros
+  // (~160 KB) with no quote characters, so the parser's inString state stays
+  // aligned when entering mid-fragment and the trojan is reachable.
+  const giantLine = (uuid: string) =>
+    `{"uuid":"${uuid}","filler":[${new Array(80000).fill(0).join(',')}],` +
+    `"trojan":{"uuid":"fake-from-payload"}}`;
+
   it('returns the latest record uuid from a `}{`-glued tail line', () => {
-    // Critical case: renameSession passes this uuid as the parentUuid of the
-    // synthetic title record. If the tail line is glued and we silently drop
-    // it (old behaviour), parentUuid points at an earlier record and
-    // reconstructHistory truncates the chain on resume.
-    const r1 = JSON.stringify(recordFor('u1', 'user', null));
-    const r2 = JSON.stringify(recordFor('u2', 'assistant', 'u1'));
-    const file = writeJsonl('glued-tail.jsonl', `${r1}${r2}\n`);
+    // renameSession passes this uuid as the synthetic title record's
+    // parentUuid; dropping the glued tail (old behaviour) points it at an
+    // earlier record and reconstructHistory truncates the chain on resume.
+    const file = writeJsonl('glued-tail.jsonl', `${R1}${R2}\n`);
 
     expect(svc.readLastRecordUuid(file)).toBe('u2');
   });
 
   it('walks past a malformed tail line and returns the previous valid uuid', () => {
-    const r1 = JSON.stringify(recordFor('u1', 'user', null));
-    const file = writeJsonl('garbage-tail.jsonl', `${r1}\nnot-json-at-all\n`);
+    const file = writeJsonl('garbage-tail.jsonl', `${R1}\nnot-json-at-all\n`);
 
     expect(svc.readLastRecordUuid(file)).toBe('u1');
   });
@@ -251,69 +257,44 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
   });
 
   it('does not extract a uuid from a payload object inside a partial-tail fragment', () => {
-    // When the last record exceeds TAIL_READ_SIZE (64 KiB), the tail buffer
-    // starts mid-record. Without the boundary guard, _recoverObjectsFromLine
-    // walks the partial fragment with depth starting at 0, finds a balanced
-    // inner `{ "uuid": "fake" }` object inside the record's payload, and
-    // surfaces "fake" as if it were the last top-level uuid. renameSession
-    // would then anchor custom_title.parentUuid at payload data and
+    // The tail buffer starts mid-record. Without the boundary guard,
+    // _recoverObjectsFromLine walks the fragment from depth 0, finds the
+    // inner uuid object and surfaces "fake" as the last top-level uuid;
+    // renameSession would anchor custom_title.parentUuid at payload data and
     // reconstructHistory would truncate the chain on resume.
-    //
-    // Filler is a long array of zeros (no quote characters) so the parser's
-    // inString state stays aligned even when entering mid-fragment, ensuring
-    // the trojan is reachable. ~80k entries → ~160 KB, comfortably above
-    // TAIL_READ_SIZE.
-    const filler = new Array(80000).fill(0).join(',');
-    const giantLine =
-      `{"uuid":"real-last","filler":[${filler}],` +
-      `"trojan":{"uuid":"fake-from-payload"}}`;
-    const file = writeJsonl('big-tail.jsonl', `${giantLine}\n`);
+    const file = writeJsonl('big-tail.jsonl', `${giantLine('real-last')}\n`);
 
-    // We cannot recover "real-last" — it lies before the tail window. The
-    // critical assertion is the absence of the false-positive recovery: the
-    // function must not surface the payload's nested uuid.
+    // "real-last" lies before the tail window and cannot be recovered; the
+    // critical assertion is the absence of the false positive.
     expect(svc.readLastRecordUuid(file)).not.toBe('fake-from-payload');
   });
 
   it('returns the final complete record uuid when a giant partial precedes it in the tail', () => {
-    // Positive twin of the partial-tail test above: after a giant line
-    // whose head is past the tail window, append one normal complete
-    // record. The partial first segment must be discarded, but the
-    // complete record after the in-window `\n` must be recovered. Pins
-    // the desired behaviour — the bare-negative assertion above would
-    // still pass if the function silently skipped every line in the
-    // window and returned `null`.
-    const filler = new Array(80000).fill(0).join(',');
-    const giantLine =
-      `{"uuid":"too-early-to-see","filler":[${filler}],` +
-      `"trojan":{"uuid":"fake-from-payload"}}`;
+    // Positive twin of the test above, which would still pass if every line
+    // in the window were skipped and `null` returned: the partial first
+    // segment is discarded, the complete record after the in-window `\n` is
+    // recovered.
     const finalRecord = JSON.stringify(recordFor('actual-last', 'user', null));
     const file = writeJsonl(
       'big-tail-then-final.jsonl',
-      `${giantLine}\n${finalRecord}\n`,
+      `${giantLine('too-early-to-see')}\n${finalRecord}\n`,
     );
 
     expect(svc.readLastRecordUuid(file)).toBe('actual-last');
   });
 
   it('returns the only record when the tail window starts exactly on a newline boundary', () => {
-    // Boundary case: file is `prev\n<final>\n` where `final\n` is
-    // exactly TAIL_READ_SIZE bytes, so the tail read covers `final\n`
-    // and `readStart - 1` lands on the separating `\n`. The first
-    // split segment is a complete record — not a partial fragment.
-    // An unconditional `lines.shift()` drops the only readable uuid
-    // and `renameSession` writes `custom_title.parentUuid` as `null`,
-    // truncating history on resume. The fix peeks the byte before
-    // `readStart` to distinguish boundary-aligned from mid-line reads.
+    // File is `prev\n<final>\n` with `final\n` exactly TAIL_READ_SIZE bytes,
+    // so `readStart - 1` lands on the separating `\n` and the first split
+    // segment is complete, not partial. An unconditional `lines.shift()`
+    // drops the only readable uuid and renameSession writes
+    // `custom_title.parentUuid` as `null`, truncating history on resume. The
+    // fix peeks the byte before `readStart` to tell the two apart.
     const TAIL_READ_SIZE = 64 * 1024;
-    // Build `final` so that `final + '\n'` is exactly TAIL_READ_SIZE.
-    // `recordFor` produces a stable JSON shape; pad it via an extra
-    // `filler` field tuned so the stringified record + 1 (for the
-    // trailing newline we'll join with) hits the target length.
     const baseFinal = recordFor('boundary-final', 'user', null);
     const baseFinalLen = Buffer.byteLength(JSON.stringify(baseFinal), 'utf8');
-    // The added field looks like `,"filler":"x...x"` — fixed overhead
-    // (everything except the x-run) is 12 bytes: ` , " f i l l e r " : " " ` .
+    // Pad with `,"filler":"x...x"`, whose fixed overhead (everything but the
+    // x-run) is 12 bytes; the final `- 1` leaves room for the newline.
     const fillerLen = TAIL_READ_SIZE - 1 - baseFinalLen - 12;
     expect(fillerLen).toBeGreaterThan(0);
     const finalRecord = JSON.stringify({
@@ -333,45 +314,144 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
 });
 
 describe('SessionService lifecycle maintenance', () => {
+  type State = 'active' | 'archived';
+  type Action = 'delete' | 'archive' | 'unarchive';
   type Privates = {
-    getSessionFilePath: (id: string, state: 'active' | 'archived') => string;
-    getPrSessionPathForState: (
-      id: string,
-      state: 'active' | 'archived',
-    ) => string;
-    getPromptLedgerPathForState: (
-      id: string,
-      state: 'active' | 'archived',
-    ) => string;
-    getWorktreeSessionPathForState: (
-      id: string,
-      state: 'active' | 'archived',
-    ) => string;
+    getSessionFilePath: (id: string, state: State) => string;
+    getPrSessionPathForState: (id: string, state: State) => string;
+    getPromptLedgerPathForState: (id: string, state: State) => string;
+    getWorktreeSessionPathForState: (id: string, state: State) => string;
     sessionBelongsToCurrentProject: (
       sessionId: string,
       cwd: string,
     ) => Promise<boolean>;
+    resolveMaintainableSessionSnapshot: (id: string) => Promise<unknown>;
   };
+  type Harness = { service: SessionService; sessionId: string };
 
-  function createHarness(content: string, state: 'active' | 'archived') {
+  /** The transcript slot an action reads from (delete uses the active one). */
+  const sourceState = (action: Action): State =>
+    action === 'unarchive' ? 'archived' : 'active';
+
+  // Seeds one transcript in `state`; `seed` may be built from the
+  // harness's own session id and cwd.
+  function createHarness(
+    seed: string | ((sessionId: string, cwd: string) => string),
+    state: State,
+  ) {
     const runtimeBaseDir = fs.mkdtempSync(path.join(tmpRoot, 'lifecycle-'));
     const cwd = path.join(runtimeBaseDir, 'workspace');
     fs.mkdirSync(cwd, { recursive: true });
     const service = new SessionService(cwd, { runtimeBaseDir });
     const sessionId = randomUUID();
+    const internals = service as unknown as Privates;
     const paths = {
-      active: (service as unknown as Privates).getSessionFilePath(
-        sessionId,
-        'active',
-      ),
-      archived: (service as unknown as Privates).getSessionFilePath(
-        sessionId,
-        'archived',
-      ),
+      active: internals.getSessionFilePath(sessionId, 'active'),
+      archived: internals.getSessionFilePath(sessionId, 'archived'),
     };
-    fs.mkdirSync(path.dirname(paths[state]), { recursive: true });
-    fs.writeFileSync(paths[state], content);
-    return { service, sessionId, paths, content, cwd };
+    const content = typeof seed === 'string' ? seed : seed(sessionId, cwd);
+    put(paths[state], content);
+    const source = paths[state];
+    const other = paths[state === 'active' ? 'archived' : 'active'];
+    return {
+      service,
+      sessionId,
+      paths,
+      content,
+      cwd,
+      internals,
+      source,
+      other,
+    };
+  }
+
+  function put(file: string, content: string) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  }
+
+  const foreignDir = () => fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
+  /** A seed whose record claims the session but a fresh foreign cwd. */
+  const foreign =
+    (extra: Record<string, unknown> = {}) =>
+    (sessionId: string) =>
+      recordLine({ sessionId, cwd: foreignDir(), ...extra });
+
+  // Makes the next resolveMaintainableSessionSnapshot call run `around` the
+  // real one, to race the filesystem against classification.
+  function interceptSnapshotOnce(
+    service: SessionService,
+    around: (resolve: () => Promise<unknown>) => Promise<unknown>,
+  ) {
+    const internals = service as unknown as Privates;
+    const resolveSnapshot =
+      internals.resolveMaintainableSessionSnapshot.bind(service);
+    vi.spyOn(
+      internals,
+      'resolveMaintainableSessionSnapshot',
+    ).mockImplementationOnce((id) => around(() => resolveSnapshot(id)));
+  }
+
+  /** An assertStorageUnchanged hook that swaps `file` for a replacement. */
+  const replaceWith = (file: string) => async () => {
+    fs.renameSync(file, `${file}.original`);
+    fs.writeFileSync(file, 'replacement');
+  };
+
+  // delete rejects; archive/unarchive resolve with the failure in errors[0].
+  // A string expects that message, a class that instance, an object a match.
+  async function expectFails(
+    { service, sessionId }: Harness,
+    action: Action,
+    expected: string | typeof SessionStorageEntryError | { reason: string },
+    options?: RemoveSessionOptions,
+  ) {
+    if (action === 'delete') {
+      const removal = service.removeSession(sessionId, options);
+      if (typeof expected === 'string')
+        await expect(removal).rejects.toThrow(expected);
+      else if (typeof expected === 'function')
+        await expect(removal).rejects.toBeInstanceOf(expected);
+      else await expect(removal).rejects.toMatchObject(expected);
+      return;
+    }
+    const result = await service[`${action}Sessions`]([sessionId], options);
+    const error = result.errors[0]?.error;
+    if (typeof expected === 'string')
+      expect(error?.message).toContain(expected);
+    else if (typeof expected === 'function')
+      expect(error).toBeInstanceOf(expected);
+    else expect(error).toMatchObject(expected);
+  }
+
+  // delete resolves `moved`; archive/unarchive list the session under
+  // `<action>d` when moved, else under notFound.
+  async function expectOutcome(
+    { service, sessionId }: Harness,
+    action: Action,
+    moved: boolean,
+  ) {
+    if (action === 'delete') {
+      await expect(service.removeSession(sessionId)).resolves.toBe(moved);
+    } else {
+      await expect(
+        service[`${action}Sessions`]([sessionId]),
+      ).resolves.toMatchObject({
+        [moved ? `${action}d` : 'notFound']: [sessionId],
+        errors: [],
+      });
+    }
+  }
+
+  // Seeds an owned readable copy in `readable` and a torn copy in the other.
+  function seedConflict(readable: State) {
+    const damaged: State = readable === 'active' ? 'archived' : 'active';
+    const h = createHarness('', 'active');
+    const torn = `{"uuid":"torn-${damaged}"`;
+    const good = owned(h.sessionId, h.cwd);
+    put(h.paths.active, readable === 'active' ? good : torn);
+    put(h.paths.archived, readable === 'active' ? torn : good);
+    return { ...h, damaged, torn, good };
   }
 
   const unreadableShapes = [
@@ -390,48 +470,33 @@ describe('SessionService lifecycle maintenance', () => {
       expect(fs.existsSync(paths.active)).toBe(false);
     });
 
-    it(`archives an owned ${shape.name} transcript without rewriting it`, async () => {
-      const { service, sessionId, paths, content } = createHarness(
-        shape.content,
-        'active',
-      );
+    for (const [action, from] of [
+      ['archive', 'active'],
+      ['unarchive', 'archived'],
+    ] as const) {
+      it(`${action}s an owned ${shape.name} transcript without rewriting it`, async () => {
+        const { service, sessionId, content, source, other } = createHarness(
+          shape.content,
+          from,
+        );
 
-      const result = await service.archiveSessions([sessionId]);
+        const result = await service[`${action}Sessions`]([sessionId]);
 
-      expect(result).toMatchObject({
-        archived: [sessionId],
-        notFound: [],
-        errors: [],
+        expect(result).toMatchObject({
+          [`${action}d`]: [sessionId],
+          notFound: [],
+          errors: [],
+        });
+        expect(fs.existsSync(source)).toBe(false);
+        expect(read(other)).toBe(content);
       });
-      expect(fs.existsSync(paths.active)).toBe(false);
-      expect(fs.readFileSync(paths.archived, 'utf8')).toBe(content);
-    });
-
-    it(`unarchives an owned ${shape.name} transcript without rewriting it`, async () => {
-      const { service, sessionId, paths, content } = createHarness(
-        shape.content,
-        'archived',
-      );
-
-      const result = await service.unarchiveSessions([sessionId]);
-
-      expect(result).toMatchObject({
-        unarchived: [sessionId],
-        notFound: [],
-        errors: [],
-      });
-      expect(fs.existsSync(paths.archived)).toBe(false);
-      expect(fs.readFileSync(paths.active, 'utf8')).toBe(content);
-    });
+    }
   }
 
   it('maintains an owned legacy child whose parent no longer exists', async () => {
-    const orphanContent = (sessionId: string, cwd: string) =>
+    const orphan = (sessionId: string, cwd: string) =>
+      owned(sessionId, cwd) +
       `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n${JSON.stringify({
         ...recordFor('u2', 'assistant', 'u1'),
         sessionId,
         cwd,
@@ -440,81 +505,54 @@ describe('SessionService lifecycle maintenance', () => {
         systemPayload: { parentSessionId: randomUUID() },
       })}\n`;
 
-    const removal = createHarness('', 'active');
-    fs.writeFileSync(
-      removal.paths.active,
-      orphanContent(removal.sessionId, removal.cwd),
-    );
-    await expect(
-      removal.service.removeSession(removal.sessionId),
-    ).resolves.toBe(true);
-
-    const archive = createHarness('', 'active');
-    fs.writeFileSync(
-      archive.paths.active,
-      orphanContent(archive.sessionId, archive.cwd),
-    );
-    await expect(
-      archive.service.archiveSessions([archive.sessionId]),
-    ).resolves.toMatchObject({ archived: [archive.sessionId], errors: [] });
-
-    const unarchive = createHarness('', 'archived');
-    fs.writeFileSync(
-      unarchive.paths.archived,
-      orphanContent(unarchive.sessionId, unarchive.cwd),
-    );
-    await expect(
-      unarchive.service.unarchiveSessions([unarchive.sessionId]),
-    ).resolves.toMatchObject({
-      unarchived: [unarchive.sessionId],
-      errors: [],
-    });
+    for (const action of ['delete', 'archive', 'unarchive'] as const) {
+      await expectOutcome(
+        createHarness(orphan, sourceState(action)),
+        action,
+        true,
+      );
+    }
   });
 
-  it('preserves default archive conflicts and explicitly keeps the archived copy', async () => {
-    const { service, sessionId, paths } = createHarness('active', 'active');
-    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-    fs.writeFileSync(paths.archived, 'archived');
+  it.each([
+    ['archive', 'archived'],
+    ['unarchive', 'active'],
+  ] as const)(
+    'preserves default %s conflicts and explicitly keeps the %s copy',
+    async (action, kept) => {
+      const { service, sessionId, paths } = createHarness('active', 'active');
+      put(paths.archived, 'archived');
 
-    const defaultResult = await service.archiveSessions([sessionId]);
-    expect(defaultResult.errors).toHaveLength(1);
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe('active');
-    expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
+      const defaultResult = await service[`${action}Sessions`]([sessionId]);
+      expect(defaultResult.errors).toHaveLength(1);
+      expect(read(paths.active)).toBe('active');
+      expect(read(paths.archived)).toBe('archived');
 
-    const repaired = await service.archiveSessions([sessionId], {
-      resolveConflicts: true,
-    });
-    expect(repaired).toMatchObject({
-      archived: [sessionId],
-      resolvedConflicts: [sessionId],
-      errors: [],
-    });
-    expect(fs.existsSync(paths.active)).toBe(false);
-    expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
-  });
+      const repaired = await service[`${action}Sessions`]([sessionId], {
+        resolveConflicts: true,
+      });
+      expect(repaired).toMatchObject({
+        [`${action}d`]: [sessionId],
+        resolvedConflicts: [sessionId],
+        errors: [],
+      });
+      expect(read(paths[kept])).toBe(kept);
+      expect(
+        fs.existsSync(paths[kept === 'active' ? 'archived' : 'active']),
+      ).toBe(false);
+    },
+  );
 
   it.each(['archive', 'unarchive'] as const)(
     'merges pr bindings into the retained copy during %s conflict repair',
     async (action) => {
-      const { service, sessionId, paths, cwd } = createHarness('', 'active');
-      const activeContent = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`;
-      const archivedContent = `${JSON.stringify({
-        ...recordFor('u2', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`;
-      fs.writeFileSync(paths.active, activeContent);
-      fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-      fs.writeFileSync(paths.archived, archivedContent);
-      const internals = service as unknown as Privates;
-      const activePr = internals.getPrSessionPathForState(sessionId, 'active');
-      const archivedPr = internals.getPrSessionPathForState(
-        sessionId,
-        'archived',
+      const { service, sessionId, paths, cwd, internals } = createHarness(
+        owned,
+        'active',
+      );
+      put(paths.archived, owned(sessionId, cwd, 'u2'));
+      const [activePr, archivedPr] = (['active', 'archived'] as const).map(
+        (state) => internals.getPrSessionPathForState(sessionId, state),
       );
       const activeEntry = {
         number: 1,
@@ -544,193 +582,79 @@ describe('SessionService lifecycle maintenance', () => {
     },
   );
 
-  it('preserves default unarchive conflicts and explicitly keeps the active copy', async () => {
-    const { service, sessionId, paths } = createHarness('active', 'active');
-    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-    fs.writeFileSync(paths.archived, 'archived');
+  it.each([
+    ['archived', 'active', 'archive'],
+    ['active', 'archived', 'unarchive'],
+  ] as const)(
+    'does not overwrite a damaged %s copy when the %s copy is readable',
+    async (damaged, readable, action) => {
+      const { service, sessionId, paths, torn } = seedConflict(readable);
 
-    const defaultResult = await service.unarchiveSessions([sessionId]);
-    expect(defaultResult.errors).toHaveLength(1);
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe('active');
-    expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
+      const result = await service[`${action}Sessions`]([sessionId]);
 
-    const repaired = await service.unarchiveSessions([sessionId], {
-      resolveConflicts: true,
-    });
-    expect(repaired).toMatchObject({
-      unarchived: [sessionId],
-      resolvedConflicts: [sessionId],
-      errors: [],
-    });
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe('active');
-    expect(fs.existsSync(paths.archived)).toBe(false);
-  });
+      expect(result.errors).toHaveLength(1);
+      expect(fs.existsSync(paths[readable])).toBe(true);
+      expect(read(paths[damaged])).toBe(torn);
+    },
+  );
 
-  it('does not overwrite a damaged archived copy when the active copy is readable', async () => {
-    const { service, sessionId, paths, cwd } = createHarness('', 'active');
-    fs.writeFileSync(
-      paths.active,
-      `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`,
-    );
-    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-    fs.writeFileSync(paths.archived, '{"uuid":"torn-archived"');
+  it.each([
+    ['archive', 'archived'],
+    ['unarchive', 'active'],
+  ] as const)(
+    'repairs an %s conflict when only the %s copy is readable',
+    async (action, readable) => {
+      const { service, sessionId, paths, damaged, good } =
+        seedConflict(readable);
 
-    const result = await service.archiveSessions([sessionId]);
+      const defaultResult = await service[`${action}Sessions`]([sessionId]);
+      expect(defaultResult.errors).toHaveLength(1);
 
-    expect(result.errors).toHaveLength(1);
-    expect(fs.existsSync(paths.active)).toBe(true);
-    expect(fs.readFileSync(paths.archived, 'utf8')).toBe(
-      '{"uuid":"torn-archived"',
-    );
-  });
-
-  it('repairs an archive conflict when only the archived copy is readable', async () => {
-    const { service, sessionId, paths, cwd } = createHarness(
-      '{"uuid":"torn-active"',
-      'active',
-    );
-    const archivedContent = `${JSON.stringify({
-      ...recordFor('u1', 'user', null),
-      sessionId,
-      cwd,
-    })}\n`;
-    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-    fs.writeFileSync(paths.archived, archivedContent);
-
-    const defaultResult = await service.archiveSessions([sessionId]);
-    expect(defaultResult.errors).toHaveLength(1);
-
-    const repaired = await service.archiveSessions([sessionId], {
-      resolveConflicts: true,
-    });
-    expect(repaired).toMatchObject({
-      archived: [sessionId],
-      resolvedConflicts: [sessionId],
-      errors: [],
-    });
-    expect(fs.existsSync(paths.active)).toBe(false);
-    expect(fs.readFileSync(paths.archived, 'utf8')).toBe(archivedContent);
-  });
-
-  it('does not overwrite a damaged active copy when the archived copy is readable', async () => {
-    const { service, sessionId, paths, cwd } = createHarness('', 'archived');
-    fs.writeFileSync(paths.active, '{"uuid":"torn-active"');
-    fs.writeFileSync(
-      paths.archived,
-      `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`,
-    );
-
-    const result = await service.unarchiveSessions([sessionId]);
-
-    expect(result.errors).toHaveLength(1);
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe('{"uuid":"torn-active"');
-    expect(fs.existsSync(paths.archived)).toBe(true);
-  });
-
-  it('repairs an unarchive conflict when only the active copy is readable', async () => {
-    const { service, sessionId, paths, cwd } = createHarness('', 'active');
-    const activeContent = `${JSON.stringify({
-      ...recordFor('u1', 'user', null),
-      sessionId,
-      cwd,
-    })}\n`;
-    fs.writeFileSync(paths.active, activeContent);
-    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-    fs.writeFileSync(paths.archived, '{"uuid":"torn-archived"');
-
-    const defaultResult = await service.unarchiveSessions([sessionId]);
-    expect(defaultResult.errors).toHaveLength(1);
-
-    const repaired = await service.unarchiveSessions([sessionId], {
-      resolveConflicts: true,
-    });
-    expect(repaired).toMatchObject({
-      unarchived: [sessionId],
-      resolvedConflicts: [sessionId],
-      errors: [],
-    });
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe(activeContent);
-    expect(fs.existsSync(paths.archived)).toBe(false);
-  });
+      const repaired = await service[`${action}Sessions`]([sessionId], {
+        resolveConflicts: true,
+      });
+      expect(repaired).toMatchObject({
+        [`${action}d`]: [sessionId],
+        resolvedConflicts: [sessionId],
+        errors: [],
+      });
+      expect(fs.existsSync(paths[damaged])).toBe(false);
+      expect(read(paths[readable])).toBe(good);
+    },
+  );
 
   it.each(['archive', 'unarchive'] as const)(
     'reclassifies a conflict that appears during %s validation',
     async (action) => {
-      const state = action === 'archive' ? 'active' : 'archived';
-      const { service, sessionId, paths, cwd } = createHarness('', state);
-      const sourcePath = paths[state];
-      const sourceContent = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`;
-      const targetPath = action === 'archive' ? paths.archived : paths.active;
-      const targetContent = 'late conflict';
-      fs.writeFileSync(sourcePath, sourceContent);
-
-      const internals = service as unknown as {
-        resolveMaintainableSessionSnapshot: (id: string) => Promise<unknown>;
-      };
-      const resolveSnapshot =
-        internals.resolveMaintainableSessionSnapshot.bind(service);
-      vi.spyOn(
-        internals,
-        'resolveMaintainableSessionSnapshot',
-      ).mockImplementationOnce(async (id) => {
-        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-        fs.writeFileSync(targetPath, targetContent);
-        return resolveSnapshot(id);
+      const { service, sessionId, source, content, other } = createHarness(
+        owned,
+        sourceState(action),
+      );
+      interceptSnapshotOnce(service, async (resolve) => {
+        put(other, 'late conflict');
+        return resolve();
       });
 
       const result = await service[`${action}Sessions`]([sessionId]);
 
       expect(result.errors).toHaveLength(1);
-      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(sourceContent);
-      expect(fs.readFileSync(targetPath, 'utf8')).toBe(targetContent);
+      expect(read(source)).toBe(content);
+      expect(read(other)).toBe('late conflict');
     },
   );
 
   it.each(['delete', 'unarchive'] as const)(
     'does not %s a readable archived transcript replaced after validation',
     async (action) => {
-      const { service, sessionId, paths, cwd } = createHarness('', 'archived');
-      fs.writeFileSync(
-        paths.archived,
-        `${JSON.stringify({
-          ...recordFor('u1', 'user', null),
-          sessionId,
-          cwd,
-        })}\n`,
-      );
-      const replacement = 'replacement';
-      const assertStorageUnchanged = async () => {
-        fs.renameSync(paths.archived, `${paths.archived}.original`);
-        fs.writeFileSync(paths.archived, replacement);
-      };
+      const h = createHarness(owned, 'archived');
+      const assertStorageUnchanged = replaceWith(h.paths.archived);
 
-      if (action === 'delete') {
-        await expect(
-          service.removeSession(sessionId, { assertStorageUnchanged }),
-        ).rejects.toThrow('changed outside its active writer');
-      } else {
-        const result = await service.unarchiveSessions([sessionId], {
-          assertStorageUnchanged,
-        });
-        expect(result.errors[0]?.error.message).toContain(
-          'changed outside its active writer',
-        );
-      }
+      await expectFails(h, action, 'changed outside its active writer', {
+        assertStorageUnchanged,
+      });
 
-      expect(fs.readFileSync(paths.archived, 'utf8')).toBe(replacement);
-      expect(fs.existsSync(paths.active)).toBe(false);
+      expect(read(h.paths.archived)).toBe('replacement');
+      expect(fs.existsSync(h.paths.active)).toBe(false);
     },
   );
 
@@ -738,287 +662,157 @@ describe('SessionService lifecycle maintenance', () => {
     'does not %s a transcript that disappears and reappears during classification',
     async (action) => {
       const state = action === 'archive' ? 'active' : 'archived';
-      const { service, sessionId, paths, cwd } = createHarness('', state);
-      const sourcePath = paths[state];
-      const originalContent = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`;
-      fs.writeFileSync(sourcePath, originalContent);
-      const replacement = 'replacement';
-
-      const internals = service as unknown as {
-        resolveMaintainableSessionSnapshot: (id: string) => Promise<unknown>;
-      };
-      const resolveSnapshot =
-        internals.resolveMaintainableSessionSnapshot.bind(service);
-      vi.spyOn(
-        internals,
-        'resolveMaintainableSessionSnapshot',
-      ).mockImplementationOnce(async (id) => {
-        fs.renameSync(sourcePath, `${sourcePath}.original`);
-        const snapshot = await resolveSnapshot(id);
-        fs.writeFileSync(sourcePath, replacement);
+      const h = createHarness(owned, state);
+      interceptSnapshotOnce(h.service, async (resolve) => {
+        fs.renameSync(h.source, `${h.source}.original`);
+        const snapshot = await resolve();
+        fs.writeFileSync(h.source, 'replacement');
         return snapshot;
       });
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).resolves.toBe(false);
-      } else {
-        const result = await service[`${action}Sessions`]([sessionId]);
-        expect(result).toMatchObject({
-          notFound: [sessionId],
-          errors: [],
-        });
-      }
+      await expectOutcome(h, action, false);
 
-      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(replacement);
-      expect(fs.readFileSync(`${sourcePath}.original`, 'utf8')).toBe(
-        originalContent,
-      );
-      expect(
-        fs.existsSync(action === 'archive' ? paths.archived : paths.active),
-      ).toBe(false);
+      expect(read(h.source)).toBe('replacement');
+      expect(read(`${h.source}.original`)).toBe(h.content);
+      expect(fs.existsSync(h.other)).toBe(false);
     },
   );
 
   it.each(['delete', 'archive', 'unarchive'] as const)(
     'does not %s a readable transcript whose record identifies another session',
     async (action) => {
-      const state = action === 'unarchive' ? 'archived' : 'active';
-      const { service, sessionId, paths, cwd } = createHarness('', state);
-      const sourcePath = paths[state];
-      const content = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId: randomUUID(),
-        cwd,
-      })}\n`;
-      fs.writeFileSync(sourcePath, content);
+      const h = createHarness(
+        (_id, cwd) => recordLine({ sessionId: randomUUID(), cwd }),
+        sourceState(action),
+      );
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).resolves.toBe(false);
-      } else {
-        await expect(
-          service[`${action}Sessions`]([sessionId]),
-        ).resolves.toMatchObject({
-          notFound: [sessionId],
-          errors: [],
-        });
-      }
+      await expectOutcome(h, action, false);
 
-      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
-      expect(
-        fs.existsSync(action === 'unarchive' ? paths.active : paths.archived),
-      ).toBe(false);
+      expect(read(h.source)).toBe(h.content);
+      expect(fs.existsSync(h.other)).toBe(false);
     },
   );
 
+  // JSON.stringify drops an `undefined` cwd, which leaves the key missing.
   it.each([
     ['missing cwd', undefined],
     ['non-string cwd', 42],
   ] as const)('fails closed on a record with %s', async (_name, cwdValue) => {
     for (const action of ['delete', 'archive', 'unarchive'] as const) {
-      const state = action === 'unarchive' ? 'archived' : 'active';
-      const { service, sessionId, paths } = createHarness('', state);
-      const sourcePath = paths[state];
-      const record = {
-        ...recordFor('u1', 'user', null),
-        sessionId,
-      } as Record<string, unknown>;
-      if (cwdValue === undefined) {
-        delete record['cwd'];
-      } else {
-        record['cwd'] = cwdValue;
-      }
-      fs.writeFileSync(sourcePath, `${JSON.stringify(record)}\n`);
+      const h = createHarness(
+        (sessionId) => recordLine({ sessionId, cwd: cwdValue }),
+        sourceState(action),
+      );
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).rejects.toMatchObject({
-          reason: 'unknown_project',
-        });
-      } else {
-        const result = await service[`${action}Sessions`]([sessionId]);
-        expect(result.errors[0]?.error).toMatchObject({
-          reason: 'unknown_project',
-        });
-      }
-      expect(fs.existsSync(sourcePath)).toBe(true);
+      await expectFails(h, action, { reason: 'unknown_project' });
+      expect(fs.existsSync(h.source)).toBe(true);
       if (action !== 'delete') {
-        expect(
-          fs.existsSync(action === 'archive' ? paths.archived : paths.active),
-        ).toBe(false);
+        expect(fs.existsSync(h.other)).toBe(false);
       }
     }
   });
 
+  // JSON.stringify drops an `undefined` sessionId, which leaves the key missing.
   it.each([
     ['missing session id', undefined],
     ['non-string session id', 42],
   ] as const)(
     'fails closed on a foreign record with %s',
     async (_name, sessionIdValue) => {
-      const { service, sessionId, paths } = createHarness('', 'active');
-      const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
-      const record = {
-        ...recordFor('u1', 'user', null),
-        cwd: foreignCwd,
-      } as Record<string, unknown>;
-      if (sessionIdValue === undefined) {
-        delete record['sessionId'];
-      } else {
-        record['sessionId'] = sessionIdValue;
-      }
-      const content = `${JSON.stringify(record)}\n`;
-      fs.writeFileSync(paths.active, content);
+      const h = createHarness(
+        () => recordLine({ sessionId: sessionIdValue, cwd: foreignDir() }),
+        'active',
+      );
 
-      await expect(service.removeSession(sessionId)).rejects.toMatchObject({
-        reason: 'unknown_project',
-      });
-      expect(fs.readFileSync(paths.active, 'utf8')).toBe(content);
+      await expectFails(h, 'delete', { reason: 'unknown_project' });
+      expect(read(h.paths.active)).toBe(h.content);
     },
   );
 
   it.each(['delete', 'archive', 'unarchive'] as const)(
     'fails closed on mixed foreign and local storage during %s',
     async (action) => {
-      const { service, sessionId, paths, cwd } = createHarness('', 'active');
-      const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
-      const activeContent = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd: foreignCwd,
-      })}\n`;
-      const archivedContent = `${JSON.stringify({
-        ...recordFor('u2', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`;
-      fs.writeFileSync(paths.active, activeContent);
-      fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
-      fs.writeFileSync(paths.archived, archivedContent);
+      const h = createHarness(foreign(), 'active');
+      const archivedContent = owned(h.sessionId, h.cwd, 'u2');
+      put(h.paths.archived, archivedContent);
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).rejects.toMatchObject({
-          reason: 'ambiguous_project',
-        });
-      } else {
-        const result = await service[`${action}Sessions`]([sessionId]);
-        expect(result.errors[0]?.error).toMatchObject({
-          reason: 'ambiguous_project',
-        });
-      }
-      expect(fs.readFileSync(paths.active, 'utf8')).toBe(activeContent);
-      expect(fs.readFileSync(paths.archived, 'utf8')).toBe(archivedContent);
+      await expectFails(h, action, { reason: 'ambiguous_project' });
+      expect(read(h.paths.active)).toBe(h.content);
+      expect(read(h.paths.archived)).toBe(archivedContent);
     },
   );
 
   it.each(['delete', 'archive', 'unarchive'] as const)(
     'fails closed when %s sees another session id without cwd ownership',
     async (action) => {
-      const state = action === 'unarchive' ? 'archived' : 'active';
-      const { service, sessionId, paths } = createHarness('', state);
-      const sourcePath = paths[state];
-      const record = {
-        ...recordFor('u1', 'user', null),
-        sessionId: randomUUID(),
-      } as Record<string, unknown>;
-      delete record['cwd'];
-      const content = `${JSON.stringify(record)}\n`;
-      fs.writeFileSync(sourcePath, content);
+      const h = createHarness(
+        () => recordLine({ sessionId: randomUUID(), cwd: undefined }),
+        sourceState(action),
+      );
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).rejects.toMatchObject({
-          reason: 'unknown_project',
-        });
-      } else {
-        const result = await service[`${action}Sessions`]([sessionId]);
-        expect(result.errors[0]?.error).toMatchObject({
-          reason: 'unknown_project',
-        });
-      }
-      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
+      await expectFails(h, action, { reason: 'unknown_project' });
+      expect(read(h.source)).toBe(h.content);
     },
   );
 
   it('maintains an oversized first physical record without buffering the whole file', async () => {
-    const { service, sessionId, paths } = createHarness('', 'active');
-    const content = 'x'.repeat(1024 * 1024 + 1);
-    fs.writeFileSync(paths.active, content);
+    const h = createHarness('x'.repeat(1024 * 1024 + 1), 'active');
+    const { service, sessionId, paths, content } = h;
 
     await expect(
       service.getMaintainableSessionLocation(sessionId),
     ).resolves.toBe('active');
-    await expect(service.archiveSessions([sessionId])).resolves.toMatchObject({
-      archived: [sessionId],
-      errors: [],
-    });
+    await expectOutcome(h, 'archive', true);
     expect(fs.existsSync(paths.active)).toBe(false);
-    expect(fs.readFileSync(paths.archived, 'utf8')).toBe(content);
+    expect(read(paths.archived)).toBe(content);
   });
 
   it.each(['delete', 'archive', 'unarchive'] as const)(
     'does not %s a just-over-limit readable transcript from another workspace',
     async (action) => {
-      const state = action === 'unarchive' ? 'archived' : 'active';
-      const { service, sessionId, paths } = createHarness('', state);
-      const sourcePath = paths[state];
-      const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
-      const content = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd: foreignCwd,
-        filler: 'x'.repeat(1024 * 1024),
-      })}\n`;
-      expect(Buffer.byteLength(content)).toBeGreaterThan(1024 * 1024);
-      expect(Buffer.byteLength(content)).toBeLessThan(1024 * 1024 + 64 * 1024);
-      fs.writeFileSync(sourcePath, content);
+      const h = createHarness(
+        foreign({ filler: 'x'.repeat(1024 * 1024) }),
+        sourceState(action),
+      );
+      const size = Buffer.byteLength(h.content);
+      expect(size).toBeGreaterThan(1024 * 1024);
+      expect(size).toBeLessThan(1024 * 1024 + 64 * 1024);
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).resolves.toBe(false);
-      } else {
-        await expect(
-          service[`${action}Sessions`]([sessionId]),
-        ).resolves.toMatchObject({ notFound: [sessionId], errors: [] });
-      }
-      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
-      expect(
-        fs.existsSync(action === 'unarchive' ? paths.active : paths.archived),
-      ).toBe(false);
+      await expectOutcome(h, action, false);
+      expect(read(h.source)).toBe(h.content);
+      expect(fs.existsSync(h.other)).toBe(false);
     },
   );
 
   it('fails closed on a readable transcript whose first record exceeds the bounded read window', async () => {
-    const { service, sessionId, paths } = createHarness('', 'active');
-    const foreignCwd = fs.mkdtempSync(path.join(tmpRoot, 'foreign-'));
-    const content = `${JSON.stringify({
-      ...recordFor('u1', 'user', null),
-      sessionId,
-      cwd: foreignCwd,
-      filler: 'x'.repeat(2 * 1024 * 1024),
-    })}\n`;
-    fs.writeFileSync(paths.active, content);
+    const { service, sessionId, paths, content } = createHarness(
+      foreign({ filler: 'x'.repeat(2 * 1024 * 1024) }),
+      'active',
+    );
 
     await expect(
       service.getMaintainableSessionLocation(sessionId),
     ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe(content);
+    expect(read(paths.active)).toBe(content);
   });
+
+  // Seeds a transcript plus prompt ledger in the action's source slot.
+  function ledgerHarness(action: 'archive' | 'unarchive') {
+    const h = createHarness('transcript', sourceState(action));
+    const ledger = (p: string) => p.replace(/\.jsonl$/, '.ledger.jsonl');
+    fs.writeFileSync(ledger(h.source), '{"promptId":"p1"}\n');
+    return {
+      ...h,
+      sourceLedger: ledger(h.source),
+      destinationLedger: ledger(h.other),
+    };
+  }
 
   it.each(['archive', 'unarchive'] as const)(
     'finishes the %s ledger move after the generation closes',
     async (action) => {
-      const state = action === 'archive' ? 'active' : 'archived';
-      const { service, sessionId, paths } = createHarness('transcript', state);
-      const sourcePath = paths[state];
-      const destinationPath =
-        action === 'archive' ? paths.archived : paths.active;
-      const sourceLedger = sourcePath.replace(/\.jsonl$/, '.ledger.jsonl');
-      const destinationLedger = destinationPath.replace(
-        /\.jsonl$/,
-        '.ledger.jsonl',
-      );
-      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const { service, sessionId, sourceLedger, destinationLedger } =
+        ledgerHarness(action);
       const generationChanged = new Error('generation changed');
       const assertCanMutate = vi
         .fn()
@@ -1044,20 +838,10 @@ describe('SessionService lifecycle maintenance', () => {
   it.each(['archive', 'unarchive'] as const)(
     'stops the %s ledger move after cleanup ownership is lost',
     async (action) => {
-      const state = action === 'archive' ? 'active' : 'archived';
-      const { service, sessionId, paths } = createHarness('transcript', state);
-      const sourcePath = paths[state];
-      const destinationPath =
-        action === 'archive' ? paths.archived : paths.active;
-      const sourceLedger = sourcePath.replace(/\.jsonl$/, '.ledger.jsonl');
-      const destinationLedger = destinationPath.replace(
-        /\.jsonl$/,
-        '.ledger.jsonl',
-      );
-      fs.writeFileSync(sourceLedger, '{"promptId":"p1"}\n');
+      const h = ledgerHarness(action);
       const ownershipLost = new Error('writer ownership lost');
 
-      const result = await service[`${action}Sessions`]([sessionId], {
+      const result = await h.service[`${action}Sessions`]([h.sessionId], {
         assertCanMutate: vi.fn(),
         assertCleanupOwned: () => {
           throw ownershipLost;
@@ -1065,47 +849,34 @@ describe('SessionService lifecycle maintenance', () => {
       });
 
       expect(result.errors[0]?.error).toBe(ownershipLost);
-      expect(fs.existsSync(sourcePath)).toBe(false);
-      expect(fs.existsSync(destinationPath)).toBe(true);
-      expect(fs.existsSync(sourceLedger)).toBe(true);
-      expect(fs.existsSync(destinationLedger)).toBe(false);
+      expect(fs.existsSync(h.source)).toBe(false);
+      expect(fs.existsSync(h.other)).toBe(true);
+      expect(fs.existsSync(h.sourceLedger)).toBe(true);
+      expect(fs.existsSync(h.destinationLedger)).toBe(false);
     },
   );
 
   it.each(['archive', 'unarchive'] as const)(
     'reconciles stranded %s sidecars on an exact retry',
     async (action) => {
-      const sourceState = action === 'archive' ? 'active' : 'archived';
-      const destinationState = action === 'archive' ? 'archived' : 'active';
-      const { service, sessionId } = createHarness(
+      const from = sourceState(action);
+      const to: State = action === 'archive' ? 'archived' : 'active';
+      const { service, sessionId, internals } = createHarness(
         action === 'archive' ? '' : '{"uuid":"torn-head"',
-        sourceState,
+        from,
       );
-      const internals = service as unknown as Privates;
-      const sourceWorktree = internals.getWorktreeSessionPathForState(
-        sessionId,
-        sourceState,
-      );
-      const destinationWorktree = internals.getWorktreeSessionPathForState(
-        sessionId,
-        destinationState,
-      );
-      const sourcePr = internals.getPrSessionPathForState(
-        sessionId,
-        sourceState,
-      );
-      const destinationPr = internals.getPrSessionPathForState(
-        sessionId,
-        destinationState,
-      );
-      const sourceLedger = internals.getPromptLedgerPathForState(
-        sessionId,
-        sourceState,
-      );
-      const destinationLedger = internals.getPromptLedgerPathForState(
-        sessionId,
-        destinationState,
-      );
+      const [
+        sourceWorktree,
+        sourcePr,
+        sourceLedger,
+        destinationWorktree,
+        destinationPr,
+        destinationLedger,
+      ] = [from, to].flatMap((state) => [
+        internals.getWorktreeSessionPathForState(sessionId, state),
+        internals.getPrSessionPathForState(sessionId, state),
+        internals.getPromptLedgerPathForState(sessionId, state),
+      ]);
       fs.writeFileSync(sourceWorktree, '{}');
       const pr = {
         number: 123,
@@ -1141,69 +912,46 @@ describe('SessionService lifecycle maintenance', () => {
       expect(fs.existsSync(sourcePr)).toBe(false);
       await expect(readSessionPrs(destinationPr)).resolves.toEqual([pr]);
       expect(fs.existsSync(sourceLedger)).toBe(false);
-      expect(fs.readFileSync(destinationLedger, 'utf8')).toContain(
-        '"promptId":"p1"',
-      );
+      expect(read(destinationLedger)).toContain('"promptId":"p1"');
       expect(assertCanMutate).toHaveBeenCalled();
       expect(assertCleanupOwned).toHaveBeenCalled();
     },
   );
 
   it('rejects an in-place rewrite during ownership classification', async () => {
-    const { service, sessionId, paths, cwd } = createHarness('', 'active');
-    fs.writeFileSync(
-      paths.active,
-      `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`,
+    const { service, paths, sessionId, internals } = createHarness(
+      owned,
+      'active',
     );
     const inode = fs.statSync(paths.active).ino;
-    vi.spyOn(
-      service as unknown as Privates,
-      'sessionBelongsToCurrentProject',
-    ).mockImplementation(async () => {
-      fs.writeFileSync(paths.active, 'replacement');
-      return true;
-    });
+    vi.spyOn(internals, 'sessionBelongsToCurrentProject').mockImplementation(
+      async () => {
+        fs.writeFileSync(paths.active, 'replacement');
+        return true;
+      },
+    );
 
     await expect(
       service.getMaintainableSessionLocation(sessionId),
     ).rejects.toThrow('changed outside its active writer');
     expect(fs.statSync(paths.active).ino).toBe(inode);
-    expect(fs.readFileSync(paths.active, 'utf8')).toBe('replacement');
+    expect(read(paths.active)).toBe('replacement');
   });
 
   it.each(['delete', 'archive', 'unarchive'] as const)(
     'does not %s a readable transcript symlink',
     async (action) => {
-      const state = action === 'unarchive' ? 'archived' : 'active';
-      const { service, sessionId, paths, cwd } = createHarness('', state);
-      const sourcePath = paths[state];
-      const targetPath = `${sourcePath}.target`;
-      const targetContent = `${JSON.stringify({
-        ...recordFor('u1', 'user', null),
-        sessionId,
-        cwd,
-      })}\n`;
-      fs.unlinkSync(sourcePath);
+      const h = createHarness('', sourceState(action));
+      const targetPath = `${h.source}.target`;
+      const targetContent = owned(h.sessionId, h.cwd);
+      fs.unlinkSync(h.source);
       fs.writeFileSync(targetPath, targetContent);
-      fs.symlinkSync(targetPath, sourcePath);
+      fs.symlinkSync(targetPath, h.source);
 
-      if (action === 'delete') {
-        await expect(service.removeSession(sessionId)).rejects.toBeInstanceOf(
-          SessionStorageEntryError,
-        );
-      } else {
-        const result = await service[`${action}Sessions`]([sessionId]);
-        expect(result.errors[0]?.error).toBeInstanceOf(
-          SessionStorageEntryError,
-        );
-      }
+      await expectFails(h, action, SessionStorageEntryError);
 
-      expect(fs.lstatSync(sourcePath).isSymbolicLink()).toBe(true);
-      expect(fs.readFileSync(targetPath, 'utf8')).toBe(targetContent);
+      expect(fs.lstatSync(h.source).isSymbolicLink()).toBe(true);
+      expect(read(targetPath)).toBe(targetContent);
     },
   );
 
@@ -1237,34 +985,16 @@ describe('SessionService lifecycle maintenance', () => {
   it.each(['delete', 'archive', 'unarchive'] as const)(
     'does not %s a damaged transcript replaced after validation',
     async (action) => {
-      const state = action === 'unarchive' ? 'archived' : 'active';
-      const { service, sessionId, paths } = createHarness(
-        '{"uuid":"torn-head"',
-        state,
-      );
-      const sourcePath = paths[state];
-      const replacement = 'replacement';
-      const assertStorageUnchanged = async () => {
-        fs.renameSync(sourcePath, `${sourcePath}.original`);
-        fs.writeFileSync(sourcePath, replacement);
-      };
+      const state = sourceState(action);
+      const h = createHarness('{"uuid":"torn-head"', state);
 
-      if (action === 'delete') {
-        await expect(
-          service.removeSession(sessionId, { assertStorageUnchanged }),
-        ).rejects.toThrow('changed outside its active writer');
-      } else {
-        const result = await service[`${action}Sessions`]([sessionId], {
-          assertStorageUnchanged,
-        });
-        expect(result.errors[0]?.error.message).toContain(
-          'changed outside its active writer',
-        );
-      }
+      await expectFails(h, action, 'changed outside its active writer', {
+        assertStorageUnchanged: replaceWith(h.source),
+      });
 
-      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(replacement);
+      expect(read(h.source)).toBe('replacement');
       expect(
-        fs.existsSync(action === 'archive' ? paths.archived : paths.active),
+        fs.existsSync(action === 'archive' ? h.paths.archived : h.paths.active),
       ).toBe(action !== 'archive' && state === 'active');
     },
   );
