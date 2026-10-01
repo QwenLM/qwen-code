@@ -749,7 +749,9 @@ export function ThreadChat({
             !thread.posts.some(
               (post) =>
                 post.sourceRunId === run.id &&
-                post.text.trim() === run.progress?.outputText?.trim(),
+                (run.closeKind === 'review' ||
+                  run.closeKind === 'blocked' ||
+                  post.text.trim() === run.progress?.outputText?.trim()),
             ),
         )
         .map(

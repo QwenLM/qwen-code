@@ -13972,6 +13972,36 @@ export class Session implements SessionContext {
           callIdAware.setCallId?.(callId);
           toolBuildSucceeded = true;
 
+          if (this.config.getSessionSourceType?.() === 'agent-host') {
+            const guard = this.config.getToolInvocationGuard?.();
+            if (guard) {
+              const invocationContext = getInvocationContext();
+              const decision = await evaluateToolInvocationGuard(guard, {
+                callId,
+                toolName: policyToolName,
+                args: invocation.params as Record<string, unknown>,
+                signal: activeToolAbortSignal,
+                permissionChecked: false,
+                sessionId: this.config.getSessionId(),
+                cwd: this.config.getTargetDir(),
+                ...(invocationContext ? { invocationContext } : {}),
+              });
+              const cancellation = cancelBeforeExecutionIfAborted(toolName);
+              if (cancellation) return cancellation;
+              if (!decision.allowed) {
+                return earlyErrorResponse(
+                  new Error(decision.reason),
+                  toolName,
+                  {
+                    status: 'error',
+                    errorType: ToolErrorType.EXECUTION_DENIED,
+                    executionStatus: 'not_started',
+                  },
+                );
+              }
+            }
+          }
+
           // Production AgentTool always initializes `eventEmitter` on its
           // invocation (`agent.ts:392`). Be defensive about the `undefined`
           // case too so an incomplete/custom AgentTool invocation degrades

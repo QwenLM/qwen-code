@@ -312,8 +312,8 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns true when `name` is in the Config's `disabledTools` set, in
-   * which case `registerTool` / `registerFactory` will skip it. This is
+   * Returns true when Config disables `name` or the Host profile withholds it,
+   * in which case tool registration will skip it. This is
    * the chokepoint for the daemon mutation route at `POST /workspace/
    * tools/:name/enable {enabled:false}`; both
    * built-ins and MCP-discovered tools flow through `registerTool`, so
@@ -323,6 +323,14 @@ export class ToolRegistry {
     name: string,
     aliases: readonly string[] = [],
   ): boolean {
+    if (
+      this.config.getSessionSourceType?.() === 'agent-host' &&
+      name !== ToolNames.READ_FILE &&
+      name !== ToolNames.GREP &&
+      name !== ToolNames.LS
+    ) {
+      return true;
+    }
     const disabledTools = this.config.getDisabledTools();
     const hasExactMatch =
       disabledTools.has(name) ||
@@ -351,7 +359,7 @@ export class ToolRegistry {
       )
     ) {
       debugLogger.info(
-        `Tool "${tool.name}" skipped: present in disabledTools set.`,
+        `Tool "${tool.name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -416,7 +424,7 @@ export class ToolRegistry {
   registerFactory(name: string, factory: ToolFactory): void {
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }
@@ -439,7 +447,7 @@ export class ToolRegistry {
   registerPermissionDeferredFactory(name: string, factory: ToolFactory): void {
     if (this.isToolDisabled(name)) {
       debugLogger.info(
-        `Tool factory "${name}" skipped: present in disabledTools set.`,
+        `Tool factory "${name}" skipped: disabled for this session.`,
       );
       return;
     }

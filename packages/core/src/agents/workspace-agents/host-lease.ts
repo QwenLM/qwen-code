@@ -519,11 +519,12 @@ export async function pickupRunForHost(
           run.lease.expiresAt > now,
       );
     if (held?.agent && held.run.lease) {
+      const attempt = held.run.attempts + 1;
       const assignment = assignmentFor(
         transaction,
         held.agent,
         held.thread,
-        held.run,
+        { ...held.run, attempts: attempt },
         roster,
       );
       const committed =
@@ -538,12 +539,15 @@ export async function pickupRunForHost(
         .map((message) => message.id);
       const lease = {
         ...held.run.lease,
+        leaseId: randomBytes(16).toString('hex'),
+        attempt,
         expiresAt: now + DEFAULT_RUN_LEASE_MS,
       };
       await transaction.writeThread(
         // The host restarted the turn, so its progress restarts too.
         withRun(held.thread, held.run.id, (run) => ({
           ...run,
+          attempts: attempt,
           lease,
           progress: undefined,
           acceptedMessageIds: Array.from(
@@ -622,7 +626,7 @@ export async function pickupRunForHost(
             attempts: candidate.run.attempts + 1,
             startedAt: now,
           }
-        : candidate.run;
+        : { ...candidate.run, attempts: candidate.run.attempts + 1 };
     const lease: RunLease = {
       hostId,
       leaseId: randomBytes(16).toString('hex'),

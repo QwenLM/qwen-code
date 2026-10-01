@@ -2873,6 +2873,11 @@ export async function loadCliConfig(
   };
 
   if (agentHostReadOnly) {
+    configParams.coreTools = [
+      ToolNames.READ_FILE,
+      ToolNames.GREP,
+      ToolNames.LS,
+    ];
     configParams.disableAllHooks = true;
     configParams.mcpServers = {};
     configParams.topTierMcpServers = undefined;

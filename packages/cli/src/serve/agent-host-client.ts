@@ -386,12 +386,14 @@ async function executeAssignment(
   progressHeartbeat.unref?.();
   renew.unref?.();
   let summary: string | undefined;
+  let tokens: number | undefined;
+  const sessionId = agentThreadSessionId(
+    `${credential.hostId}:${assignment.agent.id}`,
+    assignment.threadId,
+  );
+  let sessionReady = false;
   try {
     void flush();
-    const sessionId = agentThreadSessionId(
-      `${credential.hostId}:${assignment.agent.id}`,
-      assignment.threadId,
-    );
     const sourceId = `${credential.hostId}:${assignment.agent.id}`;
     const sessions = new SessionService(options.workspaceCwd);
     const live = options.bridge
@@ -414,6 +416,7 @@ async function executeAssignment(
         });
       }
     }
+    sessionReady = true;
     stream = streamAgentTurn(
       options.bridge,
       sessionId,
@@ -516,11 +519,23 @@ async function executeAssignment(
     updates.abort();
     await stream;
     await flush();
+    tokens = await measureTokens?.();
+    if (sessionReady) {
+      await options.bridge
+        .closeSession(sessionId, undefined, {
+          requireAgentClose: true,
+          agentCloseTimeoutMs: 10_000,
+        })
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `Agent Host could not close session: ${String(error)}`,
+          );
+        });
+    }
   }
   if (!summary) {
     throw new Error('Managed Agent finished without a final answer.');
   }
-  const tokens = await measureTokens?.();
   return {
     threadId: assignment.threadId,
     runId: assignment.runId,
@@ -705,7 +720,7 @@ async function connectAgentHost(
         await sendHeartbeat(savedCredential);
         throw new Error('Invalid or expired Agent Host enrollment token.');
       } catch (credentialError) {
-        if ((credentialError as { status?: number }).status !== 401) {
+        if (!isRevocation(credentialError)) {
           throw credentialError;
         }
         await fs.rm(filePath, { force: true });

@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
-import { isRevocation } from './agent-host-client.js';
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
+import type { AcpSessionBridge } from './acp-session-bridge.js';
+import { isRevocation, startAgentHostConnection } from './agent-host-client.js';
 
 describe('isRevocation', () => {
   // The transport error carries the route's body text as its message.
@@ -37,4 +42,46 @@ describe('isRevocation', () => {
     expect(isRevocation(new TypeError('fetch failed'))).toBe(false);
     expect(isRevocation(undefined)).toBe(false);
   });
+});
+
+it('retains a saved credential when rejoining sees only bare bearer 401s', async () => {
+  const qwenDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pr12582-f1-'));
+  const serverUrl = 'http://127.0.0.1:18582';
+  const workspaceId = 'ws-test';
+  const workspaceCwd = '/pr12582-test';
+  const key = createHash('sha256')
+    .update(`${serverUrl}\0${workspaceId}\0${workspaceCwd}`)
+    .digest('hex');
+  const file = path.join(qwenDir, 'agent-hosts', `${key}.json`);
+  const credential = JSON.stringify({
+    schemaVersion: 1,
+    serverUrl,
+    workspaceId,
+    hostId: 'host-saved',
+    secret: 'saved-test-secret',
+  });
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, credential);
+  const fetchMock = vi.fn(async () =>
+    Response.json({ error: 'Unauthorized' }, { status: 401 }),
+  );
+  vi.stubEnv('QWEN_HOME', qwenDir);
+  vi.stubGlobal('fetch', fetchMock);
+  try {
+    await expect(
+      startAgentHostConnection({
+        bridge: {} as AcpSessionBridge,
+        serverUrl,
+        workspaceId,
+        workspaceCwd,
+        enrollmentToken: 'the-original-ui-join-token',
+      }),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalled();
+    await expect(fs.readFile(file, 'utf8')).resolves.toBe(credential);
+  } finally {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    await fs.rm(qwenDir, { recursive: true, force: true });
+  }
 });

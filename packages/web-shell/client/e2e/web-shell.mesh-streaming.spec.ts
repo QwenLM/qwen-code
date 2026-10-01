@@ -280,23 +280,25 @@ test('mesh shows growing replies before completion, survives reload, and replace
       sourceRunId: run.id,
       authorKind: 'agent',
       authorName: agent.name,
-      text: 'Ready for review.',
+      text: 'Second fragment.',
       at: Date.now(),
     },
   ];
   await expect(
     transcript.getByText('First fragment. Second fragment.', { exact: true }),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   await expect(
-    transcript.getByText('Ready for review.', { exact: true }),
-  ).toBeVisible();
+    transcript.getByText('Second fragment.', { exact: true }),
+  ).toHaveCount(1);
   await expect(page.getByRole('button', { name: '验收并完成' })).toBeVisible();
   await page.reload();
-  const completedReply = transcript.getByText(
-    'First fragment. Second fragment.',
-    { exact: true },
-  );
+  const completedReply = transcript.getByText('Second fragment.', {
+    exact: true,
+  });
   await expect(completedReply).toBeVisible();
+  await expect(
+    transcript.getByText('First fragment. Second fragment.', { exact: true }),
+  ).toHaveCount(0);
   await page.screenshot({
     path: info.outputPath('02-completed.png'),
     animations: 'disabled',

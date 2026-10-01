@@ -10,6 +10,8 @@ The sidebar Agent entry opens the roster, task board, and runtime list. Collabor
 
 Qwen Host execution streams ACP reply, thought, and tool activity for the active prompt. The daemon persists bounded latest snapshots and requires the current Host, lease, and attempt for every update. A final result replaces its live preview; failed or cancelled runs retain partial output. Messages received during a run are queued for a successor turn, and replaying a result does not create duplicate work.
 
+Restarted or taken-over executions receive a new attempt and lease so their spend is counted separately. After each attempt, the Host flushes and closes the live session; later turns resume its persisted history without retaining an active session slot.
+
 This increment exposes only Qwen Code on a managed Host. It neither probes for nor launches Codex or Claude. Those providers require a separate isolated profile that can confine reads to the selected workspace and exclude ambient user MCP servers, plugins, hooks, skills, and credentials.
 
 ## Isolation and connection
@@ -26,4 +28,4 @@ Enrollment, heartbeat, pickup, lease renewal, progress, and result submission al
 
 Attachment lasts for the daemon process lifetime; this is not an OS service installer. A Host handles assignments sequentially. The feature does not synchronize files, open a relay, traverse NAT, or adopt an existing desktop session.
 
-A prior cross-machine Qwen acceptance run connected an x86_64 Linux Host to an arm64 macOS coordinator through an explicitly trusted tunnel, dispatched one read-only task, streamed progress, and returned a file that existed only on the remote checkout. That evidence predates the final isolation fixes; the final PR relies on review and remote CI for those fixes because local test and build runs were intentionally not repeated during closeout.
+Acceptance reports in [the PR review thread](https://github.com/QwenLM/qwen-code/pull/12582) identify the tested source head, environments, model type, and UI evidence. Cross-machine evidence from an earlier head does not validate later source changes.

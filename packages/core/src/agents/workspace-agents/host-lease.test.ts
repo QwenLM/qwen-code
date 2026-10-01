@@ -126,7 +126,8 @@ describe('pickupRunForHost', () => {
     expect(followup.outcomes[0]?.decision.kind).toBe('coalesce');
 
     const replay = (await pickupRunForHost(PROJECT_ROOT, mine, T0 + 1))!;
-    expect(replay.lease.leaseId).toBe(first.lease.leaseId);
+    expect(replay.lease.leaseId).not.toBe(first.lease.leaseId);
+    expect(replay.attempt).toBe(first.attempt + 1);
     expect(replay.prompt).toContain('Also inspect the follow-up.');
     expect(
       await applyHostRunResult(
@@ -204,6 +205,74 @@ describe('pickupRunForHost', () => {
 });
 
 describe('leases', () => {
+  it.each(['same host restart', 'expired lease takeover'])(
+    'charges each execution after %s and rejects the old result',
+    async (replay) => {
+      const firstHost = await host('first', ['qwen']);
+      const secondHost = await host('second', ['qwen']);
+      await placeAgent([firstHost, secondHost]);
+      const threadId = await seedQueued();
+      const startedAt = Date.now();
+      const first = (await pickupRunForHost(
+        PROJECT_ROOT,
+        firstHost,
+        startedAt,
+      ))!;
+      const firstIdentity = {
+        threadId,
+        runId: first.runId,
+        hostId: firstHost,
+        leaseId: first.lease.leaseId,
+        attempt: first.attempt,
+      };
+      await expect(
+        reportHostRunProgress(PROJECT_ROOT, {
+          ...firstIdentity,
+          sequence: 1,
+          stage: 'thinking',
+          detail: '',
+          tokens: 1_050,
+        }),
+      ).resolves.toEqual({ ok: true });
+      const at =
+        startedAt +
+        (replay === 'same host restart' ? 1 : DEFAULT_RUN_LEASE_MS + 1);
+      const next = (await pickupRunForHost(
+        PROJECT_ROOT,
+        replay === 'same host restart' ? firstHost : secondHost,
+        at,
+      ))!;
+      expect(next.attempt).toBe(first.attempt + 1);
+      const result = {
+        status: 'completed' as const,
+        close: { kind: 'review' as const, summary: 'Marker read.' },
+        tokens: 1_050,
+      };
+      await expect(
+        applyHostRunResult(PROJECT_ROOT, { ...firstIdentity, ...result }, at),
+      ).resolves.toMatchObject({ ok: false });
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          {
+            ...firstIdentity,
+            hostId: next.lease.hostId,
+            leaseId: next.lease.leaseId,
+            attempt: next.attempt,
+            ...result,
+          },
+          at,
+        ),
+      ).resolves.toMatchObject({ ok: true });
+      const thread = (await readThread(PROJECT_ROOT, threadId))!;
+      const run = thread.runs[0];
+      expect(run.usageByRound.map((usage) => usage.tokens)).toEqual([
+        1_050, 1_050,
+      ]);
+      expect(thread.tokensUsed).toBe(2_100);
+    },
+  );
+
   it('will not revive an expired lease', async () => {
     const mine = await host('mine', ['qwen']);
     await placeAgent([mine]);
@@ -242,7 +311,7 @@ describe('leases', () => {
         },
         later + 1,
       ),
-    ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+    ).resolves.toEqual({ ok: false, reason: 'attempt_moved_on' });
   });
 
   it('requeues a follow-up that a failed Host turn never received', async () => {

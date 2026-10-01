@@ -5199,6 +5199,7 @@ describe('loadCliConfig with includeDirectories', () => {
       expect.objectContaining({
         targetDir: mockCwd,
         safeMode: true,
+        coreTools: [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.LS],
         includeDirectories: [],
         lsp: { enabled: false },
         disableAllHooks: true,
