@@ -52,6 +52,11 @@
         "responses": {
           "202": {
             "description": "Immutable agent revision published.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -143,6 +148,11 @@
         "responses": {
           "202": {
             "description": "New immutable revision published for this agent.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
