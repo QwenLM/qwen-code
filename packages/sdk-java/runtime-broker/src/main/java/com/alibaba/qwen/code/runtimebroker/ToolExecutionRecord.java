@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.time.Instant;
 import java.util.Map;
-import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 
@@ -11,15 +10,22 @@ public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
 
+    /**
+     * Whether the original Runtime can still answer for this execution after
+     * its dispatch answer was lost: tool v3 and provider references can be
+     * observed and cancelled there, a tool v2 reference cannot.
+     */
+    boolean observableAfterLoss() {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                || ProviderRuntimeProtocol.isReference(reference);
+    }
+
     Map<String, Object> cancellationBeforeDispatch() {
-        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))) {
+        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                && !"deferred_v3".equals(reference.get("dispatchMode"))) {
             return Map.of("executionStatus", "cancelled");
         }
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("executionStatus", "not_started");
-        result.put("responseParts", java.util.List.of());
-        result.put("capture", null);
-        return result;
+        return cancelledBeforeV3Start();
     }
 
     public enum State {
@@ -103,7 +109,8 @@ public final class ToolExecutionRecord {
         if (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !toolCallId.equals(reference.get("callId"))
-                || !requestDigest.equals(reference.get("argsDigest"))) {
+                || !requestDigest.equals("deferred_v3".equals(reference.get("dispatchMode"))
+                        ? reference.get("payloadDigest") : reference.get("argsDigest"))) {
             throw new IllegalArgumentException(
                     "reference identity does not match execution identity");
         }
@@ -335,6 +342,14 @@ public final class ToolExecutionRecord {
         return copy(State.SETTLED, (String) status, nextResult, sequence,
                 cancelRequested, dispatchOwner, dispatchLeaseUntil,
                 dispatchGeneration, version, completionTime);
+    }
+
+    static Map<String, Object> cancelledBeforeV3Start() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("executionStatus", "not_started");
+        result.put("responseParts", java.util.List.of());
+        result.put("capture", null);
+        return result;
     }
 
     public ToolExecutionRecord withUnknown() {

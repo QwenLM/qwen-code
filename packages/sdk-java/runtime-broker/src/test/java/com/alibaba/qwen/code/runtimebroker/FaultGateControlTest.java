@@ -51,6 +51,9 @@ class FaultGateControlTest {
         ToolExecutionRecord settled = rig.awaitExecution(execution,
                 ToolExecutionRecord::isSettled, "settled execution");
         assertEquals("success", settled.getExecutionStatus());
+        assertEquals(java.util.Set.of("sessionId", "promptId", "callId", "argsDigest", "dispatchMode"),
+                settled.getReference().keySet());
+        assertEquals("deferred", settled.getReference().get("dispatchMode"));
         assertEquals(List.of("ran"), rig.marker("control"));
         assertEquals(1, proxy.count("execute"));
 

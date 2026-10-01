@@ -7,7 +7,6 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EXTRACT_NOOP_COOLDOWN_TURNS_ENV,
@@ -15,7 +14,9 @@ import {
   MAX_COOLDOWN_PENDING_HISTORY_ENTRIES,
   MemoryManager,
   resolveExtractNoopCooldownTurns,
+  type ExtractResult,
   type MemoryTaskRecord,
+  type ScheduleSkillReviewParams,
 } from './manager.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
@@ -27,6 +28,7 @@ import {
   getUserAutoMemoryRoot,
   getUserAutoMemoryMetadataPath,
 } from './paths.js';
+import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import * as metadataMigration from './metadata-migration.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -73,6 +75,12 @@ import {
 } from './user-dream.js';
 import * as userDream from './user-dream.js';
 import { runSkillReviewByAgent } from './skillReviewAgentPlanner.js';
+import {
+  content,
+  fnCall,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -92,7 +100,147 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
   } as unknown as Config;
 }
 
-// ─── MemoryManager ────────────────────────────────────────────────────────────
+// A config whose memory-pressure monitor reports `level` (or a live getter).
+const pressureConfig = (
+  level: string | (() => string),
+  extra: Partial<Config> = {},
+) =>
+  makeMockConfig({
+    getMemoryPressureMonitor: vi.fn().mockReturnValue({
+      getPressureLevel:
+        typeof level === 'function'
+          ? vi.fn(level)
+          : vi.fn().mockReturnValue(level),
+    }),
+    ...extra,
+  } as Partial<Config>);
+
+// A promise plus its resolver, for holding a mocked task in flight.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+const extractResult = (
+  sessionId: string,
+  touchedTopics: ExtractResult['touchedTopics'] = [],
+  processedOffset?: number,
+): ExtractResult => ({
+  touchedTopics,
+  cursor: {
+    sessionId,
+    ...(processedOffset === undefined ? {} : { processedOffset }),
+    updatedAt: new Date().toISOString(),
+  },
+});
+
+// scheduleExtract params; a string history is one user turn.
+const extractParams = (
+  projectRoot: string,
+  sessionId: string,
+  history: string | Content[] = 'hi',
+  config?: Config,
+) => ({
+  projectRoot,
+  sessionId,
+  history: typeof history === 'string' ? [userText(history)] : history,
+  ...(config ? { config } : {}),
+});
+
+const reviewParams = (
+  projectRoot: string,
+  overrides: Partial<ScheduleSkillReviewParams> = {},
+): ScheduleSkillReviewParams => ({
+  projectRoot,
+  sessionId: 'sess',
+  history: [userText('hi')],
+  toolCallCount: 25,
+  threshold: 2,
+  skillsModified: false,
+  config: makeMockConfig(),
+  ...overrides,
+});
+
+const fiveSessions = async () =>
+  Array.from({ length: 5 }, (_, i) => `sess-${i}`);
+const emptyDream = () => ({
+  touchedTopics: [],
+  createdEntries: 0,
+  updatedEntries: 0,
+  deletedEntries: 0,
+  dedupedEntries: 0,
+  splitEntries: 0,
+  keywordBackfilled: 0,
+  systemMessage: undefined,
+});
+
+// Schedules a skill review, asserts it was scheduled, returns the final record.
+function reviewToRecord(mgr: MemoryManager, params: ScheduleSkillReviewParams) {
+  const result = mgr.scheduleSkillReview(params);
+  expect(result.status).toBe('scheduled');
+  return result.promise!;
+}
+
+const readMeta = async (projectRoot: string) =>
+  JSON.parse(
+    await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8'),
+  ) as Record<string, unknown> & {
+    lastDreamAt?: string;
+    lastDreamSessionId?: string;
+  };
+
+const FOO_SKILL = '---\ndescription: Foo skill\n---\n# Foo\n';
+
+// The agent CREATES the skills at run time (they did not exist before the
+// review): staging only quarantines newly-created skills, so the mock must
+// write the files when invoked rather than the test pre-creating them.
+const agentCreatesSkills = (contents: string, files: string[]) =>
+  vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+    for (const f of files) {
+      await fs.mkdir(path.dirname(f), { recursive: true });
+      await fs.writeFile(f, contents);
+    }
+    return { touchedSkillFiles: files };
+  });
+
+// Per-case temp project (mocks reset first). With `memory`, managed memory is
+// forced local and scaffolded (at `scaffoldAt`, else now) for the case.
+function useTempProject(prefix: string, memory?: { scaffoldAt?: string }) {
+  const tmp = { tempDir: '', projectRoot: '', skillFilePath: '' };
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    if (memory) {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+    }
+    tmp.tempDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+    tmp.projectRoot = path.join(tmp.tempDir, 'project');
+    await fs.mkdir(tmp.projectRoot, { recursive: true });
+    tmp.skillFilePath = path.join(
+      tmp.projectRoot,
+      '.qwen/skills/auto-skill-foo/SKILL.md',
+    );
+    if (memory) {
+      await ensureAutoMemoryScaffold(
+        tmp.projectRoot,
+        memory.scaffoldAt === undefined
+          ? undefined
+          : new Date(memory.scaffoldAt),
+      );
+    }
+  });
+  afterEach(async () => {
+    if (memory) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      clearAutoMemoryRootCache();
+    }
+    await fs.rm(tmp.tempDir, { recursive: true, force: true });
+  });
+  return tmp;
+}
 
 describe('MemoryManager', () => {
   describe('metadata migration scheduling', () => {
@@ -1409,8 +1557,6 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── drain() ──────────────────────────────────────────────────────────────
-
   describe('drain()', () => {
     it('resolves true immediately when there are no in-flight tasks', async () => {
       const mgr = new MemoryManager();
@@ -1419,55 +1565,20 @@ describe('MemoryManager', () => {
 
     it('resolves false when drain times out while a task is in-flight', async () => {
       const mgr = new MemoryManager();
-      let resolveExtract!: (
-        v: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-      ) => void;
+      const extract = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockReturnValue(extract.promise);
 
-      vi.mocked(runAutoMemoryExtract).mockReturnValue(
-        new Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>>(
-          (resolve) => {
-            resolveExtract = resolve;
-          },
-        ),
-      );
-
-      void mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      void mgr.scheduleExtract(extractParams('/project', 'sess'));
 
       expect(await mgr.drain({ timeoutMs: 20 })).toBe(false);
 
-      resolveExtract({
-        touchedTopics: [],
-        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
-      });
+      extract.resolve(extractResult('sess'));
       expect(await mgr.drain()).toBe(true);
     });
   });
 
-  // ─── scheduleExtract() ────────────────────────────────────────────────────
-
   describe('scheduleExtract()', () => {
-    let tempDir: string;
-    let projectRoot: string;
-
-    beforeEach(async () => {
-      vi.resetAllMocks();
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-      clearAutoMemoryRootCache();
-      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-extract-'));
-      projectRoot = path.join(tempDir, 'project');
-      await fs.mkdir(projectRoot, { recursive: true });
-      await ensureAutoMemoryScaffold(projectRoot);
-    });
-
-    afterEach(async () => {
-      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-      clearAutoMemoryRootCache();
-      await fs.rm(tempDir, { recursive: true, force: true });
-    });
+    const tmp = useTempProject('mgr-extract-', {});
 
     it('does not emit an unhandled rejection when the caller handles a failed extraction', async () => {
       const failure = new Error('extract failed');
@@ -1478,11 +1589,7 @@ describe('MemoryManager', () => {
       try {
         const mgr = new MemoryManager();
         await expect(
-          mgr.scheduleExtract({
-            projectRoot,
-            sessionId: 'sess',
-            history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-          }),
+          mgr.scheduleExtract(extractParams(tmp.projectRoot, 'sess')),
         ).rejects.toBe(failure);
         await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -1768,21 +1875,18 @@ describe('MemoryManager', () => {
     });
 
     it('runs extract and records a completed task', async () => {
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: ['user'],
-        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(
+        extractResult('sess-1', ['user']),
+      );
 
       const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1'),
+      );
 
       expect(result.touchedTopics).toEqual(['user']);
       await mgr.drain();
-      const tasks = mgr.listTasksByType('extract', projectRoot);
+      const tasks = mgr.listTasksByType('extract', tmp.projectRoot);
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
     });
 
@@ -1799,14 +1903,14 @@ describe('MemoryManager', () => {
       const config = makeMockConfig();
 
       await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-1',
         config,
         history: [{ role: 'user', parts: [{ text: 'hi' }] }],
       });
 
       expect(recordUserMutation).toHaveBeenCalledWith(
-        projectRoot,
+        tmp.projectRoot,
         config,
         expect.any(Date),
       );
@@ -1814,22 +1918,18 @@ describe('MemoryManager', () => {
 
     it('records a session mismatch as skipped', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: [],
+        ...extractResult('sess-1'),
         skippedReason: 'session_mismatch',
-        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
       });
       const config = makeMockConfig();
 
       const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1', 'hi', config),
+      );
 
       expect(result.skippedReason).toBe('session_mismatch');
-      expect(mgr.listTasksByType('extract', projectRoot)[0]).toMatchObject({
+      expect(mgr.listTasksByType('extract', tmp.projectRoot)[0]).toMatchObject({
         status: 'skipped',
         progressText: 'Skipped: session mismatch.',
         metadata: { skippedReason: 'session_mismatch' },
@@ -1858,37 +1958,17 @@ describe('MemoryManager', () => {
     ])(
       'skips extraction when history writes to a %s memory file',
       async (_label, filePath, bridged, stringified) => {
-        const writeCall = {
-          name: 'write_file',
-          args: {
-            file_path: path.join(projectRoot, filePath),
-          },
-        };
+        const args = { file_path: path.join(tmp.projectRoot, filePath) };
+        const call = bridged
+          ? fnCall(ToolNames.TOOL_CALL, {
+              name: 'write_file',
+              arguments: stringified ? JSON.stringify(args) : args,
+            })
+          : fnCall('write_file', args);
         const mgr = new MemoryManager();
-        const result = await mgr.scheduleExtract({
-          projectRoot,
-          sessionId: 'sess-1',
-          history: [
-            {
-              role: 'model',
-              parts: [
-                {
-                  functionCall: {
-                    name: bridged ? ToolNames.TOOL_CALL : writeCall.name,
-                    args: bridged
-                      ? {
-                          name: writeCall.name,
-                          arguments: stringified
-                            ? JSON.stringify(writeCall.args)
-                            : writeCall.args,
-                        }
-                      : writeCall.args,
-                  },
-                },
-              ],
-            },
-          ],
-        });
+        const result = await mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', [content('model', call)]),
+        );
 
         expect(result.skippedReason).toBe('memory_tool');
         expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
@@ -1932,7 +2012,7 @@ describe('MemoryManager', () => {
       ];
       const mgr = new MemoryManager();
       const sameTurn = await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-1',
         history: history.slice(0, 3),
       });
@@ -1940,7 +2020,7 @@ describe('MemoryManager', () => {
       expect(sameTurn.skippedReason).toBe('memory_tool');
       expect(runAutoMemoryExtract).not.toHaveBeenCalled();
       const laterTurn = await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-1',
         history: [...history],
       });
@@ -1956,7 +2036,7 @@ describe('MemoryManager', () => {
       });
       const mgr = new MemoryManager();
       const result = await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-1',
         history: [
           {
@@ -2001,7 +2081,7 @@ describe('MemoryManager', () => {
       });
       const mgr = new MemoryManager();
       const rejected = await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-1',
         history: [
           {
@@ -2013,7 +2093,7 @@ describe('MemoryManager', () => {
                   name: 'write_file',
                   args: {
                     file_path: path.join(
-                      projectRoot,
+                      tmp.projectRoot,
                       '.qwen/memory/user/test.md',
                     ),
                   },
@@ -2043,7 +2123,7 @@ describe('MemoryManager', () => {
       // so the gate is absence-of-failure and not "always extract".
       vi.mocked(runAutoMemoryExtract).mockClear();
       const succeeded = await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-2',
         history: [
           {
@@ -2055,7 +2135,7 @@ describe('MemoryManager', () => {
                   name: 'write_file',
                   args: {
                     file_path: path.join(
-                      projectRoot,
+                      tmp.projectRoot,
                       '.qwen/memory/user/test.md',
                     ),
                   },
@@ -2089,7 +2169,7 @@ describe('MemoryManager', () => {
       });
       const mgr = new MemoryManager();
       const result = await mgr.scheduleExtract({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-1',
         history: [
           {
@@ -2140,37 +2220,19 @@ describe('MemoryManager', () => {
     });
 
     it('does not treat an unrelated bridged call as a memory write', async () => {
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: [],
-        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(
+        extractResult('sess-1'),
+      );
       const mgr = new MemoryManager();
 
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: ToolNames.TOOL_CALL,
-                  args: {
-                    name: 'web_fetch',
-                    arguments: {
-                      file_path: path.join(
-                        projectRoot,
-                        '.qwen/memory/user/test.md',
-                      ),
-                    },
-                  },
-                },
-              },
-            ],
-          },
-        ],
+      const file_path = path.join(tmp.projectRoot, '.qwen/memory/user/test.md');
+      const call = fnCall(ToolNames.TOOL_CALL, {
+        name: 'web_fetch',
+        arguments: { file_path },
       });
+      const result = await mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1', [content('model', call)]),
+      );
 
       expect(result.skippedReason).toBeUndefined();
       expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
@@ -2206,7 +2268,7 @@ describe('MemoryManager', () => {
               };
 
         const result = await mgr.scheduleExtract({
-          projectRoot,
+          projectRoot: tmp.projectRoot,
           sessionId: 'sess-1',
           config,
           now,
@@ -2241,7 +2303,7 @@ describe('MemoryManager', () => {
 
         expect(result.skippedReason).toBe('memory_tool');
         expect(recordUserMutation).toHaveBeenCalledWith(
-          projectRoot,
+          tmp.projectRoot,
           config,
           now,
         );
@@ -2249,42 +2311,24 @@ describe('MemoryManager', () => {
     );
 
     it('queues a trailing extract when one is already running', async () => {
-      let resolveFirst!: (
-        v: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-      ) => void;
+      const first = deferred<ExtractResult>();
       vi.mocked(runAutoMemoryExtract)
-        .mockReturnValueOnce(
-          new Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>>(
-            (resolve) => {
-              resolveFirst = resolve;
-            },
-          ),
-        )
-        .mockResolvedValueOnce({
-          touchedTopics: ['reference'],
-          cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
-        });
+        .mockReturnValueOnce(first.promise)
+        .mockResolvedValueOnce(extractResult('sess-1', ['reference']));
 
       const mgr = new MemoryManager();
-      const firstPromise = mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [{ role: 'user', parts: [{ text: 'first' }] }],
-      });
+      const firstPromise = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1', 'first'),
+      );
 
       // Second call while first is in-flight — should be queued
-      const queued = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [{ role: 'user', parts: [{ text: 'second' }] }],
-      });
+      const queued = await mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1', 'second'),
+      );
       expect(queued.skippedReason).toBe('queued');
 
       // Resolve first so queued one can start
-      resolveFirst({
-        touchedTopics: ['user'],
-        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
-      });
+      first.resolve(extractResult('sess-1', ['user']));
       await firstPromise;
       await mgr.drain({ timeoutMs: 1_000 });
 
@@ -2293,27 +2337,20 @@ describe('MemoryManager', () => {
     });
 
     it('isolates state between manager instances', async () => {
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: ['user'],
-        cursor: { sessionId: 'sess-1', updatedAt: new Date().toISOString() },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(
+        extractResult('sess-1', ['user']),
+      );
 
       const mgrA = new MemoryManager();
       const mgrB = new MemoryManager();
 
-      await mgrA.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-a',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      await mgrA.scheduleExtract(extractParams(tmp.projectRoot, 'sess-a'));
       await mgrA.drain();
 
-      expect(mgrA.listTasksByType('extract', projectRoot)).toHaveLength(1);
-      expect(mgrB.listTasksByType('extract', projectRoot)).toHaveLength(0);
+      expect(mgrA.listTasksByType('extract', tmp.projectRoot)).toHaveLength(1);
+      expect(mgrB.listTasksByType('extract', tmp.projectRoot)).toHaveLength(0);
     });
   });
-
-  // ─── Skill review ─────────────────────────────────────────────────────────
 
   describe('scheduleSkillReview()', () => {
     beforeEach(() => {
@@ -2325,15 +2362,9 @@ describe('MemoryManager', () => {
 
     it('skips below threshold', () => {
       const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [],
-        toolCallCount: 1,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-      });
+      const result = mgr.scheduleSkillReview(
+        reviewParams('/project', { history: [], toolCallCount: 1 }),
+      );
 
       expect(result).toEqual({
         status: 'skipped',
@@ -2344,15 +2375,9 @@ describe('MemoryManager', () => {
 
     it('skips when skills were modified in session', () => {
       const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 20,
-        threshold: 2,
-        skillsModified: true,
-        config: makeMockConfig(),
-      });
+      const result = mgr.scheduleSkillReview(
+        reviewParams('/project', { toolCallCount: 20, skillsModified: true }),
+      );
 
       expect(result).toEqual({
         status: 'skipped',
@@ -2362,23 +2387,11 @@ describe('MemoryManager', () => {
     });
 
     it('skips second call while first is still in-flight (already_running)', async () => {
-      let resolveReview!: (v: { touchedSkillFiles: string[] }) => void;
-      vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(
-        new Promise<{ touchedSkillFiles: string[] }>((resolve) => {
-          resolveReview = resolve;
-        }),
-      );
+      const review = deferred<{ touchedSkillFiles: string[] }>();
+      vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(review.promise);
 
       const mgr = new MemoryManager();
-      const baseParams = {
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user' as const, parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-      };
+      const baseParams = reviewParams('/project');
 
       const first = mgr.scheduleSkillReview(baseParams);
       expect(first.status).toBe('scheduled');
@@ -2394,7 +2407,7 @@ describe('MemoryManager', () => {
       expect(second.taskId).toBe(first.taskId);
 
       // After first completes, a new call is allowed
-      resolveReview({ touchedSkillFiles: [] });
+      review.resolve({ touchedSkillFiles: [] });
       await first.promise;
 
       vi.mocked(runSkillReviewByAgent).mockResolvedValueOnce({
@@ -2407,17 +2420,13 @@ describe('MemoryManager', () => {
 
     it('schedules skill review at threshold', async () => {
       const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 2,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        maxTurns: 3,
-        timeoutMs: 30_000,
-      });
+      const result = mgr.scheduleSkillReview(
+        reviewParams('/project', {
+          toolCallCount: 2,
+          maxTurns: 3,
+          timeoutMs: 30_000,
+        }),
+      );
 
       expect(result.status).toBe('scheduled');
       await result.promise;
@@ -2434,57 +2443,17 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── scheduleSkillReview() confirmBeforePersist ───────────────────────────
-
   describe('scheduleSkillReview() confirmBeforePersist', () => {
-    let tempDir: string;
-    let projectRoot: string;
-    let skillFilePath: string;
-
-    beforeEach(async () => {
-      vi.resetAllMocks();
-      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-confirm-'));
-      projectRoot = path.join(tempDir, 'project');
-      await fs.mkdir(projectRoot, { recursive: true });
-      skillFilePath = path.join(
-        projectRoot,
-        '.qwen',
-        'skills',
-        'auto-skill-foo',
-        'SKILL.md',
-      );
-      // The agent CREATES the skill at run time (it did not exist before the
-      // review) — staging only quarantines newly-created skills, so the mock
-      // must write the file when invoked rather than the test pre-creating it.
-      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
-        await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
-        await fs.writeFile(
-          skillFilePath,
-          '---\ndescription: Foo skill\n---\n# Foo\n',
-        );
-        return { touchedSkillFiles: [skillFilePath] };
-      });
-    });
-
-    afterEach(async () => {
-      await fs.rm(tempDir, { recursive: true, force: true });
+    const tmp = useTempProject('mgr-skill-confirm-');
+    beforeEach(() => {
+      agentCreatesSkills(FOO_SKILL, [tmp.skillFilePath]);
     });
 
     it('stages the skill and records pendingSkills when confirmBeforePersist is true', async () => {
-      const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        confirmBeforePersist: true,
-      });
-
-      expect(result.status).toBe('scheduled');
-      const record = await result.promise!;
+      const record = await reviewToRecord(
+        new MemoryManager(),
+        reviewParams(tmp.projectRoot, { confirmBeforePersist: true }),
+      );
 
       expect(record.status).toBe('completed');
       const pendingSkills = record.metadata?.['pendingSkills'] as
@@ -2494,36 +2463,26 @@ describe('MemoryManager', () => {
       expect(pendingSkills).toHaveLength(1);
 
       // The skill must no longer be under .qwen/skills/
-      await expect(fs.access(skillFilePath)).rejects.toThrow();
+      await expect(fs.access(tmp.skillFilePath)).rejects.toThrow();
     });
 
     it('stages a new skill whose name exists only in the archive', async () => {
       const archivedManifest = path.join(
-        projectRoot,
-        '.qwen',
-        'archived-skills',
-        'auto-skill-foo',
-        'SKILL.md',
+        tmp.projectRoot,
+        '.qwen/archived-skills/auto-skill-foo/SKILL.md',
       );
       await fs.mkdir(path.dirname(archivedManifest), { recursive: true });
       await fs.writeFile(archivedManifest, 'archived');
       const mgr = new MemoryManager();
-      const record = await mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        confirmBeforePersist: true,
-      }).promise!;
+      const record = await mgr.scheduleSkillReview(
+        reviewParams(tmp.projectRoot, { confirmBeforePersist: true }),
+      ).promise!;
 
       const pendingSkills = record.metadata?.['pendingSkills'] as Array<{
         stagedManifestPath: string;
       }>;
       expect(pendingSkills).toHaveLength(1);
-      await expect(fs.access(skillFilePath)).rejects.toThrow();
+      await expect(fs.access(tmp.skillFilePath)).rejects.toThrow();
       await expect(
         fs.access(pendingSkills[0]!.stagedManifestPath),
       ).resolves.toBeUndefined();
@@ -2531,26 +2490,16 @@ describe('MemoryManager', () => {
     });
 
     it('leaves the skill in place and sets no pendingSkills when confirmBeforePersist is false', async () => {
-      const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        confirmBeforePersist: false,
-      });
-
-      expect(result.status).toBe('scheduled');
-      const record = await result.promise!;
+      const record = await reviewToRecord(
+        new MemoryManager(),
+        reviewParams(tmp.projectRoot, { confirmBeforePersist: false }),
+      );
 
       expect(record.status).toBe('completed');
       expect(record.metadata?.['pendingSkills']).toBeUndefined();
 
       // The skill must still be under .qwen/skills/
-      await expect(fs.access(skillFilePath)).resolves.toBeUndefined();
+      await expect(fs.access(tmp.skillFilePath)).resolves.toBeUndefined();
     });
 
     it('falls back to systemMessage as progress text when staging yields zero pending', async () => {
@@ -2558,6 +2507,7 @@ describe('MemoryManager', () => {
       // staging skips it (only new skills are staged) — zero pending, but the
       // edit is still a durable change, so the agent's systemMessage should win
       // over the "without durable changes" default.
+      const skillFilePath = tmp.skillFilePath;
       await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
       await fs.writeFile(skillFilePath, '---\ndescription: Foo\n---\n# Foo\n');
       vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
@@ -2571,22 +2521,13 @@ describe('MemoryManager', () => {
         };
       });
       const mgr = new MemoryManager();
-      const record = await mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        confirmBeforePersist: true,
-      }).promise!;
+      const record = await mgr.scheduleSkillReview(
+        reviewParams(tmp.projectRoot, { confirmBeforePersist: true }),
+      ).promise!;
       expect(record.metadata?.['pendingSkills']).toBeUndefined();
       expect(record.progressText).toBe('Skill review updated 1 file(s).');
     });
   });
-
-  // ─── listTasksByType() ────────────────────────────────────────────────────
 
   describe('listTasksByType()', () => {
     it('returns empty array when no tasks of that type exist', () => {
@@ -2597,25 +2538,14 @@ describe('MemoryManager', () => {
     });
 
     it('filters by projectRoot when provided', async () => {
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: [],
-        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(extractResult('sess'));
 
       const mgr = new MemoryManager();
 
       // Two extractions for different project roots
       await Promise.all([
-        mgr.scheduleExtract({
-          projectRoot: '/project-a',
-          sessionId: 'sess',
-          history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        }),
-        mgr.scheduleExtract({
-          projectRoot: '/project-b',
-          sessionId: 'sess',
-          history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        }),
+        mgr.scheduleExtract(extractParams('/project-a', 'sess')),
+        mgr.scheduleExtract(extractParams('/project-b', 'sess')),
       ]);
       await mgr.drain();
 
@@ -2625,19 +2555,13 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── subscribe() filter ──────────────────────────────────────────────────
-
   describe('subscribe() taskType filter', () => {
-    // The filter exists so high-frequency consumers (the bg-tasks UI
-    // hook, only rendering dream entries) can skip the per-extract
-    // notify entirely. Pin the routing both ways: filtered subscribers
-    // must NOT fire on unrelated transitions, and unfiltered
-    // subscribers must continue to fire on everything.
+    // The filter lets high-frequency consumers (the bg-tasks UI hook, which
+    // renders only dream entries) skip the per-extract notify. Pin the routing
+    // both ways: filtered subscribers must NOT fire on unrelated transitions,
+    // and unfiltered ones must keep firing on everything.
     it('routes notifies to type-filtered subscribers only when taskType matches', async () => {
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: [],
-        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(extractResult('sess'));
       const mgr = new MemoryManager();
       const dreamFilteredFires = vi.fn();
       const extractFilteredFires = vi.fn();
@@ -2646,11 +2570,7 @@ describe('MemoryManager', () => {
       mgr.subscribe(extractFilteredFires, { taskType: 'extract' });
       mgr.subscribe(unfilteredFires);
 
-      await mgr.scheduleExtract({
-        projectRoot: '/p',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      await mgr.scheduleExtract(extractParams('/p', 'sess'));
       await mgr.drain();
 
       // Extract scheduling fires storeWith (1) + completion update (1) = 2 notifies.
@@ -2662,90 +2582,36 @@ describe('MemoryManager', () => {
     });
 
     it('returns an unsubscribe function that drops the filtered listener even when later notifies fire', async () => {
-      // Verify the unsubscribe actually severs the listener — the
-      // earlier version of this test only asserted "not called yet"
-      // without ever firing a notify, so the listener could have
-      // remained attached and the test would still pass.
-      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-        touchedTopics: [],
-        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
-      });
+      // Fires a notify after unsubscribing: an earlier version only asserted
+      // "not called yet" without firing one, so a still-attached listener
+      // would have passed.
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue(extractResult('sess'));
       const mgr = new MemoryManager();
       const fires = vi.fn();
       const unsubscribe = mgr.subscribe(fires, { taskType: 'extract' });
 
       // First extract should fire the listener (storeWith + completion update).
-      await mgr.scheduleExtract({
-        projectRoot: '/p',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      await mgr.scheduleExtract(extractParams('/p', 'sess'));
       await mgr.drain();
       const firesBeforeUnsubscribe = fires.mock.calls.length;
       expect(firesBeforeUnsubscribe).toBeGreaterThanOrEqual(1);
 
       // After unsubscribe, a second extract must not increment the count.
       unsubscribe();
-      await mgr.scheduleExtract({
-        projectRoot: '/p',
-        sessionId: 'sess-2',
-        history: [{ role: 'user', parts: [{ text: 'hi again' }] }],
-      });
+      await mgr.scheduleExtract(extractParams('/p', 'sess-2', 'hi again'));
       await mgr.drain();
       expect(fires.mock.calls.length).toBe(firesBeforeUnsubscribe);
     });
   });
 
-  // ─── skill-review subscription + accept/reject ───────────────────────────
-
   describe('skill-review subscriptions and pending APIs', () => {
-    let tempDir: string;
-    let projectRoot: string;
-    let skillFilePath: string;
-
-    beforeEach(async () => {
-      vi.resetAllMocks();
-      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-pending-'));
-      projectRoot = path.join(tempDir, 'project');
-      await fs.mkdir(projectRoot, { recursive: true });
-      skillFilePath = path.join(
-        projectRoot,
-        '.qwen',
-        'skills',
-        'auto-skill-foo',
-        'SKILL.md',
-      );
-    });
-
-    afterEach(async () => {
-      await fs.rm(tempDir, { recursive: true, force: true });
-    });
+    const tmp = useTempProject('mgr-skill-pending-');
 
     /** Produce a completed skill-review task with one pending skill. */
     async function scheduleAndAwait(mgr: MemoryManager) {
-      // The agent creates the skill at run time (not pre-existing) so staging
-      // quarantines it.
-      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
-        await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
-        await fs.writeFile(
-          skillFilePath,
-          '---\ndescription: Foo skill\n---\n# Foo\n',
-        );
-        return { touchedSkillFiles: [skillFilePath] };
-      });
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        confirmBeforePersist: true,
-      });
-      expect(result.status).toBe('scheduled');
-      const record = await result.promise!;
-      return record;
+      agentCreatesSkills(FOO_SKILL, [tmp.skillFilePath]);
+      const params = { confirmBeforePersist: true };
+      return reviewToRecord(mgr, reviewParams(tmp.projectRoot, params));
     }
 
     it('skill-review notify wakes type-filtered skill-review subscribers', async () => {
@@ -2767,20 +2633,11 @@ describe('MemoryManager', () => {
 
     it('acceptPendingSkillFromTask promotes the skill and removes it from pendingSkills', async () => {
       const mgr = new MemoryManager();
-      const record = await scheduleAndAwait(mgr);
-
-      const taskId = record.id;
+      const taskId = (await scheduleAndAwait(mgr)).id;
       await mgr.acceptPendingSkillFromTask(taskId, 'auto-skill-foo');
 
       // The skill must now exist at its final path under .qwen/skills/
-      const finalPath = path.join(
-        projectRoot,
-        '.qwen',
-        'skills',
-        'auto-skill-foo',
-        'SKILL.md',
-      );
-      await expect(fs.access(finalPath)).resolves.toBeUndefined();
+      await expect(fs.access(tmp.skillFilePath)).resolves.toBeUndefined();
 
       // The task record must reflect 0 remaining pending skills
       const updated = mgr.getTask(taskId);
@@ -2790,27 +2647,16 @@ describe('MemoryManager', () => {
 
     it('rejectPendingSkillFromTask deletes the staged skill and removes it from pendingSkills', async () => {
       const mgr = new MemoryManager();
-      const record = await scheduleAndAwait(mgr);
-
-      const taskId = record.id;
+      const taskId = (await scheduleAndAwait(mgr)).id;
       await mgr.rejectPendingSkillFromTask(taskId, 'auto-skill-foo');
 
       // The skill must NOT exist under .qwen/skills/
-      const finalPath = path.join(
-        projectRoot,
-        '.qwen',
-        'skills',
-        'auto-skill-foo',
-        'SKILL.md',
-      );
-      await expect(fs.access(finalPath)).rejects.toThrow();
+      await expect(fs.access(tmp.skillFilePath)).rejects.toThrow();
 
       // The staged dir must also be gone
       const stagedPath = path.join(
-        projectRoot,
-        '.qwen',
-        'pending-skills',
-        'auto-skill-foo',
+        tmp.projectRoot,
+        '.qwen/pending-skills/auto-skill-foo',
       );
       await expect(fs.access(stagedPath)).rejects.toThrow();
 
@@ -2824,25 +2670,12 @@ describe('MemoryManager', () => {
       const mgr = new MemoryManager();
       const names = ['auto-skill-a', 'auto-skill-b', 'auto-skill-c'];
       const files = names.map((n) =>
-        path.join(projectRoot, '.qwen', 'skills', n, 'SKILL.md'),
+        path.join(tmp.projectRoot, '.qwen', 'skills', n, 'SKILL.md'),
       );
-      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
-        for (const f of files) {
-          await fs.mkdir(path.dirname(f), { recursive: true });
-          await fs.writeFile(f, '---\ndescription: x\n---\n# x\n');
-        }
-        return { touchedSkillFiles: files };
-      });
-      const record = await mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config: makeMockConfig(),
-        confirmBeforePersist: true,
-      }).promise!;
+      agentCreatesSkills('---\ndescription: x\n---\n# x\n', files);
+      const record = await mgr.scheduleSkillReview(
+        reviewParams(tmp.projectRoot, { confirmBeforePersist: true }),
+      ).promise!;
       const taskId = record.id;
       const pending = record.metadata?.['pendingSkills'] as Array<{
         name: string;
@@ -2862,39 +2695,27 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── scheduleDream() ─────────────────────────────────────────────────────
-
   describe('scheduleDream()', () => {
-    let tempDir: string;
-    let projectRoot: string;
-
-    beforeEach(async () => {
-      vi.resetAllMocks();
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-      clearAutoMemoryRootCache();
-      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-dream-'));
-      projectRoot = path.join(tempDir, 'project');
-      await fs.mkdir(projectRoot, { recursive: true });
-      await ensureAutoMemoryScaffold(
-        projectRoot,
-        new Date('2026-04-01T00:00:00.000Z'),
-      );
-      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
-        touchedTopics: [],
-        createdEntries: 0,
-        updatedEntries: 0,
-        deletedEntries: 0,
-        dedupedEntries: 0,
-        splitEntries: 0,
-        keywordBackfilled: 0,
-        systemMessage: undefined,
-      });
+    const tmp = useTempProject('mgr-dream-', {
+      scaffoldAt: '2026-04-01T00:00:00.000Z',
     });
-
-    afterEach(async () => {
-      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-      clearAutoMemoryRootCache();
-      await fs.rm(tempDir, { recursive: true, force: true });
+    beforeEach(() => {
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue(emptyDream());
+    });
+    const APR1_10 = '2026-04-01T10:00:00.000Z';
+    const dreamParams = (
+      sessionId: string,
+      now: string,
+      minHoursBetweenDreams: number,
+      minSessionsBetweenDreams: number,
+      config = makeMockConfig(),
+    ) => ({
+      projectRoot: tmp.projectRoot,
+      sessionId,
+      config,
+      now: new Date(now),
+      minHoursBetweenDreams,
+      minSessionsBetweenDreams,
     });
 
     it('runs a manual dream through the managed path and releases the lock', async () => {
@@ -2911,11 +2732,15 @@ describe('MemoryManager', () => {
         systemMessage: 'Managed auto-memory dream (agent): consolidated',
       });
 
-      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      const result = await mgr.runManualDream(
+        tmp.projectRoot,
+        config,
+        'sess-1',
+      );
 
       expect(result.systemMessage).toContain('consolidated');
       expect(runManagedAutoMemoryDream).toHaveBeenCalledWith(
-        projectRoot,
+        tmp.projectRoot,
         expect.any(Date),
         config,
         undefined,
@@ -2928,7 +2753,7 @@ describe('MemoryManager', () => {
       );
       // The consolidation lock is released after the run.
       await expect(
-        fs.stat(getAutoMemoryConsolidationLockPath(projectRoot)),
+        fs.stat(getAutoMemoryConsolidationLockPath(tmp.projectRoot)),
       ).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
@@ -2936,11 +2761,15 @@ describe('MemoryManager', () => {
       const mgr = new MemoryManager();
       const config = makeMockConfig();
       await fs.writeFile(
-        getAutoMemoryConsolidationLockPath(projectRoot),
+        getAutoMemoryConsolidationLockPath(tmp.projectRoot),
         String(process.pid),
       );
 
-      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      const result = await mgr.runManualDream(
+        tmp.projectRoot,
+        config,
+        'sess-1',
+      );
 
       expect(result.systemMessage).toContain('already running');
       expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
@@ -2953,12 +2782,16 @@ describe('MemoryManager', () => {
       // orphan blocks /dream for the whole session.
       const mgr = new MemoryManager();
       const config = makeMockConfig();
-      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
       await fs.writeFile(lockPath, String(process.pid));
       const stale = new Date(Date.now() - 2 * 60 * 60 * 1000);
       await fs.utimes(lockPath, stale, stale);
 
-      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      const result = await mgr.runManualDream(
+        tmp.projectRoot,
+        config,
+        'sess-1',
+      );
 
       expect(runManagedAutoMemoryDream).toHaveBeenCalled();
       expect(result.systemMessage ?? '').not.toContain('already running');
@@ -2974,7 +2807,7 @@ describe('MemoryManager', () => {
       // disk owned by our own live PID — dreamLockExists() then reports
       // 'locked' until the staleness window expires. The release is guarded
       // and flagged instead, so the next scheduleDream force-cleans it.
-      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
       const mgr = new MemoryManager(async () => ['sess-9']);
       const config = makeMockConfig();
       vi.mocked(runManagedAutoMemoryDream).mockImplementation(async () => {
@@ -2994,7 +2827,11 @@ describe('MemoryManager', () => {
         };
       });
 
-      const result = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      const result = await mgr.runManualDream(
+        tmp.projectRoot,
+        config,
+        'sess-1',
+      );
       expect(result.systemMessage).toContain('consolidated');
       // The release failed: the lock path is still occupied.
       await expect(fs.stat(lockPath)).resolves.toBeDefined();
@@ -3015,7 +2852,7 @@ describe('MemoryManager', () => {
         systemMessage: undefined,
       });
       const scheduled = await mgr.scheduleDream({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-2',
         config,
         now: new Date('2026-04-02T10:00:00.000Z'),
@@ -3039,7 +2876,7 @@ describe('MemoryManager', () => {
       // min_hours gates return first. runManualDream must force-clean the
       // leaked lock itself or every later /dream falsely reports 'already
       // running' until the staleness window expires.
-      const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+      const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
       const mgr = new MemoryManager(async () => ['sess-9']);
       const config = makeMockConfig();
       vi.mocked(runManagedAutoMemoryDream).mockImplementation(async () => {
@@ -3059,7 +2896,7 @@ describe('MemoryManager', () => {
         };
       });
 
-      const first = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      const first = await mgr.runManualDream(tmp.projectRoot, config, 'sess-1');
       expect(first.systemMessage).toContain('consolidated');
       await expect(fs.stat(lockPath)).resolves.toBeDefined();
 
@@ -3079,7 +2916,11 @@ describe('MemoryManager', () => {
         systemMessage: 'Managed auto-memory dream (agent): consolidated',
       });
 
-      const second = await mgr.runManualDream(projectRoot, config, 'sess-1');
+      const second = await mgr.runManualDream(
+        tmp.projectRoot,
+        config,
+        'sess-1',
+      );
 
       expect(runManagedAutoMemoryDream).toHaveBeenCalledTimes(2);
       expect(second.systemMessage ?? '').not.toContain('already running');
@@ -3089,45 +2930,34 @@ describe('MemoryManager', () => {
     });
 
     it('skips when dream is disabled in config', async () => {
-      const mgr = new MemoryManager(async () => [
-        'sess-0',
-        'sess-1',
-        'sess-2',
-        'sess-3',
-        'sess-4',
-      ]);
+      const mgr = new MemoryManager(fiveSessions);
       const config = makeMockConfig({
         getManagedAutoDreamEnabled: vi.fn().mockReturnValue(false),
       });
 
-      const result = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-5',
-        config,
-        now: new Date('2026-04-01T10:00:00.000Z'),
-        minHoursBetweenDreams: 0,
-        minSessionsBetweenDreams: 1,
-      });
+      const result = await mgr.scheduleDream(
+        dreamParams('sess-5', APR1_10, 0, 1, config),
+      );
 
       expect(result).toEqual({ status: 'skipped', skippedReason: 'disabled' });
     });
 
     it('skips when params.config is omitted entirely', async () => {
-      // Without config, runManagedAutoMemoryDream throws — surfacing
-      // a noisy failed entry in the bg-tasks dialog. The early skip
-      // converts the omitted-config case to the same disabled-skip
-      // path so callers can't accidentally produce visible failures
-      // by leaving config out (the type allows it for test ergonomics).
+      // Without config, runManagedAutoMemoryDream throws, surfacing a noisy
+      // failed entry in the bg-tasks dialog. The early skip routes the
+      // omitted-config case to the same disabled-skip path so callers can't
+      // produce visible failures by leaving config out (the type allows it
+      // for test ergonomics).
       const mgr = new MemoryManager();
       const result = await mgr.scheduleDream({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-no-config',
         // config intentionally omitted
         now: new Date('2026-04-02T10:00:00.000Z'),
       });
       expect(result).toEqual({ status: 'skipped', skippedReason: 'disabled' });
       // Crucially — no record was stored for this skip.
-      expect(mgr.listTasksByType('dream', projectRoot)).toEqual([]);
+      expect(mgr.listTasksByType('dream', tmp.projectRoot)).toEqual([]);
     });
 
     it('skips when called again in the same session', async () => {
@@ -3137,25 +2967,15 @@ describe('MemoryManager', () => {
       const mgr = new MemoryManager(scanner);
 
       const config = makeMockConfig();
-      const first = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-x',
-        config,
-        now: new Date('2026-04-01T10:00:00.000Z'),
-        minHoursBetweenDreams: 0,
-        minSessionsBetweenDreams: 1,
-      });
+      const first = await mgr.scheduleDream(
+        dreamParams('sess-x', APR1_10, 0, 1, config),
+      );
       expect(first.status).toBe('scheduled');
       await first.promise;
 
-      const second = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-x',
-        config,
-        now: new Date('2026-04-01T11:00:00.000Z'),
-        minHoursBetweenDreams: 0,
-        minSessionsBetweenDreams: 1,
-      });
+      const second = await mgr.scheduleDream(
+        dreamParams('sess-x', '2026-04-01T11:00:00.000Z', 0, 1, config),
+      );
       expect(second).toEqual({
         status: 'skipped',
         skippedReason: 'same_session',
@@ -3163,32 +2983,17 @@ describe('MemoryManager', () => {
     });
 
     it('skips when min_hours has not elapsed', async () => {
-      const mgr = new MemoryManager(async () => [
-        'sess-0',
-        'sess-1',
-        'sess-2',
-        'sess-3',
-        'sess-4',
-      ]);
+      const mgr = new MemoryManager(fiveSessions);
 
       // Inject lastDreamAt that is very recent
-      const metaPath = getAutoMemoryMetadataPath(projectRoot);
-      const metadata = JSON.parse(
-        await fs.readFile(metaPath, 'utf-8'),
-      ) as Record<string, unknown>;
-      metadata['lastDreamAt'] = new Date(
-        '2026-04-01T09:00:00.000Z',
-      ).toISOString();
+      const metaPath = getAutoMemoryMetadataPath(tmp.projectRoot);
+      const metadata = await readMeta(tmp.projectRoot);
+      metadata['lastDreamAt'] = '2026-04-01T09:00:00.000Z';
       await fs.writeFile(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
 
-      const result = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-new',
-        config: makeMockConfig(),
-        now: new Date('2026-04-01T10:00:00.000Z'),
-        minHoursBetweenDreams: 24,
-        minSessionsBetweenDreams: 1,
-      });
+      const result = await mgr.scheduleDream(
+        dreamParams('sess-new', APR1_10, 24, 1),
+      );
 
       expect(result).toEqual({ status: 'skipped', skippedReason: 'min_hours' });
     });
@@ -3197,14 +3002,9 @@ describe('MemoryManager', () => {
       // Only 1 session — need 5
       const mgr = new MemoryManager(async () => ['sess-0']);
 
-      const result = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-new',
-        config: makeMockConfig(),
-        now: new Date('2026-04-01T10:00:00.000Z'),
-        minHoursBetweenDreams: 0,
-        minSessionsBetweenDreams: 5,
-      });
+      const result = await mgr.scheduleDream(
+        dreamParams('sess-new', APR1_10, 0, 5),
+      );
 
       expect(result.status).toBe('skipped');
       expect(result.skippedReason).toBe('min_sessions');
@@ -3224,14 +3024,9 @@ describe('MemoryManager', () => {
 
       const mgr = new MemoryManager(async () => ['s0', 's1', 's2', 's3', 's4']);
 
-      const result = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-x',
-        config: makeMockConfig(),
-        now: new Date('2026-04-01T10:00:00.000Z'),
-        minHoursBetweenDreams: 0,
-        minSessionsBetweenDreams: 3,
-      });
+      const result = await mgr.scheduleDream(
+        dreamParams('sess-x', APR1_10, 0, 3),
+      );
 
       expect(result.status).toBe('scheduled');
       const finalRecord = await result.promise;
@@ -3248,19 +3043,15 @@ describe('MemoryManager', () => {
 
       // Lock must be released
       await expect(
-        fs.access(getAutoMemoryConsolidationLockPath(projectRoot)),
+        fs.access(getAutoMemoryConsolidationLockPath(tmp.projectRoot)),
       ).rejects.toThrow();
 
       // Metadata must be updated
-      const meta = JSON.parse(
-        await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8'),
-      ) as { lastDreamSessionId?: string; lastDreamAt?: string };
+      const meta = await readMeta(tmp.projectRoot);
       expect(meta.lastDreamSessionId).toBe('sess-x');
       expect(meta.lastDreamAt).toBe('2026-04-01T10:00:00.000Z');
     });
   });
-
-  // ─── scheduleSkillReview: concurrent extract ──────────────────────────────
 
   describe('scheduleSkillReview(): concurrent extract (checklist 6)', () => {
     it('schedules skill review independently even when extract is already running', async () => {
@@ -3275,24 +3066,20 @@ describe('MemoryManager', () => {
       const config = makeMockConfig();
 
       // Start extract (will stay in-flight)
-      void mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-extract',
-        history: [{ role: 'user', parts: [{ text: 'do some work' }] }],
-        config,
-      });
+      void mgr.scheduleExtract(
+        extractParams(projectRoot, 'sess-extract', 'do some work', config),
+      );
 
       // Skill review must be scheduled independently, not silently dropped
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess-extract',
-        history: [{ role: 'user', parts: [{ text: 'do some work' }] }],
-        toolCallCount: 25,
-        threshold: 20,
-        enabled: true,
-        skillsModified: false,
-        config,
-      });
+      const result = mgr.scheduleSkillReview(
+        reviewParams(projectRoot, {
+          sessionId: 'sess-extract',
+          history: [userText('do some work')],
+          threshold: 20,
+          enabled: true,
+          config,
+        }),
+      );
 
       expect(result.status).toBe('scheduled');
       expect(result.taskId).toBeDefined();
@@ -3307,16 +3094,15 @@ describe('MemoryManager', () => {
         touchedSkillFiles: [],
       });
 
-      const result = mgr.scheduleSkillReview({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [{ role: 'user', parts: [{ text: 'work' }] }],
-        toolCallCount: 25,
-        threshold: 20,
-        enabled: true,
-        skillsModified: false,
-        config,
-      });
+      const result = mgr.scheduleSkillReview(
+        reviewParams(projectRoot, {
+          sessionId: 'sess-1',
+          history: [userText('work')],
+          threshold: 20,
+          enabled: true,
+          config,
+        }),
+      );
 
       expect(result.status).toBe('scheduled');
       expect(result.skippedReason).toBeUndefined();
@@ -3324,166 +3110,98 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── cancelTask() ────────────────────────────────────────────────────────
-
   describe('cancelTask()', () => {
-    let tempDir: string;
-    let projectRoot: string;
-
-    beforeEach(async () => {
-      vi.resetAllMocks();
-      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
-      clearAutoMemoryRootCache();
-      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-cancel-'));
-      projectRoot = path.join(tempDir, 'project');
-      await fs.mkdir(projectRoot, { recursive: true });
-      await ensureAutoMemoryScaffold(
-        projectRoot,
-        new Date('2026-04-01T00:00:00.000Z'),
-      );
+    const tmp = useTempProject('mgr-cancel-', {
+      scaffoldAt: '2026-04-01T00:00:00.000Z',
     });
 
-    afterEach(async () => {
-      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-      clearAutoMemoryRootCache();
-      await fs.rm(tempDir, { recursive: true, force: true });
-    });
-
-    it('aborts the dream fork agent and marks the record cancelled', async () => {
-      // The fork's abort signal is captured here so the test can assert
-      // both the status flip AND the actual signal propagation — only
-      // the latter guarantees runForkedAgent will unwind.
-      let capturedSignal: AbortSignal | undefined;
-      let resolveDreamStarted!: () => void;
-      const dreamStarted = new Promise<void>((r) => {
-        resolveDreamStarted = r;
-      });
-      vi.mocked(runManagedAutoMemoryDream).mockImplementation(
-        async (_root, _now, _config, signal) => {
-          capturedSignal = signal;
-          resolveDreamStarted();
-          // Simulate a long-running dream that respects the signal.
-          await new Promise<void>((_, reject) => {
-            signal?.addEventListener('abort', () =>
-              reject(new Error('aborted')),
-            );
-          });
-          return {
-            touchedTopics: [],
-            createdEntries: 0,
-            updatedEntries: 0,
-            deletedEntries: 0,
-            dedupedEntries: 0,
-            splitEntries: 0,
-            keywordBackfilled: 0,
-            systemMessage: undefined,
-          };
-        },
-      );
-
-      const mgr = new MemoryManager(async () => [
-        'sess-0',
-        'sess-1',
-        'sess-2',
-        'sess-3',
-        'sess-4',
-      ]);
+    // Schedules a dream over five prior sessions.
+    async function startDream() {
+      const mgr = new MemoryManager(fiveSessions);
       const config = makeMockConfig();
       const result = await mgr.scheduleDream({
-        projectRoot,
+        projectRoot: tmp.projectRoot,
         sessionId: 'sess-x',
         config,
         now: new Date('2026-04-02T10:00:00.000Z'),
       });
-      expect(result.status).toBe('scheduled');
-      const taskId = result.taskId!;
+      return { mgr, result, taskId: result.taskId! };
+    }
 
-      // Wait for the fork to actually enter — scheduleDream returns
-      // before lock acquisition + the fork-agent invocation actually
-      // run. Cancelling before the fork enters would race the abort
-      // signal capture and produce a flaky undefined.
-      await dreamStarted;
+    // Mocks a dream that reports entry via `started`, records its abort
+    // signal, then waits for abort and rejects, or resolves with `resolved`.
+    function parkDreamUntilAbort(
+      resolved?: Awaited<ReturnType<typeof runManagedAutoMemoryDream>>,
+    ) {
+      const started = deferred<void>();
+      const seen: { signal?: AbortSignal } = {};
+      vi.mocked(runManagedAutoMemoryDream).mockImplementation(
+        async (_root, _now, _config, signal) => {
+          seen.signal = signal;
+          started.resolve();
+          await new Promise<void>((resolve, reject) => {
+            signal?.addEventListener('abort', () =>
+              resolved ? resolve() : reject(new Error('aborted')),
+            );
+          });
+          return resolved ?? emptyDream();
+        },
+      );
+      return { started: started.promise, seen };
+    }
+
+    it('aborts the dream fork agent and marks the record cancelled', async () => {
+      // The fork's abort signal is captured so the test can assert both the
+      // status flip AND the signal propagation; only the latter guarantees
+      // runForkedAgent will unwind.
+      const dream = parkDreamUntilAbort();
+      const { mgr, result, taskId } = await startDream();
+      expect(result.status).toBe('scheduled');
+
+      // Wait for the fork to enter: scheduleDream returns before lock
+      // acquisition and the fork-agent invocation run, so cancelling earlier
+      // would race the signal capture and flake with undefined.
+      await dream.started;
 
       // Cancel must succeed and synchronously flip status; the fork's
       // unwind happens later via the abort signal.
       const cancelled = mgr.cancelTask(taskId);
       expect(cancelled).toBe(true);
       expect(mgr.getTask(taskId)?.status).toBe('cancelled');
-      expect(capturedSignal?.aborted).toBe(true);
+      expect(dream.seen.signal?.aborted).toBe(true);
 
-      // Drain so the fork-agent rejection lands and runDream's catch
-      // path runs — the user-cancel guard must NOT overwrite to
-      // 'failed'. (Without the guard, the rejected promise sets the
-      // record to failed with error="aborted".)
+      // Drain so the fork-agent rejection lands and runDream's catch path
+      // runs: the user-cancel guard must NOT overwrite to 'failed' (without
+      // it the record becomes failed with error="aborted").
       await mgr.drain({ timeoutMs: 1000 });
       expect(mgr.getTask(taskId)?.status).toBe('cancelled');
     });
 
     it('keeps the record cancelled even when runManagedAutoMemoryDream resolves successfully after abort', async () => {
       // The realistic abort path: runForkedAgent maps
-      // AgentTerminateMode.CANCELLED to a resolved `{status: 'cancelled'}`
-      // rather than a rejection. dreamAgentPlanner is supposed to
-      // rethrow that case, but the manager carries an additional
-      // signal.aborted check after the await as defense in depth.
-      // This test simulates the "resolved despite cancel" scenario by
-      // having the mock RESOLVE on abort instead of rejecting — without
-      // the guard, runDream's success path would overwrite the
-      // user-cancelled record to 'completed' and bump dream metadata
-      // for an aborted run.
-      let resolveStarted!: () => void;
-      const started = new Promise<void>((r) => {
-        resolveStarted = r;
+      // AgentTerminateMode.CANCELLED to a resolved `{status: 'cancelled'}`,
+      // not a rejection. dreamAgentPlanner should rethrow it, but the manager
+      // also checks signal.aborted after the await as defense in depth. The
+      // mock RESOLVES on abort: without the guard, runDream's success path
+      // would overwrite the cancelled record to 'completed' and bump dream
+      // metadata for an aborted run.
+      const dream = parkDreamUntilAbort({
+        ...emptyDream(),
+        updatedEntries: 2,
+        touchedTopics: ['user', 'project'],
+        dedupedEntries: 0,
+        systemMessage: 'Managed auto-memory dream completed.',
       });
-      vi.mocked(runManagedAutoMemoryDream).mockImplementation(
-        async (_root, _now, _config, signal) => {
-          resolveStarted();
-          await new Promise<void>((resolve) => {
-            signal?.addEventListener('abort', () => resolve());
-          });
-          return {
-            touchedTopics: ['user', 'project'],
-            createdEntries: 0,
-            updatedEntries: 2,
-            deletedEntries: 0,
-            dedupedEntries: 0,
-            splitEntries: 0,
-            keywordBackfilled: 0,
-            systemMessage: 'Managed auto-memory dream completed.',
-          };
-        },
-      );
-
-      const mgr = new MemoryManager(async () => [
-        'sess-0',
-        'sess-1',
-        'sess-2',
-        'sess-3',
-        'sess-4',
-      ]);
-      const config = makeMockConfig();
-      const result = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-x',
-        config,
-        now: new Date('2026-04-02T10:00:00.000Z'),
-      });
-      const taskId = result.taskId!;
-      await started;
+      const { mgr, taskId } = await startDream();
+      await dream.started;
       mgr.cancelTask(taskId);
       await mgr.drain({ timeoutMs: 1000 });
 
       expect(mgr.getTask(taskId)?.status).toBe('cancelled');
-      // Metadata write must NOT have happened — lastDreamAt should
-      // still be the scaffold's initial value, not the cancelled-run's
-      // `now`. (Bumping it would suppress the next legitimate dream.)
-      const metaRaw = await fs.readFile(
-        getAutoMemoryMetadataPath(projectRoot),
-        'utf-8',
-      );
-      const meta = JSON.parse(metaRaw) as {
-        lastDreamAt?: string;
-        lastDreamSessionId?: string;
-      };
+      // No metadata write: lastDreamAt must still be the scaffold's value,
+      // not the cancelled run's `now` (bumping it would suppress the next
+      // legitimate dream).
+      const meta = await readMeta(tmp.projectRoot);
       expect(meta.lastDreamAt).not.toBe('2026-04-02T10:00:00.000Z');
       expect(meta.lastDreamSessionId).not.toBe('sess-x');
     });
@@ -3494,35 +3212,11 @@ describe('MemoryManager', () => {
     });
 
     it('returns false for an already-completed dream', async () => {
-      // The dream's natural completion path runs first, marks the
-      // record terminal; a subsequent cancel attempt must no-op rather
-      // than overwrite the recorded outcome (would erase touchedTopics
-      // metadata the user just saw via memory_saved toast).
-      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
-        touchedTopics: [],
-        createdEntries: 0,
-        updatedEntries: 0,
-        deletedEntries: 0,
-        dedupedEntries: 0,
-        splitEntries: 0,
-        keywordBackfilled: 0,
-        systemMessage: undefined,
-      });
-      const mgr = new MemoryManager(async () => [
-        'sess-0',
-        'sess-1',
-        'sess-2',
-        'sess-3',
-        'sess-4',
-      ]);
-      const config = makeMockConfig();
-      const result = await mgr.scheduleDream({
-        projectRoot,
-        sessionId: 'sess-x',
-        config,
-        now: new Date('2026-04-02T10:00:00.000Z'),
-      });
-      const taskId = result.taskId!;
+      // Natural completion marks the record terminal first; a later cancel
+      // must no-op rather than overwrite the outcome (it would erase the
+      // touchedTopics metadata the user just saw via the memory_saved toast).
+      vi.mocked(runManagedAutoMemoryDream).mockResolvedValue(emptyDream());
+      const { mgr, taskId } = await startDream();
       // Drain so the dream completes naturally.
       await mgr.drain({ timeoutMs: 1000 });
       expect(mgr.getTask(taskId)?.status).toBe('completed');
@@ -3531,181 +3225,101 @@ describe('MemoryManager', () => {
     });
   });
 
-  // ─── resetExtractStateForTests() ─────────────────────────────────────────
-
   describe('resetExtractStateForTests()', () => {
     it('clears in-flight extract state so subsequent calls are not blocked', async () => {
-      let resolveExtract!: (
-        v: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-      ) => void;
+      const extract = deferred<ExtractResult>();
       vi.mocked(runAutoMemoryExtract)
-        .mockReturnValueOnce(
-          new Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>>(
-            (resolve) => {
-              resolveExtract = resolve;
-            },
-          ),
-        )
-        .mockResolvedValueOnce({
-          touchedTopics: [],
-          cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
-        });
+        .mockReturnValueOnce(extract.promise)
+        .mockResolvedValueOnce(extractResult('sess'));
 
       const mgr = new MemoryManager();
-      void mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      void mgr.scheduleExtract(extractParams('/project', 'sess'));
 
       mgr.resetExtractStateForTests();
 
       // After reset, a new schedule call should not return 'already_running'
-      const result = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess-2',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await mgr.scheduleExtract(
+        extractParams('/project', 'sess-2'),
+      );
       expect(result.skippedReason).not.toBe('already_running');
 
-      resolveExtract({
-        touchedTopics: [],
-        cursor: { sessionId: 'sess', updatedAt: new Date().toISOString() },
-      });
+      extract.resolve(extractResult('sess'));
     });
   });
 
   // ─── #5147 regression: trailing queue + memory pressure ─────────────────
 
   describe('scheduleExtract #5147', () => {
-    /**
-     * B1: When an extract is already running and a new extract is queued,
-     * superseding the trailing request drops the old params reference (the
-     * old history becomes GC-eligible). Verify that only the latest params
-     * are retained and the trailing extract executes correctly.
-     */
+    const extractUnder = (config: Config) =>
+      new MemoryManager().scheduleExtract(
+        extractParams('/project', 'sess', 'hi', config),
+      );
+
+    // B1: superseding the queued trailing extract drops the old params
+    // reference (its history becomes GC-eligible); only the latest params
+    // are retained and the trailing extract runs with them.
     it('supersedes trailing queue without leaking old history refs', async () => {
       vi.mocked(runAutoMemoryExtract).mockClear();
 
       const mgr = new MemoryManager();
-
-      let resolveFirst: (
-        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-      ) => void;
-      let resolveTrailing: (
-        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-      ) => void;
-      const firstPromise = new Promise<
-        Awaited<ReturnType<typeof runAutoMemoryExtract>>
-      >((r) => {
-        resolveFirst = r;
-      });
-      const trailingPromise = new Promise<
-        Awaited<ReturnType<typeof runAutoMemoryExtract>>
-      >((r) => {
-        resolveTrailing = r;
+      const first = deferred<ExtractResult>();
+      const trailing = deferred<ExtractResult>();
+      const turns = (n: string) => [
+        userText(`${n} history`),
+        modelText(`${n} response`),
+      ];
+      const params = (n: string) => ({
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: turns(n),
       });
 
       // First call → starts running
-      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(firstPromise);
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(first.promise);
 
-      void mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [
-          { role: 'user', parts: [{ text: 'first history' }] },
-          { role: 'model', parts: [{ text: 'first response' }] },
-        ],
-      });
+      void mgr.scheduleExtract(params('first'));
 
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
 
       // Second call while first is running → queues trailing
-      const secondResult = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [
-          { role: 'user', parts: [{ text: 'second history' }] },
-          { role: 'model', parts: [{ text: 'second response' }] },
-        ],
-      });
+      const secondResult = await mgr.scheduleExtract(params('second'));
       expect(secondResult.skippedReason).toBe('queued');
 
       // Third call while first is STILL running → supersedes trailing
-      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(trailingPromise);
-      const thirdResult = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [
-          { role: 'user', parts: [{ text: 'third history' }] },
-          { role: 'model', parts: [{ text: 'third response' }] },
-        ],
-      });
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(trailing.promise);
+      const thirdResult = await mgr.scheduleExtract(params('third'));
       expect(thirdResult.skippedReason).toBe('queued');
       // Still only 1 actual extract call (first is still running)
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
 
       // Finish the first extract
-      resolveFirst!({
-        touchedTopics: [],
-        cursor: {
-          sessionId: 'sess',
-          processedOffset: 2,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      first.resolve(extractResult('sess', [], 2));
       // Wait for the trailing to be picked up and started
       await vi.waitFor(() => {
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       });
 
-      // Verify the trailing extract received the third call's params,
-      // not the second call's stale history reference.
+      // The trailing extract must get the third call's params, not the
+      // second call's stale history reference.
       expect(runAutoMemoryExtract).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          history: [
-            { role: 'user', parts: [{ text: 'third history' }] },
-            { role: 'model', parts: [{ text: 'third response' }] },
-          ],
-        }),
+        expect.objectContaining({ history: turns('third') }),
       );
 
       // Finish the trailing (should use third history, not second)
-      resolveTrailing!({
-        touchedTopics: ['user'],
-        cursor: {
-          sessionId: 'sess',
-          processedOffset: 2,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      trailing.resolve(extractResult('sess', ['user'], 2));
 
       // Drain to ensure everything settles
       await mgr.drain({ timeoutMs: 500 });
     });
 
-    /**
-     * B2: extract is skipped with 'memory_pressure' when the shared
-     * MemoryPressureMonitor reports hard/critical pressure. The cursor is
-     * NOT advanced (runAutoMemoryExtract is never called), so the unread
-     * messages are retried on a later, lower-pressure turn.
-     */
+    // B2: extract is skipped with 'memory_pressure' when the shared
+    // MemoryPressureMonitor reports hard/critical pressure. The cursor is NOT
+    // advanced (runAutoMemoryExtract never runs), so the unread messages are
+    // retried on a later, lower-pressure turn.
     it('skips extract with memory_pressure when the monitor reports critical', async () => {
       vi.mocked(runAutoMemoryExtract).mockClear();
 
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn().mockReturnValue('critical'),
-        }),
-      } as Partial<Config>);
-
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await extractUnder(pressureConfig('critical'));
 
       expect(result.skippedReason).toBe('memory_pressure');
       expect(result.touchedTopics).toEqual([]);
@@ -3716,154 +3330,81 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).not.toHaveBeenCalled();
     });
 
-    /**
-     * B3: extract proceeds normally when the monitor reports normal/soft
-     * pressure (only hard/critical gate it).
-     */
+    // B3: normal/soft pressure lets extract proceed (only hard/critical gate).
     it('does not skip extract when pressure is normal', async () => {
       vi.mocked(runAutoMemoryExtract).mockClear();
-      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
-        touchedTopics: ['user'],
-        cursor: {
-          sessionId: 'sess',
-          processedOffset: 1,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+        extractResult('sess', ['user'], 1),
+      );
 
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn().mockReturnValue('soft'),
-        }),
-      } as Partial<Config>);
-
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await extractUnder(pressureConfig('soft'));
 
       expect(result.skippedReason).toBeUndefined();
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
-    /**
-     * B3c: when getMemoryPressureMonitor() returns undefined, the gate
-     * allows extraction to proceed — the optional-chain returns undefined
-     * (falsy), so isUnderMemoryPressure returns false.
-     */
+    // B3c: getMemoryPressureMonitor() returning undefined lets extraction
+    // proceed: the optional chain yields undefined (falsy), so
+    // isUnderMemoryPressure returns false.
     it('does not skip extract when monitor is absent', async () => {
       vi.mocked(runAutoMemoryExtract).mockClear();
-      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
-        touchedTopics: ['user'],
-        cursor: {
-          sessionId: 'sess',
-          processedOffset: 1,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(
+        extractResult('sess', ['user'], 1),
+      );
 
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue(undefined),
-      } as Partial<Config>);
-
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await extractUnder(
+        makeMockConfig({
+          getMemoryPressureMonitor: vi.fn().mockReturnValue(undefined),
+        } as Partial<Config>),
+      );
 
       expect(result.skippedReason).toBeUndefined();
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
-    /**
-     * B3b: 'hard' pressure level also gates extract (not just 'critical').
-     * In production 'hard' is the first level to fire as memory climbs, so
-     * it needs the same coverage as 'critical'.
-     */
+    // B3b: 'hard' also gates extract, not just 'critical'. In production
+    // 'hard' is the first level to fire as memory climbs, so it needs the
+    // same coverage.
     it('skips extract when monitor reports hard pressure', async () => {
       vi.mocked(runAutoMemoryExtract).mockClear();
 
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn().mockReturnValue('hard'),
-        }),
-      } as Partial<Config>);
-
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-      });
+      const result = await extractUnder(pressureConfig('hard'));
 
       expect(result.skippedReason).toBe('memory_pressure');
       expect(result.cursor.processedOffset).toBeUndefined();
       expect(runAutoMemoryExtract).not.toHaveBeenCalled();
     });
 
-    /**
-     * B4: a queued (trailing) extract is also gated. Because the gate lives
-     * in runExtract — the choke point both the direct and queued paths funnel
-     * through — a trailing extract started after pressure spikes is skipped
-     * rather than bypassing the gate via startQueuedExtract.
-     */
+    // B4: a queued (trailing) extract is also gated. The gate lives in
+    // runExtract, the choke point both the direct and queued paths funnel
+    // through, so a trailing extract started after pressure spikes is skipped
+    // rather than bypassing the gate via startQueuedExtract.
     it('gates queued trailing extracts under memory pressure', async () => {
       vi.mocked(runAutoMemoryExtract).mockClear();
 
       let pressure: 'normal' | 'critical' = 'normal';
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn(() => pressure),
-        }),
-      } as Partial<Config>);
+      const config = pressureConfig(() => pressure);
 
-      let resolveFirst: (
-        value: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-      ) => void;
-      const firstPromise = new Promise<
-        Awaited<ReturnType<typeof runAutoMemoryExtract>>
-      >((r) => {
-        resolveFirst = r;
-      });
-      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(firstPromise);
+      const first = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract).mockReturnValueOnce(first.promise);
 
       const mgr = new MemoryManager();
 
       // First extract starts running (pressure normal).
-      void mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'first' }] }],
-      });
+      void mgr.scheduleExtract(
+        extractParams('/project', 'sess', 'first', config),
+      );
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
 
       // Queue a trailing extract while the first is still running.
-      const queuedResult = await mgr.scheduleExtract({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        config,
-        history: [{ role: 'user', parts: [{ text: 'trailing' }] }],
-      });
+      const queuedResult = await mgr.scheduleExtract(
+        extractParams('/project', 'sess', 'trailing', config),
+      );
       expect(queuedResult.skippedReason).toBe('queued');
 
       // Pressure spikes, then the first extract finishes → trailing dequeues.
       pressure = 'critical';
-      resolveFirst!({
-        touchedTopics: [],
-        cursor: {
-          sessionId: 'sess',
-          processedOffset: 1,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+      first.resolve(extractResult('sess', [], 1));
 
       // The trailing extract must NOT call the real runAutoMemoryExtract a
       // second time — the gate in runExtract skips it under pressure.
@@ -3871,93 +3412,50 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
 
-    /**
-     * B4b: skill review pressure gate lives in runSkillReview (mirroring
-     * the extract pattern), producing a skipped task record.
-     */
+    // B4b: the skill review pressure gate lives in runSkillReview (mirroring
+    // extract) and produces a skipped task record.
     it('skips skill review when monitor reports hard pressure', async () => {
       vi.mocked(runSkillReviewByAgent).mockClear();
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn().mockReturnValue('hard'),
-        }),
-      } as Partial<Config>);
 
-      const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config,
-      });
-
-      expect(result.status).toBe('scheduled');
-      const record = await result.promise!;
+      const record = await reviewToRecord(
+        new MemoryManager(),
+        reviewParams('/project', { config: pressureConfig('hard') }),
+      );
       expect(record.status).toBe('skipped');
       expect(record.metadata?.['skippedReason']).toBe('memory_pressure');
       expect(runSkillReviewByAgent).not.toHaveBeenCalled();
     });
 
-    /**
-     * B4c: after the gate fires, the finally block must clean up the
-     * skillReviewInFlightByProject Map entry. A second call to
-     * scheduleSkillReview must NOT return already_running.
-     */
+    // B4c: after the gate fires, the finally block must clean up the
+    // skillReviewInFlightByProject Map entry, so a second
+    // scheduleSkillReview must NOT return already_running.
     it('cleans up Map entry after pressure gate fires', async () => {
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn().mockReturnValue('hard'),
-        }),
-      } as Partial<Config>);
+      const config = pressureConfig('hard');
 
       const mgr = new MemoryManager();
 
       // First call: gate fires, skipped record pushed to promise.
-      const first = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config,
-      });
-      expect(first.status).toBe('scheduled');
-      await first.promise!;
+      await reviewToRecord(mgr, reviewParams('/project', { config }));
 
       vi.mocked(runSkillReviewByAgent).mockClear();
 
       // Second call: must not return already_running — the Map entry was
       // cleaned up by the finally block.
-      const second = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
-        toolCallCount: 25,
-        threshold: 2,
-        skillsModified: false,
-        config,
-      });
+      const second = mgr.scheduleSkillReview(
+        reviewParams('/project', { config }),
+      );
 
       expect(second.status).toBe('scheduled');
       expect(second.skippedReason).toBeUndefined();
     });
 
-    /**
-     * B5: scheduleDream also gates on memory pressure. The dream path does
-     * its own structuredClone of full history, so hard/critical pressure
-     * should skip it alongside extract.
-     */
+    // B5: scheduleDream also gates on memory pressure. The dream path does its
+    // own structuredClone of full history, so hard/critical pressure should
+    // skip it alongside extract.
     it('skips dream with memory_pressure when monitor reports critical', async () => {
-      const config = makeMockConfig({
-        getMemoryPressureMonitor: vi.fn().mockReturnValue({
-          getPressureLevel: vi.fn().mockReturnValue('critical'),
-        }),
+      const config = pressureConfig('critical', {
         getManagedAutoDreamEnabled: vi.fn().mockReturnValue(true),
-      } as Partial<Config>);
+      });
 
       const mgr = new MemoryManager();
       const result = await mgr.scheduleDream({
