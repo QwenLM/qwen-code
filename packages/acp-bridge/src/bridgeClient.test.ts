@@ -418,6 +418,73 @@ describe('BridgeClient — managed external tool guard', () => {
     });
   });
 
+  it.each([true, false, undefined])(
+    'forwards only a true top-level permissionChecked marker (%s)',
+    async (permissionChecked) => {
+      const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+        allowed: true,
+      });
+      const entry = {
+        sessionId: 'session-1',
+        effectiveCwd: '/workspace/worktree',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      };
+      const client = makeClient(undefined, {
+        resolveEntry: () => entry,
+        handler,
+      });
+      const args = { command: 'pwd', permissionChecked: true };
+
+      await expect(
+        client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: args,
+          ...(permissionChecked === undefined ? {} : { permissionChecked }),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      expect(handler).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: args,
+        effectiveCwd: '/workspace/worktree',
+        ...(permissionChecked === true ? { permissionChecked: true } : {}),
+      });
+    },
+  );
+
+  it.each(['true', 1, null, {}])(
+    'rejects a non-boolean permissionChecked marker (%j)',
+    async (permissionChecked) => {
+      const handler = vi.fn<ExternalToolGuardHandler>();
+      const client = makeClient(undefined, {
+        resolveEntry: () => ({
+          sessionId: 'session-1',
+          promptActive: true,
+          activePromptId: 'prompt-1',
+        }),
+        handler,
+      });
+
+      await expect(
+        client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: { command: 'pwd' },
+          permissionChecked,
+        }),
+      ).rejects.toThrow('Invalid external tool guard request');
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
   it('ignores a forged effective directory in the child payload', async () => {
     const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
       allowed: true,

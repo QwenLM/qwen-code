@@ -169,6 +169,10 @@ import {
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
+  resolveAgentPersona,
+  findAgentSessionBinding,
+  resolveModelId,
+  buildModelIdContext,
   registerSession,
   getLastPeerInboxFailure,
   SessionSourceService,
@@ -352,6 +356,10 @@ import {
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
 import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../utils/aux-model-selector.js';
+import {
   updateOutputLanguageFile,
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
@@ -440,6 +448,10 @@ import {
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge/sessionSource';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../runtime/agent-session-source.js';
 import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -1089,18 +1101,21 @@ async function resolvePersistedSessionIdForRestore(
 }
 
 /**
- * A paired Bridge names the engine it selected; this host only executes
- * Legacy sessions, so any other selection is refused before session work.
+ * A paired Bridge names the engine it selected; a host executes only its own
+ * engine, so any other selection is refused before session work. A Managed
+ * host serves only its paired Bridge, which always names the engine.
  */
 function requestedExecutionEngine(
   meta: Record<string, unknown> | null | undefined,
   sessionId: string | undefined,
+  hostEngine: SessionExecutionEngine,
 ): SessionExecutionEngine | undefined {
   const engine = meta?.[SESSION_EXECUTION_ENGINE_META_KEY];
-  if (engine === undefined || engine === 'legacy') return engine;
+  if (engine === hostEngine) return hostEngine;
+  if (hostEngine === 'legacy' && engine === undefined) return undefined;
   throw new RequestError(
     -32024,
-    'This ACP host only executes legacy sessions.',
+    `This ACP host only executes ${hostEngine} sessions.`,
     {
       errorKind: 'session_execution_engine_unavailable',
       ...(sessionId !== undefined ? { sessionId } : {}),
@@ -1118,6 +1133,16 @@ function withExecutionEngineReceipt<
   };
 }
 
+function mapSessionExecutionEngineRequestError(
+  error: SessionExecutionEngineError,
+  sessionId: string | undefined,
+): RequestError {
+  return new RequestError(-32024, error.message, {
+    errorKind: error.errorKind,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  });
+}
+
 function mapSessionRestoreRequestError(
   error: unknown,
   sessionId: string,
@@ -1125,10 +1150,7 @@ function mapSessionRestoreRequestError(
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
   if (error instanceof SessionExecutionEngineError) {
-    return new RequestError(-32024, error.message, {
-      errorKind: error.errorKind,
-      sessionId,
-    });
+    return mapSessionExecutionEngineRequestError(error, sessionId);
   }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
@@ -2103,7 +2125,12 @@ function readCoreSettingValues(
   for (const key of QWEN_CORE_SETTING_KEYS) {
     const value = getNestedSettingValue(source, key);
     if (value !== undefined) {
-      values[key] = value;
+      // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix
+      // can embed userinfo credentials and must not reach the ACP client.
+      values[key] =
+        typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     }
   }
   return values;
@@ -2836,6 +2863,9 @@ export function createManagedExternalToolGuard(
             toolCallId: context.callId,
             toolName: context.toolName,
             arguments: context.args,
+            ...(context.permissionChecked === true
+              ? { permissionChecked: true }
+              : {}),
             // A sub-agent pinned to a worktree executes here, not in the
             // session's own directory; the host validates this before use.
             ...(typeof context.cwd === 'string' && context.cwd.length > 0
@@ -2993,6 +3023,8 @@ export async function runAcpAgent(
   options?: {
     privateParentCapability?: string;
     conversationsRuntimeProvenance?: boolean;
+    /** Accepted by the CLI entry point only from a private ACP parent. */
+    executionEngine?: 'managed';
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
   },
@@ -3007,11 +3039,14 @@ export async function runAcpAgent(
   // process lifetime alongside the writer-lease snapshot.
   const conversationsRuntimeProvenance =
     options?.conversationsRuntimeProvenance === true;
+  const hostExecutionEngine: SessionExecutionEngine =
+    options?.executionEngine ?? 'legacy';
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
-  // within one ACP process lifetime.
+  // within one ACP process lifetime. A Managed Session log requires the lease.
   const sessionWriterLeaseEnabledAtStartup =
     conversationsRuntimeProvenance ||
+    hostExecutionEngine === 'managed' ||
     (typeof config.isSessionWriterLeaseEnabled === 'function'
       ? config.isSessionWriterLeaseEnabled()
       : settings.merged.experimental?.sessionWriterLease === true);
@@ -3029,6 +3064,14 @@ export async function runAcpAgent(
   if (externalToolGuardRequired && privateParentCapability === undefined) {
     throw new Error(
       'Required external tool guard is available only to a private managed ACP parent.',
+    );
+  }
+  if (
+    hostExecutionEngine === 'managed' &&
+    privateParentCapability === undefined
+  ) {
+    throw new Error(
+      'A Managed ACP host is available only to a private managed ACP parent.',
     );
   }
 
@@ -3171,6 +3214,7 @@ export async function runAcpAgent(
         managedToolInvocationGuard,
         externalToolGuardProviderAttached,
         conversationsRuntimeProvenance,
+        hostExecutionEngine,
       );
       return agentInstance;
     }, stream);
@@ -5124,6 +5168,7 @@ class QwenAgent implements Agent {
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
     private readonly externalToolGuardProviderAttached = false,
     private readonly conversationsRuntimeProvenance = false,
+    private readonly hostExecutionEngine: SessionExecutionEngine = 'legacy',
   ) {
     if (config.getShellExecutionSandbox?.()) {
       throw new Error(
@@ -5600,6 +5645,7 @@ class QwenAgent implements Agent {
     const executionEngine = requestedExecutionEngine(
       params._meta,
       requestedSessionId,
+      this.hostExecutionEngine,
     );
     const releaseStartingSessionId = requestedSessionId
       ? this.reserveStartingSessionId(requestedSessionId)
@@ -5613,6 +5659,24 @@ class QwenAgent implements Agent {
       );
       initializationDeadline?.signal.throwIfAborted();
       const sessionSource = getSessionSource(params);
+      if (
+        sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+        !this.isTrustedManagedParent()
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          '`agent` is reserved for daemon-owned workspace agent creation',
+        );
+      }
+      if (
+        sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+        !this.isTrustedManagedParent()
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          '`agent-host` is reserved for daemon-owned host creation',
+        );
+      }
       const provisionalStandalone = isReservedStandaloneSessionSourceType(
         sessionSource?.sourceType,
       );
@@ -5724,7 +5788,11 @@ class QwenAgent implements Agent {
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
-    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      sessionId,
+      this.hostExecutionEngine,
+    );
     const parentContext = extractDaemonTraceContext(params);
     return withExecutionEngineReceipt(
       await withDaemonSpan(
@@ -5755,6 +5823,24 @@ class QwenAgent implements Agent {
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    if (
+      sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent` is reserved for daemon-owned workspace agent restore',
+      );
+    }
+    if (
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent-host` is reserved for daemon-owned host restore',
+      );
+    }
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
     );
@@ -6278,7 +6364,11 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     const sessionId = normalizeSessionIdForLookup(params.sessionId);
-    const executionEngine = requestedExecutionEngine(params._meta, sessionId);
+    const executionEngine = requestedExecutionEngine(
+      params._meta,
+      sessionId,
+      this.hostExecutionEngine,
+    );
     const parentContext = extractDaemonTraceContext(params);
     return withExecutionEngineReceipt(
       await withDaemonSpan(
@@ -6309,6 +6399,24 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    if (
+      sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent` is reserved for daemon-owned workspace agent restore',
+      );
+    }
+    if (
+      sessionSource?.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+      !this.isTrustedManagedParent()
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`agent-host` is reserved for daemon-owned host restore',
+      );
+    }
     const provisionalStandalone = isReservedStandaloneSessionSourceType(
       sessionSource?.sourceType,
     );
@@ -6576,6 +6684,10 @@ class QwenAgent implements Agent {
       return sessionService.listSessions({
         cursor: numericCursor,
         size,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
     });
 
@@ -8336,7 +8448,11 @@ class QwenAgent implements Agent {
                 ...(baseUrl
                   ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) }
                   : {}),
-                ...(fastModelId ? { fastModelId } : {}),
+                // The persisted selector can carry a userinfo-bearing
+                // baseUrl suffix; publish the credential-stripped form.
+                ...(fastModelId
+                  ? { fastModelId: publicAuxModelSelectorValue(fastModelId) }
+                  : {}),
               },
             }
           : {}),
@@ -9424,7 +9540,7 @@ class QwenAgent implements Agent {
       ) {
         throw RequestError.invalidParams(
           undefined,
-          'Background notifications require a trusted private ACP parent',
+          'This operation requires a trusted private ACP parent',
         );
       }
       const sessionId = normalizedParams['sessionId'];
@@ -11589,6 +11705,17 @@ class QwenAgent implements Agent {
           }
         }
         const session = this.sessionOrThrow(sessionId);
+        if (
+          source.sourceType === AGENT_HOST_SESSION_SOURCE_TYPE &&
+          (!this.isTrustedManagedParent() ||
+            session.getConfig().getSessionSourceType() !==
+              AGENT_HOST_SESSION_SOURCE_TYPE)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            '`agent-host` is reserved for daemon-owned host creation',
+          );
+        }
         if (isCompatibleLiveSessionSource(source)) {
           await session.enableLiveScreenContext();
         }
@@ -15042,9 +15169,15 @@ class QwenAgent implements Agent {
           errorKind: writerError.errorKind,
         });
       }
-      throw sessionId && restoreOptions
-        ? mapSessionRestoreRequestError(error, sessionId)
-        : error;
+      if (sessionId && restoreOptions) {
+        throw mapSessionRestoreRequestError(error, sessionId);
+      }
+      // A session the host's engine cannot record or own, such as a Managed
+      // one without chat recording, is refused rather than degraded.
+      if (error instanceof SessionExecutionEngineError) {
+        throw mapSessionExecutionEngineRequestError(error, sessionId);
+      }
+      throw error;
     }
   }
 
@@ -15327,6 +15460,79 @@ class QwenAgent implements Agent {
         // (the daemon only adds SDK-type runtime servers for client MCP).
         sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
       });
+      // initialize() creates the definition manager. Resolve the identity
+      // afterwards, but before publishing or prompting this session.
+      if (sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE) {
+        if (!sessionSource.sourceId) {
+          throw RequestError.invalidParams(
+            undefined,
+            'An agent session must name the agent it is',
+          );
+        }
+        // Refuse, rather than silently continuing as an ordinary session. A
+        // downgrade would hand the client a session it believes is an agent's:
+        // it would carry the agent's name and be resumed as that agent later,
+        // with none of the persona or tools that make the claim true.
+        // Guarded like the other optional Config reads in this file. Absent
+        // means not enabled, which refuses — the safe direction here, since the
+        // alternative is granting an agent persona on a Config that cannot say
+        // whether the operator opted in.
+        const collaborationEnabled =
+          typeof config.isAgentCollaborationEnabled === 'function' &&
+          config.isAgentCollaborationEnabled();
+        if (!collaborationEnabled) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Agent collaboration is disabled on this daemon (experimental.agentCollaboration)',
+          );
+        }
+        // Server binding. `sourceType` and `sourceId` both arrive from the
+        // client, so on their own they are a claim, not a credential — without
+        // this check any caller with daemon access could ask for an agent's
+        // persona and its thread tools. What makes the claim true is that this
+        // workspace's store holds a live run for that agent naming this very
+        // session. Deliberately not gated on the opt-in: with collaboration on
+        // is exactly when the check has to hold.
+        const binding = await findAgentSessionBinding(
+          cwd,
+          wiredSessionId,
+          sessionSource.sourceId,
+        );
+        if (!binding) {
+          throw RequestError.invalidParams(
+            undefined,
+            'No dispatched run claims this session for that agent',
+          );
+        }
+        const persona = await resolveAgentPersona(
+          config,
+          sessionSource.sourceId,
+        );
+        if (persona.status !== 'resolved') {
+          throw RequestError.invalidParams(undefined, persona.error);
+        }
+        config.applyWorkspaceAgentPersona(
+          persona.systemPrompt,
+          persona.agent.name,
+          persona.toolConfig.executionAllowedTools,
+        );
+        const currentAuthType = config.getModelsConfig().getCurrentAuthType();
+        const model = resolveModelId(persona.model, {
+          ...buildModelIdContext(config),
+          currentModel: undefined,
+          currentAuthType,
+        });
+        if (model?.authType && model.authType !== currentAuthType) {
+          await config.switchModel(model.authType, model.modelId, {
+            requireCachedCredentials:
+              model.authType === AuthType.QWEN_OAUTH &&
+              model.authType !== currentAuthType,
+          });
+        } else if (model) {
+          await config.setModel(model.modelId, { reason: 'workspace-agent' });
+        }
+        await config.getLlmClient().refreshSystemInstruction();
+      }
       this.assertManagedSessionAdmission();
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>
@@ -16024,6 +16230,29 @@ class QwenAgent implements Agent {
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+      }
+
+      // An agent session belongs in the ordinary session list, so it has to be
+      // legible there. Left alone its display name would be the first prompt —
+      // a turn envelope, which is machine text no one asked to read. Write the
+      // agent's own name instead, once, and only when nothing has named this
+      // session already: a person's `/rename` outranks us, and so does the
+      // title a previous attach wrote, which is why an attach does not repeat
+      // this. `auto` rather than `manual` keeps `/rename` free to replace it.
+      // Guarded like `getWarnings`, `getSessionId` and `getFailedMcpServerNames`
+      // above: this layer is handed Config-shaped objects that are not always a
+      // full Config — derived configs, shims and test doubles among them — and
+      // an unguarded call turns a missing method into a failed session
+      // creation rather than a session with no agent title.
+      const agentSessionTitle =
+        typeof config.getWorkspaceAgentName === 'function'
+          ? config.getWorkspaceAgentName()
+          : undefined;
+      if (agentSessionTitle) {
+        const recording = config.getChatRecordingService();
+        if (recording && !recording.getCurrentCustomTitle()) {
+          await recording.recordCustomTitle(agentSessionTitle, 'auto');
+        }
       }
 
       if (options.deferWorkspaceActivation !== true) {

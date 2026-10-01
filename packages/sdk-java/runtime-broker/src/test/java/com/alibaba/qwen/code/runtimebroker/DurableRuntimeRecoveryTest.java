@@ -1020,6 +1020,262 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void lostBranchSurvivesAnInFlightRenewalTick() throws Exception {
+        ReclaimWatchRepository bindings = new ReclaimWatchRepository(
+                new InMemoryRuntimeBindingRepository());
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner recovered = new DurableProvisioner();
+        recovered.reconcileGate = new CompletableFuture<>();
+        // A 2s lease so the 1.5s evidence-write hold below still fits
+        // inside the branch's just-renewed claim.
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                recovered, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofSeconds(2),
+                Duration.ofSeconds(2))) {
+            CompletableFuture<RuntimeBindingRecord> warm =
+                    service.warm("harness").toCompletableFuture();
+            RuntimeBindingRecord original = bindings.findActive(
+                    request(initial));
+            await(() -> recovered.reconciliations.get() > 0,
+                    Duration.ofSeconds(2));
+            // Hold the branch's evidence write until a background tick
+            // lands in the renewal window; with the renewal stopped on
+            // branch entry no tick comes and the write proceeds.
+            bindings.holdEvidenceCas.set(true);
+            recovered.reconcileGate.complete(RuntimeObservation.notFound(
+                    RuntimeRecoveryContract.evidence(original,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                    RuntimeRecoveryContract.evidence(original,
+                            RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)));
+            RuntimeBindingRecord reclaimed = warm.get(5, TimeUnit.SECONDS);
+            assertEquals(2, reclaimed.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    reclaimed.getState());
+            assertEquals(1, recovered.ensures.get());
+        }
+    }
+
+    @Test
+    void lostBranchRenewsBeforeItsEvidenceWrite() throws Exception {
+        ReclaimWatchRepository bindings = new ReclaimWatchRepository(
+                new InMemoryRuntimeBindingRepository());
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner recovered = new DurableProvisioner();
+        recovered.reconcileGate = new CompletableFuture<>();
+        try (RuntimeBrokerService service = service(recovered,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-two")) {
+            CompletableFuture<RuntimeBindingRecord> warm =
+                    service.warm("harness").toCompletableFuture();
+            RuntimeBindingRecord original = bindings.findActive(
+                    request(initial));
+            await(() -> recovered.reconciliations.get() > 0,
+                    Duration.ofSeconds(2));
+            // The claim and its ticks have moved the row past this read;
+            // the branch must renew — re-reading and refreshing its
+            // snapshot — rather than CAS from the stale findById result.
+            RuntimeBindingRecord stale = bindings.findById(
+                    original.getBindingId());
+            await(() -> bindings.ticks.get() > 0, Duration.ofSeconds(2));
+            bindings.staleRead = stale;
+            recovered.reconcileGate.complete(RuntimeObservation.notFound(
+                    RuntimeRecoveryContract.evidence(original,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                    RuntimeRecoveryContract.evidence(original,
+                            RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)));
+            RuntimeBindingRecord reclaimed = warm.get(5, TimeUnit.SECONDS);
+            assertEquals(2, reclaimed.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    reclaimed.getState());
+            assertEquals(1, recovered.ensures.get());
+        }
+    }
+
+    @Test
+    void lostBranchReclaimsBeyondTheReconcileDeadline() throws Exception {
+        InMemoryRuntimeBindingRepository bindings =
+                new InMemoryRuntimeBindingRepository();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+
+        DurableProvisioner recovered = new DurableProvisioner();
+        // The retry backoff reaches the ninth call at ~7.15s of the 8s
+        // deadline (2s lease, 4x); the loss is observed there, and the
+        // cleanup's own observation leg then burns another ~1.2s, so the
+        // reclaim only finishes past the reconcile's original deadline.
+        // It must get a fresh deadline window at the handoff instead of
+        // being cut by the reconcile's.
+        recovered.startingBeforeNotFound = 8;
+        recovered.notFoundOnce = true;
+        recovered.reconcileDelayMillis = 1200;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                recovered, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofSeconds(2),
+                Duration.ofSeconds(2))) {
+            RuntimeBindingRecord original = bindings.findActive(
+                    request(initial));
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(20, TimeUnit.SECONDS));
+            assertEquals("runtime_broker_runtime_lost",
+                    brokerFailure(failure).getCode());
+            RuntimeBindingRecord pinned = bindings.findActive(
+                    request(initial));
+            assertEquals(original.getBindingId(), pinned.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    pinned.getState());
+        }
+    }
+
+    /**
+     * The LOST handoff runs the evidence CAS, the reclaim's claimOperation
+     * (a same-owner no-op that does not extend the lease) and the first
+     * recoverLost on one renewal; slow handoff steps must not lapse it.
+     */
+    @Test
+    void lostHandoffRenewsBeforeTheFirstRecoverLost() throws Exception {
+        ReclaimWatchRepository bindings = new ReclaimWatchRepository(
+                new InMemoryRuntimeBindingRepository());
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+        DurableProvisioner recovered = new DurableProvisioner();
+        recovered.reconcileGate = new CompletableFuture<>();
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                recovered, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofSeconds(2),
+                Duration.ofSeconds(2))) {
+            CompletableFuture<RuntimeBindingRecord> warm =
+                    service.warm("harness").toCompletableFuture();
+            RuntimeBindingRecord original = bindings.findActive(
+                    request(initial));
+            await(() -> recovered.reconciliations.get() > 0,
+                    Duration.ofSeconds(2));
+            bindings.handoffSleepMillis = 800;
+            recovered.reconcileGate.complete(RuntimeObservation.notFound(
+                    RuntimeRecoveryContract.evidence(original,
+                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                    RuntimeRecoveryContract.evidence(original,
+                            RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)));
+            RuntimeBindingRecord reclaimed = warm.get(10, TimeUnit.SECONDS);
+            assertTrue(bindings.casSlept.get() && bindings.claimSlept.get()
+                    && bindings.recoverSlept.get(),
+                    "all three handoff steps slept");
+            assertEquals(2, reclaimed.getGeneration());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    reclaimed.getState());
+        }
+    }
+
+    /**
+     * A restored Broker adopting a live worker through reconcileLoop's
+     * default branch: one background renewal tick lands between
+     * adoptObservation's findById and its attestation CAS.
+     */
+    @Test
+    void adoptCasSurvivesARenewalTickInItsWindow() throws Exception {
+        ReclaimWatchRepository bindings = new ReclaimWatchRepository(
+                new InMemoryRuntimeBindingRepository());
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner initial = new DurableProvisioner();
+        try (RuntimeBrokerService service = service(initial,
+                new TestTransport(), bindings, sessions, executions,
+                "broker-one")) {
+            service.warm("harness").toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+        }
+        DurableProvisioner restored = new DurableProvisioner();
+        bindings.tickInAdoptWindow = true;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                restored, new TestTransport(), bindings, sessions,
+                executions, "broker-two", Duration.ofSeconds(3),
+                Duration.ofSeconds(3))) {
+            RuntimeBindingRecord adopted = service.warm("harness")
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertTrue(bindings.adoptTickFired.get(), "the window was held");
+            assertEquals(RuntimeBindingRecord.State.READY, adopted.getState());
+            assertEquals(1, adopted.getGeneration());
+            assertEquals(0, restored.ensures.get());
+        }
+    }
+
+    @Test
+    void stoppedFlagRetractsATickQueuedBehindClose() throws Exception {
+        ReclaimWatchRepository bindings = new ReclaimWatchRepository(
+                new InMemoryRuntimeBindingRepository());
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner provisioner = new DurableProvisioner();
+        // persistResourceHandle's write holds the renewal monitor for 2.5s
+        // of the 3s lease, so the tick dispatched at 1s queues on the
+        // monitor; the write then fails, and persistResourceHandle calls
+        // close() reentrantly. The queued tick must see the stopped flag
+        // and never call renewOperation — without the flag it renews here.
+        bindings.holdResourceHandleCasMillis = 2500;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                provisioner, new TestTransport(), bindings, sessions,
+                executions, "broker", Duration.ofSeconds(3),
+                Duration.ofSeconds(3))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(15, TimeUnit.SECONDS));
+            assertEquals("runtime_provision_fenced",
+                    brokerFailure(failure).getCode());
+            assertEquals(0, bindings.ticks.get(),
+                    "a tick queued behind close() renewed the claim");
+        }
+    }
+
+    @Test
     void lateEnsureResultCannotOverwriteANewOperationOwner()
             throws Exception {
         MutableClock clock = new MutableClock();
@@ -1209,6 +1465,43 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void aReplacedBrokerConfirmsAPreparedCancellationAfterAdoptingTheSession() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        String runtime = "550e8400-e29b-41d4-a716-446655440302";
+        Map<String, Object> reference = Map.of("sessionId", runtime, "promptId", "turn",
+                "callId", "call", "argsDigest", "a".repeat(64), "capabilityDigest", "b".repeat(64),
+                "policyRevision", "policy", "invocationId", "invocation");
+        ToolExecutionRecord settled;
+        try (RuntimeBrokerService service = service(new DurableProvisioner(), new TestTransport(),
+                bindings, sessions, executions, "broker-one")) {
+            service.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord prepared = service.prepareExecution("harness", runtime, "key", reference)
+                    .toCompletableFuture().join();
+            // The process dies after persisting the cancellation and before
+            // the worker, which still holds the preparation, hears of it.
+            settled = executions.requestCancel(prepared.getExecutionCallId(), prepared.getVersion());
+        }
+        var transport = new TestTransport();
+        transport.cancelAnswer = Map.of("state", "settled", "result", Map.of("executionStatus", "cancelled"));
+        try (RuntimeBrokerService replaced = service(new DurableProvisioner(), transport,
+                bindings, sessions, executions, "broker-two")) {
+            RuntimeBrokerException adopt = brokerFailure(assertThrows(Exception.class,
+                    () -> replaced.cancelExecution("harness", runtime, settled.getExecutionCallId())
+                            .toCompletableFuture().join()));
+            assertEquals("runtime_reconciliation_required", adopt.getCode());
+            assertTrue(adopt.isRetryable());
+            assertEquals(0, transport.cancels.get());
+            replaced.acquire("harness", runtime, "bootstrap").toCompletableFuture().join();
+            ToolExecutionRecord confirmed = replaced.cancelExecution("harness", runtime,
+                    settled.getExecutionCallId()).toCompletableFuture().join();
+            assertEquals("cancelled", confirmed.getExecutionStatus());
+            assertEquals(1, transport.cancels.get());
+        }
+    }
+
+    @Test
     void lateReleaseReplyKeepsALostSessionPinned() {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();
@@ -1368,66 +1661,11 @@ class DurableRuntimeRecoveryTest {
     }
 
     private static final class ClaimFailureRepository
-            implements RuntimeBindingRepository {
-        private final RuntimeBindingRepository delegate;
+            extends DelegatingBindingRepository {
         private final AtomicBoolean fail = new AtomicBoolean(true);
 
         ClaimFailureRepository(RuntimeBindingRepository delegate) {
-            this.delegate = delegate;
-        }
-
-        @Override
-        public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
-                RuntimeSessionRecord expected) {
-            return delegate.completeSessionRelease(sessions, expected);
-        }
-
-        @Override
-        public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
-            return delegate.recoverLost(sessions, executions, expected);
-        }
-
-        @Override
-        public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
-                RuntimeSessionRecord candidate) {
-            return delegate.admitSession(sessions, candidate);
-        }
-
-        @Override
-        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
-            return delegate.admitExecution(sessions, executions, candidate);
-        }
-
-        @Override
-        public RuntimeBindingRecord findOrCreate(
-                RuntimeProvisionRequest request) {
-            return delegate.findOrCreate(request);
-        }
-
-        @Override
-        public RuntimeBindingRecord findActive(
-                RuntimeProvisionRequest request) {
-            return delegate.findActive(request);
-        }
-
-        @Override
-        public List<RuntimeBindingRecord> findActiveByIsolationKey(
-                RuntimeScope scope, String isolationKey) {
-            return delegate.findActiveByIsolationKey(scope, isolationKey);
-        }
-
-        @Override
-        public RuntimeBindingRecord findById(String bindingId) {
-            return delegate.findById(bindingId);
-        }
-
-        @Override
-        public RuntimeBindingRecord compareAndSet(
-                RuntimeBindingRecord expected,
-                RuntimeBindingRecord replacement) {
-            return delegate.compareAndSet(expected, replacement);
+            super(delegate);
         }
 
         @Override
@@ -1437,21 +1675,6 @@ class DurableRuntimeRecoveryTest {
                 throw new IllegalStateException("transient database failure");
             }
             return delegate.claimOperation(bindingId, owner, leaseDuration);
-        }
-
-        @Override
-        public RuntimeBindingRecord renewOperation(String bindingId,
-                String owner, long operationGeneration,
-                Duration leaseDuration) {
-            return delegate.renewOperation(bindingId, owner,
-                    operationGeneration, leaseDuration);
-        }
-
-        @Override
-        public RuntimeBindingRecord releaseOperation(String bindingId,
-                String owner, long operationGeneration) {
-            return delegate.releaseOperation(bindingId, owner,
-                    operationGeneration);
         }
     }
 
@@ -1479,6 +1702,8 @@ class DurableRuntimeRecoveryTest {
         private RuntimeLease releasedLease;
         private boolean notFoundOnce;
         private boolean stopProved;
+        private int startingBeforeNotFound;
+        private long reconcileDelayMillis;
         private boolean usable = true;
 
         @Override
@@ -1549,6 +1774,11 @@ class DurableRuntimeRecoveryTest {
             reconciliations.incrementAndGet();
             lastReconcileHandle = handle;
             lastReconcileLease = lastLease;
+            if (startingBeforeNotFound > 0) {
+                startingBeforeNotFound--;
+                return CompletableFuture.completedFuture(
+                        RuntimeObservation.starting(HANDLE));
+            }
             if (reconcileFailure != null) {
                 return CompletableFuture.failedFuture(reconcileFailure);
             }
@@ -1563,6 +1793,12 @@ class DurableRuntimeRecoveryTest {
                             proof(seed, handle, RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)));
                 }
                 return CompletableFuture.completedFuture(RuntimeObservation.notFound());
+            }
+            if (reconcileDelayMillis > 0) {
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.unknown(HANDLE),
+                        CompletableFuture.delayedExecutor(
+                                reconcileDelayMillis, TimeUnit.MILLISECONDS));
             }
             if (outcome == RuntimeObservation.Outcome.READY) {
                 return CompletableFuture.completedFuture(
@@ -1594,6 +1830,143 @@ class DurableRuntimeRecoveryTest {
         }
     }
 
+    /**
+     * A binding repository double that watches background renewal ticks and
+     * can hold the reconcile loop's loss-evidence write until one lands.
+     */
+    private static final class ReclaimWatchRepository
+            extends DelegatingBindingRepository {
+        final AtomicInteger ticks = new AtomicInteger();
+        final AtomicBoolean holdEvidenceCas = new AtomicBoolean();
+        volatile RuntimeBindingRecord staleRead;
+        volatile long holdResourceHandleCasMillis;
+        /** Real-time sleep injected once into each LOST-handoff step. */
+        volatile long handoffSleepMillis;
+        final AtomicBoolean casSlept = new AtomicBoolean();
+        final AtomicBoolean claimSlept = new AtomicBoolean();
+        final AtomicBoolean recoverSlept = new AtomicBoolean();
+        /** Hold the attestation CAS until a renewal tick lands in its window. */
+        volatile boolean tickInAdoptWindow;
+        final AtomicBoolean adoptTickFired = new AtomicBoolean();
+
+        private void handoffSleep(AtomicBoolean once) {
+            if (handoffSleepMillis > 0 && once.compareAndSet(false, true)) {
+                try {
+                    Thread.sleep(handoffSleepMillis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+
+        @Override
+        public RuntimeBindingRecord claimOperation(String bindingId,
+                String owner, Duration leaseDuration) {
+            handoffSleep(claimSlept);
+            return delegate.claimOperation(bindingId, owner, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            handoffSleep(recoverSlept);
+            return delegate.recoverLost(sessions, executions, expected);
+        }
+
+        ReclaimWatchRepository(InMemoryRuntimeBindingRepository delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public RuntimeBindingRecord findById(String bindingId) {
+            RuntimeBindingRecord stale = staleRead;
+            if (stale != null && stale.getBindingId().equals(bindingId)) {
+                staleRead = null;
+                return stale;
+            }
+            return delegate.findById(bindingId);
+        }
+
+        @Override
+        public RuntimeBindingRecord compareAndSet(
+                RuntimeBindingRecord expected,
+                RuntimeBindingRecord replacement) {
+            if (tickInAdoptWindow
+                    && replacement.getAttestationGeneration()
+                            > expected.getAttestationGeneration()
+                    && adoptTickFired.compareAndSet(false, true)) {
+                // A slow attestation CAS: give a live background renewal
+                // one tick to land between findById and this write; a
+                // stopped renewal never arrives (bounded wait, 3s lease).
+                int baseline = ticks.get();
+                long deadline = System.nanoTime()
+                        + Duration.ofMillis(1500).toNanos();
+                try {
+                    while (ticks.get() == baseline
+                            && System.nanoTime() < deadline) {
+                        Thread.sleep(10);
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (expected.getLossEvidence() == null
+                    && replacement.getLossEvidence() != null) {
+                handoffSleep(casSlept);
+            }
+            if (holdResourceHandleCasMillis > 0
+                    && expected.getResourceHandle() == null
+                    && replacement.getResourceHandle() != null) {
+                // persistResourceHandle runs this write on the renewal
+                // monitor; holding it queues a dispatched tick behind the
+                // monitor, and failing it makes persistResourceHandle call
+                // close() reentrantly — the only deterministic staging of
+                // the stopped flag's window.
+                long millis = holdResourceHandleCasMillis;
+                holdResourceHandleCasMillis = 0;
+                try {
+                    Thread.sleep(millis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }
+            if (holdEvidenceCas.get() && expected.getLossEvidence() == null
+                    && replacement.getLossEvidence() != null) {
+                // Give a live background renewal one tick to land in the
+                // renewal window; a stopped one never arrives. Only ticks
+                // newer than the hold count — a tick that fired while the
+                // reconcile was still gated must not pre-satisfy the wait.
+                int baseline = ticks.get();
+                long deadline = System.nanoTime()
+                        + Duration.ofMillis(1500).toNanos();
+                try {
+                    while (ticks.get() == baseline
+                            && System.nanoTime() < deadline) {
+                        Thread.sleep(10);
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return delegate.compareAndSet(expected, replacement);
+        }
+
+        @Override
+        public RuntimeBindingRecord renewOperation(String bindingId,
+                String owner, long operationGeneration,
+                Duration leaseDuration) {
+            if (Thread.currentThread().getName()
+                    .equals("qwen-runtime-broker-lease-renewal")) {
+                ticks.incrementAndGet();
+            }
+            return delegate.renewOperation(bindingId, owner,
+                    operationGeneration, leaseDuration);
+        }
+    }
+
     private static final class TestTransport implements RuntimeTransport {
         private final CompletableFuture<Void> attestationGate;
         private final RuntimeException attestationFailure;
@@ -1606,7 +1979,9 @@ class DurableRuntimeRecoveryTest {
         private final AtomicInteger attestations = new AtomicInteger();
         private final AtomicInteger acquisitions = new AtomicInteger();
         private final AtomicInteger releases = new AtomicInteger();
+        private final AtomicInteger cancels = new AtomicInteger();
         private CompletableFuture<Boolean> releaseResult = CompletableFuture.completedFuture(true);
+        private Map<String, Object> cancelAnswer = Map.of();
 
         TestTransport() {
             this(CompletableFuture.completedFuture(null), false, null);
@@ -1679,7 +2054,8 @@ class DurableRuntimeRecoveryTest {
         public CompletionStage<Map<String, Object>> cancel(
                 RuntimeLease lease, RuntimeSession session,
                 Map<String, Object> reference) {
-            return CompletableFuture.completedFuture(Map.of());
+            cancels.incrementAndGet();
+            return CompletableFuture.completedFuture(cancelAnswer);
         }
 
         @Override

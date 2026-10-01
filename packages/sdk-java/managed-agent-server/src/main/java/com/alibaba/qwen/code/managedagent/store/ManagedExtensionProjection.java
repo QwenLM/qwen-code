@@ -27,7 +27,17 @@ public final class ManagedExtensionProjection {
                     ManagedExtensionRecords::requireMonitorRun,
                     body -> body.get("monitorId").textValue(),
                     ManagedExtensionRecords::isMonitorRunStart,
-                    ManagedExtensionRecords::isMonitorRunSuccessor));
+                    ManagedExtensionRecords::isMonitorRunSuccessor),
+            "mcp_configuration", new Body(null,
+                    ManagedMcpRecords::requireConfiguration,
+                    body -> body.get("configurationId").textValue(),
+                    ManagedMcpRecords::isConfigurationStart,
+                    ManagedMcpRecords::isConfigurationSuccessor),
+            "mcp_operation", new Body(null,
+                    ManagedMcpRecords::requireOperation,
+                    body -> body.get("operationId").textValue(),
+                    ManagedMcpRecords::isOperationStart,
+                    ManagedMcpRecords::isOperationSuccessor));
     public static final List<String> TASK_STATES = List.of("pending",
             "running", "waiting", "completed", "failed", "cancelled",
             "degraded", "recovery_blocked");
