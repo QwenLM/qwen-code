@@ -172,6 +172,29 @@ function readCache(cachePath: string): ModelCatalog | undefined {
 }
 
 /**
+ * Client-owned context windows. models.dev's `limit.input` is the source of
+ * truth for input limits, but for these ids it is bucketed above the window
+ * the curated table in `tokenLimits.ts` *and* the provider presets declare,
+ * so the declared window wins. Only ids the resolved catalog actually
+ * carries are corrected.
+ */
+const CATALOG_CONTEXT_CORRECTIONS: Readonly<Record<string, number>> = {
+  // Sonnet 4.5's retired 1M beta must not override the default API limit.
+  // https://platform.claude.com/docs/en/build-with-claude/context-windows
+  'claude-sonnet-4-5': 200_000,
+  // models.dev rounds the vendor-declared window of these ids up to the next
+  // binary size: 1,048,576 for the 1M ids, 204,800 for the MiniMax-M2.5 and
+  // GLM-4.7 rounds. The over-stated window is larger than anything the
+  // curated row or the presets declare, so compaction thresholds computed
+  // from it fire too late and the request 400s at the vendor.
+  'qwen3-coder-plus': 1_000_000,
+  'kimi-k3': 1_000_000,
+  'minimax-m2.5': 196_608,
+  'minimax-m2.5-highspeed': 196_608,
+  'glm-4.7': 202_752,
+};
+
+/**
  * The refreshed cache wins only when it is newer than the snapshot bundled
  * with this build, so upgrading the CLI never serves stale cached data.
  */
@@ -195,33 +218,17 @@ export function loadModelCatalog(): ModelCatalog {
         : undefined;
     let base =
       usable && usable.fetchedAt > bundled.fetchedAt ? usable : bundled;
-    // Sonnet 4.5's retired 1M beta must not override the default API limit.
-    // https://platform.claude.com/docs/en/build-with-claude/context-windows
-    if (base.models['claude-sonnet-4-5']) {
-      base = {
-        ...base,
-        models: {
-          ...base.models,
-          'claude-sonnet-4-5': {
-            ...base.models['claude-sonnet-4-5'],
-            context: 200_000,
-          },
-        },
-      };
+    const models = { ...base.models };
+    let corrected = false;
+    for (const [id, context] of Object.entries(CATALOG_CONTEXT_CORRECTIONS)) {
+      const entry = models[id];
+      if (entry) {
+        models[id] = { ...entry, context };
+        corrected = true;
+      }
     }
-    // models.dev's alibaba buckets approximate the vendor-declared 1M window
-    // of qwen3-coder-plus as 1,048,576; keep the declared 1,000,000.
-    if (base.models['qwen3-coder-plus']) {
-      base = {
-        ...base,
-        models: {
-          ...base.models,
-          'qwen3-coder-plus': {
-            ...base.models['qwen3-coder-plus'],
-            context: 1_000_000,
-          },
-        },
-      };
+    if (corrected) {
+      base = { ...base, models };
     }
     loaded = base;
   }

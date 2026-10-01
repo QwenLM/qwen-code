@@ -422,6 +422,33 @@ describe('model catalog', () => {
     expect(tokenLimit('qwen3-coder-plus')).toBe(1_000_000);
   });
 
+  // models.dev buckets each of these above the window the curated table in
+  // tokenLimits.ts and the provider presets declare, so the declared value
+  // must survive both the bundled snapshot and a newer downloaded one.
+  it.each([
+    ['kimi-k3', 1_000_000],
+    ['minimax-m2.5', 196_608],
+    ['minimax-m2.5-highspeed', 196_608],
+    ['glm-4.7', 202_752],
+  ])(
+    'keeps %s at its declared %i window even after a refresh',
+    (id, declared) => {
+      expect(tokenLimit(id)).toBe(declared);
+      expect(computeThresholds(tokenLimit(id)).hard).toBeLessThanOrEqual(
+        declared,
+      );
+      writeJson(getModelCatalogCachePath(), {
+        source: 'https://models.dev/api.json',
+        fetchedAt: FAR_FUTURE,
+        projection: MODEL_CATALOG_PROJECTION_VERSION,
+        models: { [id]: { context: declared + 48_576, output: 65_536 } },
+      });
+      invalidateModelCatalog();
+      expect(lookupModelCatalog(id)?.context).toBe(declared);
+      expect(tokenLimit(id)).toBe(declared);
+    },
+  );
+
   it('drops malformed entries while parsing', () => {
     const parsed = parseModelCatalog({
       fetchedAt: FAR_FUTURE,
