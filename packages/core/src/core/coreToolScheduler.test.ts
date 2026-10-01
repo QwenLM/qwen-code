@@ -7202,10 +7202,8 @@ describe('CoreToolScheduler truncated output protection', () => {
     const declarativeTool = new TestApprovalTool({
       getApprovalMode: () => ApprovalMode.AUTO_EDIT,
     } as unknown as Config);
-    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
-      declarativeTool,
-      [TestApprovalTool.Name],
-    );
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(declarativeTool);
 
     await scheduler.schedule(
       [
@@ -7261,10 +7259,8 @@ describe('CoreToolScheduler truncated output protection', () => {
         required: ['path'],
       },
     });
-    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
-      readTool,
-      ['mockReadWithRequiredParam'],
-    );
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(readTool);
 
     await scheduler.schedule(
       [
@@ -7386,10 +7382,8 @@ describe('CoreToolScheduler truncated output protection', () => {
       setApprovalMode: vi.fn(),
     } as unknown as Config;
     const writeFileTool = new WriteFileTool(writeFileConfig);
-    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
-      writeFileTool,
-      [WriteFileTool.Name],
-    );
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(writeFileTool);
 
     const messages: string[] = [];
 

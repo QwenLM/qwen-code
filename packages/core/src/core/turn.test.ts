@@ -19,7 +19,12 @@ import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
-import type { Part, Content, PartListUnion } from '@google/genai';
+import type {
+  Part,
+  Content,
+  PartListUnion,
+  GenerateContentResponse,
+} from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { LlmChat } from './llm-chat.js';
 import { StreamEventType } from './llm-chat.js';
