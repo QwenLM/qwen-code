@@ -779,6 +779,12 @@ describe('extractShellOperationsAcrossCommand', () => {
     ["cd 'foo;bar' && echo {} > settings.json", '/repo/foo;bar/settings.json'],
     ["cd 'a&b' && echo {} > settings.json", '/repo/a&b/settings.json'],
     ['cd "foo;bar" && echo {} > settings.json', '/repo/foo;bar/settings.json'],
+    // An unrelated backslash elsewhere in the command must not de-resolve a
+    // genuinely quoted metacharacter directory.
+    [
+      "cd 'foo;bar' && echo {} > settings.json && printf 'a\\n'",
+      '/repo/foo;bar/settings.json',
+    ],
   ])(
     'resolves the quoted metacharacter directory in %s without escalating',
     (command, expectedPath) => {

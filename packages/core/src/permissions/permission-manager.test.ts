@@ -2589,6 +2589,26 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('deny rule still cites a quoted metachar dir despite an unrelated backslash', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(printf *)'],
+          permissionsDeny: ['Write(r&d/.env)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // `r&d` is a real quoted directory name; the backslash in printf's
+      // argument belongs to an unrelated segment and must not de-resolve it.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cd 'r&d' && printf 'x\\n' > .env",
+        }),
+      ).toBe('deny');
+    });
+
     it('semicolon compound: deny in second → deny', async () => {
       pm = new PermissionManager(
         makeConfig({

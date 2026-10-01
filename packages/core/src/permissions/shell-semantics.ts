@@ -2063,14 +2063,14 @@ function isDynamicShellPath(
   splitArtifactPossible: boolean,
 ): boolean {
   if (word.includes('$') || word.includes('`')) return true;
-  // A `cd` target carrying operator metacharacters is a quoting artifact of
-  // the segment split, not a real directory, so it must escalate like a
-  // `$`/backtick target instead of becoming a concrete cwd writes get
-  // attributed to (#12246 variant). Only apply this when a backslash forced
-  // the dual-reading walk: in the single self-consistent reading a quoted
-  // metacharacter arrives as a bare word after tokenize strips the quotes,
-  // and `cd 'foo;bar'` / `cd 'a&b'` are legal POSIX directory names.
-  return splitArtifactPossible && /[;|&><]/.test(word);
+  // A `cd` target that carries both escape residue and operator
+  // metacharacters is a quoting artifact of the segment split, not a real
+  // directory, so it must escalate like a `$`/backtick target instead of
+  // becoming a concrete cwd writes get attributed to (#12246 variant).
+  // tokenize strips quotes but keeps backslashes, so a genuinely quoted name
+  // like `cd 'foo;bar'` arrives as a bare word with no backslash, while an
+  // artifact such as `x\;cd /etc` retains the escape that produced it.
+  return splitArtifactPossible && word.includes('\\') && /[;|&><]/.test(word);
 }
 
 function resolveCdTargetCwd(
