@@ -7181,6 +7181,10 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(errorMessage).toContain(
       'rejected to prevent writing truncated content',
     );
+    // The telemetry arm of the cause-versus-diagnosis distinction (#12970):
+    // a genuine max_tokens cut must keep reporting OUTPUT_TRUNCATED, never
+    // collapse into the malformed-generation INVALID_TOOL_PARAMS.
+    expect(call.response.errorType).toBe(ToolErrorType.OUTPUT_TRUNCATED);
     return errorMessage;
   }
 

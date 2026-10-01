@@ -945,6 +945,14 @@ describe('Turn', () => {
         name: 'write_file',
         args: { file_path: '/test.txt', content: 'half-written' },
       };
+      // A clean sibling in the same response pins the per-call quantifier:
+      // the marker must land on the marked call only — a response-wide
+      // `functionCalls.some(...)` read would flag the complete call too, and
+      // the scheduler would then reject a well-formed Edit as malformed.
+      const cleanCall = {
+        name: 'write_file',
+        args: { file_path: '/other.txt', content: 'complete' },
+      };
       // Mark the same object reference that goes on the stream — the marker
       // is a non-enumerable symbol and does not survive a rebuild.
       markToolCallArgumentsIncomplete([{ functionCall: markedCall }]);
@@ -952,7 +960,7 @@ describe('Turn', () => {
         yield {
           type: StreamEventType.CHUNK,
           value: {
-            functionCalls: [markedCall],
+            functionCalls: [markedCall, cleanCall],
           } as unknown as GenerateContentResponse,
         };
         yield {
@@ -979,16 +987,22 @@ describe('Turn', () => {
         events.push(event);
       }
 
-      const toolCallEvent = events.find(
+      const toolCallEvents = events.filter(
         (event): event is ServerLlmToolCallRequestEvent =>
           event.type === LlmEventType.ToolCallRequest,
       );
-      expect(toolCallEvent).toBeDefined();
-      expect(toolCallEvent!.value.hadIncompleteArguments).toBe(true);
-      expect(toolCallEvent!.value.wasOutputTruncated).toBeUndefined();
-      expect(turn.pendingToolCalls).toHaveLength(1);
+      expect(toolCallEvents).toHaveLength(2);
+      expect(toolCallEvents[0].value.hadIncompleteArguments).toBe(true);
+      expect(toolCallEvents[0].value.wasOutputTruncated).toBeUndefined();
+      expect(toolCallEvents[1].value).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
+      expect(turn.pendingToolCalls).toHaveLength(2);
       expect(turn.pendingToolCalls[0].hadIncompleteArguments).toBe(true);
       expect(turn.pendingToolCalls[0].wasOutputTruncated).toBeUndefined();
+      expect(turn.pendingToolCalls[1]).not.toHaveProperty(
+        'hadIncompleteArguments',
+      );
     });
 
     it('should NOT set hadIncompleteArguments on unmarked tool calls', async () => {
