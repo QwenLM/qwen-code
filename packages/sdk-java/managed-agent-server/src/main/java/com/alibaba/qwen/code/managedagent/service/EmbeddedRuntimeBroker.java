@@ -46,7 +46,7 @@ import org.slf4j.LoggerFactory;
 public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(
             EmbeddedRuntimeBroker.class);
-    private static final Duration LEASE = Duration.ofSeconds(30);
+    public static final Duration LEASE = Duration.ofSeconds(30);
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;

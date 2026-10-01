@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
     static final String KIND = "local-process";
-    private static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");

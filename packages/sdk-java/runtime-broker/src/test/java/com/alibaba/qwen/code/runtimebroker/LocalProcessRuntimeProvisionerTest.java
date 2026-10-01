@@ -693,82 +693,9 @@ class LocalProcessRuntimeProvisionerTest {
      * can lose the race on a fast machine.
      */
     private static final class FencingBindingRepository
-            implements RuntimeBindingRepository {
-        @Override
-        public void requestHarnessDrain(String tenantId, String harnessId) {
-            delegate.requestHarnessDrain(tenantId, harnessId);
-        }
-
-        @Override
-        public boolean isHarnessDraining(String tenantId, String harnessId) {
-            return delegate.isHarnessDraining(tenantId, harnessId);
-        }
-
-        @Override
-        public java.util.List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessId,
-                String after, int limit) {
-            return delegate.findByHarnessSession(tenantId, harnessId, after, limit);
-        }
-
-        private final InMemoryRuntimeBindingRepository delegate =
-                new InMemoryRuntimeBindingRepository();
-
-        @Override
-        public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
-                RuntimeSessionRecord expected) {
-            return delegate.completeSessionRelease(sessions, expected);
-        }
-
-        @Override
-        public java.util.List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String after, int limit) {
-            return delegate.findRecoveryCandidates(kind, after, limit);
-        }
-
-        @Override
-        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
-            return delegate.finishLostRecovery(sessions, executions, expected);
-        }
-
-        @Override
-        public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
-            return delegate.recoverLost(sessions, executions, expected);
-        }
-
-        @Override
-        public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
-                RuntimeSessionRecord candidate) {
-            return delegate.admitSession(sessions, candidate);
-        }
-
-        @Override
-        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
-            return delegate.admitExecution(sessions, executions, candidate);
-        }
-
-        @Override
-        public RuntimeBindingRecord findOrCreate(
-                RuntimeProvisionRequest request) {
-            return delegate.findOrCreate(request);
-        }
-
-        @Override
-        public RuntimeBindingRecord findActive(
-                RuntimeProvisionRequest request) {
-            return delegate.findActive(request);
-        }
-
-        @Override
-        public RuntimeBindingRecord findById(String bindingId) {
-            return delegate.findById(bindingId);
-        }
-
-        @Override
-        public List<RuntimeBindingRecord> findActiveByIsolationKey(
-                RuntimeScope scope, String isolationKey) {
-            return delegate.findActiveByIsolationKey(scope, isolationKey);
+            extends DelegatingBindingRepository {
+        FencingBindingRepository() {
+            super(new InMemoryRuntimeBindingRepository());
         }
 
         @Override
@@ -780,27 +707,6 @@ class LocalProcessRuntimeProvisionerTest {
                 return null;
             }
             return delegate.compareAndSet(expected, replacement);
-        }
-
-        @Override
-        public RuntimeBindingRecord claimOperation(String bindingId,
-                String owner, Duration leaseDuration) {
-            return delegate.claimOperation(bindingId, owner, leaseDuration);
-        }
-
-        @Override
-        public RuntimeBindingRecord renewOperation(String bindingId,
-                String owner, long operationGeneration,
-                Duration leaseDuration) {
-            return delegate.renewOperation(bindingId, owner,
-                    operationGeneration, leaseDuration);
-        }
-
-        @Override
-        public RuntimeBindingRecord releaseOperation(String bindingId,
-                String owner, long operationGeneration) {
-            return delegate.releaseOperation(bindingId, owner,
-                    operationGeneration);
         }
     }
 
