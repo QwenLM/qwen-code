@@ -35,12 +35,25 @@ const MAX_INDEX_LINE_CHARS = 150;
 const MAX_INDEX_LINES = 200;
 const MAX_INDEX_BYTES = 25_000;
 const MAX_INDEX_FIELD_CHARS = 120;
+// The description is the only optional part of an entry, so it absorbs all the
+// shortening. Below this length a hook is not worth the bytes it costs, and the
+// entry is emitted without one.
+const MIN_INDEX_HOOK_CHARS = 24;
+const INDEX_HOOK_SEPARATOR = ' — ';
 
-function truncateIndexLine(text: string): string {
-  if (text.length <= MAX_INDEX_LINE_CHARS) {
-    return text;
+/**
+ * Shorten an already-sanitized field to `limit`, preferring a word boundary.
+ * Only display text may pass through here — never a link target, which stops
+ * resolving the moment it is cut.
+ */
+function truncateIndexField(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
   }
-  return `${text.slice(0, MAX_INDEX_LINE_CHARS - 1).trimEnd()}…`;
+  return `${value
+    .slice(0, limit - 1)
+    .replace(/\s+\S*$/, '')
+    .trimEnd()}…`;
 }
 
 /**
@@ -65,10 +78,7 @@ function sanitizeIndexField(value: string): string {
     .replace(/\]\(/g, '] (')
     .replace(/\s+/g, ' ')
     .trim();
-  if (cleaned.length <= MAX_INDEX_FIELD_CHARS) {
-    return cleaned;
-  }
-  return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
+  return truncateIndexField(cleaned, MAX_INDEX_FIELD_CHARS);
 }
 
 // Chars left RAW in a link target: alphanumerics plus the path punctuation
@@ -91,15 +101,13 @@ const utf8Encoder = new TextEncoder();
  * space→`%20`, backtick→`%60`, …) so the target is one line with no `](`/`)`
  * breakout, yet `decodeURIComponent` recovers the exact path — the link still
  * resolves to the real file. `/` is kept literal so it stays a usable path.
+ * The path is deliberately NOT shortened: a truncated target points at a file
+ * that does not exist, and a dead link costs more than a long line. Overall
+ * index size stays bounded by `MAX_INDEX_BYTES` in {@link assembleIndex}.
  */
 function encodeIndexPathTarget(value: string): string {
-  // Cap the RAW path before encoding so a pathological filename can't bloat the
-  // committed file; slicing by code point (and encoding AFTER) means we never
-  // split a surrogate pair or a `%XX` escape. The whole line is capped again by
-  // truncateIndexLine.
-  const chars = [...value].slice(0, MAX_INDEX_FIELD_CHARS);
   let out = '';
-  for (const ch of chars) {
+  for (const ch of value) {
     if (ch === '/' || PATH_TARGET_SAFE.test(ch)) {
       out += ch;
       continue;
@@ -111,10 +119,22 @@ function encodeIndexPathTarget(value: string): string {
   return out;
 }
 
+/**
+ * Render one index entry. The link is built first and never shortened, because
+ * it is the entry's only functional part; the description takes whatever room
+ * the link leaves, and is dropped entirely when that room is too small to be
+ * useful. An entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} is
+ * therefore allowed to run long — a resolving long link beats a short dead one.
+ */
 function docIndexLine(doc: ScannedAutoMemoryDocument): string {
   const title = sanitizeIndexField(doc.title) || doc.type;
   const description = sanitizeIndexField(doc.description) || doc.type;
-  return `- [${title}](${encodeIndexPathTarget(doc.relativePath)}) — ${description}`;
+  const link = `- [${title}](${encodeIndexPathTarget(doc.relativePath)})`;
+  const room = MAX_INDEX_LINE_CHARS - link.length - INDEX_HOOK_SEPARATOR.length;
+  if (room < MIN_INDEX_HOOK_CHARS) {
+    return link;
+  }
+  return `${link}${INDEX_HOOK_SEPARATOR}${truncateIndexField(description, room)}`;
 }
 
 /**
@@ -131,7 +151,9 @@ function assembleIndex(lines: string[]): string {
 
   if (truncated.length > MAX_INDEX_BYTES) {
     const cutAt = truncated.lastIndexOf('\n', MAX_INDEX_BYTES);
-    truncated = truncated.slice(0, cutAt > 0 ? cutAt : MAX_INDEX_BYTES);
+    // Cut on an entry boundary only: slicing mid-line would emit a half-written
+    // `](path)` link. An entry longer than the whole budget is dropped.
+    truncated = cutAt > 0 ? truncated.slice(0, cutAt) : '';
   }
 
   if (!wasLineTruncated && truncated.length === raw.length) {
@@ -148,7 +170,7 @@ export function buildManagedAutoMemoryIndex(
     'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
   >,
 ): string {
-  return assembleIndex(docs.map((doc) => truncateIndexLine(docIndexLine(doc))));
+  return assembleIndex(docs.map((doc) => docIndexLine(doc)));
 }
 
 /**
@@ -175,7 +197,7 @@ interface TeamIndexGroup {
  * the same shared fact, collapsing them into one index line — listing the other
  * files via "(also: …)" — keeps the index readable. The topic files themselves
  * are never removed (they remain the source of truth); only the index display
- * collapses, and an over-long "(also: …)" suffix may itself be truncated.
+ * collapses, and an "(also: …)" entry that does not fit is dropped whole.
  * Empty descriptions are never grouped. Input is assumed pre-sorted by
  * relativePath, so group order and each group's primary are deterministic.
  */
@@ -205,12 +227,22 @@ function groupTeamDocsByDescription(
 function teamGroupIndexLine(group: TeamIndexGroup): string {
   const base = docIndexLine(group.primary);
   if (group.others.length === 0) {
-    return truncateIndexLine(base);
+    return base;
   }
-  const also = group.others
-    .map((doc) => encodeIndexPathTarget(doc.relativePath))
-    .join(', ');
-  return truncateIndexLine(`${base} (also: ${also})`);
+  // Append whole "(also: …)" targets while they fit, then stop. A target that
+  // does not fit is dropped rather than sliced: every emitted path has to
+  // resolve.
+  const prefix = `${base} (also: `;
+  let also = '';
+  for (const doc of group.others) {
+    const target = encodeIndexPathTarget(doc.relativePath);
+    const next = also ? `${also}, ${target}` : target;
+    if (prefix.length + next.length + 1 > MAX_INDEX_LINE_CHARS) {
+      break;
+    }
+    also = next;
+  }
+  return also ? `${prefix}${also})` : base;
 }
 
 /**

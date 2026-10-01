@@ -339,6 +339,94 @@ describe('managed auto-memory indexer', () => {
     ]);
     expect(content).toContain('…');
     expect(content.length).toBeLessThanOrEqual(150);
+    // The title yields to the cap; the link target never does.
+    expect(decodeURIComponent(linkTarget(content))).toBe('feedback/long.md');
+  });
+
+  it('keeps the link target intact when a long title pushes the entry past 150 chars', () => {
+    // Regression: slicing the assembled line at a fixed 150 columns landed
+    // inside `](path)`, leaving a target that did not resolve.
+    const relativePath = 'reference/markdownlint-fix-config.md';
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: 'markdownlint-fix-config.md',
+        title:
+          "A full-config markdownlint '--fix' rewrites prose that wrapped onto a marker, and ubuntu-console's shim now refuses it",
+        description: 'hook',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    // The link alone exceeds the line budget, so the entry runs long and the
+    // hook is dropped rather than the target being cut.
+    expect(line.length).toBeGreaterThan(150);
+    expect(linkTarget(line)).toBe(relativePath);
+    expect(line).not.toContain('—');
+  });
+
+  it('keeps a relative path longer than the field cap addressable', () => {
+    // Regression: the raw path used to be sliced at 120 code points, so the
+    // emitted link pointed at a file that does not exist.
+    const relativePath = `reference/${'p'.repeat(140)}.md`;
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: `${'p'.repeat(140)}.md`,
+        title: 'Long path',
+        description: 'hook',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    expect(linkTarget(line)).toBe(relativePath);
+    expect(decodeURIComponent(linkTarget(line))).toBe(relativePath);
+  });
+
+  it('never cuts inside a link when one entry exceeds the size budget', () => {
+    // The byte trim used to slice at the budget, emitting a half-written
+    // `](path)` target. It now cuts on an entry boundary only.
+    const relativePath = `reference/${'p'.repeat(25_003)}.md`;
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: path.basename(relativePath),
+        title: 'Huge',
+        description: 'hook',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const body = content.split('\n\n> WARNING')[0];
+    for (const line of body.split('\n')) {
+      if (line.startsWith('- [')) {
+        expect(() => linkTarget(line)).not.toThrow();
+      }
+    }
+    expect(content).toContain('WARNING: MEMORY.md is too large');
   });
 
   it('sanitizes an attacker-controlled relativePath in the main index line', () => {
@@ -458,5 +546,65 @@ describe('managed auto-memory indexer', () => {
     // Reversible + addressable: decodes back to the exact real file.
     expect(target).toBe('feedback/a%28b%29.md');
     expect(decodeURIComponent(target)).toBe(relativePath);
+  });
+
+  it('drops an "(also: …)" entry whole instead of cutting its target', () => {
+    // Regression: an over-long "(also: …)" suffix used to be sliced at 150
+    // columns, which cut the secondary path mid-escape.
+    const shared = 'shared fact';
+    const primaryPath = 'alice/a.md';
+    const fittingPath = `bob/${'b'.repeat(60)}.md`;
+    const overflowPath = `carol/${'c'.repeat(60)}.md`;
+    const content = buildTeamAutoMemoryIndex([
+      {
+        scope: 'team',
+        type: 'feedback',
+        filePath: `/tmp/${primaryPath}`,
+        relativePath: primaryPath,
+        filename: 'a.md',
+        title: 'Alpha',
+        description: shared,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+      {
+        scope: 'team',
+        type: 'feedback',
+        filePath: `/tmp/${fittingPath}`,
+        relativePath: fittingPath,
+        filename: 'b.md',
+        title: 'Bravo',
+        description: shared,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+      {
+        scope: 'team',
+        type: 'feedback',
+        filePath: `/tmp/${overflowPath}`,
+        relativePath: overflowPath,
+        filename: 'c.md',
+        title: 'Carol',
+        description: shared,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    // Every emitted path decodes back to a real file — none is a slice.
+    expect(decodeURIComponent(linkTarget(line))).toBe(primaryPath);
+    expect(alsoTargets(line).map(decodeURIComponent)).toEqual([fittingPath]);
+    // The entry that did not fit is dropped, not half-written.
+    expect(line).not.toContain('carol/');
   });
 });
