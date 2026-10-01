@@ -542,9 +542,10 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
-                // Only the Session creator may answer; after the service says
-                // so, further clicks would only repeat the same refusal.
-                disabled={approvalForbidden}
+                // Only the Session creator may answer; once the service says
+                // so, that is true of every approval this Session raises, so
+                // the latch is scoped to the Session rather than the Action.
+                disabled={approvals.respondForbidden}
                 extraDescriptionId={
                   pendingApproval.rawInput === undefined
                     ? argumentsCaveatId

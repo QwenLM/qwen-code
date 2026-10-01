@@ -303,6 +303,45 @@ describe('useManagedActions', () => {
     expect(hook.latest?.answerError).toBeUndefined();
   });
 
+  it('keeps the creator-only refusal for the Session after that Action leaves the list', async () => {
+    const next = { ...pending, actionId: 'tool_approval_2' };
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValue([next]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    await act(async () => {
+      await expect(
+        hook.latest!.respond('tool_approval_1', 'allow'),
+      ).rejects.toThrow('Forbidden');
+    });
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // The refused Action is gone and its per-Action warning with it, but the
+    // refusal is a fact about the viewer and the Session, so it still covers
+    // the Action that replaced it.
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
+    expect(hook.latest?.answerError).toBeUndefined();
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // A different Session may be the viewer's own: the refusal does not
+    // follow the selection.
+    hook.rerender({ sessionId: 'session-2' });
+    expect(hook.latest?.respondForbidden).toBe(false);
+  });
+
   it('restores the retry budget when the reader is withdrawn and back', async () => {
     vi.useFakeTimers();
     const listPending = vi

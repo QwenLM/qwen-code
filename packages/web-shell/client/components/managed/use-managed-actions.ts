@@ -40,6 +40,12 @@ export interface ManagedActionsState {
   loaded: boolean;
   /** Sending an answer failed; the approval is shown again. */
   answerError?: unknown;
+  /**
+   * The service refused an answer as creator-only. That is a fact about the
+   * viewer and the Session, not about one Action, so it outlives the refused
+   * Action and covers every later approval the same Session raises.
+   */
+  respondForbidden: boolean;
   respond(actionId: string, optionId: string): Promise<void>;
   /** Reads the pending approvals again now. */
   retry(): void;
@@ -67,6 +73,7 @@ export function useManagedActions(
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [loadError, setLoadError] = useState<unknown>();
   const [answerError, setAnswerError] = useState<unknown>();
+  const [respondForbidden, setRespondForbidden] = useState(false);
   const [revision, setRevision] = useState(0);
   const loadFailures = useRef(0);
   // The Action whose answer last failed, so the warning can be dropped once
@@ -90,6 +97,7 @@ export function useManagedActions(
     setAnswered(new Set());
     setLoadError(undefined);
     setAnswerError(undefined);
+    setRespondForbidden(false);
     loadFailures.current = 0;
     answerFailure.current = undefined;
     endedAnswers.current.clear();
@@ -219,6 +227,18 @@ export function useManagedActions(
           next.delete(actionId);
           return next;
         });
+        if (
+          typeof failure === 'object' &&
+          failure !== null &&
+          'code' in failure &&
+          (failure as { code?: unknown }).code === 'action_forbidden'
+        ) {
+          // Responding requires the Session creator, which the service decides
+          // from the (tenant, Session, actor) row rather than the Action, so
+          // the next Action this Session raises is refused the same way even
+          // after this one has left the pending list.
+          setRespondForbidden(true);
+        }
         setAnswerError(failure);
         answerFailure.current = actionId;
         throw failure;
@@ -238,6 +258,7 @@ export function useManagedActions(
     loaded,
     answerError:
       answerFailure.current === action?.actionId ? answerError : undefined,
+    respondForbidden,
     respond,
     retry,
   };

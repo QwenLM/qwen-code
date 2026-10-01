@@ -507,6 +507,124 @@ describe('ManagedSessionsPage', () => {
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the next approval of the same Session unanswerable after a creator-only refusal', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    const second = {
+      ...pendingAction,
+      actionId: 'tool_approval_2',
+      functionCallId: 'call-2',
+    };
+    // A transcript report of an approval change is what re-reads the list;
+    // hold it back until the first read has landed.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(3, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_2', state: 'requested' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      .mockResolvedValue([second]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    provider = { ...provider, actions: { listPending, respond } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(listPending).toHaveBeenCalledTimes(1);
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Only the Session creator can answer this approval.',
+    );
+    expect(allow().disabled).toBe(true);
+
+    // The refused Action left and the next one arrived: the refusal is a fact
+    // about the viewer and the Session, so the new card is just as dead
+    // instead of offering one more guaranteed 403.
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(
+      container.querySelector('[data-testid="message-list-pending-approval"]')
+        ?.textContent,
+    ).toContain('tool_approval_2');
+    expect(allow().disabled).toBe(true);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
+    // The per-Action warning left with the Action it described; the disabled
+    // card itself is what tells the viewer the next one is refused too.
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('keeps a coded but retryable answer failure answerable', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    // Every HTTP failure the Managed client builds carries a string code, so
+    // carrying a code is not what marks a refusal final: only the
+    // creator-only refusal is.
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(503, 'unavailable', 'Busy'),
+      )
+      .mockResolvedValue(undefined);
+    provider = {
+      ...provider,
+      actions: {
+        listPending: vi.fn().mockResolvedValue([pendingAction]),
+        respond,
+      },
+    };
+    await render('s1');
+    const allow = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="managed-approval"] button'),
+      ).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
+    );
+    expect(allow().disabled).toBe(false);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+  });
+
   it('does not read approvals for a Session without the actions capability', async () => {
     const listPending = vi.fn().mockResolvedValue([]);
     provider = {
