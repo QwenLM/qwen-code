@@ -1493,6 +1493,7 @@ describe('package scripts', () => {
       );
       expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
         'husky',
+        'npm run generate',
         'npm run build',
       ]);
     } finally {
