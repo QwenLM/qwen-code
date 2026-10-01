@@ -345,10 +345,10 @@ function resolvesPointer(document: unknown, ref: string): boolean {
 }
 
 /** Every member the client exposes, including inherited accessors. */
-function sdkMethods(): Set<string> {
+function sdkMethods(root: object = DaemonClient.prototype): Set<string> {
   const names = new Set<string>();
   for (
-    let proto: object | null = DaemonClient.prototype;
+    let proto: object | null = root;
     proto && proto !== Object.prototype;
     proto = Object.getPrototypeOf(proto) as object | null
   ) {
@@ -572,37 +572,63 @@ describe('REST integration documentation contract', () => {
     // The grouped "Additional documented APIs" rows begin with an Area name
     // rather than a link, so the OpenAPI row check above never sees them.
     const capabilities = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
-    const sdkPrototypes = {
-      DaemonClient: DaemonClient.prototype as unknown as Record<
-        string,
-        unknown
-      >,
-      WorkspaceDaemonClient:
-        WorkspaceDaemonClient.prototype as unknown as Record<string, unknown>,
+    const sdkMethodSets = {
+      DaemonClient: sdkMethods(DaemonClient.prototype),
+      WorkspaceDaemonClient: sdkMethods(WorkspaceDaemonClient.prototype),
     };
-    const rows = readFileSync(REFERENCE, 'utf8')
-      .split('\n')
-      .filter((line) => /^\| [A-Z]/.test(line) && line.includes('[`'));
+    const lines = readFileSync(REFERENCE, 'utf8').split('\n');
+    // Header-derived column indices make a column insert or reorder fail
+    // loudly instead of silently emptying both assertion loops.
+    const headerCells = (lines.find((line) => /^\| Area\s*\|/.test(line)) ?? '')
+      .split('|')
+      .map((cell) => cell.trim());
+    const capabilityColumn = headerCells.indexOf('Capability and scope');
+    const sdkColumn = headerCells.indexOf('TypeScript SDK');
+    expect(
+      capabilityColumn,
+      'grouped table must have a "Capability and scope" column',
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      sdkColumn,
+      'grouped table must have a "TypeScript SDK" column',
+    ).toBeGreaterThanOrEqual(0);
+    const rows = lines.filter(
+      (line) => /^\| [A-Z]/.test(line) && line.includes('[`'),
+    );
     expect(rows.length).toBeGreaterThan(0);
+    let capabilityChecks = 0;
+    let sdkChecks = 0;
     for (const row of rows) {
       const cells = row.split('|').map((cell) => cell.trim());
       const area = cells[1];
-      for (const match of (cells[3] ?? '').matchAll(/`([a-z][a-z0-9_]*)`/g)) {
+      for (const match of (cells[capabilityColumn] ?? '').matchAll(
+        /`([a-z][a-z0-9_]*)`/g,
+      )) {
+        capabilityChecks += 1;
         expect(
           capabilities.has(match[1]),
           `${area}: \`${match[1]}\` is not a registered serve capability`,
         ).toBe(true);
       }
-      for (const match of (cells[4] ?? '').matchAll(
-        /`(DaemonClient|WorkspaceDaemonClient)\.([A-Za-z0-9_]+)`/g,
+      // A bare method name continues the class the cell last qualified; one
+      // cell can switch classes mid-way.
+      let sdkClass: keyof typeof sdkMethodSets = 'DaemonClient';
+      for (const match of (cells[sdkColumn] ?? '').matchAll(
+        /`(?:(DaemonClient|WorkspaceDaemonClient)\.)?([A-Za-z0-9_]+)`/g,
       )) {
         const [, className, method] = match;
+        if (className) {
+          sdkClass = className as keyof typeof sdkMethodSets;
+        }
+        sdkChecks += 1;
         expect(
-          typeof sdkPrototypes[className as keyof typeof sdkPrototypes][method],
-          `${area}: \`${className}.${method}\` is not an SDK method`,
-        ).toBe('function');
+          sdkMethodSets[sdkClass].has(method),
+          `${area}: \`${method}\` is not an SDK method`,
+        ).toBe(true);
       }
     }
+    expect(capabilityChecks).toBeGreaterThan(0);
+    expect(sdkChecks).toBeGreaterThan(0);
   });
 
   it('indexes every operation with a dedicated protocol section', () => {
