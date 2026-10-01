@@ -62,13 +62,11 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
-    // A cancel the Harness did not take is re-sent with these delays (the
-    // last one repeating) while its Turn is still CANCELLING. The running
-    // dispatcher checks CANCELLING only once, before it starts streaming, so
-    // nothing else re-sends it.
-    private static final long[] CANCEL_RETRY_MILLIS = {1_000, 2_000, 5_000,
-            10_000};
-    private static final int CANCEL_RETRY_LIMIT = 60;
+    // A cancel the Harness did not take is re-sent while its Turn is still
+    // CANCELLING: the running dispatcher checks CANCELLING only once, before
+    // it starts streaming, so nothing else re-sends it.
+    private static final long CANCEL_RETRY_MILLIS = 2_000;
+    private static final int CANCEL_RETRY_LIMIT = 150;
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService renewer =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -558,20 +556,12 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // A live cancel reuses the running Turn's attachment, which runs
-            // no Workspace authorization: aborting running work must not
-            // depend on the grants that admit new work. A passive attach
-            // would reload the Session in the Harness, so the abort would
-            // reach a different attachment and the Turn would stay
-            // CANCELLING; only cancellation recovery, which has no live
-            // attachment, may attach passively.
-            Attachment attachment = harness.liveAttachment(
-                    session.tenantId(), session.sessionId())
-                    .orElseGet(() -> harness.createOrLoad(session.tenantId(),
-                            session.sessionId(),
-                            session.harnessBootId() != null));
-            if (store.bindHarness(tenantId, sessionId,
-                    turnId, owner, attachment.bootId())) {
+            // An admitted Turn's boot is already bound, so the cancel needs no
+            // attach: attaching re-runs the Workspace authorization, and
+            // aborting running work must not depend on the grants that admit
+            // new work. harness.cancel reuses the running Turn's attachment.
+            if (session.harnessBootId() != null && store.bindHarness(tenantId,
+                    sessionId, turnId, owner, session.harnessBootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
@@ -590,11 +580,9 @@ public class HarnessCoordinator {
                     + " session={} turn={}", tenantId, sessionId, turnId);
             return;
         }
-        long delay = CANCEL_RETRY_MILLIS[Math.min(attempt,
-                CANCEL_RETRY_MILLIS.length) - 1];
         try {
             renewer.schedule(() -> executor.execute(() -> cancelAdmittedTurn(
-                    tenantId, sessionId, turnId, attempt)), delay,
+                    tenantId, sessionId, turnId, attempt)), CANCEL_RETRY_MILLIS,
                     TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException closed) {
             // The coordinator is shutting down; recovery takes over.
