@@ -70,6 +70,39 @@ import {
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
+export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
+export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
+
+export type HostedWorkspaceToolProfile =
+  | typeof HOSTED_WORKSPACE_FILE_PROFILE
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE
+  | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2;
+
+export function isHostedWorkspaceProfile(
+  profile: unknown,
+): profile is HostedWorkspaceToolProfile {
+  return (
+    profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+  );
+}
+
+export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
+  return (
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+  );
+}
+
+export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
+  return (
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+  );
+}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -81,9 +114,6 @@ export function isRetryableWorkspaceAcquisition(
     (cause.code === 'workspace_busy' || cause.code === 'workspace_unavailable')
   );
 }
-export type HostedWorkspaceToolProfile =
-  | typeof HOSTED_WORKSPACE_FILE_PROFILE
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE;
 
 export interface HostedShellTurnOptions {
   resources: DurableToolResultResourceStore;
@@ -184,6 +214,33 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+const HOSTED_GLOB_TOOL: FunctionDeclaration = {
+  name: 'glob',
+  description:
+    'Find files by name pattern in the remote Workspace, for example "**/*.ts". Returns paths relative to the saved Session working directory, sorted by modification time (newest first).',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      pattern: { type: 'string' },
+      path: {
+        type: 'string',
+        description:
+          'Directory to search, relative to the saved Session working directory. Omit to search the whole working directory.',
+      },
+    },
+    required: ['pattern'],
+    additionalProperties: false,
+  },
+};
+export const HOSTED_WORKSPACE_FILE_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+export const HOSTED_WORKSPACE_SHELL_TOOLS_V2: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_SHELL_TOOLS,
+  HOSTED_GLOB_TOOL,
+];
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -231,6 +288,7 @@ export class HostedWorkspaceToolTurn {
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
     private readonly mcp?: HostedMcpSession,
+    private readonly profile?: string,
   ) {
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -255,10 +313,15 @@ export class HostedWorkspaceToolTurn {
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
+    const search = isHostedWorkspaceSearchProfile(this.profile);
     this.advertised = [
       ...(this.publication || this.shell
-        ? HOSTED_WORKSPACE_SHELL_TOOLS
-        : HOSTED_WORKSPACE_FILE_TOOLS),
+        ? search
+          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+          : HOSTED_WORKSPACE_SHELL_TOOLS
+        : search
+          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+          : HOSTED_WORKSPACE_FILE_TOOLS),
       ...(this.mcp?.tools() ?? []),
     ];
     return this.advertised;
@@ -396,6 +459,27 @@ export class HostedWorkspaceToolTurn {
         input = this.publication
           ? { ...args }
           : { ...args, is_background: false };
+      } else if (call.name === 'glob') {
+        input = { ...call.args };
+        const globError =
+          'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
+        const pattern = call.args['pattern'];
+        const directory = call.args['path'];
+        if (typeof pattern !== 'string' || !pattern.trim()) {
+          validationError = globError;
+        } else if (directory !== undefined) {
+          if (typeof directory !== 'string') {
+            validationError = globError;
+          } else {
+            try {
+              input['path'] = normalizeWorkspaceRelativePath(directory.trim());
+            } catch (cause) {
+              if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                throw cause;
+              validationError = globError;
+            }
+          }
+        }
       } else {
         const file = call.args['file_path'];
         input = { ...call.args };
@@ -977,6 +1061,28 @@ export class HostedWorkspaceToolTurn {
         let outcome = Buffer.from(
           JSON.stringify({ executionCallId, ...converted[0] }),
         );
+        if (
+          outcome.byteLength >
+            HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
+          !this.messageFitsInline('tool_result', converted, model)
+        ) {
+          // A glob result is a path list: keep the prefix that fits rather
+          // than omitting the whole result, so the model can narrow and retry.
+          if (request.call.name === 'glob') {
+            const fits = (candidate: Part[]) =>
+              Buffer.byteLength(
+                JSON.stringify({ executionCallId, ...candidate[0] }),
+              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
+              this.messageFitsInline('tool_result', candidate, model);
+            const truncated = truncateHostedGlobResponse(converted, fits);
+            if (truncated) {
+              converted = truncated;
+              outcome = Buffer.from(
+                JSON.stringify({ executionCallId, ...converted[0] }),
+              );
+            }
+          }
+        }
         if (
           outcome.byteLength >
             HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
@@ -1582,4 +1688,43 @@ export class HostedWorkspaceToolTurn {
   async close(): Promise<void> {
     await this.publisher?.close();
   }
+}
+
+const HOSTED_GLOB_TRUNCATION_HINT =
+  '\n---\n[Result truncated to fit the durable Session limit. Narrow the pattern or path.]';
+
+/**
+ * Keeps the longest whole-line prefix of a glob result that fits, followed by
+ * a narrowing hint. Returns undefined when the response has no text output to
+ * truncate or even the empty list does not fit.
+ */
+function truncateHostedGlobResponse(
+  parts: Part[],
+  fits: (candidate: Part[]) => boolean,
+): Part[] | undefined {
+  const functionResponse = parts[0]?.functionResponse;
+  const response = functionResponse?.response as
+    | Record<string, unknown>
+    | undefined;
+  const output = response?.['output'];
+  if (!functionResponse || !response || typeof output !== 'string')
+    return undefined;
+  const lines = output.split('\n');
+  while (lines.length > 0) {
+    const candidate: Part[] = [
+      {
+        functionResponse: {
+          ...functionResponse,
+          response: {
+            ...response,
+            output: lines.join('\n') + HOSTED_GLOB_TRUNCATION_HINT,
+            outputTruncated: true,
+          },
+        },
+      },
+    ];
+    if (fits(candidate)) return candidate;
+    lines.pop();
+  }
+  return undefined;
 }

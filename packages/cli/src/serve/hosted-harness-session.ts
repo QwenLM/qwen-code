@@ -58,10 +58,10 @@ import {
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import {
-  HOSTED_WORKSPACE_FILE_PROFILE,
-  HOSTED_WORKSPACE_SHELL_PROFILE,
   HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
+  isHostedWorkspaceProfile,
+  isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
@@ -702,6 +702,7 @@ async function executeHostedTurn(
               waiters: session.waiters,
             },
             session.mcp,
+            session.toolProfile,
           )
         : undefined;
     if (resumeFromToolResults) {
@@ -791,8 +792,7 @@ export function registerHostedHarnessSessionRoutes(
     let captureBytes = body?.['captureBytes'];
     if (
       toolProfile !== undefined &&
-      ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
-        toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+      ((!isHostedWorkspaceProfile(toolProfile) &&
         toolProfile !== HOSTED_MCP_PROFILE) ||
         !brokerOptions)
     ) {
@@ -829,7 +829,7 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (
-      toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+      isHostedWorkspaceShellProfile(toolProfile) &&
       captureBytes !== undefined &&
       (!Number.isSafeInteger(captureBytes) ||
         (captureBytes as number) < 1 ||
@@ -885,7 +885,7 @@ export function registerHostedHarnessSessionRoutes(
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
-                  ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
+                  ...(isHostedWorkspaceShellProfile(toolProfile)
                     ? { captureBytes }
                     : {}),
                   ...(approval ? hostedApprovalDefinition(approval) : {}),
@@ -925,23 +925,19 @@ export function registerHostedHarnessSessionRoutes(
       if (
         !create &&
         toolProfile === undefined &&
-        (savedProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
-          savedProfile === HOSTED_WORKSPACE_SHELL_PROFILE)
+        isHostedWorkspaceProfile(savedProfile)
       )
         toolProfile = savedProfile;
       if (
         !create &&
-        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes === undefined
       )
         captureBytes = definition?.['captureBytes'];
-      const workspaceProfile =
-        toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
-        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE;
+      const workspaceProfile = isHostedWorkspaceProfile(toolProfile);
       if (
         toolProfile !== undefined &&
-        ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
-          toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+        ((!isHostedWorkspaceProfile(toolProfile) &&
           toolProfile !== HOSTED_MCP_PROFILE) ||
           !brokerOptions)
       ) {
@@ -950,7 +946,7 @@ export function registerHostedHarnessSessionRoutes(
         return;
       }
       if (
-        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined &&
         (!Number.isSafeInteger(captureBytes) ||
           (captureBytes as number) < 1 ||
@@ -969,7 +965,7 @@ export function registerHostedHarnessSessionRoutes(
         blocked: false,
         waiters: new HostedApprovalWaiters(),
         ...(toolProfile ? { toolProfile } : {}),
-        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes !== undefined
           ? {
               publication: {
@@ -978,7 +974,7 @@ export function registerHostedHarnessSessionRoutes(
               },
             }
           : {}),
-        ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        ...(isHostedWorkspaceShellProfile(toolProfile) &&
         captureBytes === undefined
           ? {
               shell: {
@@ -995,7 +991,7 @@ export function registerHostedHarnessSessionRoutes(
         definition?.['toolProfile'] !== toolProfile ||
         JSON.stringify(definition?.['mcpServers']) !==
           JSON.stringify(mcpServers) ||
-        (toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        (isHostedWorkspaceShellProfile(toolProfile) &&
           definition?.['captureBytes'] !== captureBytes) ||
         (toolProfile && !pinned)
       ) {

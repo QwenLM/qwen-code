@@ -1303,6 +1303,99 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it('pins the /2 file profile through create and load and advertises glob', async () => {
+    const body = {
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/2',
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = app(true);
+    const created = await headers(supertest(server).post('/session')).send(
+      body,
+    );
+    expect(created.status).toBe(200);
+    state.model.mockImplementationOnce(async ({ toolTurn }) => {
+      expect(
+        (await toolTurn!.declarations(new AbortController().signal)).map(
+          (tool) => tool.name,
+        ),
+      ).toEqual(['read_file', 'write_file', 'edit', 'glob']);
+      return { text: 'text without side effects', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const clientId = created.body.clientId as string;
+    expect(
+      (
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+      ).status,
+    ).toBe(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+    expect(
+      (
+        await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        })
+      ).status,
+    ).toBe(409);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    let resumedDeclarations: string[] | undefined;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      resumedDeclarations = (await toolTurn!.declarations(signal)).map(
+        (tool) => tool.name!,
+      );
+      return { text: 'resumed', model: 'test-model' };
+    });
+    const nextPrompt = [{ type: 'text', text: 'again' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        prompt: nextPrompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+    expect(resumedDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'glob',
+    ]);
+    expect(state.model).toHaveBeenCalledTimes(2);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      loaded.body.clientId as string,
+    );
+  });
+
   it('requires the saved explicit Shell profile and advertises it only with a Broker', async () => {
     const body = {
       sessionId: SESSION_ID,

@@ -13,6 +13,7 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js'
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
 import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
 import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
+import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import { ShellTool } from '@qwen-code/qwen-code-core/tools/shell.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { ShellToolInvocation } from '@qwen-code/qwen-code-core/tools/shell.js';
@@ -120,6 +121,7 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   WriteFileTool.Name,
   EditTool.Name,
   ShellTool.Name,
+  GlobTool.Name,
 ]);
 
 interface JournalEntry {
@@ -778,6 +780,29 @@ export class ManagedToolExecutor {
           params['file_path'].trim(),
         );
       }
+      if (entry.toolName === GlobTool.Name) {
+        // Glob's own validation admits external paths, so the executor pins
+        // the search to the Session's installed context: the workspace-wide
+        // includeDirectories would otherwise reach sibling Sessions' files.
+        const root = tools.directory;
+        if (root === undefined)
+          throw new ManagedToolUnavailableError(
+            'Managed context directory is unavailable.',
+          );
+        const requested =
+          typeof params['path'] === 'string' ? params['path'].trim() : '';
+        const resolved =
+          requested === '' || requested === '.'
+            ? root
+            : path.resolve(root, requested);
+        const relative = path.relative(root, resolved);
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+          throw new Error(
+            `Path '${requested}' is not within the Workspace directory.`,
+          );
+        }
+        params['path'] = resolved;
+      }
       if (
         entry.toolName === ShellTool.Name &&
         typeof params['directory'] === 'string' &&
@@ -835,6 +860,14 @@ export class ManagedToolExecutor {
         result = outcome.result;
       } else {
         result = await invoke();
+      }
+      if (entry.toolName === GlobTool.Name) {
+        const root = tools.directory;
+        if (root === undefined)
+          throw new ManagedToolUnavailableError(
+            'Managed context directory is unavailable.',
+          );
+        result = relativizeGlobResult(result, root);
       }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
@@ -1000,6 +1033,7 @@ export function createManagedToolSet(
         new ReadFileTool(config),
         new WriteFileTool(config),
         new EditTool(config),
+        new GlobTool(config),
         new ShellTool(config),
       ].map((tool): [string, AnyDeclarativeTool] => [tool.name, tool]),
     ),
@@ -1070,6 +1104,25 @@ function sameInvocation(
     entry.toolName === toolName &&
     entry.inputJson === inputJson
   );
+}
+
+/**
+ * Glob results list absolute paths, but a Hosted model must not see the
+ * Runtime host's physical layout: every path under the Session's installed
+ * context becomes Workspace-relative, and the root itself becomes ".".
+ */
+function relativizeGlobResult(result: ToolResult, directory: string) {
+  if (typeof result.llmContent !== 'string') return result;
+  const root = path.resolve(directory);
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  const bareRoot = new RegExp(
+    root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![/\\w.-])',
+    'g',
+  );
+  return {
+    ...result,
+    llmContent: result.llmContent.split(prefix).join('').replace(bareRoot, '.'),
+  };
 }
 
 function toPayload(

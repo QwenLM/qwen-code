@@ -36,8 +36,8 @@ export interface HostedApprovalSettings {
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file'],
-  'auto-edit': ['read_file', 'write_file', 'edit'],
+  default: ['read_file', 'glob'],
+  'auto-edit': ['read_file', 'write_file', 'edit', 'glob'],
 };
 
 /**

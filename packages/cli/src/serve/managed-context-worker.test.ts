@@ -980,6 +980,51 @@ describe('Managed context tool gate', () => {
     expect(fs.readFileSync(file, 'utf8')).toBe('final draft');
   });
 
+  it('globs inside the Session directory and answers Workspace-relative paths', async () => {
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), '');
+    fs.writeFileSync(path.join(root, 'services/api/package.json'), '{}');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    await post(origin, CONTEXT, installation('session-1', 'services/api'));
+    await post(origin, CONTEXT, installation('session-2', 'services/web'));
+    const glob = (callId: string, input: Record<string, unknown>) => ({
+      ...shell('session-1', callId, ''),
+      toolName: 'glob',
+      input,
+    });
+
+    const all = await (
+      await post(origin, EXECUTE, glob('call-1', { pattern: '**/*' }))
+    ).json();
+    const sub = await (
+      await post(
+        origin,
+        EXECUTE,
+        glob('call-2', { pattern: '*.ts', path: 'src' }),
+      )
+    ).json();
+    const outside = await (
+      await post(
+        origin,
+        EXECUTE,
+        glob('call-3', { pattern: '**/*', path: '..' }),
+      )
+    ).json();
+
+    expect(all.result.executionStatus).toBe('success');
+    const text = JSON.stringify(all);
+    expect(text).toContain('src/index.ts');
+    expect(text).not.toContain('secret.txt');
+    expect(text).not.toContain(realDirectory(root, 'services/api'));
+    expect(sub.result.executionStatus).toBe('success');
+    expect(JSON.stringify(sub)).toContain('index.ts');
+    expect(outside.result.executionStatus).toBe('error');
+    expect(JSON.stringify(outside)).toContain(
+      'not within the Workspace directory',
+    );
+  });
+
   it('refuses new calls once the directory is gone, and still answers settled ones', async () => {
     const root = workspace();
     const origin = await startWorker({ ...BOOT, mountRoot: root });

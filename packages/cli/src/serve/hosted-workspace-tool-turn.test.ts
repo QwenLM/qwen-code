@@ -83,7 +83,9 @@ let session: ManagedSession;
 let harness: ReturnType<typeof createManagedHarnessHandle>;
 let turn: HostedWorkspaceToolTurn;
 let commit: ConstructorParameters<typeof HostedWorkspaceToolTurn>[4];
-const messageFitsInline = vi.fn(() => true);
+const messageFitsInline = vi.fn(
+  (_type: 'assistant' | 'tool_result', _parts: Part[], _model: string) => true,
+);
 let waiters: HostedApprovalWaiters;
 let expectWritesStopped: boolean;
 function createTurn(
@@ -885,6 +887,216 @@ it('preserves trimmed and normalized valid file paths', async () => {
   expect(payload.input.file_path).toBe('dir/file.txt');
   await turn.consumeResults();
   await turn.finish();
+});
+
+it('offers glob only under the /2 Workspace profiles', async () => {
+  const signal = new AbortController().signal;
+  const advertised = async (profile?: string, shell = false) =>
+    (
+      await new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        shell
+          ? { resources: session.resources, assertWritable: async () => {} }
+          : undefined,
+        undefined,
+        undefined,
+        undefined,
+        profile,
+      ).declarations(signal)
+    ).map((tool) => tool.name);
+  const file = ['read_file', 'write_file', 'edit'];
+  const shellTools = [...file, 'run_shell_command'];
+  await expect(advertised()).resolves.toEqual(file);
+  await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
+  await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual(
+    shellTools,
+  );
+  await expect(advertised('hosted-workspace-files/2')).resolves.toEqual([
+    ...file,
+    'glob',
+  ]);
+  await expect(advertised('hosted-workspace-shell/2', true)).resolves.toEqual([
+    ...shellTools,
+    'glob',
+  ]);
+});
+
+function createSearchTurn() {
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    'hosted-workspace-files/2',
+  );
+}
+
+it('refuses a glob call a /1 profile never advertised', async () => {
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts' },
+  };
+  await expect(
+    turn.execute(
+      [call],
+      [
+        {
+          functionCall: { id: call.callId, name: call.name, args: call.args },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Hosted Workspace profile refused a tool call.');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each([
+  {},
+  { pattern: '' },
+  { pattern: '   ' },
+  { pattern: 7 },
+  { pattern: '**/*.ts', path: '/private/secret-host-path' },
+  { pattern: '**/*.ts', path: '../escape' },
+  { pattern: '**/*.ts', path: 'a\\b' },
+  { pattern: '**/*.ts', path: 5 },
+])(
+  'persists correctable glob argument errors without dispatch: %j',
+  async (args) => {
+    turn = createSearchTurn();
+    const call = { ...calls[0], name: 'glob', args };
+    const original = [
+      { functionCall: { id: call.callId, name: call.name, args: call.args } },
+    ];
+    const responses = await turn.execute(
+      [call],
+      original,
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'];
+    expect(responses[0].functionResponse?.id).toBe(call.callId);
+    expect(error).toContain('glob');
+    expect(error).toContain('retry');
+    expect(error).not.toContain('secret-host-path');
+    const history = await session.sink.project();
+    expect(history.slice(-2).map((record) => record.type)).toEqual([
+      'assistant',
+      'tool_result',
+    ]);
+    expect(history.at(-2)?.message?.parts).toEqual(original);
+    expect(history.at(-1)?.message?.parts).toEqual(responses);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  },
+);
+
+it('normalizes a glob path before dispatch', async () => {
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts', path: ' ./src//nested ' },
+  };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload).toEqual({
+    toolName: 'glob',
+    input: { pattern: '**/*.ts', path: 'src/nested' },
+  });
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('truncates an oversized glob result to a fitting prefix with a narrowing hint', async () => {
+  turn = createSearchTurn();
+  messageFitsInline.mockImplementation(
+    (type, messageParts) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+          timestamp: new Date().toISOString(),
+          type,
+          cwd: root,
+          version: 'test',
+          daemonPromptId: 'prompt',
+          message: {
+            role: type === 'assistant' ? 'model' : 'user',
+            parts: messageParts,
+          },
+        }),
+      ) <=
+      64 * 1024,
+  );
+  const lines = Array.from(
+    { length: 400 },
+    (_, index) =>
+      `src/file-${String(index).padStart(3, '0')}-${'x'.repeat(150)}.ts`,
+  );
+  broker.execute.mockResolvedValue({
+    executionStatus: 'success',
+    responseParts: [
+      {
+        text: `Found ${lines.length} file(s) matching "**/*.ts" in the workspace directory, sorted by modification time (newest first):\n---\n${lines.join('\n')}`,
+      },
+    ],
+  });
+  const publish = vi.spyOn(session.resources, 'publish');
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts' },
+  };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const response = responses[0].functionResponse?.response;
+  expect(response?.['executionStatus']).toBe('success');
+  expect(response?.['outputTruncated']).toBe(true);
+  const output = response?.['output'];
+  expect(typeof output).toBe('string');
+  expect(output).toContain('file-000');
+  expect(output).not.toContain('file-399');
+  expect(output).toContain('Narrow the pattern or path.');
+  expect(response).not.toHaveProperty('outputOmitted');
+  const outcome = publish.mock.calls.find(
+    ([kind]) => kind === 'managed-tool-outcome',
+  )?.[1];
+  expect(outcome?.byteLength).toBeLessThanOrEqual(64 * 1024);
+  const receipt = (await session.sink.project()).at(-1);
+  expect(receipt?.message?.parts).toEqual(responses);
+  expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(
+    64 * 1024,
+  );
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  expect(broker.release).toHaveBeenCalledOnce();
 });
 
 it.each([

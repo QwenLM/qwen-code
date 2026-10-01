@@ -44,8 +44,8 @@ describe('Hosted tool approval settings', () => {
 
   it('asks before the tools each mode does not pre-approve', () => {
     const asked = (mode: 'yolo' | 'default' | 'auto-edit') =>
-      ['read_file', 'write_file', 'edit', 'run_shell_command'].filter((tool) =>
-        hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool),
+      ['read_file', 'write_file', 'edit', 'run_shell_command', 'glob'].filter(
+        (tool) => hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool),
       );
     expect(asked('yolo')).toEqual([]);
     expect(asked('default')).toEqual([
