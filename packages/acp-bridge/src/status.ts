@@ -1265,10 +1265,19 @@ export interface ServeWorkspaceMemoryFile {
   bytes: number;
   /**
    * File text, present only when the caller asked for content
-   * (`GET /workspace/memory?content=true`) and the read succeeded.
+   * (`GET /workspace/memory?content=true`), the read succeeded, and the
+   * on-disk bytes are valid BOM-free UTF-8. A `mode:'replace'` client may
+   * treat it as the file's full text. Absent for non-UTF-8 or BOM'd
+   * files (a lossy decode is never served as replaceable text) and for
+   * reads that raced a concurrent write.
    */
   content?: string;
-  /** True when `content` stops at the daemon's read cap. */
+  /**
+   * True when the served text is not the file's full content: either
+   * `content` stops at the daemon's read cap, or the read raced a
+   * concurrent write (byte count differed from `bytes`, in which case
+   * `content` is omitted entirely).
+   */
   truncated?: boolean;
 }
 

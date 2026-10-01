@@ -236,6 +236,41 @@ describe('workspace memory routes', () => {
       expect(file.path).toBe(globalFile);
       expect(file).not.toHaveProperty('content');
     });
+
+    it('flags a torn read (size changed between stat and read) as truncated', async () => {
+      // Memory writes are truncate-then-write; a read landing inside that
+      // window captures a prefix. The entry must not report that prefix
+      // as the file's full text.
+      const wsFile = path.join(workspace, 'QWEN.md');
+      await fs.writeFile(wsFile, 'x'.repeat(100), 'utf8');
+      const realReadFile = fs.readFile;
+      const readSpy = vi
+        .spyOn(fs, 'readFile')
+        .mockImplementation((async (
+          target: Parameters<typeof fs.readFile>[0],
+          ...rest: unknown[]
+        ) => {
+          if (String(target) === wsFile) {
+            return Buffer.from('x'.repeat(40));
+          }
+          return Reflect.apply(realReadFile, fs, [target, ...rest]);
+        }) as typeof fs.readFile);
+      try {
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace });
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        const [file] = res.body.files as Array<{
+          content?: string;
+          truncated?: boolean;
+        }>;
+        expect(file.truncated).toBe(true);
+        expect(file.content).toBeUndefined();
+      } finally {
+        readSpy.mockRestore();
+      }
+    });
   });
 
   describe('POST /workspace/memory', () => {

@@ -498,7 +498,12 @@ export interface CollectWorkspaceMemoryStatusOptions {
   /**
    * Read each discovered file's text, capped at the write route's
    * byte limit. A file that fails to read keeps its entry without
-   * `content` and adds a cell to `errors[]`.
+   * `content` and adds a cell to `errors[]`. `content` is also
+   * omitted (without an error cell) when the on-disk bytes are not
+   * valid BOM-free UTF-8 — a lossy decode is never served as
+   * replaceable text — and a read whose byte count differs from the
+   * earlier `stat` is flagged `truncated` with no `content` (torn
+   * read racing a concurrent write).
    */
   includeContent?: boolean;
 }
@@ -564,7 +569,10 @@ export async function collectWorkspaceMemoryStatus(
   if (options.includeContent) {
     for (const file of files) {
       try {
-        Object.assign(file, await readMemoryFileContent(file.absolutePath));
+        Object.assign(
+          file,
+          await readMemoryFileContent(file.absolutePath, file.bytes),
+        );
       } catch (err) {
         errors.push({
           kind: 'memory_file',
@@ -643,15 +651,43 @@ async function walkWorkspaceForMemory(
   return out;
 }
 
+/**
+ * Read one memory file for the `?content=true` response. The web-shell
+ * memory panel treats any non-`truncated` `content` as the file's full
+ * text and may `mode:'replace'` the file from it (an unconditional
+ * `fs.writeFile` with no backup), so this read must be lossless or
+ * honest — never serve bytes the panel could mistake for the original:
+ *
+ * - A byte count that differs from the earlier `stat` means a writer
+ *   rewrote the file between the stat and this read (memory writes are
+ *   truncate-then-write under a per-file lock this read does not take,
+ *   and out-of-process writers hold no lock at all). Flag `truncated`
+ *   and omit `content` rather than serve a torn prefix the panel would
+ *   save back over the real tail.
+ * - Bytes that are not valid BOM-free UTF-8 (GBK, Shift_JIS, UTF-16 from
+ *   PowerShell `>` redirection, BOM'd UTF-8) cannot round-trip through
+ *   a replace write: omit `content` so the client's fallback path takes
+ *   over instead of saving a lossy decode back over the original bytes.
+ */
 async function readMemoryFileContent(
   filePath: string,
+  expectedBytes: number,
 ): Promise<{ content?: string; truncated?: boolean }> {
   const buffer = await fs.readFile(filePath);
+  if (buffer.length !== expectedBytes) {
+    return { truncated: true };
+  }
   const truncated = buffer.length > MAX_MEMORY_CONTENT_BYTES;
   const slice = buffer.subarray(
     0,
     truncated ? MAX_MEMORY_CONTENT_BYTES : buffer.length,
   );
+  // A UTF-8 BOM survives the fatal decode below as an invisible U+FEFF
+  // first character; a replace save would then drop the BOM. BOM'd
+  // UTF-16/32 fails the fatal decode on its own.
+  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+    return {};
+  }
   try {
     return {
       content: new TextDecoder('utf-8', { fatal: true }).decode(slice),

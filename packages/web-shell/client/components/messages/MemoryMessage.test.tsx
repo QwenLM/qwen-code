@@ -216,4 +216,37 @@ describe('MemoryMessage', () => {
     await flush();
     expect(container.querySelector('textarea')).not.toBeNull();
   });
+
+  it('restores the file’s own CRLF endings on save', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'a\r\nb\r\n',
+      truncated: false,
+    });
+    memory.writeMemory.mockResolvedValue({
+      ok: true,
+      filePath: GLOBAL_PATH,
+      bytesWritten: 9,
+      mode: 'replace',
+      changed: true,
+    });
+
+    await mountOnUserTab();
+    act(() => button('Edit').click());
+    await flush();
+
+    const editor = container.querySelector('textarea')!;
+    // The textarea value API normalizes CRLF to LF.
+    expect(editor.value).toBe('a\nb\n');
+    // One keystroke: append "c" as a new line.
+    type(editor, 'a\nb\nc\n');
+    await flush();
+    act(() => button('Save Memory').click());
+    await flush();
+
+    expect(memory.writeMemory).toHaveBeenCalledWith({
+      scope: 'global',
+      mode: 'replace',
+      content: 'a\r\nb\r\nc\r\n',
+    });
+  });
 });

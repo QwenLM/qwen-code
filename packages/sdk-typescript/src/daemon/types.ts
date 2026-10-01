@@ -2621,9 +2621,19 @@ export interface DaemonWorkspaceMemoryFile {
   path: string;
   scope: DaemonContextFileScope;
   bytes: number;
-  /** Present only for `workspaceMemory({ includeContent: true })`. */
+  /**
+   * Present only for `workspaceMemory({ includeContent: true })` when the
+   * read succeeded and the on-disk bytes are valid BOM-free UTF-8 — only
+   * then may a client treat it as the file's full text for a replace
+   * write. Absent for non-UTF-8/BOM'd files and for reads that raced a
+   * write.
+   */
   content?: string;
-  /** True when `content` stops at the daemon's read cap. */
+  /**
+   * True when the served text is not the file's full content: `content`
+   * stopped at the daemon's read cap, or the read raced a concurrent
+   * write (byte count differed from `bytes`; `content` omitted).
+   */
   truncated?: boolean;
 }
 
