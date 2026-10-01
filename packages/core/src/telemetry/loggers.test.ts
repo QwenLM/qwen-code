@@ -82,7 +82,6 @@ import {
   logApiError,
   logApiRetry,
   logProtocolTagSanitized,
-  logMemoryRecall,
   logMemoryRecallDelivery,
   logMemorySearch,
   logMemoryMigration,
@@ -120,7 +119,6 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
-  MemoryRecallEvent,
   MemorySearchEvent,
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
@@ -320,68 +318,6 @@ describe('loggers', () => {
       );
       expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
         /response_text|reasoning|tool_name|arguments/,
-      );
-    });
-  });
-
-  describe('logMemoryRecall', () => {
-    const SKIP_SELECTOR_EXPERIMENT_ENV =
-      'QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT';
-
-    const makeRecallEvent = (selectorSkipped: boolean) =>
-      new MemoryRecallEvent({
-        query_length: 12,
-        docs_scanned: 3,
-        docs_selected: 1,
-        strategy: 'heuristic',
-        duration_ms: 42,
-        selector_skipped: selectorSkipped,
-      });
-
-    beforeEach(() => {
-      vi.spyOn(metrics, 'recordMemoryRecallMetrics');
-    });
-
-    afterEach(() => {
-      delete process.env[SKIP_SELECTOR_EXPERIMENT_ENV];
-    });
-
-    it('keeps selector_skipped off the recall metrics while the #13003 experiment is disabled', () => {
-      delete process.env[SKIP_SELECTOR_EXPERIMENT_ENV];
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
-
-      logMemoryRecall(config, makeRecallEvent(false));
-
-      expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
-        config,
-        42,
-        {
-          strategy: 'heuristic',
-          docs_selected: 1,
-        },
-      );
-      // The log attribute stays unconditional on purpose; only the metric
-      // dimensions are gated on the experiment.
-      expect(mockLogger.emit).toHaveBeenCalledWith({
-        body: 'Memory recall: strategy=heuristic. Selected 1/3 docs.',
-        attributes: expect.objectContaining({ selector_skipped: false }),
-      });
-    });
-
-    it('attaches selector_skipped to the recall metrics while the #13003 experiment is enabled', () => {
-      process.env[SKIP_SELECTOR_EXPERIMENT_ENV] = '1';
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
-
-      logMemoryRecall(config, makeRecallEvent(true));
-
-      expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
-        config,
-        42,
-        {
-          strategy: 'heuristic',
-          docs_selected: 1,
-          selector_skipped: true,
-        },
       );
     });
   });

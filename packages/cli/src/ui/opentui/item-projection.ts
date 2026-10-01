@@ -463,11 +463,7 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     );
   }
   lines.push('');
-  // Parity of views/ContextUsage: without a provider total the estimate
-  // caption above already heads these rows (#12606).
-  if (totalTokens > 0) {
-    lines.push('Usage by category');
-  }
+  lines.push('Usage by category');
   const categories: Array<[string, string]> = [
     ['System prompt', 'systemPrompt'],
     ['Built-in tools', 'builtinTools'],

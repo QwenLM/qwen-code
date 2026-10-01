@@ -1261,34 +1261,14 @@ export function recordMemoryDreamMetrics(
 export function recordMemoryRecallMetrics(
   config: Config,
   durationMs: number,
-  attrs: {
-    strategy: MemoryRecallStrategy;
-    docs_selected: number;
-    /**
-     * Attached only when defined: the `selector_skipped` dimension belongs to
-     * the #13003 skip-selector experiment, so callers pass it solely while
-     * that experiment is enabled. An existing series must not gain the
-     * dimension — not even as a constant `false` — on deployments where the
-     * experiment is off, or every deployment would split the time series.
-     */
-    selector_skipped?: boolean;
-  },
+  attrs: { strategy: MemoryRecallStrategy; docs_selected: number },
 ): void {
   if (!isMetricsInitialized) return;
   const common = baseMetricDefinition.getCommonAttributes(config);
-  const selectorSkippedAttr =
-    attrs.selector_skipped === undefined
-      ? {}
-      : { selector_skipped: attrs.selector_skipped };
-  memoryRecallCounter?.add(1, {
-    ...common,
-    strategy: attrs.strategy,
-    ...selectorSkippedAttr,
-  });
+  memoryRecallCounter?.add(1, { ...common, strategy: attrs.strategy });
   memoryRecallDurationHistogram?.record(durationMs, {
     ...common,
     strategy: attrs.strategy,
-    ...selectorSkippedAttr,
   });
 }
 

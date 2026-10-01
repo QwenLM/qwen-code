@@ -340,33 +340,6 @@ describe('projectContextUsage', () => {
     expect(text).not.toContain('pre-conversation');
   });
 
-  it('heads the categories with "Usage by category" only when a provider total exists (#12606)', () => {
-    // Parity of views/ContextUsage and the text panel: without a provider
-    // total the estimate caption heads the rows, with or without a history.
-    const breakdown = {
-      systemPrompt: 1000,
-      builtinTools: 800,
-      mcpTools: 0,
-      memoryFiles: 200,
-      skills: 0,
-      freeSpace: 57000,
-      autocompactBuffer: 1000,
-    };
-    const project = (totalTokens: number, messages: number) =>
-      projectContextUsage({
-        modelName: 'qwen3-max',
-        totalTokens,
-        contextWindowSize: 100000,
-        breakdown: { ...breakdown, messages },
-        isEstimated: totalTokens <= 0,
-        showDetails: false,
-      });
-
-    expect(project(0, 0)).not.toContain('Usage by category');
-    expect(project(0, 40000)).not.toContain('Usage by category');
-    expect(project(42000, 40000)).toContain('Usage by category');
-  });
-
   it('shows the no-API-response notice before the first turn', () => {
     const text = projectContextUsage({
       modelName: 'qwen3-max',

@@ -24,7 +24,6 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
-import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
@@ -42,17 +41,9 @@ export interface AutoMemoryExtractResult {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch'
-    | 'cooldown';
+    | 'session_mismatch';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
-  /**
-   * True when the extraction agent actually ran and completed. Absent on every
-   * early return (no new user messages, session mismatch), which otherwise
-   * share a no-op's shape; the cooldown in `MemoryManager` must not treat
-   * those as a completed no-op (#13004).
-   */
-  extractorRan?: true;
 }
 
 function getSessionMismatchResult(
@@ -73,38 +64,6 @@ function getSessionMismatchResult(
       updatedAt: now.toISOString(),
     },
   };
-}
-
-/**
- * Cut-safety predicates for the pending-window boundary. A cut is unsafe when
- * the last included entry is a model entry carrying a functionCall (its
- * response falls outside the window and the trailing repair would fabricate
- * one reusing the real call's id), or when the next entry is a user entry
- * that is all functionResponse parts (the next window would open on an
- * orphaned response whose call sits in already-processed history, and no
- * extraction run would ever see it — the cursor only advances).
- */
-function endsOnOpenCall(
-  history: readonly Content[],
-  endOffset: number,
-): boolean {
-  const last = history[endOffset - 1];
-  return (
-    last?.role === 'model' &&
-    (last.parts ?? []).some((part) => part.functionCall)
-  );
-}
-
-function opensOnOrphanedResponse(
-  history: readonly Content[],
-  endOffset: number,
-): boolean {
-  const next = history[endOffset];
-  return (
-    next?.role === 'user' &&
-    (next.parts ?? []).length > 0 &&
-    (next.parts ?? []).every((part) => part.functionResponse)
-  );
 }
 
 async function readExtractCursor(
@@ -170,7 +129,6 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
-  preserveUnprocessedHistory?: boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -211,46 +169,20 @@ export async function runAutoMemoryExtract(params: {
   // History may shrink between extract calls (compression). Clamp to length
   // so new messages after compression are not permanently skipped.
   const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
-  // With turn-skipping enabled, a large ending turn can evict skipped facts
-  // from the usual tail. Process the oldest pending window instead, and never
-  // mark its unseen remainder as processed.
-  let endOffset = params.preserveUnprocessedHistory
-    ? Math.min(
-        params.history.length,
-        startOffset + CACHE_SAFE_HISTORY_TAIL_ENTRIES,
-      )
-    : params.history.length;
-  // A plain index can split a model functionCall from its functionResponse:
-  // the trailing repair would fabricate a response reusing the real call's
-  // id, and the next window would open on the orphaned true output, which no
-  // extraction run ever sees (the cursor only advances). Back the cut off to
-  // a real turn boundary — but only while the window does not already reach
-  // the end of history (a session ending on an open call must still be able
-  // to arm the no-op cooldown at processedOffset === history.length), and
-  // never past startOffset (a zero-length window still writes the cursor).
-  if (params.preserveUnprocessedHistory) {
-    while (
-      endOffset < params.history.length &&
-      endOffset > startOffset &&
-      (endsOnOpenCall(params.history, endOffset) ||
-        opensOnOrphanedResponse(params.history, endOffset))
-    ) {
-      endOffset--;
-    }
-  }
-  const pendingHistory = params.history.slice(startOffset, endOffset);
 
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. partToString runs only on this small slice and without the
   // global whitespace regex — the .trim().length check preserves the old
   // behaviour of ignoring empty-text user turns.
-  const hasNewUserMessages = pendingHistory.some(
-    (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
-  );
+  const hasNewUserMessages = params.history
+    .slice(startOffset)
+    .some(
+      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+    );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
-      processedOffset: endOffset,
+      processedOffset: params.history.length,
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
@@ -267,15 +199,6 @@ export async function runAutoMemoryExtract(params: {
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
-    params.preserveUnprocessedHistory ? pendingHistory : undefined,
-    // A pending window that does not reach the end of history is a
-    // historical segment: the planner drops the recency wording and the
-    // anchor-to-today date claim, which would otherwise convert the
-    // segment's relative dates against the drain day. The previous cursor's
-    // write time is the nearest proxy for the segment's own date.
-    endOffset < params.history.length
-      ? { windowAsOf: currentCursor.updatedAt }
-      : undefined,
   );
 
   if (agentResult.touchedTopics.length > 0) {
@@ -321,18 +244,7 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    // The windowed arm must advance even without genuine progress:
-    // endOffset is capped relative to startOffset, so holding the cursor at
-    // startOffset recomputes a byte-identical slice next turn — the pending
-    // window freezes for the rest of the session, facts past the cap are
-    // never extracted, and the no-op cooldown (which arms only at
-    // processedOffset === history.length) can never engage. The
-    // whole-history arm keeps the #6311 hold-back: its retried slice grows
-    // with new turns, so nothing unprocessed is permanently dropped there.
-    processedOffset:
-      madeGenuineProgress || params.preserveUnprocessedHistory
-        ? endOffset
-        : startOffset,
+    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);
@@ -346,6 +258,5 @@ export async function runAutoMemoryExtract(params: {
     touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,
-    extractorRan: true,
   };
 }

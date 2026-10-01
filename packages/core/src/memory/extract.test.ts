@@ -20,7 +20,6 @@ import {
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
-import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -123,8 +122,6 @@ describe('auto-memory extraction', () => {
 
     expect(first.touchedTopics).toEqual([]);
     expect(second.touchedTopics).toEqual([]);
-    expect(first.extractorRan).toBe(true);
-    expect(second.extractorRan).toBeUndefined();
     expect(refreshMemoryInstruction).not.toHaveBeenCalled();
 
     const cursor = JSON.parse(
@@ -153,7 +150,6 @@ describe('auto-memory extraction', () => {
 
     expect(result.skippedReason).toBe('session_mismatch');
     expect(result.cursor.processedOffset).toBeUndefined();
-    expect(result.extractorRan).toBeUndefined();
     expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
     expect(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
@@ -193,260 +189,6 @@ describe('auto-memory extraction', () => {
       }),
     ).rejects.toThrow('no cache-safe params');
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
-  });
-
-  it('extracts skipped history before a large ending turn and leaves the remainder pending', async () => {
-    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-      touchedTopics: [],
-      touchedProjectScope: false,
-      touchedUserScope: false,
-      hasToolActivity: true,
-    });
-    const prefix: Content[] = [
-      { role: 'user', parts: [{ text: 'Already processed.' }] },
-    ];
-    const params = {
-      projectRoot,
-      sessionId: 'session-1',
-      config: mockConfig,
-      preserveUnprocessedHistory: true,
-    };
-    await runAutoMemoryExtract({ ...params, history: prefix });
-    const skippedFact: Content = {
-      role: 'user',
-      parts: [{ text: 'Remember: production uses pnpm.' }],
-    };
-    const history = [
-      ...prefix,
-      skippedFact,
-      ...Array.from(
-        { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
-        (_, i): Content =>
-          i % 2 === 0
-            ? {
-                role: 'model',
-                parts: [
-                  {
-                    functionCall: {
-                      id: `read-${i / 2}`,
-                      name: 'read_file',
-                      args: {},
-                    },
-                  },
-                ],
-              }
-            : {
-                role: 'user',
-                parts: [
-                  {
-                    functionResponse: {
-                      id: `read-${(i - 1) / 2}`,
-                      name: 'read_file',
-                      response: { output: 'Read complete.' },
-                    },
-                  },
-                ],
-              },
-      ),
-      {
-        role: 'user',
-        parts: [{ text: 'Another durable fact in the remainder.' }],
-      },
-    ];
-    expect(history.slice(-CACHE_SAFE_HISTORY_TAIL_ENTRIES)).not.toContain(
-      skippedFact,
-    );
-
-    const first = await runAutoMemoryExtract({ ...params, history });
-    const boundary = prefix.length + CACHE_SAFE_HISTORY_TAIL_ENTRIES;
-    // The naive boundary lands on the open functionCall at i=38 (the skipped
-    // fact shifted the alternating pairs by one), so the cut retreats one
-    // entry: the window ends before the open call and the cursor stops
-    // there, keeping the call and its response together for the next run.
-    const aligned = boundary - 1;
-    // The aligned window does not reach the end of history, so the run is
-    // stamped as a historical segment for the planner prompt.
-    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
-      mockConfig,
-      projectRoot,
-      history.slice(prefix.length, aligned),
-      { windowAsOf: expect.any(String) },
-    );
-    expect(first.cursor.processedOffset).toBe(aligned);
-    const persisted = JSON.parse(
-      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
-    );
-    expect(persisted.processedOffset).toBe(aligned);
-
-    const second = await runAutoMemoryExtract({ ...params, history });
-    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
-      mockConfig,
-      projectRoot,
-      history.slice(aligned),
-      undefined,
-    );
-    expect(second.cursor.processedOffset).toBe(history.length);
-  });
-
-  it('backs the pending-window cut off a model functionCall so the response is never orphaned', async () => {
-    // A plain-index cut can land between a model functionCall and its
-    // functionResponse: the trailing repair would fabricate a response
-    // reusing the real call's id, and the next window would open on the
-    // orphaned true output, which no run ever sees. The cut must retreat to
-    // the turn boundary: the window ends before the open call, the cursor
-    // stops there, and the next run's window starts on it.
-    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-      touchedTopics: [],
-      touchedProjectScope: false,
-      touchedUserScope: false,
-      hasToolActivity: true,
-    });
-    const params = {
-      projectRoot,
-      sessionId: 'session-1',
-      config: mockConfig,
-      preserveUnprocessedHistory: true,
-    };
-    const prefix: Content[] = [
-      { role: 'user', parts: [{ text: 'Already processed.' }] },
-    ];
-    await runAutoMemoryExtract({ ...params, history: prefix });
-
-    // Entry at the naive cut (startOffset + CACHE_SAFE_HISTORY_TAIL_ENTRIES)
-    // is a model functionCall; its response follows it.
-    const boundary = prefix.length + CACHE_SAFE_HISTORY_TAIL_ENTRIES;
-    const history: Content[] = [
-      ...prefix,
-      { role: 'user', parts: [{ text: 'Pending user fact.' }] },
-      ...Array.from(
-        { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES - 2 },
-        (_, i): Content => ({
-          role: 'model',
-          parts: [{ text: `Filler turn ${i}.` }],
-        }),
-      ),
-      {
-        role: 'model',
-        parts: [
-          { functionCall: { id: 'call-open', name: 'read_file', args: {} } },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-open',
-              name: 'read_file',
-              response: { output: 'the real file bytes' },
-            },
-          },
-        ],
-      },
-      { role: 'user', parts: [{ text: 'A durable fact in the remainder.' }] },
-    ];
-    expect(history[boundary - 1]?.parts?.[0]).toHaveProperty('functionCall');
-
-    const first = await runAutoMemoryExtract({ ...params, history });
-    // The cut retreated one entry: the window ends before the open call.
-    // That window is a historical segment, so the planner gets windowAsOf.
-    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
-      mockConfig,
-      projectRoot,
-      history.slice(prefix.length, boundary - 1),
-      { windowAsOf: expect.any(String) },
-    );
-    expect(first.cursor.processedOffset).toBe(boundary - 1);
-
-    const second = await runAutoMemoryExtract({ ...params, history });
-    // The next window opens on the call, so call and response are extracted
-    // together — and it reaches the end of history, so no segment stamp.
-    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
-      mockConfig,
-      projectRoot,
-      history.slice(boundary - 1),
-      undefined,
-    );
-    expect(second.cursor.processedOffset).toBe(history.length);
-  });
-
-  it('does not mark a user fact beyond an empty pending window processed', async () => {
-    const history: Content[] = [
-      ...Array.from(
-        { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
-        (): Content => ({ role: 'model', parts: [{ text: 'No user fact.' }] }),
-      ),
-      { role: 'user', parts: [{ text: 'Remember: use pnpm.' }] },
-    ];
-    const result = await runAutoMemoryExtract({
-      projectRoot,
-      sessionId: 'session-1',
-      config: mockConfig,
-      preserveUnprocessedHistory: true,
-      history,
-    });
-    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
-    expect(result.cursor.processedOffset).toBe(CACHE_SAFE_HISTORY_TAIL_ENTRIES);
-    expect(result.extractorRan).toBeUndefined();
-  });
-
-  it('windowed arm: a no-progress run advances the pending window instead of freezing it', async () => {
-    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-      touchedTopics: [],
-      touchedProjectScope: false,
-      touchedUserScope: false,
-      hasToolActivity: false,
-      systemMessage: undefined,
-    });
-    const params = {
-      projectRoot,
-      sessionId: 'session-1',
-      config: mockConfig,
-      preserveUnprocessedHistory: true,
-    };
-    const history: Content[] = Array.from(
-      { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
-      (_, i): Content => ({
-        role: 'user',
-        parts: [{ text: `Pending fact ${i}.` }],
-      }),
-    );
-    const lateFact: Content = {
-      role: 'user',
-      parts: [{ text: 'Remember: the late fact stated after the cap.' }],
-    };
-    history.push(
-      lateFact,
-      { role: 'model', parts: [{ text: 'Noted.' }] },
-      { role: 'user', parts: [{ text: 'And one more newer fact.' }] },
-      { role: 'model', parts: [{ text: 'Noted too.' }] },
-    );
-
-    const first = await runAutoMemoryExtract({ ...params, history });
-    // The first window does not reach the end of history, so it is stamped
-    // as a historical segment for the planner prompt.
-    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
-      mockConfig,
-      projectRoot,
-      history.slice(0, CACHE_SAFE_HISTORY_TAIL_ENTRIES),
-      { windowAsOf: expect.any(String) },
-    );
-    // No genuine progress, but the windowed arm must still advance: holding
-    // the cursor at startOffset recomputes a byte-identical slice next turn
-    // (endOffset is capped relative to startOffset), freezing the window for
-    // the rest of the session and never arming the no-op cooldown.
-    expect(first.cursor.processedOffset).toBe(CACHE_SAFE_HISTORY_TAIL_ENTRIES);
-
-    const second = await runAutoMemoryExtract({ ...params, history });
-    const secondWindow = vi.mocked(runAutoMemoryExtractionByAgent).mock
-      .calls[1]?.[2];
-    expect(secondWindow).toEqual(
-      history.slice(CACHE_SAFE_HISTORY_TAIL_ENTRIES),
-    );
-    expect(secondWindow).toContainEqual(lateFact);
-    // Caught up: processedOffset === history.length is the condition the
-    // no-op cooldown in MemoryManager arms on.
-    expect(second.cursor.processedOffset).toBe(history.length);
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {
@@ -1007,7 +749,6 @@ describe('auto-memory extraction', () => {
       });
 
       expect(result.cursor.processedOffset).toBe(1);
-      expect(result.extractorRan).toBe(true);
     });
   });
 });
