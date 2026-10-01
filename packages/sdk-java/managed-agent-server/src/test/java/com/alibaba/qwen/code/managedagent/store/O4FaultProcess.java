@@ -44,7 +44,15 @@ public final class O4FaultProcess {
             private void pause() {
                 try {
                     Files.writeString(root.resolve("ready"), mode);
-                    while (!Files.exists(root.resolve("resume"))) { Thread.sleep(20); }
+                    long deadline = System.nanoTime() + Duration.ofMillis(
+                            Long.getLong("qwen.o4.pause-timeout-millis", 300_000)).toNanos();
+                    var parent = ProcessHandle.current().parent();
+                    while (!Files.exists(root.resolve("resume"))) {
+                        if (System.nanoTime() >= deadline || parent.isPresent() && !parent.get().isAlive()) {
+                            throw new IllegalStateException("O4 child pause ended without resume");
+                        }
+                        Thread.sleep(20);
+                    }
                 } catch (IOException | InterruptedException error) { throw new IllegalStateException(error); }
             }
         };

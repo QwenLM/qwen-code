@@ -239,8 +239,9 @@
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>
                 <configuration>
-                    <includes><include>**/O4MySqlIT.java</include></includes>
+                    <includes><include>**/O4MySqlGate.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
+                    <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
                     <argLine>-Xmx256m</argLine>
                     <systemPropertyVariables><qwen.o4.required>true</qwen.o4.required></systemPropertyVariables>
                     <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
@@ -255,11 +256,12 @@
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>${maven-failsafe-plugin.version}</version>
                 <configuration>
-                    <includes><include>**/O4OssIT.java</include></includes>
+                    <includes><include>**/O4OssGate.java</include></includes>
                     <failIfNoTests>true</failIfNoTests>
+                    <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
                     <argLine>-Xmx256m</argLine>
                     <systemPropertyVariables><qwen.o4.required>true</qwen.o4.required></systemPropertyVariables>
-                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                    <forkedProcessTimeoutInSeconds>5400</forkedProcessTimeoutInSeconds>
                 </configuration>
                 <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
             </plugin></plugins></build>

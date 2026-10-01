@@ -5,14 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration;
-import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
-import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.OSSException;
 import com.aliyun.oss.common.auth.DefaultCredentialProvider;
 import com.aliyun.oss.common.auth.DefaultCredentials;
-import com.aliyun.oss.common.comm.SignVersion;
 import java.io.InputStream;
+import java.nio.file.Files;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -24,7 +22,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /** Opt-in real OSS gates, including inherited real SQL/process gates. No credential values are logged. */
-public class O4OssIT extends O4MySqlIT {
+public class O4OssGate extends O4MySqlGate {
     @BeforeAll
     static void requireOssEnvironment() {
         if (!Boolean.getBoolean("qwen.o4.required")) {
@@ -57,29 +55,26 @@ public class O4OssIT extends O4MySqlIT {
     private static OSS client() throws Exception {
         secret("OSS_ACCESS_KEY_ID");
         secret("OSS_ACCESS_KEY_SECRET");
+        return new ToolPublicationConfiguration().toolPublicationOss(properties());
+    }
+    private static ManagedAgentProperties properties() {
         var props = new ManagedAgentProperties();
         props.getToolPublication().setOssRegion(required("qwen.o4.oss.region"));
         props.getToolPublication().setOssEndpoint("https://oss-" + required("qwen.o4.oss.region") + ".aliyuncs.com");
         props.getToolPublication().setOssBucket(bucket());
         props.getToolPublication().setServiceBaseUrl("https://o4-test.invalid");
-        return new ToolPublicationConfiguration().toolPublicationOss(props);
+        return props;
     }
     private static OSS deniedClient() {
         var credentials = new DefaultCredentials(secret("OSS_DELETE_DENIED_ACCESS_KEY_ID"),
                 secret("OSS_DELETE_DENIED_ACCESS_KEY_SECRET"), System.getenv("OSS_DELETE_DENIED_SESSION_TOKEN"));
-        var config = new ClientBuilderConfiguration();
-        config.setSignatureVersion(SignVersion.V4);
-        config.setMaxErrorRetry(0);
-        return OSSClientBuilder.create()
-                .endpoint("https://oss-" + required("qwen.o4.oss.region") + ".aliyuncs.com")
-                .region(required("qwen.o4.oss.region"))
-                .credentialsProvider(new DefaultCredentialProvider(credentials)).clientConfiguration(config).build();
+        return ToolPublicationConfiguration.buildOss(properties(), new DefaultCredentialProvider(credentials));
     }
 
     @Test
     void realDeleteLostResponseRetriesAndConfirmsMissingObject() throws Exception {
         try (var real = new OssFixture(client())) {
-            String objectKey = "o4-tests/" + UUID.randomUUID() + "/one";
+            String objectKey = ownedPrefix() + "one";
             var uncertain = new ToolPublicationObjectStore() {
                 private boolean first = true;
                 @Override public void putIfAbsent(String key, byte[] bytes) { real.putIfAbsent(key, bytes); }
@@ -108,7 +103,7 @@ public class O4OssIT extends O4MySqlIT {
     @Test
     void realPermissionFailurePreservesQuotaUntilAuthorizedRetry() throws Exception {
         try (var restricted = new OssFixture(deniedClient()); var real = new OssFixture(client())) {
-            String objectKey = "o4-tests/" + UUID.randomUUID() + "/denied";
+            String objectKey = ownedPrefix() + "denied";
             retention.put(key, scope, "pub-1", objectKey, new byte[] {7}, real);
             addObject("one", objectKey, null);
             retire();
@@ -129,12 +124,19 @@ public class O4OssIT extends O4MySqlIT {
     @Timeout(value = 1800)
     void largeCatalogCollectionUsesBoundedPages(long bytes) throws Exception {
         try (var objects = new OssFixture(client())) {
-            String prefix = "o4-tests/" + UUID.randomUUID() + "/";
+            String prefix = ownedPrefix();
             collectCapacity(objects, bytes, prefix);
             List<String> keys = jdbc.queryForList("SELECT object_key FROM qwen_tool_publication_object"
                     + " WHERE scope_key = ? AND object_key IS NOT NULL", String.class, scope);
             for (String objectKey : keys) { assertThat(objects.client.doesObjectExist(bucket(), objectKey)).isFalse(); }
         }
+    }
+
+    private String ownedPrefix() throws java.io.IOException {
+        String prefix = "o4-tests/" + UUID.randomUUID() + "/";
+        Files.writeString(root.resolve("oss-prefix"), prefix);
+        System.out.println("O4 OSS owned prefix: " + prefix);
+        return prefix;
     }
 
     private static final class OssFixture implements ToolPublicationObjectStore, AutoCloseable {
@@ -151,7 +153,7 @@ public class O4OssIT extends O4MySqlIT {
             objects.putIfAbsent(key, bytes);
         }
         @Override public InputStream open(String key) { return objects.open(key); }
-        @Override public void deleteIfPresent(String key) { objects.deleteIfPresent(key); }
+        @Override public void deleteIfPresent(String key) { objects.deleteIfPresent(key); keys.remove(key); }
         @Override public void requireUnversioned() { objects.requireUnversioned(); }
         @Override public void close() {
             RuntimeException failure = null;

@@ -10,7 +10,6 @@ import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -20,9 +19,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /** Real SQL gates plus controlled storage/process faults; OSS is a separate required gate. */
 @Timeout(value = 240)
-public class O4MySqlIT extends ToolPublicationCollectorTest {
+public class O4MySqlGate extends ToolPublicationCollectorTest {
     protected O4MySqlDatabase database;
-    @TempDir Path root;
+    @TempDir(cleanup = org.junit.jupiter.api.io.CleanupMode.ON_SUCCESS) Path root;
 
     @Override protected javax.sql.DataSource dataSource() {
         database = new O4MySqlDatabase();
@@ -35,27 +34,56 @@ public class O4MySqlIT extends ToolPublicationCollectorTest {
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var entered = new CountDownLatch(1);
+        var connection = new java.util.concurrent.atomic.AtomicLong();
+        String schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
         try (var executor = Executors.newFixedThreadPool(2)) {
             var deleting = executor.submit(() -> tx.executeWithoutResult(status -> {
                 ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, session);
                 locked.countDown();
-                try { assertThat(release.await(10, TimeUnit.SECONDS)).isTrue(); }
+                try { assertThat(release.await(30, TimeUnit.SECONDS)).isTrue(); }
                 catch (InterruptedException error) { throw new IllegalStateException(error); }
                 ToolPublicationRetentionStore.retire(jdbc, tenant, session, "delete-contended");
             }));
-            assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
-            var writer = executor.submit(() -> {
-                entered.countDown();
-                return tx.execute(status -> new ManagedSessionStore(jdbc).acquireWriter(tenant, session,
-                        "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "late", 60000L)));
-            });
-            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
-            try { assertThatThrownBy(() -> writer.get(200, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class); }
-            finally { release.countDown(); }
-            deleting.get(10, TimeUnit.SECONDS);
-            assertThatThrownBy(() -> writer.get(10, TimeUnit.SECONDS))
-                    .hasCauseInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class);
+            try {
+                assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
+                var writer = executor.submit(() -> tx.execute(status -> {
+                    connection.set(jdbc.queryForObject("SELECT CONNECTION_ID()", Long.class));
+                    entered.countDown();
+                    return new ManagedSessionStore(jdbc).acquireWriter(tenant, session,
+                            "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "late", 60000L));
+                }));
+                assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+                long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+                boolean waiting = false;
+                while (!waiting && !writer.isDone() && System.nanoTime() < deadline) {
+                    waiting = jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits waits"
+                            + " JOIN performance_schema.threads threads ON threads.THREAD_ID = waits.REQUESTING_THREAD_ID"
+                            + " JOIN performance_schema.data_locks locks ON locks.ENGINE = waits.ENGINE"
+                            + " AND locks.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
+                            + " WHERE threads.PROCESSLIST_ID = ? AND locks.OBJECT_SCHEMA = ?"
+                            + " AND locks.OBJECT_NAME = 'qwen_tool_publication_tenant'", Long.class, connection.get(), schema) > 0;
+                    if (!waiting) { Thread.sleep(20); }
+                }
+                assertThat(waiting).as("writer connection observed in an actual InnoDB lock wait").isTrue();
+                assertThat(writer.isDone()).isFalse();
+                release.countDown();
+                deleting.get(10, TimeUnit.SECONDS);
+                assertThatThrownBy(() -> writer.get(10, TimeUnit.SECONDS))
+                        .cause().isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                                error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
+            } finally { release.countDown(); }
         }
+    }
+
+    @Test
+    void unresumedChildExitsAfterItsPauseDeadline() throws Exception {
+        Process child = child("put", 1000);
+        try {
+            ready(child);
+            assertThat(child.waitFor(10, TimeUnit.SECONDS)).as("bounded child pause: %s", childLog()).isTrue();
+            assertThat(child.exitValue()).isNotZero();
+            assertThat(childLog()).contains("O4 child pause ended without resume");
+        } finally { stop(child); }
     }
 
     @Test
@@ -121,11 +149,13 @@ public class O4MySqlIT extends ToolPublicationCollectorTest {
             signal(child, "-STOP");
             long expires = jdbc.queryForObject("SELECT expires_at FROM qwen_output_read_lease WHERE tenant_key = ?",
                     Long.class, ToolPublicationRetentionStore.hash(tenant));
+            assertThat(expires - ToolPublicationRetentionStore.now(jdbc)).as("two-minute reader budget")
+                    .isBetween(115_000L, 120_000L);
             while (ToolPublicationRetentionStore.now(jdbc) <= expires + 1000) { Thread.sleep(1000); }
             Files.writeString(root.resolve("resume"), "resume");
             signal(child, "-CONT");
-            assertThat(child.waitFor(15, TimeUnit.SECONDS)).isTrue();
-            assertThat(child.exitValue()).isZero();
+            assertThat(child.waitFor(15, TimeUnit.SECONDS)).as("reader child: %s", childLog()).isTrue();
+            assertThat(child.exitValue()).as("reader child: %s", childLog()).isZero();
             assertThat(Files.readString(root.resolve("result"))).isEqualTo("tool_output_read_expired");
         } finally { stop(child); }
     }
@@ -219,24 +249,35 @@ public class O4MySqlIT extends ToolPublicationCollectorTest {
     }
 
     private Process child(String mode) throws IOException {
+        return child(mode, 300_000);
+    }
+    private Process child(String mode, long pauseMillis) throws IOException {
         String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
-        return new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-Xmx128m", "-cp", classpath, O4FaultProcess.class.getName(), mode,
+        Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Xmx128m", "-Dqwen.o4.pause-timeout-millis=" + pauseMillis, "-cp", classpath, O4FaultProcess.class.getName(), mode,
                 database.url(), database.user(), tenant, session, scope, root.toString())
                 .redirectErrorStream(true).redirectOutput(root.resolve("child.log").toFile()).start();
+        try { Files.writeString(root.resolve("child.pid"), Long.toString(child.pid())); }
+        catch (IOException error) { child.destroyForcibly(); throw error; }
+        return child;
     }
     private void ready(Process child) throws Exception {
         long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
         while (!Files.exists(root.resolve("ready")) && child.isAlive() && System.nanoTime() < deadline) { Thread.sleep(20); }
-        assertThat(Files.exists(root.resolve("ready"))).as("child reached durable boundary").isTrue();
+        assertThat(Files.exists(root.resolve("ready"))).as("child reached durable boundary, exit=%s output=%s root=%s",
+                child.isAlive() ? "alive" : child.exitValue(), childLog(), root).isTrue();
     }
     private static void signal(Process child, String signal) throws Exception {
         Process command = new ProcessBuilder("kill", signal, Long.toString(child.pid())).start();
         assertThat(command.waitFor(5, TimeUnit.SECONDS)).isTrue();
         assertThat(command.exitValue()).isZero();
     }
-    private static void stop(Process child) throws InterruptedException {
+    private String childLog() throws IOException {
+        Path log = root.resolve("child.log");
+        return Files.exists(log) ? Files.readString(log) : "<none>";
+    }
+    private void stop(Process child) throws Exception {
         child.destroyForcibly();
-        assertThat(child.waitFor(10, TimeUnit.SECONDS)).isTrue();
+        assertThat(child.waitFor(10, TimeUnit.SECONDS)).as("child shutdown: %s root=%s", childLog(), root).isTrue();
     }
 }
