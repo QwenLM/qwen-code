@@ -31,6 +31,7 @@ import {
   type LspClient,
   type ToolName,
   type ToolInvocationGuard,
+  AGENT_HOST_TOOL_NAMES,
   ToolNames,
   NativeLspClient,
   createDebugLogger,
@@ -2873,11 +2874,7 @@ export async function loadCliConfig(
   };
 
   if (agentHostReadOnly) {
-    configParams.coreTools = [
-      ToolNames.READ_FILE,
-      ToolNames.GREP,
-      ToolNames.LS,
-    ];
+    configParams.coreTools = [...AGENT_HOST_TOOL_NAMES];
     configParams.disableAllHooks = true;
     configParams.mcpServers = {};
     configParams.topTierMcpServers = undefined;

@@ -5,7 +5,7 @@ import { isLoopbackBind } from '../loopback-binds.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 
 function serverUrl(value: unknown, allowHttp: boolean): string {
-  if (typeof value !== 'string') throw new Error('请填写服务地址。');
+  if (typeof value !== 'string') throw new Error('A server URL is required.');
   const url = new URL(value);
   if (
     url.username ||
@@ -19,7 +19,7 @@ function serverUrl(value: unknown, allowHttp: boolean): string {
       ))
   ) {
     throw new Error(
-      '请使用 HTTPS；可信演示网络可显式允许 HTTP。地址不能包含凭证或查询参数。',
+      'Use HTTPS; HTTP is allowed only when explicitly enabled for a trusted network. The URL must not contain credentials, a query, or a fragment.',
     );
   }
   return url.toString().replace(/\/+$/, '');
@@ -82,7 +82,7 @@ export function registerAgentHostConnectionRoutes(
         !input.enrollmentToken ||
         input.provider !== 'qwen'
       ) {
-        throw new Error('接入参数不完整。');
+        throw new Error('Missing connection parameters.');
       }
       if (!isCurrent(req, res, runtime)) return;
       const { startAgentHostConnection } = await import(
@@ -106,7 +106,9 @@ export function registerAgentHostConnectionRoutes(
     } catch (error) {
       res
         .status(400)
-        .json({ error: error instanceof Error ? error.message : '接入失败。' });
+        .json({
+          error: error instanceof Error ? error.message : 'Connection failed.',
+        });
     }
   });
 
@@ -130,7 +132,9 @@ export function registerAgentHostConnectionRoutes(
         !input.remoteToken.trim() ||
         input.provider !== 'qwen'
       )
-        throw new Error('请填写远程服务凭证、远程执行目录和执行程序。');
+        throw new Error(
+          'Remote server credential, remote workspace, and provider are required.',
+        );
       const endpoint = `${remote}/workspaces/${encodeURIComponent(input.remoteCwd)}/agent/hosts`;
       const request = async (path: string, body?: unknown) => {
         const response = await fetch(`${endpoint}${path}`, {
@@ -145,13 +149,15 @@ export function registerAgentHostConnectionRoutes(
         });
         if (response.status === 404)
           throw new Error(
-            '远程服务不支持在线主机接入，或执行目录未注册。请升级并启用协作功能，确认远程工作区后重试。',
+            'The remote server does not support Agent Host enrollment, or the workspace is not registered. Upgrade it, enable agent collaboration, confirm the remote workspace, and retry.',
           );
         if (response.status === 401 || response.status === 403)
-          throw new Error('远程凭证无效，或远程项目尚未授权。');
+          throw new Error(
+            'The remote credential is invalid, or the remote workspace is not authorized.',
+          );
         if (!response.ok)
           throw new Error(
-            `远程接入失败（${response.status}），请检查远程服务日志及协调端回连地址。`,
+            `Remote connection failed (${response.status}). Check the remote server log and the coordinator callback URL.`,
           );
         return (await response.json()) as {
           protocol?: number;
@@ -164,7 +170,9 @@ export function registerAgentHostConnectionRoutes(
         service.protocol !== 1 ||
         !service.providers?.includes(input.provider)
       )
-        throw new Error('远程服务不支持所选执行程序或接入协议。');
+        throw new Error(
+          'The remote server does not support the selected provider or connection protocol.',
+        );
       if (!isCurrent(req, res, runtime)) return;
       // The enrollment token below crosses both legs; mirror the Host's
       // warning on this side, which is the one holding the secret.
@@ -182,11 +190,15 @@ export function registerAgentHostConnectionRoutes(
         allowHttp: input.allowHttp === true,
       });
       if (!isCurrent(req, res, runtime)) return;
-      if (!result.connected) throw new Error('远程服务未确认接入。');
+      if (!result.connected)
+        throw new Error('The remote server did not confirm the connection.');
       res.json(result);
     } catch (error) {
       res.status(400).json({
-        error: error instanceof Error ? error.message : '无法连接远程服务。',
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Cannot reach the remote server.',
       });
     }
   });

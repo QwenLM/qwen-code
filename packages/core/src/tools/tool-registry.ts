@@ -22,7 +22,7 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
-import { ToolNames } from './tool-names.js';
+import { AGENT_HOST_TOOL_NAMES, ToolNames } from './tool-names.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -325,9 +325,7 @@ export class ToolRegistry {
   ): boolean {
     if (
       this.config.getSessionSourceType?.() === 'agent-host' &&
-      name !== ToolNames.READ_FILE &&
-      name !== ToolNames.GREP &&
-      name !== ToolNames.LS
+      !AGENT_HOST_TOOL_NAMES.includes(name)
     ) {
       return true;
     }
