@@ -2438,6 +2438,23 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'caps a huge stderr tail in the %s rejection when no server is ready',
+      async (operation) => {
+        // A crash-exhausted server is marked FAILED without `error` being
+        // assigned, so the only recorded cause is the subprocess stderr tail.
+        handle.status = 'FAILED';
+        handle.error = undefined;
+        handle.processDiagnostics = { stderrTail: 'y'.repeat(8192) };
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.llmContent).not.toContain('y'.repeat(1001));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'keeps the cause chain of a rejected %s pull',
       async (operation) => {
         connection.request.mockRejectedValue(

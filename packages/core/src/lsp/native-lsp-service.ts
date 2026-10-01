@@ -69,8 +69,12 @@ function describeLspServerState(name: string, handle: LspServerHandle): string {
   if (handle.status === 'READY' && !handle.connection) {
     return `${name} has no active connection`;
   }
-  const reason =
-    handle.error?.message ?? handle.processDiagnostics?.stderrTail?.trim();
+  // Rendered through `getErrorMessage` so this arm is capped and cause-aware
+  // like the `failures` arm it is joined with: a crash-exhausted FAILED handle
+  // records no `error`, leaving the raw stderr tail as the only cause.
+  const tail = handle.processDiagnostics?.stderrTail?.trim();
+  const cause = handle.error ?? (tail ? { message: tail } : undefined);
+  const reason = cause && getErrorMessage(cause);
   const state = handle.status.toLowerCase().replace(/_/g, ' ');
   return `${name} is ${state}${reason ? ` (${reason})` : ''}`;
 }
