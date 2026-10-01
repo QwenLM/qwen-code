@@ -112,7 +112,7 @@ public class ManagedToolResultStore {
             return Boolean.TRUE.equals(transactions.execute(status -> {
                 var heads = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, journal_revision,"
                         + " o3_backfill_revision, o3_backfill_through FROM qwen_managed_session_journal_head"
-                        + " WHERE o3_backfill_pending = TRUE AND o3_backfill_error IS NULL"
+                        + " WHERE state NOT IN ('DELETING', 'DELETED') AND o3_backfill_pending = TRUE AND o3_backfill_error IS NULL"
                         + " ORDER BY tenant_id, session_id LIMIT 1 FOR UPDATE");
                 if (heads.isEmpty()) {
                     return false;
@@ -217,6 +217,17 @@ public class ManagedToolResultStore {
     public boolean complete(Claim claim, Projection projection, String currentPolicyVersion) {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             Source source = claim.source();
+            ToolPublicationRetentionStore.lockSession(jdbc, source.tenantId(), source.sessionId());
+            var retired = jdbc.queryForList("SELECT generation FROM qwen_output_session_retirement"
+                    + " WHERE tenant_key = ? AND session_key = ?",
+                    ToolPublicationRetentionStore.hash(source.tenantId()), ToolPublicationRetentionStore.hash(source.sessionId()));
+            if (!retired.isEmpty()) {
+                fail(claim, "SUPPRESSED", "session_retired");
+                return false;
+            }
+            jdbc.queryForList("SELECT publication_id FROM qwen_tool_publication WHERE tenant_id = ?"
+                    + " AND session_id = ? AND publication_id = ? FOR UPDATE",
+                    source.tenantId(), source.sessionId(), projection.publicationId());
             var publicSessions = jdbc.queryForList("SELECT tenant_id, session_id, workspace_id, status, last_sequence FROM"
                             + " managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                     source.tenantId(), source.sessionId());

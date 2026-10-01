@@ -48,6 +48,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 import org.flywaydb.core.Flyway;
@@ -709,7 +710,7 @@ class ManagedAgentMySqlIT {
 
     @Test
     @Order(9)
-    void announcesNothingAfterADeletionCommittedMidCommit() throws Exception {
+    void announcesNothingAfterDeletionStartsMidCommit() throws Exception {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
@@ -726,9 +727,10 @@ class ManagedAgentMySqlIT {
                         "create", "sha256:" + "a".repeat(64), "qwen-code",
                         null, "tasks", List.of(), "sha256:" + "b".repeat(64)))
                 .sessionId();
-        // The deletion commits on another connection after the commit read
-        // its snapshot and before it announces, which on REPEATABLE READ is
-        // invisible to a plain read.
+        // The public deletion starts after the private commit read its
+        // snapshot; REPEATABLE READ hides it from a plain read. Completion
+        // waits for the private writer, so it runs after this commit.
+        AtomicReference<OperationRecord> deletion = new AtomicReference<>();
         AgentStateStore racing = (AgentStateStore) Proxy.newProxyInstance(
                 AgentStateStore.class.getClassLoader(),
                 new Class<?>[] {AgentStateStore.class},
@@ -742,15 +744,11 @@ class ManagedAgentMySqlIT {
                                             "sha256:" + "c".repeat(64),
                                             "delete", "digest-delete"))
                                     .operation().operationId();
-                            long claim = inTransaction(transactions,
+                            deletion.set(inTransaction(transactions,
                                     () -> agents.claimOperation(tenant,
                                             session, operation, "worker",
                                             Duration.ofMinutes(1)))
-                                    .orElseThrow().claimGeneration();
-                            inTransaction(transactions,
-                                    () -> agents.completeOperation(tenant,
-                                            session, operation, "worker",
-                                            claim, true));
+                                    .orElseThrow());
                         }).join();
                     }
                     try {
@@ -770,14 +768,42 @@ class ManagedAgentMySqlIT {
         inTransaction(transactions,
                 () -> journal.commitMonitor("start", start, 1_000));
 
+        assertThat(count(jdbc, "qwen_managed_session_extension_record",
+                tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class,
+                tenant, session)).isEqualTo("DELETING");
+        OperationRecord operation = deletion.get();
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> agents.completeOperation(tenant, session,
+                        operation.operationId(), "worker",
+                        operation.claimGeneration(), true)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                "managed_session_writer_active"));
+        assertThat(count(jdbc, "qwen_output_session_retirement",
+                tenant, session)).isZero();
+        long generation = jdbc.queryForObject("SELECT writer_generation FROM"
+                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
+                + " session_id = ?", Long.class, tenant, session);
+        inTransaction(transactions, () -> store.sealWriter(tenant, session,
+                "extension-writer-token-0123456789", new SealWriterRequest(
+                        "mysql-extension-workspace", "writer-extension",
+                        generation)));
+        assertThat(inTransaction(transactions,
+                () -> agents.completeOperation(tenant, session,
+                        operation.operationId(), "worker",
+                        operation.claimGeneration(), true))).isTrue();
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
+                + " session_id = ?", String.class, tenant, session))
+                .isEqualTo("DELETED");
         List<String> events = jdbc.queryForList("SELECT event_type FROM"
                         + " managed_agent_event WHERE tenant_id = ? AND"
                         + " session_id = ? ORDER BY sequence_id",
                 String.class, tenant, session);
         assertThat(events).endsWith("session.deleted")
                 .doesNotContain("task.updated");
-        assertThat(count(jdbc, "qwen_managed_session_extension_record",
-                tenant, session)).isEqualTo(1);
     }
 
     @Test
@@ -937,6 +963,33 @@ class ManagedAgentMySqlIT {
                 .isEmpty();
         assertThat(store.listTurns(tenant.toUpperCase(), sessionId, null,
                 null, 10).turns()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"UTC", "Asia/Tokyo"})
+    @Order(12)
+    void retentionClockAndWriterGuardIgnoreJvmTimezone(String timezone) throws Exception {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        String java = Path.of(System.getProperty("java.home"), "bin",
+                isWindows() ? "java.exe" : "java").toString();
+        String classpath = System.getProperty("surefire.test.class.path",
+                System.getProperty("java.class.path"));
+        var builder = new ProcessBuilder(java, "-Duser.timezone=" + timezone, "-cp", classpath,
+                com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionClockFixtureMain.class.getName())
+                .redirectErrorStream(true);
+        builder.environment().put("D1_MYSQL_URL", required("mysql.url"));
+        builder.environment().put("D1_MYSQL_USER", required("mysql.user"));
+        builder.environment().put("D1_MYSQL_PASSWORD", System.getProperty("mysql.password", ""));
+        var process = builder.start();
+        try {
+            assertProcess(process, 0, "O4_RETENTION_CLOCK_OK");
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
     }
 
     private static int count(JdbcTemplate jdbc, String table, String tenant,

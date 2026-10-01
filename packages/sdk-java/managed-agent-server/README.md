@@ -199,9 +199,11 @@ tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
 
 Delete writes a public tombstone: get and list stop returning the Session,
-while its operations stay readable. It does not physically erase the private
-journal, events or resources, and it does not mark the journal deleted;
-retention and garbage collection remain future work.
+while its operations stay readable. Completed deletion permanently marks the
+private journal `DELETED`, clears its writer and recovery references, and fences
+new writes and recovery. Close and archive keep output pinned. Deletion does
+not physically erase the journal, events or resources; output collection stays
+disabled by default and requires the retention deployment gates.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this

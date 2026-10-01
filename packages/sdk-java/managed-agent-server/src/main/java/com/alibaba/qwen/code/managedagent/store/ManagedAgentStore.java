@@ -729,6 +729,10 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean completeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed) {
+        var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
+        if (target.kind() == OperationKind.DELETE) {
+            ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
+        }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         OperationRecord operation = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
@@ -751,6 +755,9 @@ public class ManagedAgentStore implements AgentStateStore {
                     + operation.kind() + " operation");
         }
         long now = lifecycleDatabaseTime();
+        if (operation.kind() == OperationKind.DELETE) {
+            ToolPublicationRetentionStore.retire(jdbc, tenantId, sessionId, operationId);
+        }
         switch (operation.kind()) {
             case CLOSE, ARCHIVE -> jdbc.update("UPDATE managed_agent_session"
                             + " SET status = ?, harness_event_epoch = NULL,"

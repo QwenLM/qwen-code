@@ -128,12 +128,19 @@ public class ManagedArtifactService {
                 && policy.readOriginal(tenant.tenantId(), tenant.actorId(),
                         session.workspace().getWorkspaceId(), session.sessionId());
         var availability = reader.availability(page.artifacts());
+        if (availability.containsValue(false)) {
+            session(tenant, sessionId);
+        }
         return new WebShellPage<>(page.artifacts().stream().map(a -> view(a,
                 availability.get(a.descriptor().path("id").asText()), sessionRead)).toList(), next, page.hasMore());
     }
 
     private ArtifactResponse view(TenantContext tenant, SessionRecord session, Artifact artifact) {
-        return view(artifact, reader.available(artifact), policy.readOriginal(tenant.tenantId(), tenant.actorId(),
+        boolean available = reader.available(artifact);
+        if (!available) {
+            session(tenant, artifact.source().sessionId());
+        }
+        return view(artifact, available, policy.readOriginal(tenant.tenantId(), tenant.actorId(),
                 session.workspace().getWorkspaceId(), session.sessionId()));
     }
 
@@ -161,6 +168,7 @@ public class ManagedArtifactService {
     private void requireContent(TenantContext tenant, Artifact artifact) {
         requireContentAccess(tenant, artifact);
         if (!reader.available(artifact)) {
+            session(tenant, artifact.source().sessionId());
             throw unavailable();
         }
     }
@@ -222,13 +230,14 @@ public class ManagedArtifactService {
             outcome = "interrupted";
             long started = System.nanoTime();
             long timeout = settings.getReadTimeout().toNanos();
-            Runnable guard = () -> {
-                if (System.nanoTime() - started > timeout) {
-                    throw unavailable();
-                }
-                requireContentAccess(tenant, artifact);
-            };
-            try {
+            try (var lease = reader.lease(artifact)) {
+                Runnable guard = () -> {
+                    lease.check();
+                    if (System.nanoTime() - started > timeout) {
+                        throw unavailable();
+                    }
+                    requireContentAccess(tenant, artifact);
+                };
                 if (selection.partial()) {
                     byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), guard);
                     guard.run();
@@ -255,6 +264,11 @@ public class ManagedArtifactService {
                     throw new IOException("Artifact stream interrupted", error);
                 }
                 if (error instanceof ApiException api) {
+                    if ("tool_output_session_retired".equals(api.getCode())
+                            || "tool_output_read_expired".equals(api.getCode())) {
+                        session(tenant, sessionId);
+                        throw unavailable();
+                    }
                     throw api;
                 }
                 throw unavailable();
