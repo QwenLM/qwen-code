@@ -9,11 +9,37 @@ public final class HarnessSessionRef {
     private final HarnessRuntimeRecovery runtimeRecovery;
     private final Long harnessLastEventId;
     private final String harnessEventEpoch;
+    private final String approvalMode;
+
+    public String getApprovalMode() {
+        return approvalMode;
+    }
 
     HarnessSessionRef(String harnessSessionId, String harnessClientId,
             String harnessBootId, String harnessControlCwd,
             HarnessRuntimeRecovery runtimeRecovery,
             Long harnessLastEventId, String harnessEventEpoch) {
+        this(
+                harnessSessionId,
+                harnessClientId,
+                harnessBootId,
+                harnessControlCwd,
+                runtimeRecovery,
+                harnessLastEventId,
+                harnessEventEpoch,
+                null);
+    }
+
+    HarnessSessionRef(
+            String harnessSessionId,
+            String harnessClientId,
+            String harnessBootId,
+            String harnessControlCwd,
+            HarnessRuntimeRecovery runtimeRecovery,
+            Long harnessLastEventId,
+            String harnessEventEpoch,
+            String approvalMode) {
+        this.approvalMode = approvalMode;
         this.harnessSessionId = harnessSessionId;
         this.harnessClientId = harnessClientId;
         this.harnessBootId = harnessBootId;

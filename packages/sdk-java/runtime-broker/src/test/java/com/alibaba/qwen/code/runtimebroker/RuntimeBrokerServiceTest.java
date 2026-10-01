@@ -95,6 +95,52 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void failedAdoptedReleaseLeavesReclamationReachable() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            assertEquals(RuntimeSessionRecord.State.ACQUIRING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.provisioner.usable = false;
+            RuntimeBrokerException releaseFailure = failure(fixture.service.release("blocked", "blocked"));
+            assertEquals("runtime_reconciliation_required", releaseFailure.getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST, fixture.bindingRepository.findById("binding-1").getState());
+            fixture.provisioner.usable = true;
+            fixture.transport.acquireResult = CompletableFuture.completedFuture(null);
+            RuntimeBrokerException acquireFailure = failure(fixture.service.acquire("blocked", "blocked", "bootstrap"));
+            assertEquals("runtime_broker_runtime_lost", acquireFailure.getCode(),
+                    "missing durable stop proof must fail at reclamation, not a stale session admission guard");
+            assertEquals(1, fixture.provisioner.calls.get(), "without writer-stop proof no new Runtime may be provisioned");
+        }
+    }
+
+    @Test
+    void releasesAnIncompleteAcquisitionOnlyAfterOriginalTransportConfirmation() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            fixture.transport.releaseResult = CompletableFuture.failedFuture(new IllegalStateException("lost release"));
+            assertEquals("runtime_session_release_failed", failure(fixture.service.release("blocked", "blocked")).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.transport.releaseResult = CompletableFuture.completedFuture(true);
+            assertTrue(join(fixture.service.release("blocked", "blocked")));
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            assertEquals("blocked", fixture.transport.lastSession.getRuntimeSessionId());
+            assertEquals(2, fixture.transport.acquireCalls.get());
+            assertEquals(2, fixture.transport.releaseCalls.get());
+            assertEquals(1, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void failedAcquireCanRetryTheSameSessionIdentity() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             fixture.transport.acquireResult = CompletableFuture.failedFuture(
@@ -943,6 +989,138 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void inFlightDeferredV3AcknowledgementBlocksRelease() {
+        Map<String, Object> manifest = Map.of("resourceId", "manifest", "kind",
+                "managed-tool-result-manifest", "schemaVersion", 1,
+                "byteLength", 1, "digest", "a".repeat(64));
+        Map<String, Object> receipt = Map.of("executionCallId", "durable-v3",
+                "manifest", manifest, "deliveryStatus", "committed",
+                "historyRevision", 1);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                throw new AssertionError("No dispatch expected");
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                return receipt;
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            ToolExecutionRecord prepared = fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("durable-v3", "v3-key",
+                            session.getBindingId(), session.getRuntimeGeneration(),
+                            "harness", "runtime", "prompt", "call", "digest",
+                            Map.of("sessionId", "runtime", "promptId", "prompt",
+                                    "callId", "call", "argsDigest", "canonical",
+                                    "payloadDigest", "digest", "dispatchMode", "deferred_v3",
+                                    "publicationId", "pub-1")));
+            ToolExecutionRecord claimed = fixture.executionRepository.claimDispatch(
+                    "durable-v3", "other-broker", Duration.ofMinutes(1));
+            fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 1, START),
+                    "other-broker", claimed.getDispatchGeneration());
+            Map<String, Object> conflicting = new HashMap<>(receipt);
+            conflicting.put("deliveryStatus", "blocked");
+            assertEquals("runtime_execution_conflict", failure(
+                    fixture.service.acknowledgeExecution("harness", "runtime",
+                            prepared.getExecutionCallId(), conflicting)).getCode());
+            CompletableFuture<Map<String, Object>> acknowledgement = new CompletableFuture<>();
+            fixture.transport.acknowledgeV3Result = acknowledgement;
+
+            CompletionStage<Map<String, Object>> pending = fixture.service.acknowledgeExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), receipt);
+            assertEquals("runtime_session_busy", failure(
+                    fixture.service.release("harness", "runtime")).getCode());
+            acknowledgement.complete(Map.of("state", "settled"));
+            assertEquals("settled", join(pending).get("state"));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
+    void deferredV3SettlesOnlyAnExplicitNotStartedAnswer() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            Map<String, Object> notStarted = new java.util.LinkedHashMap<>();
+            notStarted.put("executionStatus", "not_started");
+            notStarted.put("capture", null);
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", notStarted));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+
+            ToolExecutionRecord settled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("not_started", settled.getExecutionStatus());
+            assertTrue(settled.getResult().containsKey("capture"));
+            assertNull(settled.getResult().get("capture"));
+            assertEquals(1, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.statusV3Calls.get());
+
+            fixture.transport.executeV3Result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_unavailable", "remote refusal", false));
+            ToolExecutionRecord next = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "next-key", reference, digest, "pub-2"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    next.getExecutionCallId(), payload, "pub-2", "token"));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, awaitExecution(fixture.executionRepository,
+                    next.getExecutionCallId(), ToolExecutionRecord.State.UNKNOWN).getState());
+            assertEquals(2, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.statusV3Calls.get());
+        }
+    }
+
+    @Test
+    void cancelUnknownDeferredV3CallsTheOriginalRuntime() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            ToolExecutionRecord prepared = fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("durable-v3", "v3-key",
+                            session.getBindingId(), session.getRuntimeGeneration(),
+                            "harness", "runtime", "prompt", "call", "digest",
+                            Map.of("sessionId", "runtime", "promptId", "prompt",
+                                    "callId", "call", "argsDigest", "canonical",
+                                    "payloadDigest", "digest", "dispatchMode", "deferred_v3",
+                                    "publicationId", "pub-1")));
+            ToolExecutionRecord claimed = fixture.executionRepository.claimDispatch(
+                    "durable-v3", "other-broker", Duration.ofMinutes(1));
+            ToolExecutionRecord executing = fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                    "other-broker", claimed.getDispatchGeneration());
+            fixture.executionRepository.compareAndSet(executing, executing.withUnknown(),
+                    "other-broker", executing.getDispatchGeneration());
+
+            join(fixture.service.cancelExecution("harness", "runtime",
+                    prepared.getExecutionCallId()));
+            assertEquals(1, fixture.transport.cancelV3Calls.get());
+        }
+    }
+
+    @Test
     void controlUsesTheExistingPrivateOperationAllowlist() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -959,6 +1137,74 @@ class RuntimeBrokerServiceTest {
                             Map.of("kind", "status")));
             assertEquals("runtime_control_operation_invalid",
                     error.getCode());
+        }
+    }
+
+    @Test
+    void mcpControlsStayWithTheAcquiredSessionAndNeverProvisionForLookup() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String kind : List.of("mcp-configure", "mcp-discover", "mcp-status", "mcp-cancel", "mcp-release")) {
+                Map<String, Object> operation = Map.of("kind", kind, "operationId", "operation",
+                        "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+                assertEquals("ok", join(fixture.service.control("harness", "runtime", operation)));
+                assertEquals(operation, fixture.transport.lastControl);
+            }
+            Map<String, Object> foreign = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "foreign", "sessionId", "harness"));
+            assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
+            assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+        }
+    }
+
+    @Test
+    void refusesIllFormedMcpStringsBeforeForwarding() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                for (Map<String, Object> request : List.of(
+                        Map.<String, Object>of("kind", "resource_read", "uri", "a" + surrogate + "b"),
+                        Map.<String, Object>of("kind", "prompt_get", "name", "prompt",
+                                "arguments", Map.of("a" + surrogate + "b", "value")))) {
+                    Map<String, Object> operation = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                            "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                            "request", request);
+                    RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime", operation));
+                    assertEquals(400, error.getStatusCode());
+                    assertEquals("runtime_control_operation_invalid", error.getCode());
+                    assertFalse(error.isRetryable());
+                    assertNull(fixture.transport.lastControl);
+                }
+            }
+            Map<String, Object> valid = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                    "request", Map.of("kind", "resource_read", "uri", "a\uD83D\uDE00b"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", valid)));
+            assertEquals(valid, fixture.transport.lastControl);
+        }
+    }
+
+    @Test
+    void observesTheOriginalOwnerAfterNewAdmissionIsRevoked() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.resolver.result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(403, "workspace_access_denied", "Access revoked", false));
+            assertEquals(original, join(fixture.service.acquire("harness", "runtime", "bootstrap")));
+            Map<String, Object> lookup = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "targetOperationId", "original-operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", lookup)));
+            assertEquals("workspace_access_denied", failure(fixture.service.acquire("harness", "new-runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("other", "runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("harness", "runtime", "continuation")).getCode());
+            RuntimeBindingRecord binding = fixture.bindingRepository.findById(original.getBindingId());
+            fixture.bindingRepository.compareAndSet(binding, binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), START));
+            assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "runtime", "bootstrap")).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(1, fixture.transport.acquireCalls.get());
         }
     }
 
@@ -2672,6 +2918,49 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void finishedV3PublicationAnswersStatusWithoutAWorkerStatusQuery() {
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                throw new AssertionError("Reconciliation cannot install another grant");
+            }
+
+            @Override
+            public Map<String, Object> finished(ToolExecutionRecord execution) {
+                assertEquals("durable-v3", execution.getExecutionCallId());
+                return Map.of("executionStatus", "success", "responseParts", java.util.List.of());
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            var prepared = fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared(
+                    "durable-v3", "v3-key", session.getBindingId(), session.getRuntimeGeneration(),
+                    "harness", "runtime", "prompt",
+                    "call", "digest", Map.of("sessionId", "runtime", "promptId", "prompt",
+                            "callId", "call", "argsDigest", "canonical", "payloadDigest", "digest",
+                            "dispatchMode", "deferred_v3",
+                            "publicationId", "pub-1")));
+            var claimed = fixture.executionRepository.claimDispatch("durable-v3", "other-broker",
+                    Duration.ofMinutes(1));
+            var executing = fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                    "other-broker", claimed.getDispatchGeneration());
+            assertEquals(prepared.getExecutionCallId(), executing.getExecutionCallId());
+            fixture.executionRepository.compareAndSet(executing, executing.withUnknown(),
+                    "other-broker", executing.getDispatchGeneration());
+
+            var settled = join(fixture.service.getExecution("harness", "runtime", "durable-v3"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    join(fixture.service.reconcileExecution("harness", "runtime", "durable-v3"))
+                            .getOutcome());
+            assertEquals(0, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
     void nonTerminalLookupKeepsTheExecutionUnknown() {
         for (String state : List.of("prepared", "executing",
                 "cancel_requested", "unknown")) {
@@ -3575,6 +3864,11 @@ class RuntimeBrokerServiceTest {
             this(scope, new MutableClock(START), Duration.ofMinutes(1));
         }
 
+        Fixture(RuntimeScope scope, RuntimePublicationVerifier verifier) {
+            this(scope, new MutableClock(START), Duration.ofMinutes(1),
+                    Duration.ofMinutes(1), verifier);
+        }
+
         Fixture(RuntimeScope scope, Clock clock,
                 Duration dispatchLeaseDuration) {
             this(scope, clock, Duration.ofMinutes(1),
@@ -3584,18 +3878,28 @@ class RuntimeBrokerServiceTest {
         Fixture(RuntimeScope scope, Clock clock,
                 Duration operationLeaseDuration,
                 Duration dispatchLeaseDuration) {
+            this(scope, clock, operationLeaseDuration, dispatchLeaseDuration, null);
+        }
+
+        private Fixture(RuntimeScope scope, Clock clock,
+                Duration operationLeaseDuration,
+                Duration dispatchLeaseDuration,
+                RuntimePublicationVerifier verifier) {
             bindingRepository = new InMemoryRuntimeBindingRepository(clock,
                     () -> "binding-" + bindingIds.incrementAndGet());
             executionRepository =
                     new InMemoryToolExecutionRepository(clock);
             resolver = new FakeResolver(scope);
             transport.executionRepository = executionRepository;
-            service = new RuntimeBrokerService(
-                    resolver,
-                    provisioner, transport, bindingRepository,
-                    sessionRepository, executionRepository, "broker",
-                    operationLeaseDuration, dispatchLeaseDuration, clock,
-                    () -> "execution-" + executionIds.incrementAndGet());
+            service = verifier == null
+                    ? new RuntimeBrokerService(resolver, provisioner, transport,
+                            bindingRepository, sessionRepository, executionRepository,
+                            "broker", operationLeaseDuration, dispatchLeaseDuration,
+                            clock, () -> "execution-" + executionIds.incrementAndGet())
+                    : new RuntimeBrokerService(resolver, provisioner, transport,
+                            bindingRepository, sessionRepository, executionRepository,
+                            "broker", operationLeaseDuration, dispatchLeaseDuration,
+                            verifier);
         }
 
         @Override
@@ -3681,6 +3985,9 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger acquireCalls = new AtomicInteger();
         final AtomicInteger executeCalls = new AtomicInteger();
         final AtomicInteger cancelCalls = new AtomicInteger();
+        final AtomicInteger cancelV3Calls = new AtomicInteger();
+        final AtomicInteger executeV3Calls = new AtomicInteger();
+        final AtomicInteger statusV3Calls = new AtomicInteger();
         final AtomicInteger releaseCalls = new AtomicInteger();
         final AtomicInteger statusCalls = new AtomicInteger();
         volatile long lastAfterSequence = -1;
@@ -3705,9 +4012,12 @@ class RuntimeBrokerServiceTest {
         volatile CompletableFuture<Map<String, Object>> executeResult =
                 CompletableFuture.completedFuture(
                         Map.of("executionStatus", "success"));
+        volatile CompletableFuture<Map<String, Object>> executeV3Result;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
+        volatile CompletableFuture<Map<String, Object>> acknowledgeV3Result =
+                CompletableFuture.completedFuture(Map.of("state", "settled"));
         volatile CompletableFuture<Boolean> releaseResult =
                 CompletableFuture.completedFuture(true);
 
@@ -3756,6 +4066,29 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
+        public CompletionStage<Void> installPublication(RuntimeLease lease,
+                RuntimeSession session, RuntimePublicationGrant grant) {
+            return executeV3Result == null ? RuntimeTransport.super.installPublication(lease, session, grant)
+                    : CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> payload, Map<String, Object> capture) {
+            executeV3Calls.incrementAndGet();
+            return executeV3Result == null ? RuntimeTransport.super.executeV3(lease, session,
+                    reference, payload, capture) : executeV3Result;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference, long afterSequence) {
+            statusV3Calls.incrementAndGet();
+            return RuntimeTransport.super.statusV3(lease, session, reference, afterSequence);
+        }
+
+        @Override
         public CompletionStage<Map<String, Object>> cancel(
                 RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference) {
@@ -3769,6 +4102,20 @@ class RuntimeBrokerServiceTest {
                         .findByExecutionCallId(observedExecutionId);
             }
             return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference) {
+            cancelV3Calls.incrementAndGet();
+            return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> receipt) {
+            return acknowledgeV3Result;
         }
 
         @Override

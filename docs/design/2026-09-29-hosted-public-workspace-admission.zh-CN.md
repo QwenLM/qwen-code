@@ -30,7 +30,13 @@ G0 开放随创建会话准入的一次初始文件工具轮次，使用现有�
 | 现有 Broker/worker            | 复用生产路由与 fencing                          | 所选 Runtime 及持久 Workspace |
 | 契约与 README                 | 记录有限的创建能力及剩余门禁                    | 公开 REST 与 WebShell 适配器  |
 
-涉及代码位于 `packages/sdk-java/managed-agent-server`，以及 `packages/sdk-java/qwencode` 的私有 Hosted DTO。不需要为 core authority、工具执行循环、数据库 schema 或公开请求字段新增抽象。
+生产行为只在 `packages/sdk-java/managed-agent-server` 和 `packages/sdk-java/qwencode` 的私有 Hosted DTO 中变化，且仅限于初始 Workspace Read/Write/Edit Turn。不需要为 core authority、工具执行循环、数据库 schema 或公开请求字段新增抽象。
+
+合入的改动还涉及该范围之外的三处，均不增加运行时行为：
+
+- **生成的 WebShell 类型。** `packages/web-shell` 根据更新后的 OpenAPI 描述重新生成 `managed-agent-api.ts`，只有文档注释变化。
+- **Runtime Broker 故障门禁。** `DurableLocalRuntimeFaultGateTest` 在故障代理中扣住 worker 的 `execute` 响应，使第一个 Broker 在被终止前无法记录结果。随后替换 Broker 的 `acquire` 通过 #12964 的接管对账结算该调用，测试断言这一结果（`ALREADY_SETTLED`，且只有一次物理执行），而不再同时接受取决于时序的已结算或已解决两种状态。
+- **Core resume 测试。** `background-agent-resume.test.ts` 的一个用例把 Skill 工具报告为已注册，使其列表断言不会空洞通过。该覆盖目前仍在 `main` 上。
 
 ## 验证与验收
 
