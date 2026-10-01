@@ -148,24 +148,25 @@ public final class WorkspaceRecoveryStore {
                 case "invalidate" -> {
                     check("capture".equals(mode), "source_read_not_allowed");
                     check(Set.of("CAPTURING", "INVALIDATED").contains(ownedOperation().get("state")), "operation_not_writable");
-                    check("source_drift".equals(text(params, "code")), "invalid_request");
-                    invalidate();
+                    String code = text(params, "code");
+                    check(Set.of("source_drift", "unsupported_source_entry").contains(code), "invalid_request");
+                    invalidate(code);
                     yield JSON.createObjectNode().put("state", "INVALIDATED");
                 }
                 default -> throw failure("unknown_method");
             };
         } catch (RecoveryFailure error) {
             if ("source_drift".equals(error.code)) {
-                invalidate();
+                invalidate("source_drift");
             }
             recordFailure(error.code);
             throw error;
         }
     }
 
-    private void invalidate() {
-        jdbc.update("UPDATE managed_workspace_recovery_operation SET state = 'INVALIDATED', last_error_code = 'source_drift',"
-                + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state = 'CAPTURING'", id);
+    private void invalidate(String code) {
+        jdbc.update("UPDATE managed_workspace_recovery_operation SET state = 'INVALIDATED', last_error_code = ?,"
+                + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state = 'CAPTURING'", code, id);
     }
 
     private void recordFailure(String code) {

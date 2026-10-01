@@ -86,6 +86,20 @@ class WorkspaceRecoveryStoreTest {
     }
 
     @Test
+    void retainsUnsupportedSourceFailureOnInvalidationWithoutAcceptingUnknownReasons() {
+        var capture = capture();
+        assertThatThrownBy(() -> capture.call("invalidate", object().put("code", "arbitrary_reason")))
+                .hasMessageContaining("invalid_request");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("CAPTURING");
+        capture.call("invalidate", object().put("code", "unsupported_source_entry"));
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("unsupported_source_entry");
+        capture.call("invalidate", object().put("code", "source_drift"));
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("unsupported_source_entry");
+        assertThatThrownBy(() -> call(capture(), "context")).hasMessageContaining("source_drift");
+    }
+
+    @Test
     void pinsAllSharedStorageMembershipAndRetriesDerivedWorkWithoutMutatingAuthority() {
         List<String> ids = new ArrayList<>();
         for (int i = 0; i < 35; i++) ids.add(session(i % 2 == 0 ? "workspace-a" : "workspace-b"));

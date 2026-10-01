@@ -84,6 +84,16 @@ under the still-owned fence; no operation takes over another fence.
 Completion updates only the expected mutable phase, so a concurrent committed
 invalidation cannot be overwritten by a stale completion request.
 
+A previously unpinned unsupported source entry refuses capture with
+`unsupported_source_entry`, invalidates that recovery UUID, and prints its type
+and parent-relative path only on the operator's stderr. Paths are JSON-escaped
+so unusual filenames cannot forge diagnostic lines. After correcting the
+offline source and preparing a new matching copy, use a new recovery UUID.
+Unsupported replacements of pinned entries and final-tree changes remain
+`source_drift`. Disappearance of observed source paths still invalidates;
+unreadable paths remain read failures. Unsupported candidate entries retain
+candidate-validation errors.
+
 The Java private main supports `capture`, `verify` and `inspect` with an
 operator-owned JSON request and `--offline-confirmed` for mutations. Requests
 identify tenant/storage, recovery UUID, fence UUID, expected mount revision,
@@ -104,6 +114,25 @@ module graph. The bundled executable enters the CLI bootstrap directly and
 therefore retains its own dispatch. The private flag is for Java's stdio child,
 not a public help command. Wrapper import or startup failures report a diagnostic
 and exit nonzero regardless of Node's unhandled-rejection policy.
+
+The single-threaded private Java process owns one physical JDBC connection and
+closes it on normal completion, inspection, receipt replay and failure. Each
+existing transaction still commits or rolls back separately; per-record fence,
+source and ownership checks are retained. No connection pool or online service
+behavior changes.
+
+Plan the offline window by filesystem entry count as well as byte size. The
+[independent Linux report](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5933639978)
+measured a 20,916-entry, 77-Session capture at 829 seconds and verification at
+765 seconds on a 4-vCPU/8-GiB VM before connection reuse. Its separately tested
+single-connection candidate reduced a 20,500-entry capture from 806 to 221
+seconds and verification from 378 to 136 seconds. These are the reviewer's
+workload measurements, not a latency guarantee for this revision. Guard reads
+and derived metadata writes still cost work per entry. Each capture and verify
+retains its own operation, Session and asset rows for resume and receipt audit;
+there is no automatic retention cleanup in W1b. Budget database space for
+repeated operations; batching and garbage collection require follow-up designs
+that preserve the maintenance and receipt boundaries.
 
 The packaged maintenance artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`.
 Run `java -jar <artifact> capture <request.json> --offline-confirmed`,
@@ -273,8 +302,17 @@ Original O2 protocol fixtures also passed on real MySQL with an in-memory object
 store. Independent review found a concurrent completion/invalidation race and a
 partial-inventory source-loss path; fixes now preserve the durable invalidation
 and recheck pinned originals. Focused packaged/H2 and Node regression probes are
-reported separately from the earlier full MySQL run. These fixtures do not prove live Harness/Worker/Broker or external OSS
-deployment acceptance. Real Linux identity, full deployed O2 capture, exhaustive
-physical interruption boundaries and stress-scale evidence remain pending.
+reported separately from the earlier full MySQL run. These author-run fixtures
+do not prove live Harness/Worker/Broker or external OSS deployment acceptance.
+Separately, [wenshao's deployment evidence](https://github.com/wenshao/qwen-code/tree/511e05b89edf0197a0e632b19248b9b7c0a0d636/pr13138)
+tests `989baf220` on Ubuntu/ext4 with MySQL 8.4.11, deployed Broker/Harness/Worker,
+real Aliyun OSS, four physical kill points, and 20,916 entries/77 Sessions.
+The reviewer also compared the `8bd11d5a` bundle and found only the embedded
+commit constant changed. Those measured scenarios are independent evidence at
+those artifacts, not author-run validation of later review fixes or exhaustive
+interruption coverage. Archived/closed/deleted membership remains synthetic coverage.
+Maintainer architecture signoff and supported-platform validation of the new
+diagnostic/connection changes remain pending; green CI and Ready status do not
+close these gates.
 #13110 has merged into main; this integration also preserves main's V26 tool
 result projection migration and assigns the new recovery metadata to V27.

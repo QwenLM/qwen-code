@@ -185,6 +185,49 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
+  it.each(['absolute', 'dangling', 'not-directory', 'hardlink'])(
+    'invalidates a fresh unsupported %s entry with its own code and private path',
+    async (kind) => {
+      const f = await fixture();
+      const source = f.context.request.sourceRoot;
+      const name = 'unsupported\nentry';
+      if (kind === 'hardlink')
+        await link(join(source, 'file'), join(source, name));
+      else
+        await symlink(
+          kind === 'absolute'
+            ? join(source, 'file')
+            : kind === 'not-directory'
+              ? 'file/child'
+              : 'absent',
+          join(source, name),
+        );
+      let invalidatedCode: unknown;
+      const rpc: RecoveryRpc = async (method, params) => {
+        if (method === 'invalidate') {
+          f.calls.push(method);
+          invalidatedCode = (params as { code: unknown }).code;
+          return { state: 'INVALIDATED' };
+        }
+        return f.rpc(method, params);
+      };
+      await expect(runRecoveryWorker(rpc)).rejects.toMatchObject({
+        message: 'unsupported_source_entry',
+        entryPath:
+          kind === 'hardlink'
+            ? expect.stringMatching(/^source\/(file|unsupported\nentry)$/)
+            : `source/${name}`,
+        reason:
+          kind === 'hardlink' ? 'unsupported_file_type' : 'unsupported_symlink',
+      });
+      expect(invalidatedCode).toBe('unsupported_source_entry');
+      expect(f.calls.filter((method) => method === 'invalidate')).toHaveLength(
+        1,
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
   it.each(['file', 'nested'])(
     'invalidates original %s removed after its entry commit in the same capture pass',
     async (name) => {

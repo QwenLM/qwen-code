@@ -118,33 +118,39 @@ describe('local offline recovery bundle', () => {
     },
   );
 
-  it.each(['absolute', 'escape', 'loop', 'dangling', 'hardlink'])(
-    'rejects %s entries before sealing',
-    async (kind) => {
-      const f = await fixture();
-      await writeFile(join(f.source, 'regular'), 'x');
-      if (kind === 'hardlink')
-        await link(join(f.source, 'regular'), join(f.source, 'other'));
-      else
-        await symlink(
-          kind === 'absolute'
-            ? join(f.source, 'regular')
-            : kind === 'escape'
-              ? '../history'
-              : kind === 'loop'
-                ? 'other'
+  it.each([
+    'absolute',
+    'escape',
+    'loop',
+    'dangling',
+    'not-directory',
+    'hardlink',
+  ])('rejects %s entries before sealing', async (kind) => {
+    const f = await fixture();
+    await writeFile(join(f.source, 'regular'), 'x');
+    if (kind === 'hardlink')
+      await link(join(f.source, 'regular'), join(f.source, 'other'));
+    else
+      await symlink(
+        kind === 'absolute'
+          ? join(f.source, 'regular')
+          : kind === 'escape'
+            ? '../history'
+            : kind === 'loop'
+              ? 'other'
+              : kind === 'not-directory'
+                ? 'regular/child'
                 : 'absent',
-          join(f.source, 'other'),
-        );
-      await cp(f.source, join(f.candidate, 'workspace'), {
-        recursive: true,
-        verbatimSymlinks: true,
-      });
-      await expect(
-        f.bundle.compareTree(f.source, 'workspace'),
-      ).rejects.toThrow();
-    },
-  );
+        join(f.source, 'other'),
+      );
+    await cp(f.source, join(f.candidate, 'workspace'), {
+      recursive: true,
+      verbatimSymlinks: true,
+    });
+    await expect(f.bundle.compareTree(f.source, 'workspace')).rejects.toThrow(
+      'unsupported_source_entry',
+    );
+  });
 
   it('pins every retained history backup and treats a missing referenced backup as corruption', async () => {
     const f = await fixture();

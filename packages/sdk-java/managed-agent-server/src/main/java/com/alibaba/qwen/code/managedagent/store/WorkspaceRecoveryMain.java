@@ -28,7 +28,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 /** Private offline entry; it never boots the application or a Runtime. */
 public final class WorkspaceRecoveryMain {
@@ -44,18 +44,18 @@ public final class WorkspaceRecoveryMain {
                 "invalid_request_file");
         byte[] bytes = Files.readAllBytes(input);
         JsonNode request = WorkspaceRecoveryStore.parse(bytes);
-        var source = new DriverManagerDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"),
-                requiredPresent("W1_JDBC_PASSWORD"));
-        var jdbc = new JdbcTemplate(source);
-        var manager = new DataSourceTransactionManager(source);
-        var properties = new ManagedAgentProperties();
-        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
-        if (!"inspect".equals(args[0])) {
-            properties.getRuntimeBroker().setWorkspaceMounts(List.of(
-                    new WorkspaceMount(text(request, "tenantId"), text(request, "storageId"), text(request, "sourceRoot"))));
-        }
         OSS oss = null;
-        try {
+        // The private RPC loop is single-threaded; transactions still commit separately.
+        try (var source = new SingleConnectionDataSource(required("W1_JDBC_URL"), required("W1_JDBC_USER"),
+                requiredPresent("W1_JDBC_PASSWORD"), true)) {
+            var jdbc = new JdbcTemplate(source);
+            var manager = new DataSourceTransactionManager(source);
+            var properties = new ManagedAgentProperties();
+            properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+            if (!"inspect".equals(args[0])) {
+                properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                        new WorkspaceMount(text(request, "tenantId"), text(request, "storageId"), text(request, "sourceRoot"))));
+            }
             ToolPublicationObjectStore objects = null;
             if ("capture".equals(args[0]) && System.getenv("W1_OSS_ENDPOINT") != null) {
                 URI endpoint = URI.create(required("W1_OSS_ENDPOINT"));

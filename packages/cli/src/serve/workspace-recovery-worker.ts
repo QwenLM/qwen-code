@@ -12,6 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   LocalRecoveryBundle,
+  UnsupportedSourceEntryError,
   recoveryDigest,
   recoveryJson,
   type BundleIndex,
@@ -474,8 +475,13 @@ export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
       },
     });
   } catch (error) {
-    if (capturing && error instanceof Error && error.message === 'source_drift')
-      await rpc('invalidate', { code: 'source_drift' });
+    if (
+      capturing &&
+      error instanceof Error &&
+      (error.message === 'source_drift' ||
+        error instanceof UnsupportedSourceEntryError)
+    )
+      await rpc('invalidate', { code: error.message });
     throw error;
   }
 }
@@ -493,7 +499,11 @@ export async function runWorkspaceRecoveryWorker(): Promise<void> {
         ? 'bundle_io_failed'
         : 'protocol_validation_failed';
     await rpc('failure', { code }).catch(() => undefined);
-    process.stderr.write(`${code}: ${message}\n`);
+    const detail =
+      error instanceof UnsupportedSourceEntryError
+        ? ` (${error.reason} at ${JSON.stringify(error.entryPath)})`
+        : '';
+    process.stderr.write(`${code}: ${message}${detail}\n`);
     process.exitCode = 1;
   } finally {
     process.stdin.destroy();

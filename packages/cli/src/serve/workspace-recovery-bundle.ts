@@ -117,6 +117,24 @@ async function fileDigest(
   }
 }
 
+class UnsupportedEntryError extends Error {
+  constructor(
+    code: string,
+    readonly entryPath: string,
+  ) {
+    super(code);
+  }
+}
+
+export class UnsupportedSourceEntryError extends Error {
+  constructor(
+    readonly entryPath: string,
+    readonly reason: string,
+  ) {
+    super('unsupported_source_entry');
+  }
+}
+
 async function entry(
   root: string,
   name: string,
@@ -131,15 +149,37 @@ async function entry(
     mode: stat.mode & 0o7777,
   };
   if (stat.isDirectory()) return { ...common, entryType: 'directory' };
-  if (stat.isFile())
-    return { ...common, entryType: 'file', ...(await fileDigest(path)) };
+  if (stat.isFile()) {
+    try {
+      return { ...common, entryType: 'file', ...(await fileDigest(path)) };
+    } catch (error) {
+      if (error instanceof Error && error.message === 'unsupported_file_type')
+        throw new UnsupportedEntryError(error.message, name);
+      throw error;
+    }
+  }
   if (stat.isSymbolicLink()) {
     const target = await readlink(path);
-    if (isAbsolute(target) || !inside(boundary, await realpath(path)))
-      throw new Error('unsupported_symlink');
+    if (isAbsolute(target))
+      throw new UnsupportedEntryError('unsupported_symlink', name);
+    let resolved: string;
+    try {
+      resolved = await realpath(path);
+    } catch (error) {
+      if (
+        ['ENOENT', 'ENOTDIR', 'ELOOP'].includes(
+          (error as NodeJS.ErrnoException).code ?? '',
+        ) &&
+        (await lstat(path)).isSymbolicLink()
+      )
+        throw new UnsupportedEntryError('unsupported_symlink', name);
+      throw error;
+    }
+    if (!inside(boundary, resolved))
+      throw new UnsupportedEntryError('unsupported_symlink', name);
     return { ...common, entryType: 'symlink', target };
   }
-  throw new Error('unsupported_file_type');
+  throw new UnsupportedEntryError('unsupported_file_type', name);
 }
 
 async function* tree(
@@ -182,10 +222,18 @@ function sourceReadDrift(error: unknown): boolean {
   );
 }
 
-async function* sourceTree(root: string): AsyncGenerator<BundleEntry> {
+async function* sourceTree(
+  root: string,
+  unpinned?: (entryPath: string) => Promise<boolean>,
+): AsyncGenerator<BundleEntry> {
   try {
     yield* tree(dirname(root), basename(root));
   } catch (error) {
+    if (
+      error instanceof UnsupportedEntryError &&
+      (await unpinned?.(error.entryPath))
+    )
+      throw new UnsupportedSourceEntryError(error.entryPath, error.message);
     if (sourceReadDrift(error)) throw new Error('source_drift');
     throw error;
   }
@@ -367,8 +415,15 @@ export class LocalRecoveryBundle {
       } while (afterKey !== null);
     }
     let count = 0;
+    const unpinned = async (entryPath: string) =>
+      (await this.rpc('assetLookup', {
+        key: recoveryAssetKey(
+          'entry',
+          `${candidate}${entryPath.slice(basename(sourceRoot).length)}`,
+        ),
+      })) === null;
     // Symlink resolution is relative to the complete tree, not to each parent.
-    for await (const original of sourceTree(sourceRoot)) {
+    for await (const original of sourceTree(sourceRoot, unpinned)) {
       const suffix = original.path.slice(basename(sourceRoot).length);
       const name = `${candidate}${suffix}`;
       const saved = await this.rpc('assetLookup', {

@@ -65,6 +65,12 @@ I/O 中断保留阶段和进度，来源漂移使操作失效。运维调查后�
 使用新恢复 UUID；任何操作不能接管其他 fence。
 完成提交只更新预期的可写阶段，陈旧的完成请求不能覆盖另一个进程已提交的失效。
 
+此前未固定的不支持源条目以 `unsupported_source_entry` 拒绝捕获并使该恢复 UUID
+失效，仅在运维 stderr 输出类型和相对源根父目录的路径。路径按 JSON 转义，特殊
+文件名不能伪造诊断行。修正离线源并准备新的匹配副本后，使用新的恢复 UUID。
+已固定条目的不支持替换及最终目录树变化仍为 `source_drift`；已观察到的源路径丢失
+仍使操作失效，不可读取仍为读取失败。候选副本中的不支持条目保留副本校验错误。
+
 Java 私有 main 支持 `capture`、`verify`、`inspect`，读取运维拥有的 JSON 请求，
 写操作要求 `--offline-confirmed`。请求包含 tenant/storage、恢复 UUID、fence UUID、
 预期 mount revision、规范 source/bundle 根、原 Worker file-history 根、Node
@@ -80,6 +86,19 @@ npm wrapper 在导入普通 CLI 模块图前分派私有 Worker；打包可执�
 CLI bootstrap，因此保留自己的分派。私有 flag 用于 Java 的 stdio 子进程，不属于
 公开 help 命令。Wrapper 导入或启动失败会输出诊断并非零退出，不依赖 Node 的
 未处理 rejection 策略。
+
+单线程 Java 私有进程拥有一条物理 JDBC 连接，并在完成、检查、回执重放及失败时
+关闭。既有事务仍分别提交或回滚，逐记录的 fence、来源和所有权检查保留；不引入
+连接池，不改变在线服务行为。
+
+按文件系统条目数和字节数一起估算离线窗口。
+[独立 Linux 报告](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5933639978)
+在 4 vCPU/8 GiB VM 上测得复用连接前，20,916 条目、77 Session 的捕获耗时
+829 秒、验证 765 秒。其单独测试的单连接候选将 20,500 条目的捕获从 806 秒降至
+221 秒，验证从 378 秒降至 136 秒。这是评审者指定工作负载的测量，不是本修订的
+延迟保证。守卫读取和派生元数据写入仍按条目产生开销。每次捕获和验证均保留自己的
+操作、Session 和 asset 行，用于续办和回执审计；W1b 不自动清理这些记录。多次
+操作需预留数据库空间；批量写入及垃圾回收需后续设计，保持维护和回执边界。
 
 打包后的维护制品为 `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`。
 运行 `java -jar <artifact> capture <request.json> --offline-confirmed`、
@@ -209,7 +228,13 @@ asset 和 56 个文件系统条目；同 ID 完成重试保持回执与全部制
 均保持 `INVALIDATED/source_drift`，不封存、不写原权威数据。原 O2 协议 fixture
 也在真实 MySQL 配合内存对象存储通过。独立审查发现并发完成/失效竞态及部分清单的
 来源丢失路径；修复保留持久失效并复查固定来源。定向已打包 Java/H2 和 Node 回归
-探针与此前完整 MySQL 测试分别记录。这些 fixture 不证明实时
-Harness/Worker/Broker 或外部 OSS 部署验收。真实 Linux 身份、完整部署的 O2
-捕获、全部物理中断边界及压力规模证据仍待完成。
+探针与此前完整 MySQL 测试分别记录。这些作者执行的 fixture 不证明实时
+Harness/Worker/Broker 或外部 OSS 部署验收。
+[wenshao 的独立部署证据](https://github.com/wenshao/qwen-code/tree/511e05b89edf0197a0e632b19248b9b7c0a0d636/pr13138)
+另在 Ubuntu/ext4、MySQL 8.4.11 上测试 `989baf220`，包含已部署的
+Broker/Harness/Worker、真实阿里云 OSS、四个物理 kill 时点及 20,916 条目/
+77 Session。评审者还比较了 `8bd11d5a` 的 bundle，只有内嵌提交常量不同。
+这些已测场景属于对应制品的独立证据，不是作者对后续评审修复的实测，也不覆盖
+所有中断边界。归档/关闭/删除成员仍只有合成数据覆盖。维护者架构签核及新增诊断/连接
+改动的支持平台验收仍待完成；CI 绿灯和 Ready 状态不能替代这些门槛。
 #13110 已合入主干；本次整合保留主干 V26 工具结果投影迁移，将新增恢复元数据安排为 V27。
