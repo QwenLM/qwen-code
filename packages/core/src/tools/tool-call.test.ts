@@ -1367,6 +1367,37 @@ describe('ToolCallTool', () => {
       });
     });
 
+    it('allows gate-supplied defaults without changing the declaration or caller arguments', async () => {
+      const target = new MockMediaPolicyTool({});
+      const schemaBefore = structuredClone(target.schema.parametersJsonSchema);
+      const registry = makeRegistry([target], new Set([target.name]));
+      const defaults = vi.fn(() => ['outputDir']);
+      for (const args of [
+        { inputPath: '/tmp/in.wav' },
+        { inputPath: '/tmp/in.wav', outputDir: '/caller/out' },
+      ]) {
+        const argsBefore = structuredClone(args);
+        const result = await resolveDeferredToolCall(
+          registry,
+          { name: target.name, arguments: args },
+          { getDefaultArgumentNames: defaults },
+        );
+        expect(result).toMatchObject({ tool: target, arguments: argsBefore });
+        expect(args).toEqual(argsBefore);
+        expect(target.schema.parametersJsonSchema).toEqual(schemaBefore);
+      }
+      expect(defaults).toHaveBeenCalledWith(target.name);
+      const invalid = await resolveDeferredToolCall(
+        registry,
+        { name: target.name, arguments: { outputDir: {} } },
+        { getDefaultArgumentNames: defaults },
+      );
+      expect(invalid).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: target.name,
+      });
+    });
+
     it('refuses a media-policy target whose arguments miss a model-visible required field', async () => {
       // With no lockedArguments the projection is the native schema, so a
       // bridged `{}` must still be refused here — naming the target and the

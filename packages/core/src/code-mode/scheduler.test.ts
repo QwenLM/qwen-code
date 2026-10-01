@@ -17,6 +17,8 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
+import { ToolCallTool } from '../tools/tool-call.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
 import {
   Kind,
@@ -794,6 +796,48 @@ describe('CodeModeOnly scheduler dispatch', () => {
       'unavailable on this CodeModeOnly call surface',
     );
   });
+
+  it.each([
+    ['read_probe', 'model', ToolErrorType.EXECUTION_DENIED],
+    ['agent', 'model', ToolErrorType.INVALID_TOOL_PARAMS],
+    ['read_probe', 'code_mode', ToolErrorType.INVALID_TOOL_PARAMS],
+  ] as const)(
+    'preserves the call surface policy for malformed bridged %s calls from %s',
+    async (name, source, errorType) => {
+      const execute = vi.fn();
+      const { run, completed, call } = setup([
+        new ToolCallTool(),
+        new MockTool({ name: 'tool_search' }),
+        new MockTool({
+          name,
+          shouldDefer: true,
+          params: {
+            type: 'object',
+            properties: { value: { type: 'string' } },
+            required: ['value'],
+          },
+          execute,
+        }),
+      ]);
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        completed.mockClear();
+        await run(`bridge-${attempt}`, 'prompt-bridge-policy', undefined, {
+          name: 'tool_call',
+          args: { name, arguments: {} },
+          source,
+        });
+        expect(call()?.response.errorType).toBe(errorType);
+        if (errorType === ToolErrorType.EXECUTION_DENIED) {
+          expect(call()?.response.error.message).toContain('CodeModeOnly');
+          expect(JSON.stringify(call()?.response)).not.toContain(
+            'RETRY LOOP DETECTED',
+          );
+        }
+      }
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
 
   it('enforces a restricted agent allowlist inside exec', async () => {
     const read = vi.fn().mockResolvedValue({

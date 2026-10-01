@@ -77,6 +77,8 @@ export interface DeferredToolCallOptions {
    * sees.
    */
   suppressArgumentPreCheck?: (targetName: string) => boolean | Promise<boolean>;
+  /** Media-policy fields supplied by the caller's downstream modelAccess gate. */
+  getDefaultArgumentNames?: (targetName: string) => readonly string[];
 }
 
 export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
@@ -391,6 +393,8 @@ export async function resolveDeferredToolCall(
   // rules that assume the modelAccess gate (which both frontends run AFTER
   // bridge resolution) has merged those arguments back in — running it here
   // would refuse calls the very next stage accepts.
+  // Defaults remain model-visible and overridable; omit their names only
+  // from this clone's required list because the same gate supplies them.
   let paramsError: string | null = null;
   // A truncated response yields to the caller's truncation handling: the
   // arguments are incomplete for transport reasons, not a schema misreading.
@@ -412,6 +416,17 @@ export async function resolveDeferredToolCall(
       const schemaClone = relaxAdditionalProperties(
         target.schema.parametersJsonSchema,
       );
+      if (
+        target.mediaPolicyDescriptor?.kind === 'media_policy' &&
+        Array.isArray(schemaClone['required'])
+      ) {
+        const defaults = new Set(
+          options?.getDefaultArgumentNames?.(target.name),
+        );
+        schemaClone['required'] = schemaClone['required'].filter(
+          (name) => !defaults.has(name),
+        );
+      }
       const required = new Set(
         Array.isArray(schemaClone['required']) ? schemaClone['required'] : [],
       );

@@ -12,7 +12,10 @@ import {
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
-import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
+import {
+  evaluateMediaPolicyToolCall,
+  resolveMediaPolicyModelAccess,
+} from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
@@ -13736,6 +13739,11 @@ export class Session implements SessionContext {
         );
       }
       const resolution = await resolveDeferredToolCall(toolRegistry, args, {
+        getDefaultArgumentNames: (targetName) =>
+          Object.keys(
+            resolveMediaPolicyModelAccess(this.config, targetName)
+              .defaultArguments,
+          ),
         // Thread the real configured depth so the ACP frontend applies the
         // same depth-gated AgentTool re-admission as the terminal scheduler
         // and tool_search — the exclusion contract must be consistent across

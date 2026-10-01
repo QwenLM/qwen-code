@@ -36,7 +36,10 @@ import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
+import {
+  evaluateMediaPolicyToolCall,
+  resolveMediaPolicyModelAccess,
+} from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
 import {
@@ -2805,27 +2808,42 @@ export class CoreToolScheduler {
         // The owner policy must win over the argument pre-check so a denied
         // target keeps its specific EXECUTION_DENIED.
         isTargetExecutionAllowed: this.isToolExecutionAllowed,
-        // The permission-manager gate in _schedule owns the richer denial
-        // (deny-rule attribution); a pm-denied target skips the argument
-        // pre-check so that denial — not a parameter error for a call that
-        // could never run — is what the model sees.
-        suppressArgumentPreCheck: permissionManager
-          ? async (targetName: string) => {
-              try {
-                return !(await permissionManager.isToolEnabled(targetName));
-              } catch (error) {
-                // Do not let a policy lookup failure swallow the pre-check.
-                // On the refusal path _schedule continues ahead of the
-                // permission gate, so this is the lookup's only record.
-                debugLogger.warn(
-                  'Bridge pre-check policy lookup failed for',
-                  targetName,
-                  error,
-                );
-                return false;
-              }
+        getDefaultArgumentNames: (targetName) =>
+          Object.keys(
+            resolveMediaPolicyModelAccess(this.config, targetName)
+              .defaultArguments,
+          ),
+        // The Code Mode and permission-manager gates in _schedule own their
+        // specific denials; a blocked target skips the argument pre-check
+        // instead of accruing parameter errors for a call that cannot run.
+        suppressArgumentPreCheck: async (targetName: string) => {
+          if (
+            this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+            request.executionOrigin?.kind !== 'fixed_policy' &&
+            !isCodeModeToolCallAllowed(
+              canonicalToolName(targetName),
+              request.source ?? 'model',
+            )
+          ) {
+            return true;
+          }
+          if (permissionManager) {
+            try {
+              return !(await permissionManager.isToolEnabled(targetName));
+            } catch (error) {
+              // Do not let a policy lookup failure swallow the pre-check.
+              // On the refusal path _schedule continues ahead of the
+              // permission gate, so this is the lookup's only record.
+              debugLogger.warn(
+                'Bridge pre-check policy lookup failed for',
+                targetName,
+                error,
+              );
+              return false;
             }
-          : undefined,
+          }
+          return false;
+        },
       }),
     );
     if ('error' in resolution) {
