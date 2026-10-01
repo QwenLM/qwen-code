@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
@@ -20,9 +23,15 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -31,13 +40,16 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
 import org.junit.jupiter.api.MethodOrderer;
@@ -610,6 +622,166 @@ class ManagedAgentMySqlIT {
 
     @Test
     @Order(8)
+    void projectsStageHRecordsAndRollsBackARefusedOne() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        String tenant = "mysql-extension";
+        String session = "mysql-extension-" + UUID.randomUUID();
+        ExtensionRecordJournal journal = inTransaction(transactions,
+                () -> new ExtensionRecordJournal(new ManagedSessionStore(jdbc),
+                        tenant, "mysql-extension-workspace", session).open());
+        JsonNode fixtures = ManagedExtensionProjectionContractTest.fixtures();
+        JsonNode chain = fixtures.required("monitorChainCases").get(0)
+                .required("revisions");
+        for (int index = 0; index < chain.size() - 1; index++) {
+            JsonNode revision = chain.get(index);
+            String commandId = "monitor-" + index;
+            inTransaction(transactions, () -> journal.commitMonitor(
+                    commandId, revision.required("monitorRun"),
+                    revision.required("occurredAt").longValue()));
+        }
+        ManagedExtensionRecordStore records =
+                new ManagedExtensionRecordStore(jdbc, null);
+        TaskProjection before = records.listTasks(tenant, session, null,
+                null, 10).tasks().get(0).projection();
+
+        assertThat(before).isEqualTo(ManagedExtensionProjectionContractTest
+                .view(chain.get(chain.size() - 2).required("view")));
+
+        // A body no revision committed, so its resource and its reference
+        // are new rows that only a rollback removes.
+        JsonNode refused = ((ObjectNode) chain.get(chain.size() - 2)
+                .required("monitorRun").deepCopy()).put("maxEvents", 50);
+        String refusedResource = ExtensionRecordJournal.resourceId(
+                ExtensionRecordJournal.bytes(refused));
+        int references = count(jdbc, "qwen_managed_session_resource_ref",
+                tenant, session);
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> journal.commitMonitor("refused", refused, 99_000)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                ManagedExtensionRecordStore.ERROR_REJECTED));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_resource WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?",
+                Integer.class, tenant, session, refusedResource)).isZero();
+        assertThat(count(jdbc, "qwen_managed_session_resource_ref", tenant,
+                session)).isEqualTo(references);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_journal_tx WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " command_id = 'refused'", Integer.class, tenant,
+                session)).isZero();
+        assertThat(records.listTasks(tenant, session, null, null, 10).tasks()
+                .get(0).projection()).isEqualTo(before);
+
+        // A first revision checks its opening command through an index, not
+        // by reading every record of its Session. The plan is asked of a
+        // Session with enough records for the choice to matter.
+        String scopeKey = sha256("explain-" + session);
+        jdbc.batchUpdate("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, created_at) VALUES (?, ?,"
+                        + " ?, ?, ?, 'monitor_run', ?, ?, 1, ?, 'monitor',"
+                        + " 'pending', ?)",
+                IntStream.range(0, 500)
+                        .mapToObj(index -> new Object[] {scopeKey,
+                                sha256("record-" + index), tenant,
+                                "mysql-extension-workspace", "explain",
+                                "monitor-" + index, sha256("command-" + index),
+                                "resource-" + index, 1_000L + index})
+                        .toList());
+        jdbc.queryForList("ANALYZE TABLE"
+                + " qwen_managed_session_extension_record");
+        assertThat(jdbc.queryForList("EXPLAIN SELECT COUNT(*) FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_scope_key = ? AND operation_hash = ?",
+                scopeKey, sha256("command-7")))
+                .extracting(row -> row.get("key"))
+                .containsExactly("idx_managed_session_extension_operation");
+    }
+
+    @Test
+    @Order(9)
+    void announcesNothingAfterADeletionCommittedMidCommit() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        TransactionTemplate transactions = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource));
+        ManagedAgentStore agents = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        String tenant = "mysql-extension-delete-" + UUID.randomUUID();
+        String session = inTransaction(transactions,
+                () -> agents.insertSessionCommand(tenant, "CREATE_SESSION",
+                        "create", "sha256:" + "a".repeat(64), "qwen-code",
+                        null, "tasks", List.of(), "sha256:" + "b".repeat(64)))
+                .sessionId();
+        // The deletion commits on another connection after the commit read
+        // its snapshot and before it announces, which on REPEATABLE READ is
+        // invisible to a plain read.
+        AgentStateStore racing = (AgentStateStore) Proxy.newProxyInstance(
+                AgentStateStore.class.getClassLoader(),
+                new Class<?>[] {AgentStateStore.class},
+                (proxy, method, arguments) -> {
+                    if ("appendLiveSessionEventIfAbsent".equals(
+                            method.getName())) {
+                        CompletableFuture.runAsync(() -> {
+                            String operation = inTransaction(transactions,
+                                    () -> agents.beginOperation(tenant,
+                                            session, OperationKind.DELETE,
+                                            "sha256:" + "c".repeat(64),
+                                            "delete", "digest-delete"))
+                                    .operation().operationId();
+                            long claim = inTransaction(transactions,
+                                    () -> agents.claimOperation(tenant,
+                                            session, operation, "worker",
+                                            Duration.ofMinutes(1)))
+                                    .orElseThrow().claimGeneration();
+                            inTransaction(transactions,
+                                    () -> agents.completeOperation(tenant,
+                                            session, operation, "worker",
+                                            claim, true));
+                        }).join();
+                    }
+                    try {
+                        return method.invoke(agents, arguments);
+                    } catch (InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+        ManagedSessionStore store = new ManagedSessionStore(jdbc,
+                new ManagedExtensionRecordStore(jdbc, racing));
+        ExtensionRecordJournal journal = inTransaction(transactions,
+                () -> new ExtensionRecordJournal(store, tenant,
+                        "mysql-extension-workspace", session).open());
+        JsonNode start = ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases").get(0).required("revisions")
+                .get(0).required("monitorRun");
+        inTransaction(transactions,
+                () -> journal.commitMonitor("start", start, 1_000));
+
+        List<String> events = jdbc.queryForList("SELECT event_type FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? ORDER BY sequence_id",
+                String.class, tenant, session);
+        assertThat(events).endsWith("session.deleted")
+                .doesNotContain("task.updated");
+        assertThat(count(jdbc, "qwen_managed_session_extension_record",
+                tenant, session)).isEqualTo(1);
+    }
+
+    @Test
+    @Order(10)
     void admitsClaimsAndCompletesSessionOperationsOnMySql()
             throws InterruptedException {
         DriverManagerDataSource dataSource = dataSource();
@@ -703,6 +875,91 @@ class ManagedAgentMySqlIT {
         assertThat(journals.hasLiveWriter(tenant, sessionId)).isTrue();
         Thread.sleep(1_500);
         assertThat(journals.hasLiveWriter(tenant, sessionId)).isFalse();
+    }
+
+    @Test
+    @Order(11)
+    void pagesTurnsNewestFirstOnMySql() {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        ManagedAgentStore store = new ManagedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {
+                }, new ManagedWorkspaceRegistry(jdbc),
+                new ManagedAgentProperties());
+        String tenant = "mysql-turns-" + UUID.randomUUID();
+        String sessionId = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "create", "digest-create", "qwen-code", null,
+                null, List.of(), null).sessionId();
+        // Turn IDs that differ only by case compare by their bytes, as the
+        // binary collation stores them. The oldest Turn has the largest ID.
+        for (String[] turn : List.of(new String[] {"turn_z", "500"},
+                new String[] {"turn_a", "1000"},
+                new String[] {"turn_B", "5000"},
+                new String[] {"turn_b", "5000"},
+                new String[] {"turn_c", "9000"})) {
+            jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+                            + " session_id, turn_id, prompt_id, input_json,"
+                            + " payload_digest, status, created_at,"
+                            + " updated_at, completed_at) VALUES (?, ?, ?, ?,"
+                            + " 'not json', 'digest', 'COMPLETED', ?, ?, ?)",
+                    tenant, sessionId, turn[0], UUID.randomUUID().toString(),
+                    Long.parseLong(turn[1]), Long.parseLong(turn[1]),
+                    Long.parseLong(turn[1]) + 1);
+        }
+
+        List<String> order = new ArrayList<>();
+        TurnPage page = store.listTurns(tenant, sessionId, null, null, 2);
+        while (true) {
+            page.turns().forEach(turn -> order.add(turn.turnId()));
+            if (!page.hasMore()) {
+                break;
+            }
+            TurnSummary last = page.turns().getLast();
+            page = store.listTurns(tenant, sessionId, last.createdAt(),
+                    last.turnId(), 2);
+        }
+        assertThat(order).containsExactly("turn_c", "turn_b", "turn_B",
+                "turn_a", "turn_z");
+        assertThat(store.findTurnSummary(tenant, sessionId, "turn_B"))
+                .get().extracting(TurnSummary::createdAt,
+                        TurnSummary::completedAt)
+                .containsExactly(5000L, 5001L);
+        assertThat(store.findTurnSummary(tenant, sessionId, "TURN_B"))
+                .isEmpty();
+        // The collation pads with spaces; the lookup still wants the exact ID.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " managed_agent_turn WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = 'turn_B  '",
+                Integer.class, tenant, sessionId)).isEqualTo(1);
+        assertThat(store.findTurnSummary(tenant, sessionId, "turn_B  "))
+                .isEmpty();
+        assertThat(store.listTurns(tenant.toUpperCase(), sessionId, null,
+                null, 10).turns()).isEmpty();
+    }
+
+    private static int count(JdbcTemplate jdbc, String table, String tenant,
+            String session) {
+        Integer rows = jdbc.queryForObject("SELECT COUNT(*) FROM " + table
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session);
+        return rows == null ? 0 : rows;
+    }
+
+    @Test
+    @Order(11)
+    void originalWorkspaceHoldersRecoverWithoutCurrentAuthority() throws Exception {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var jdbc = new JdbcTemplate(source);
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> { },
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        var authority = new com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore(jdbc,
+                new DataSourceTransactionManager(source));
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verifyOperatorPrepare(
+                source, jdbc, store, authority);
     }
 
     private static Process startWorkspaceProcess(String action,

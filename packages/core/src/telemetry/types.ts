@@ -1892,6 +1892,8 @@ export class MemoryMigrationEvent implements BaseTelemetryEvent {
   output_tokens: number;
   total_tokens: number;
   duration_ms: number;
+  /** Optional: why a failed run failed (index rebuild error message, 'stalled'). */
+  failure_reason?: string;
 
   constructor(
     params: Omit<MemoryMigrationEvent, 'event.name' | 'event.timestamp'>,
@@ -1912,6 +1914,7 @@ export class MemoryMigrationEvent implements BaseTelemetryEvent {
     this.output_tokens = params.output_tokens;
     this.total_tokens = params.total_tokens;
     this.duration_ms = params.duration_ms;
+    this.failure_reason = params.failure_reason;
   }
 }
 

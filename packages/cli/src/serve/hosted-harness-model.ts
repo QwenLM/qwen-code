@@ -13,10 +13,7 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
-import {
-  HOSTED_WORKSPACE_FILE_TOOLS,
-  type HostedWorkspaceToolTurn,
-} from './hosted-workspace-tool-turn.js';
+import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 
 export interface HostedHarnessModelResult {
   text: string;
@@ -31,7 +28,11 @@ export async function runHostedHarnessTextTurn(input: {
   prompt: string;
   promptId: string;
   signal: AbortSignal;
-  toolTurn?: Pick<HostedWorkspaceToolTurn, 'execute' | 'consumeResults'>;
+  resumeFromToolResults?: readonly Part[];
+  toolTurn?: Pick<
+    HostedWorkspaceToolTurn,
+    'execute' | 'consumeResults' | 'declarations'
+  >;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -78,7 +79,14 @@ export async function runHostedHarnessTextTurn(input: {
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
-    const history: Content[] = input.history.flatMap((record) => {
+    const historyRecords = input.resumeFromToolResults
+      ? input.history.slice(
+          0,
+          input.history.findLastIndex((record) => record.type === 'assistant') +
+            1,
+        )
+      : input.history;
+    const history: Content[] = historyRecords.flatMap((record) => {
       if (
         (record.type === 'user' ||
           record.type === 'assistant' ||
@@ -110,13 +118,19 @@ export async function runHostedHarnessTextTurn(input: {
                 : answered(entry),
             ),
       );
-    let request: Part[] = [{ text: input.prompt }];
+    let request: Part[] = input.resumeFromToolResults
+      ? [...input.resumeFromToolResults]
+      : [{ text: input.prompt }];
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
       if (input.toolTurn)
-        client
-          .getChat()
-          .setTools([{ functionDeclarations: HOSTED_WORKSPACE_FILE_TOOLS }]);
+        client.getChat().setTools([
+          {
+            functionDeclarations: await input.toolTurn.declarations(
+              input.signal,
+            ),
+          },
+        ]);
       let calls: ToolCallRequestInfo[] = [];
       let text = '';
       let finished = false;
@@ -126,7 +140,7 @@ export async function runHostedHarnessTextTurn(input: {
         input.promptId,
         {
           type:
-            round === 0
+            round === 0 && !input.resumeFromToolResults
               ? SendMessageType.UserQuery
               : SendMessageType.ToolResult,
         },
@@ -167,7 +181,8 @@ export async function runHostedHarnessTextTurn(input: {
       if (!finished)
         throw new Error('Hosted Harness model turn did not finish.');
       if (!input.toolTurn) return { text, model: config.getModel() };
-      if (round > 0) await input.toolTurn.consumeResults();
+      if (round > 0 || input.resumeFromToolResults)
+        await input.toolTurn.consumeResults();
       const output = client.getHistory().at(-1);
       if (output?.role !== 'model' || !output.parts)
         throw new Error('Hosted model output is unavailable.');

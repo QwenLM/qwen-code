@@ -42,7 +42,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than input, text-delta and tool-call updates, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
+        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta and item.tool_call.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description W0 maps workspaceId/cwdRelative to the public selection without using environmentId or absolute cwd. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. Later Workspace submit, cancel and lifecycle operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -149,6 +149,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/actions/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        post: operations["queryWebShellActions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/actions/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        post: operations["getWebShellAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/actions/respond": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description D6 serves Hosted permission Actions. Question Actions and vote_recorded remain planned. Reads follow Session authorization; only the Session creator may respond. Responses are durable operations, reconciled against the original journal decision. */
+        post: operations["respondWebShellAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/sessions/close": {
         parameters: {
             query?: never;
@@ -208,6 +259,38 @@ export interface paths {
         put?: never;
         /** @description Read one authorized Workspace by its logical ID; absent or unreadable Workspaces return 404. No Runtime is started. */
         post: operations["webShellGetWorkspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tasks/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellTasks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tasks/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellTask"];
         delete?: never;
         options?: never;
         head?: never;
@@ -319,6 +402,12 @@ export interface components {
             /** Format: int64 */
             lastSequence: number;
             workspace?: components["schemas"]["WebShellWorkspaceContext"];
+            capabilities?: components["schemas"]["WebShellSessionCapabilities"];
+        };
+        WebShellSessionCapabilities: {
+            /** @default false */
+            actions: boolean;
+            tasks: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -448,7 +537,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, empty Session creation, and saved binding read-back; does not enable execution. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; later submit, cancel and lifecycle operations remain gated. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
@@ -464,7 +553,31 @@ export interface components {
             sessionId: string;
             operationId: string;
         };
-        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel completion means that the authority recorded the cancel, not that the task stopped: the task becomes cancelled only after its physical execution settles. */
+        WebShellAction: components["schemas"]["WebShellPermissionAction"] | components["schemas"]["WebShellQuestionAction"];
+        WebShellActionResolution: {
+            actionId: string;
+            /**
+             * @description D6 supports decided only; vote_recorded is planned.
+             * @enum {unknown}
+             */
+            outcome: "vote_recorded" | "decided";
+            receiptId: string;
+            decisionReceiptId?: string;
+        } & unknown;
+        WebShellQuestionAnswer: {
+            questionId: string;
+            optionIds?: string[];
+            text?: string;
+        } | unknown | unknown;
+        WebShellActionQuestion: {
+            id: string;
+            prompt: string;
+            required: boolean;
+            multiple: boolean;
+            allowText: boolean;
+            options: components["schemas"]["WebShellActionOption"][];
+        };
+        /** @description Receipt IDs are opaque authorized product handles, not private journal or storage refs. Input/cancel completion is command acceptance, not Turn completion or physical stop. Action completion may only record one vote. Lifecycle completion requires its cleanup facts; archive may remain java_durable because Java is its authority. Task cancel 202 is Java durable admission; completion means the authority durably recorded cancellation and returned a receipt, not that the task stopped. Task cancel failed proves non-acceptance and no further delivery, with a failure code; recovery_blocked means acceptance is unknown and needs reconciliation before re-execution. Its status is never cancelled. Physical settlement and an unknown physical outcome belong to the task, independently of operation acceptance. A completed task cancel carries admission stage harness_confirmed and delivery state confirmed with the authority's receipt; failed and recovery_blocked carry java_durable and blocked, so they are never delivered again without reconciliation. */
         WebShellCommandOperation: {
             operationId: string;
             /** Format: uuid */
@@ -478,9 +591,107 @@ export interface components {
             /** @enum {unknown} */
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
+            actionResolution?: components["schemas"]["WebShellActionResolution"];
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. */
+            failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown);
+        WebShellQuestionAction: {
+            actionId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            kind: "question";
+            source: components["schemas"]["WebShellActionSource"];
+            /** @enum {unknown} */
+            state: "requested" | "decided" | "cancelled" | "expired";
+            /** Format: int64 */
+            inputRevision: number;
+            policyRevision: string;
+            /** Format: int64 */
+            createdAt: number;
+            /** Format: int64 */
+            expiresAt: number;
+            decisionReceiptId?: string;
+            questions: components["schemas"]["WebShellActionQuestion"][];
+        } & unknown;
+        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
+        WebShellPermissionAction: {
+            actionId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            kind: "permission";
+            source: components["schemas"]["WebShellActionSource"];
+            /** @enum {unknown} */
+            state: "requested" | "decided" | "cancelled" | "expired";
+            /** Format: int64 */
+            inputRevision: number;
+            policyRevision: string;
+            /** Format: int64 */
+            createdAt: number;
+            /** Format: int64 */
+            expiresAt: number;
+            decisionReceiptId?: string;
+            options: components["schemas"]["WebShellActionOption"][];
+            turnId?: string;
+            functionCallId: string;
+            toolName: string;
+        } & unknown;
+        WebShellPermissionResponse: {
+            /** @constant */
+            kind: "permission";
+            /** Format: int64 */
+            inputRevision: number;
+            policyRevision: string;
+            optionId: string;
+        };
+        WebShellActionPage: {
+            data: components["schemas"]["WebShellAction"][];
+            hasMore: boolean;
+            nextCursor?: string | null;
+        };
+        WebShellActionSource: {
+            /** @enum {unknown} */
+            kind: "tool_call" | "automation_run" | "team_plan" | "user_operation";
+            id: string;
+        };
+        /** @description Validate IDs, required answers, selection cardinality, text eligibility and current responder permission against the original Action. Unknown/expired/cancelled/conflicting revisions cannot grant execution. */
+        WebShellActionResponseRequest: components["schemas"]["WebShellPermissionResponse"] | components["schemas"]["WebShellQuestionResponse"];
+        WebShellActionOption: {
+            id: string;
+            label: string;
+            description?: string;
+        };
+        WebShellQuestionResponse: {
+            /** @constant */
+            kind: "question";
+            /** Format: int64 */
+            inputRevision: number;
+            policyRevision: string;
+            answers: components["schemas"]["WebShellQuestionAnswer"][];
+        };
         WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellActionQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string;
+            /** @default 20 */
+            limit?: number;
+        };
+        WebShellActionGetRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            actionId: string;
+        };
+        WebShellActionRespondRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            actionId: string;
+            idempotencyKey: string;
+            response: components["schemas"]["WebShellActionResponseRequest"];
+            requestId?: string;
+        };
         WebShellLifecycleRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -494,9 +705,75 @@ export interface components {
         WebShellWorkspaceGetRequest: {
             workspaceId: string;
         };
+        /** @enum {string} */
+        TaskKind: "child_agent" | "workflow" | "background_shell" | "monitor" | "automation_run";
+        /**
+         * @description Logical run state. completed, failed and cancelled are terminal and are set only after the physical execution has settled. degraded means that the task still runs with reduced guarantees, such as a Monitor that lost its observation source. recovery_blocked means that recovery cannot prove the physical outcome: it is not settled, is never reported as success and is never re-run automatically.
+         * @enum {string}
+         */
+        TaskState: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "degraded" | "recovery_blocked";
+        /**
+         * @description Redacted state of the Runtime that hosts the task, without binding identity or generation.
+         * @enum {string}
+         */
+        TaskRuntimeState: "unbound" | "provisioning" | "ready" | "draining" | "lost";
+        /**
+         * @description Actions the task supports now, the same for every caller. cancel: the cancel route accepts a new command for this task; whether a caller may use it is an authorization check (403 on the cancel route). send_input: reserved for a later capability route. read_output: the task events route returns output events for this task to any caller that can read it. read_output does not change during the task's life, and a task without it produces no output events: its output goes only to Artifacts, so the events route never filters out events that exist.
+         * @enum {string}
+         */
+        TaskActionCapability: "cancel" | "send_input" | "read_output";
+        /** @description Read-only projection of one asynchronous task of a Session (SessionTaskView). It is rebuilt from the Session's durable domain records and is never their source of truth. It never carries a Runtime binding ID, generation, Runtime endpoint, Pod, absolute path, raw PID, SecretHandle or local sidecar; diagnostics are authorized Artifact references. */
+        WebShellTask: {
+            taskId: string;
+            /** Format: uuid */
+            sessionId: string;
+            kind: components["schemas"]["TaskKind"];
+            state: components["schemas"]["TaskState"];
+            /**
+             * Format: int64
+             * @description Immutable definition revision this run is pinned to, when the kind has a definition.
+             */
+            definitionRevision?: number;
+            runtimeState?: components["schemas"]["TaskRuntimeState"];
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            createdAt: number;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            startedAt?: number;
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds.
+             */
+            settledAt?: number;
+            /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
+            artifactRefs: string[];
+            actionCapabilities: components["schemas"]["TaskActionCapability"][];
+        } & (unknown & unknown & unknown & unknown);
+        WebShellTaskPage: {
+            data: components["schemas"]["WebShellTask"][];
+            hasMore: boolean;
+            nextCursor?: string | null;
+        } & unknown;
+        WebShellTaskQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            cursor?: string;
+            /** @default 20 */
+            limit?: number;
+        };
+        WebShellTaskGetRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+        };
     };
     responses: {
-        /** @description Resource is readable but actor lacks this operation or original Action responder permission. */
+        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -637,6 +914,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -663,6 +941,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -721,6 +1000,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -749,6 +1029,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
@@ -776,6 +1057,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -804,6 +1086,97 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    queryWebShellActions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellActionQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellActionPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Responding requires the Session creator (action_forbidden). */
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getWebShellAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellActionGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellAction"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Responding requires the Session creator (action_forbidden). */
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    respondWebShellAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellActionRespondRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized operation semantics as the public API. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCommandOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Responding requires the Session creator (action_forbidden). */
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable Session (session_not_found), or unknown Action (action_not_found). */
+            404: components["responses"]["NotFound"];
+            /** @description Idempotency conflict or an ended Action (action_expired, action_cancelled, action_already_resolved). */
             409: components["responses"]["Conflict"];
         };
     };
@@ -914,6 +1287,61 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    queryWebShellTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTaskPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getWebShellTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskGetRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public API. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTask"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };

@@ -4,6 +4,7 @@ WORKDIR /workspace
 COPY packages/sdk-java/qwencode packages/sdk-java/qwencode
 COPY packages/sdk-java/runtime-broker packages/sdk-java/runtime-broker
 COPY packages/sdk-java/managed-agent-server packages/sdk-java/managed-agent-server
+COPY packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json packages/core/src/managed-runtime/contracts/
 
 RUN mvn --batch-mode --no-transfer-progress \
       -f packages/sdk-java/qwencode/pom.xml \

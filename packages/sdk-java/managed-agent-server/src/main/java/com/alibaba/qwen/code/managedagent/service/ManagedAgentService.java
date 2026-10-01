@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -37,7 +38,9 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -49,6 +52,8 @@ import java.util.regex.Pattern;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
@@ -59,6 +64,10 @@ public class ManagedAgentService {
     private static final String UNARCHIVE = "UNARCHIVE_SESSION";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
+    // A Turn cursor is the creation time and ID of the last Turn of a page.
+    private static final Pattern TURN_CURSOR = Pattern.compile(
+            "^(0|[1-9][0-9]{0,18}):([A-Za-z0-9_-]{1,64})$");
+    private static final int TURN_ID_MAX_LENGTH = 64;
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // A context stays ready until cwd changes arrive (W2).
@@ -71,6 +80,18 @@ public class ManagedAgentService {
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
+    private ManagedActionStore actions;
+
+    @Autowired
+    void setActions(ManagedActionStore actions) {
+        this.actions = actions;
+    }
+
+    private boolean hasActions(SessionRecord session) {
+        return session.workspace() != null
+                && actions != null
+                && !"yolo".equals(actions.approvalMode(session.tenantId(), session.sessionId()));
+    }
 
     public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
@@ -131,7 +152,7 @@ public class ManagedAgentService {
                     "actor_required", "A trusted actor is required.");
         }
         List<Map<String, Object>> input = input(blocks, false);
-        if (!input.isEmpty()) {
+        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
@@ -320,6 +341,38 @@ public class ManagedAgentService {
                 page.hasMore());
     }
 
+    /**
+     * A page of a Session's Turns, newest first. Every page checks the
+     * Session again, so a cursor never outlives the caller's read access.
+     */
+    public PublicList<PublicTurn> listPublicTurns(String tenantId,
+            String actorId, String sessionId, String cursor,
+            int requestedLimit) {
+        int limit = limit(requestedLimit);
+        TurnCursor decoded = decodeTurnCursor(cursor);
+        requireReadableSession(tenantId, actorId, sessionId);
+        TurnPage page = store.listTurns(tenantId, sessionId,
+                decoded == null ? null : decoded.createdAt(),
+                decoded == null ? null : decoded.turnId(), limit);
+        return new PublicList<>("list", page.turns().stream()
+                .map(ManagedAgentService::publicTurn).toList(),
+                page.hasMore(), nextTurnCursor(page));
+    }
+
+    public PublicTurn getPublicTurn(String tenantId, String actorId,
+            String sessionId, String turnId) {
+        // The path schema counts characters, not UTF-16 units.
+        if (turnId.codePointCount(0, turnId.length()) > TURN_ID_MAX_LENGTH) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_request",
+                    "The Turn id is invalid.");
+        }
+        requireReadableSession(tenantId, actorId, sessionId);
+        return store.findTurnSummary(tenantId, sessionId, turnId)
+                .map(ManagedAgentService::publicTurn)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,
+                        "turn_not_found", "The Turn was not found."));
+    }
+
     public PublicList<PublicEvent> publicEvents(String tenantId,
             String actorId, String sessionId, long afterSequence,
             int requestedLimit) {
@@ -425,17 +478,29 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
-        return new PublicSession(session.sessionId(), "agent.session",
-                session.agentId(), session.agentRevision(),
+        return new PublicSession(
+                session.sessionId(),
+                "agent.session",
+                session.agentId(),
+                session.agentRevision(),
                 session.status().toLowerCase(),
-                session.createdAt() / 1000, session.updatedAt() / 1000,
-                metadata, activeTurn == null ? null : publicTurn(activeTurn),
-                session.lastSequence(), session.replayFloorSequence(),
-                store.findSnapshotCoveredSequence(session.tenantId(),
-                        session.sessionId()),
-                // A Workspace-bound Session has no lifecycle operations yet.
-                new SessionCapabilities(true, true, false, true,
-                        session.workspace() == null),
+                session.createdAt() / 1000,
+                session.updatedAt() / 1000,
+                metadata,
+                activeTurn == null ? null : publicTurn(activeTurn),
+                session.lastSequence(),
+                session.replayFloorSequence(),
+                store.findSnapshotCoveredSequence(session.tenantId(), session.sessionId()),
+                // A Workspace-bound Session has no lifecycle operations yet;
+                // every Session serves its task list and detail (H0c).
+                new SessionCapabilities(
+                        true,
+                        true,
+                        false,
+                        true,
+                        session.workspace() == null,
+                        true,
+                        hasActions(session)),
                 publicWorkspace(session));
     }
 
@@ -444,12 +509,20 @@ public class ManagedAgentService {
                 session.sessionId()).orElse(null);
         EventRecord environmentEvent = store.findLatestEnvironmentEvent(
                 session.tenantId(), session.sessionId()).orElse(null);
-        return new WebShellSession(session.sessionId(), session.title(),
-                session.agentId(), session.status().toLowerCase(),
-                session.createdAt(), session.updatedAt(),
+        return new WebShellSession(
+                session.sessionId(),
+                session.title(),
+                session.agentId(),
+                session.status().toLowerCase(),
+                session.createdAt(),
+                session.updatedAt(),
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
-                session.lastSequence(), webShellWorkspace(session));
+                session.lastSequence(),
+                webShellWorkspace(session),
+                // Every Session serves its task list and detail; the tasks come from the
+                // Stage H records its Session store holds (H0c).
+                new WebShellSessionCapabilities(true, hasActions(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -494,6 +567,12 @@ public class ManagedAgentService {
     }
 
     private static PublicTurn publicTurn(TurnRecord turn) {
+        return publicTurn(new TurnSummary(turn.sessionId(), turn.turnId(),
+                turn.status(), turn.createdAt(), turn.completedAt(),
+                turn.errorCode()));
+    }
+
+    private static PublicTurn publicTurn(TurnSummary turn) {
         return new PublicTurn(turn.turnId(), "agent.turn",
                 turn.sessionId(), StoreModels.inputItemId(turn.turnId()),
                 turn.status().toLowerCase(),
@@ -781,6 +860,40 @@ public class ManagedAgentService {
         }
     }
 
+    private static String nextTurnCursor(TurnPage page) {
+        if (!page.hasMore() || page.turns().isEmpty()) {
+            return null;
+        }
+        TurnSummary last = page.turns().getLast();
+        String raw = last.createdAt() + ":" + last.turnId();
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static TurnCursor decodeTurnCursor(String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return null;
+        }
+        String decoded;
+        try {
+            decoded = new String(Base64.getUrlDecoder().decode(cursor),
+                    StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException error) {
+            decoded = "";
+        }
+        var matcher = TURN_CURSOR.matcher(decoded);
+        try {
+            if (matcher.matches()) {
+                return new TurnCursor(Long.parseLong(matcher.group(1)),
+                        matcher.group(2));
+            }
+        } catch (NumberFormatException error) {
+            // A creation time beyond a long is not a cursor this server wrote.
+        }
+        throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_cursor",
+                "Turn cursor is invalid.");
+    }
+
     private static Long transcriptCursor(String cursor) {
         if (cursor == null || cursor.isBlank()) {
             return null;
@@ -803,6 +916,9 @@ public class ManagedAgentService {
     }
 
     private record SessionCursor(long updatedAt, String sessionId) {
+    }
+
+    private record TurnCursor(long createdAt, String turnId) {
     }
 
     public record SessionMutationResult<T>(T body, boolean replayed) {

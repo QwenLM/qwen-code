@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
@@ -22,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicWorkspace;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionCapabilities;
@@ -41,9 +43,13 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellOperationRequest
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellStreamRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSubmitRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskGetRequest;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTaskQueryRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscriptRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
@@ -52,9 +58,12 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.ValidationMessage;
 import java.io.IOException;
 import java.io.InputStream;
@@ -77,6 +86,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
@@ -110,6 +120,12 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(ApiModels.PermissionResponse.class, List.of("PermissionResponse")),
+                    entry(ApiModels.WebShellPermissionResponse.class, List.of("WebShellPermissionResponse")),
+                    entry(ApiModels.WebShellActionQueryRequest.class, List.of("WebShellActionQueryRequest")),
+                    entry(ApiModels.WebShellActionGetRequest.class, List.of("WebShellActionGetRequest")),
+                    entry(ApiModels.WebShellActionRespondRequest.class, List.of("WebShellActionRespondRequest")),
+                    entry(ApiModels.PublicActionList.class, List.of("PublicActionList")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -127,8 +143,9 @@ class ManagedAgentApiContractTest {
                             List.of("PublicCommandOperation")),
                     entry(SessionCapabilities.class,
                             List.of("SessionCapabilities")),
-                    entry(PublicList.class,
-                            List.of("PublicSessionList", "PublicEventList")),
+                    entry(PublicList.class, List.of("PublicSessionList",
+                            "PublicEventList", "PublicTaskList",
+                            "PublicTurnList")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -160,8 +177,16 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellCommandOperation")),
                     entry(WebShellTurn.class, List.of("WebShellTurn")),
                     entry(WebShellSession.class, List.of("WebShellSession")),
-                    entry(WebShellPage.class,
-                            List.of("WebShellSessionPage")),
+                    entry(WebShellSessionCapabilities.class,
+                            List.of("WebShellSessionCapabilities")),
+                    entry(WebShellPage.class, List.of("WebShellSessionPage",
+                            "WebShellTaskPage", "WebShellActionPage")),
+                    entry(PublicTask.class, List.of("PublicTask")),
+                    entry(WebShellTask.class, List.of("WebShellTask")),
+                    entry(WebShellTaskQueryRequest.class,
+                            List.of("WebShellTaskQueryRequest")),
+                    entry(WebShellTaskGetRequest.class,
+                            List.of("WebShellTaskGetRequest")),
                     entry(WebShellEvent.class, List.of("WebShellEvent")),
                     entry(WebShellResyncRequired.class,
                             List.of("WebShellResyncRequired")),
@@ -189,8 +214,34 @@ class ManagedAgentApiContractTest {
     private ManagedAgentStore store;
 
     @Autowired
+    private ManagedSessionStore sessionStore;
+
+    @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    @Test
+    void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
+        Map<String, String> drift = new TreeMap<>();
+        for (Operation operation : CONTRACT.operations()) {
+            if (!operation.path().startsWith("/v1/agents/")
+                    && !operation.path().startsWith(WEB_SHELL + "/")) {
+                continue;
+            }
+            assertThat(operation.node().path("responses").path("403").path("$ref").asText())
+                    .as("%s declares the tenant filter refusal", operation.operationId())
+                    .isEqualTo("#/components/responses/Forbidden");
+            if ("planned".equals(operation.status())) {
+                continue;
+            }
+            String path = operation.path().replaceAll("\\{[^}]+}", "scope-probe");
+            MockHttpServletRequestBuilder request = request(
+                    HttpMethod.valueOf(operation.method()), path)
+                    .header(TENANT, "contract-tenant").principal(actor("other-tenant"));
+            exchange(drift, operation.operationId(), 403, request, null);
+        }
+        assertThat(drift).isEmpty();
+    }
 
     @Test
     void mappedRoutesMatchTheSpec() {
@@ -845,12 +896,253 @@ class ManagedAgentApiContractTest {
                 .isEqualTo(1);
         assertThat(webBound.at("/workspace/state").asText())
                 .isEqualTo("ready");
+        exchangeActions(drift, tenant);
+        exchangeTasks(drift, tenant, otherTenant);
+        String mcpCatalog = exchange(drift, "getSessionMcpCatalog", 200,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(mcpCatalog).path("servers")).isEmpty();
+        exchange(drift, "getSessionMcpCatalog", 404,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionMcpCatalog", 404,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getSessionMcpCatalog", 403,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionMcpCatalog", 400,
+                get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId), null);
+        exchangeTurns(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    private void exchangeActions(Map<String, String> drift, String tenant) throws Exception {
+        String session = json(exchange(drift, "createSession", 202,
+                post("/v1/agents/sessions").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "actions-contract"),
+                "{\"agent_id\":\"qwen-code\",\"input\":[]}")).path("id").asText();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key, request_digest, session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                tenant, "actor-a".getBytes(StandardCharsets.UTF_8), "actions-owner", "sha256:fixture", session, System.currentTimeMillis());
+        ActionJournal journal = new ActionJournal(sessionStore, tenant, session,
+                System.currentTimeMillis(), System.currentTimeMillis() + 600000);
+        journal.change("requested", null);
+        var actor = actor(tenant);
+        String path = "/v1/agents/sessions/" + session + "/actions";
+        exchange(drift, "listSessionActions", 200, get(path).header(TENANT, tenant), null);
+        exchange(drift, "getSessionAction", 200, get(path + "/" + journal.id).header(TENANT, tenant), null);
+        String lookup = "{\"sessionId\":\"%s\",\"actionId\":\"%s\"}".formatted(session, journal.id);
+        exchange(drift, "queryWebShellActions", 200, post(WEB_SHELL + "/actions/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(session));
+        exchange(drift, "getWebShellAction", 200, post(WEB_SHELL + "/actions/get").header(TENANT, tenant), lookup);
+        String body = "{\"kind\":\"permission\",\"input_revision\":1,\"policy_revision\":\"hosted-tool-approval/1\",\"option_id\":\"allow\"}";
+        exchange(drift, "respondToSessionAction", 202, post(path + "/" + journal.id + "/responses")
+                .header(TENANT, tenant).principal(actor).header(IDEMPOTENCY_KEY, "contract-answer"), body);
+        exchange(drift, "respondWebShellAction", 202, post(WEB_SHELL + "/actions/respond").header(TENANT, tenant).principal(actor),
+                "{\"sessionId\":\"%s\",\"actionId\":\"%s\",\"requestId\":\"action-trace\",\"idempotencyKey\":\"contract-answer\",\"response\":{\"kind\":\"permission\",\"inputRevision\":1,\"policyRevision\":\"hosted-tool-approval/1\",\"optionId\":\"allow\"}}".formatted(session, journal.id));
+        journal.change("cancelled", null);
+    }
+
+    /**
+     * Commits a settled and a pending monitor for a new Session through its
+     * Session store, then reads them back on both surfaces.
+     */
+    private void exchangeTasks(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String sessionId = json(mvc.perform(post("/v1/agents/sessions")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-tasks")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\"}"))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8)).get("id")
+                .asText();
+        ExtensionRecordJournal journal = new ExtensionRecordJournal(
+                sessionStore, tenant, "workspace-contract", sessionId).open();
+        JsonNode chain = ManagedExtensionProjectionContractTest.fixtures()
+                .required("monitorChainCases").get(0).required("revisions");
+        for (int index = 0; index < chain.size(); index++) {
+            journal.commitMonitor("monitor-1:" + index,
+                    chain.get(index).required("monitorRun"),
+                    chain.get(index).required("occurredAt").longValue());
+        }
+        journal.commitMonitor("monitor-2:0", ((ObjectNode) chain.get(0)
+                .required("monitorRun").deepCopy())
+                .put("monitorId", "monitor-2"), 99_000);
+
+        JsonNode page = json(exchange(drift, "listSessionTasks", 200,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .param("limit", "1").header(TENANT, tenant), null));
+        assertThat(page.at("/data/0/state").asText()).isEqualTo("pending");
+        String taskId = page.at("/data/0/id").asText();
+        JsonNode rest = json(exchange(drift, "listSessionTasks", 200,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .param("cursor", page.get("next_cursor").asText())
+                        .header(TENANT, tenant), null));
+        assertThat(rest.at("/data/0/state").asText()).isEqualTo("cancelled");
+        assertThat(rest.get("has_more").asBoolean()).isFalse();
+        exchange(drift, "listSessionTasks", 400,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .param("cursor", "bad").header(TENANT, tenant), null);
+        exchange(drift, "listSessionTasks", 400,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .param("limit", "0").header(TENANT, tenant), null);
+        exchange(drift, "listSessionTasks", 404,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "listSessionTasks", 403,
+                get("/v1/agents/sessions/{id}/tasks", sessionId)
+                        .header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionTask", 200,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        rest.at("/data/0/id").asText()).header(TENANT, tenant),
+                null);
+        exchange(drift, "getSessionTask", 404,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        "task_missing").header(TENANT, tenant), null);
+        exchange(drift, "getSessionTask", 400,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        taskId), null);
+        exchange(drift, "getSessionTask", 403,
+                get("/v1/agents/sessions/{id}/tasks/{task}", sessionId,
+                        taskId).header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+        exchange(drift, "queryWebShellTasks", 200,
+                post(WEB_SHELL + "/tasks/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(sessionId));
+        exchange(drift, "queryWebShellTasks", 400,
+                post(WEB_SHELL + "/tasks/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":0}".formatted(sessionId));
+        exchange(drift, "queryWebShellTasks", 404,
+                post(WEB_SHELL + "/tasks/query").header(TENANT, otherTenant),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "queryWebShellTasks", 403,
+                post(WEB_SHELL + "/tasks/query").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "getWebShellTask", 200,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, taskId));
+        exchange(drift, "getWebShellTask", 404,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"taskId\":\"task_missing\"}"
+                        .formatted(sessionId));
+        exchange(drift, "getWebShellTask", 400,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "getWebShellTask", 403,
+                post(WEB_SHELL + "/tasks/get").header(TENANT, tenant)
+                        .principal(actor(otherTenant)),
+                "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
+                        .formatted(sessionId, taskId));
+    }
+
+    /**
+     * Pages through the Turns of a new Session: the Turn its creation ran and
+     * a failed Turn written after it.
+     */
+    private void exchangeTurns(Map<String, String> drift, String tenant,
+            String otherTenant) throws Exception {
+        String sessionId = json(mvc.perform(post("/v1/agents/sessions")
+                        .header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-turns")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code",
+                                 "input":[{"type":"input_text","text":"turns"}]}
+                                """))
+                .andReturn().getResponse()
+                .getContentAsString(StandardCharsets.UTF_8)).get("id")
+                .asText();
+        awaitIdle(tenant, sessionId);
+        TurnRecord first = store.findLatestTurn(tenant, sessionId)
+                .orElseThrow();
+        // The fixture Harness runs one Turn per Session, so the second Turn
+        // is written as a failed dispatch would leave it.
+        String second = "turn_" + UUID.randomUUID().toString()
+                .replace("-", "");
+        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, error_code, created_at, updated_at,"
+                        + " completed_at) VALUES (?, ?, ?, ?, '[]', 'digest',"
+                        + " 'FAILED', 'hosted_harness_unavailable', ?, ?,"
+                        + " ?)",
+                tenant, sessionId, second, UUID.randomUUID().toString(),
+                first.createdAt() + 1_000, first.createdAt() + 2_000,
+                first.createdAt() + 2_000);
+
+        JsonNode page = json(exchange(drift, "listTurns", 200,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("limit", "1").header(TENANT, tenant), null));
+        assertThat(page.at("/data/0/id").asText()).isEqualTo(second);
+        assertThat(page.at("/data/0/status").asText()).isEqualTo("failed");
+        assertThat(page.at("/data/0/error_code").asText())
+                .isEqualTo("hosted_harness_unavailable");
+        assertThat(page.get("has_more").asBoolean()).isTrue();
+        JsonNode rest = json(exchange(drift, "listTurns", 200,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("cursor", page.get("next_cursor").asText())
+                        .header(TENANT, tenant), null));
+        assertThat(rest.get("data")).hasSize(1);
+        assertThat(rest.at("/data/0/id").asText()).isEqualTo(first.turnId());
+        assertThat(rest.at("/data/0/status").asText()).isEqualTo("completed");
+        assertThat(rest.at("/data/0/input_item_id").asText())
+                .isEqualTo("item_" + first.turnId() + "_input");
+        assertThat(rest.get("has_more").asBoolean()).isFalse();
+        assertThat(rest.get("next_cursor").isNull()).isTrue();
+        assertThat(code(exchange(drift, "listTurns", 400,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("cursor", "bad").header(TENANT, tenant),
+                null))).isEqualTo("invalid_cursor");
+        assertThat(code(exchange(drift, "listTurns", 400,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .param("limit", "101").header(TENANT, tenant),
+                null))).isEqualTo("invalid_limit");
+        exchange(drift, "listTurns", 400,
+                get("/v1/agents/sessions/{id}/turns", sessionId), null);
+        exchange(drift, "listTurns", 403,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+        assertThat(code(exchange(drift, "listTurns", 404,
+                get("/v1/agents/sessions/{id}/turns", sessionId)
+                        .header(TENANT, otherTenant), null)))
+                .isEqualTo("session_not_found");
+
+        assertThat(json(exchange(drift, "getTurn", 200,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        first.turnId()).header(TENANT, tenant), null)))
+                .isEqualTo(rest.at("/data/0"));
+        assertThat(code(exchange(drift, "getTurn", 404,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        "turn_missing").header(TENANT, tenant), null)))
+                .isEqualTo("turn_not_found");
+        assertThat(code(exchange(drift, "getTurn", 404,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        second).header(TENANT, otherTenant), null)))
+                .isEqualTo("session_not_found");
+        assertThat(code(exchange(drift, "getTurn", 400,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        "turn_" + "0".repeat(60)).header(TENANT, tenant),
+                null))).isEqualTo("invalid_request");
+        exchange(drift, "getTurn", 400,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        second), null);
+        exchange(drift, "getTurn", 403,
+                get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+                        second).header(TENANT, tenant)
+                        .principal(actor(otherTenant)), null);
+    }
+
+    private String code(String content) throws IOException {
+        return json(content).at("/error/code").asText();
     }
 
     @Test
@@ -927,7 +1219,7 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true,"session_lifecycle":true}
+                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -942,6 +1234,8 @@ class ManagedAgentApiContractTest {
                 assertThat(other.get("lastSequence").asLong())
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
+                assertThat(other.get("capabilities"))
+                        .isEqualTo(json("{\"tasks\":true,\"actions\":false}"));
             }
         }
 
@@ -1057,6 +1351,11 @@ class ManagedAgentApiContractTest {
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
+        if (expectedStatus == 403) {
+            assertThat(json(content).path("error").path("code").asText())
+                    .as("%s actor-scope error code", operationId)
+                    .isEqualTo("actor_scope_mismatch");
+        }
         if (status != expectedStatus) {
             drift.put("response %s: expected %d, got %d%s".formatted(
                     operationId, expectedStatus, status, errorCode(content)),

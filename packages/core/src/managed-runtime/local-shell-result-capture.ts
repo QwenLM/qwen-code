@@ -87,7 +87,11 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
   private started = false;
   private processResult: ShellExecutionResult | null = null;
   private failed = false;
-  private failureReason: 'storage_failed' | 'size_limit' | null = null;
+  private failureReason:
+    | 'storage_failed'
+    | 'size_limit'
+    | 'quota_exhausted'
+    | null = null;
   private finalEnvelope: ToolResultEnvelope | null = null;
 
   constructor(
@@ -107,6 +111,10 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
 
   setProcessResult(result: ShellExecutionResult): void {
     this.processResult = result;
+  }
+
+  failCapture(): void {
+    this.fail(new Error('Capture transport failed.'));
   }
 
   write(id: StreamId, chunk: Buffer): Promise<void> {
@@ -169,7 +177,9 @@ export class LocalShellResultCapture implements ShellRawCaptureSink {
     this.failureReason =
       cause instanceof Error && cause.message === 'size_limit'
         ? 'size_limit'
-        : 'storage_failed';
+        : cause instanceof Error && cause.message === 'quota_exhausted'
+          ? 'quota_exhausted'
+          : 'storage_failed';
   }
 
   private async publishSegment(state: StreamState): Promise<void> {

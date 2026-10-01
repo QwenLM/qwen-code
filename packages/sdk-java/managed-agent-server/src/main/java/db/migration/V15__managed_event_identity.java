@@ -8,7 +8,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -29,21 +28,23 @@ public class V15__managed_event_identity extends BaseJavaMigration {
     private static final int BATCH_SIZE = 500;
     // Rows read per query, so memory does not grow with a Session's length.
     private static final int PAGE_SIZE = 5000;
+    // Sessions listed per query, so memory does not grow with their number.
+    private static final int SESSION_PAGE_SIZE = 1000;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public void migrate(Context context) throws Exception {
         Connection connection = context.getConnection();
-        List<String[]> sessions = new ArrayList<>();
-        try (Statement statement = connection.createStatement();
-                ResultSet rows = statement.executeQuery("SELECT DISTINCT"
-                        + " tenant_id, session_id FROM managed_agent_event")) {
-            while (rows.next()) {
-                sessions.add(new String[] {rows.getString(1),
-                        rows.getString(2)});
-            }
-        }
-        try (PreparedStatement select = connection.prepareStatement("SELECT"
+        try (PreparedStatement firstSessions = connection.prepareStatement(
+                        "SELECT tenant_id, session_id FROM"
+                                + " managed_agent_session ORDER BY tenant_id,"
+                                + " session_id LIMIT ?");
+                PreparedStatement nextSessions = connection.prepareStatement(
+                        "SELECT tenant_id, session_id FROM"
+                                + " managed_agent_session WHERE tenant_id > ?"
+                                + " OR (tenant_id = ? AND session_id > ?)"
+                                + " ORDER BY tenant_id, session_id LIMIT ?");
+                PreparedStatement select = connection.prepareStatement("SELECT"
                         + " sequence_id, event_type, turn_id, CASE WHEN"
                         + " event_type IN ('turn.accepted',"
                         + " 'item.output_text.delta', 'item.reasoning.delta',"
@@ -56,10 +57,37 @@ public class V15__managed_event_identity extends BaseJavaMigration {
                                 + " content_part_id = ? WHERE tenant_id = ?"
                                 + " AND session_id = ? AND sequence_id"
                                 + " BETWEEN ? AND ?")) {
-            for (String[] session : sessions) {
-                backfill(select, update, session[0], session[1]);
+            firstSessions.setInt(1, SESSION_PAGE_SIZE);
+            nextSessions.setInt(4, SESSION_PAGE_SIZE);
+            List<String[]> sessions = sessions(firstSessions);
+            while (!sessions.isEmpty()) {
+                for (String[] session : sessions) {
+                    backfill(select, update, session[0], session[1]);
+                }
+                if (sessions.size() < SESSION_PAGE_SIZE) {
+                    break;
+                }
+                String[] last = sessions.getLast();
+                nextSessions.setString(1, last[0]);
+                nextSessions.setString(2, last[0]);
+                nextSessions.setString(3, last[1]);
+                sessions = sessions(nextSessions);
             }
         }
+    }
+
+    // Sessions come from their own table, keyed by the primary key, so every
+    // page is an index range; a Session without events reads nothing.
+    private static List<String[]> sessions(PreparedStatement query)
+            throws SQLException {
+        List<String[]> sessions = new ArrayList<>();
+        try (ResultSet rows = query.executeQuery()) {
+            while (rows.next()) {
+                sessions.add(new String[] {rows.getString(1),
+                        rows.getString(2)});
+            }
+        }
+        return sessions;
     }
 
     // A text stream shares one identity across consecutive rows, so each run

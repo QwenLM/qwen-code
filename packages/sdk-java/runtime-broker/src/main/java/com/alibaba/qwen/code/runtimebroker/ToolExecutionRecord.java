@@ -10,6 +10,24 @@ public final class ToolExecutionRecord {
     private static final Set<String> EXECUTION_STATUSES = Set.of(
             "not_started", "success", "error", "cancelled");
 
+    /**
+     * Whether the original Runtime can still answer for this execution after
+     * its dispatch answer was lost: tool v3 and provider references can be
+     * observed and cancelled there, a tool v2 reference cannot.
+     */
+    boolean observableAfterLoss() {
+        return Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                || ProviderRuntimeProtocol.isReference(reference);
+    }
+
+    Map<String, Object> cancellationBeforeDispatch() {
+        if (!Integer.valueOf(3).equals(reference.get("runtimeProtocol"))
+                && !"deferred_v3".equals(reference.get("dispatchMode"))) {
+            return Map.of("executionStatus", "cancelled");
+        }
+        return cancelledBeforeV3Start();
+    }
+
     public enum State {
         PREPARED,
         DISPATCHING,
@@ -91,7 +109,8 @@ public final class ToolExecutionRecord {
         if (!runtimeSessionId.equals(reference.get("sessionId"))
                 || !turnId.equals(reference.get("promptId"))
                 || !toolCallId.equals(reference.get("callId"))
-                || !requestDigest.equals(reference.get("argsDigest"))) {
+                || !requestDigest.equals("deferred_v3".equals(reference.get("dispatchMode"))
+                        ? reference.get("payloadDigest") : reference.get("argsDigest"))) {
             throw new IllegalArgumentException(
                     "reference identity does not match execution identity");
         }
@@ -268,6 +287,18 @@ public final class ToolExecutionRecord {
         return isSettled() || state == State.ABANDONED;
     }
 
+    boolean needsReconciliation() {
+        return state == State.EXECUTING || state == State.CANCEL_REQUESTED
+                || state == State.UNKNOWN;
+    }
+
+    boolean belongsTo(RuntimeSessionRecord session) {
+        return bindingId.equals(session.getBindingId())
+                && runtimeGeneration == session.getRuntimeGeneration()
+                && harnessSessionId.equals(session.getSession().getHarnessSessionId())
+                && runtimeSessionId.equals(session.getRuntimeSessionId());
+    }
+
     ToolExecutionRecord abandon(RuntimeBindingRecord binding, Instant time) {
         if (isTerminal() || binding.getState() != RuntimeBindingRecord.State.LOST
                 || !bindingId.equals(binding.getBindingId())
@@ -313,6 +344,14 @@ public final class ToolExecutionRecord {
                 dispatchGeneration, version, completionTime);
     }
 
+    static Map<String, Object> cancelledBeforeV3Start() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("executionStatus", "not_started");
+        result.put("responseParts", java.util.List.of());
+        result.put("capture", null);
+        return result;
+    }
+
     public ToolExecutionRecord withUnknown() {
         // The last claim stays on the record so recovery can attest which
         // dispatcher and lease may still be executing physically.
@@ -325,6 +364,14 @@ public final class ToolExecutionRecord {
             Map<String, Object> resolutionResult, Instant resolutionTime) {
         if (state != State.UNKNOWN) {
             throw new IllegalStateException("execution is not unknown");
+        }
+        return resolveUnsettled(resolutionResult, resolutionTime);
+    }
+
+    ToolExecutionRecord resolveUnsettled(
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        if (!needsReconciliation()) {
+            throw new IllegalStateException("execution does not require reconciliation");
         }
         if (resolutionTime == null) {
             throw new IllegalArgumentException("resolutionTime is required");

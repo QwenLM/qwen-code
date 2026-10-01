@@ -34,9 +34,10 @@ async function fixture(
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks).toString();
+    const url = new URL(req.url!, 'http://fixture');
     const response = handler(
-      new URL(req.url!, 'http://fixture').pathname,
-      body ? JSON.parse(body) : {},
+      url.pathname,
+      body ? JSON.parse(body) : Object.fromEntries(url.searchParams),
     );
     if (response.drop) {
       res.destroy();
@@ -74,6 +75,133 @@ it.each(['tenantId', 'workspaceId', 'capabilityDigest'])(
     await expect(broker.acquire()).rejects.toThrow('scope');
   },
 );
+
+it('preserves payload identity separately from the explicitly selected v3 input digest', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, body) => {
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        ...(path.endsWith(':publisher')
+          ? { installed: true, bindingGeneration: '7' }
+          : {
+              executionCallId: 'execution',
+              status: { state: 'prepared' },
+            }),
+      },
+    };
+  });
+  expect(
+    await broker.registerPublisher({
+      url: 'http://127.0.0.1:99/internal/hosted-shell-publisher/v1',
+      token: 'x'.repeat(43),
+    }),
+  ).toBe('7');
+  await broker.prepare(
+    'runtime-call',
+    `sha256:${'a'.repeat(64)}`,
+    'b'.repeat(64),
+  );
+  expect(requests[1]).toMatchObject({
+    requestDigest: `sha256:${'a'.repeat(64)}`,
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'runtime-call',
+      argsDigest: `sha256:${'a'.repeat(64)}`,
+      runtimeProtocol: 3,
+      inputDigest: 'b'.repeat(64),
+    },
+  });
+});
+
+it.each([undefined, 'b'.repeat(64)])(
+  'keeps the original Runtime owner separate from the prompt and input digest (%s)',
+  async (inputDigest) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return {
+        body: {
+          ...identity,
+          executionCallId: 'execution',
+          status: { state: 'prepared' },
+        },
+      };
+    });
+    await broker.prepare('call', 'sha256:payload', inputDigest, 'next-prompt');
+    expect(requests[0]).toMatchObject({
+      runtimeSessionId: 'turn',
+      turnId: 'next-prompt',
+      idempotencyKey: 'turn:call',
+      requestDigest: 'sha256:payload',
+    });
+    expect(requests[0]['reference']).toEqual({
+      sessionId: 'turn',
+      promptId: 'next-prompt',
+      callId: 'call',
+      argsDigest: 'sha256:payload',
+      ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
+    });
+  },
+);
+
+it('requires confirmation for the exact Shell receipt acknowledgement', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toMatchObject({
+      executionCallId: 'execution',
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    expect(body['receipt']).not.toHaveProperty('outcomeRef');
+    return {
+      body: { ...identity, executionCallId: 'other', acknowledged: true },
+    };
+  });
+  await expect(
+    broker.acknowledge('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+      outcomeRef: {
+        resourceId: 'outcome',
+        kind: 'managed-tool-outcome',
+        schemaVersion: 1,
+        byteLength: 0,
+        digest: 'a'.repeat(64),
+      },
+    }),
+  ).rejects.toThrow('acknowledge');
+});
+
+it('accepts the Broker acknowledgement envelope for a remote v3 receipt', async () => {
+  const broker = await fixture((_path, body) => {
+    expect(body['receipt']).toEqual({
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    });
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        acknowledged: true,
+        status: { state: 'settled' },
+      },
+    };
+  });
+  await expect(
+    broker.acknowledgeV3('execution', {
+      executionCallId: 'execution',
+      manifest: null,
+      deliveryStatus: 'blocked',
+      historyRevision: null,
+    }),
+  ).resolves.toBeUndefined();
+});
 
 it('waits for original terminal evidence after a cancellation request', async () => {
   let cancelled = false;
@@ -217,8 +345,9 @@ it.each(['runtime_idempotency_conflict', 'runtime_execution_conflict'])(
 
 it('queries the original identity when start reports an unknown execution', async () => {
   const paths: string[] = [];
-  const broker = await fixture((path) => {
+  const broker = await fixture((path, fields) => {
     paths.push(path);
+    expect(fields).not.toHaveProperty('reconcile');
     return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
   });
   await expect(
@@ -228,6 +357,42 @@ it('queries the original identity when start reports an unknown execution', asyn
     '/internal/runtime-broker/v1/executions/execution:start',
     '/internal/runtime-broker/v1/executions/execution',
   ]);
+});
+
+it('observes a late original result after unknown cancellation without starting again', async () => {
+  const paths: string[] = [];
+  const queries: Array<Record<string, unknown>> = [];
+  let observations = 0;
+  const broker = await fixture((path, fields) => {
+    paths.push(path);
+    if (!path.endsWith(':cancel')) queries.push(fields);
+    if (path.endsWith(':cancel') || observations++ === 0)
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    broker.execute('execution', '{}', abort.signal, 5000, true),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(paths.filter((path) => path.endsWith(':cancel'))).toHaveLength(1);
+  expect(paths.filter((path) => path.endsWith(':start'))).toHaveLength(0);
+  expect(paths.filter((path) => path.endsWith('/execution'))).toHaveLength(2);
+  for (const query of queries)
+    expect(query).toMatchObject({
+      reconcile: 'true',
+      harnessSessionId: 'session',
+      runtimeSessionId: 'turn',
+    });
 });
 
 it('queries the original identity after an uncertain start failure', async () => {
@@ -256,6 +421,66 @@ it('queries the original identity after an uncertain start failure', async () =>
   ]);
 });
 
+it('restarts the same Tool v3 reservation after an uncertain start leaves it prepared', async () => {
+  let starts = 0;
+  const broker = await fixture((path, body) => {
+    if (path.endsWith(':start')) {
+      starts++;
+      expect(body['payloadJson']).toBe(
+        '{"toolName":"run_shell_command","input":{}}',
+      );
+      if (starts === 1)
+        return { code: 503, body: { code: 'runtime_execution_failed' } };
+    }
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status:
+          starts < 2
+            ? { state: 'prepared' }
+            : {
+                state: 'settled',
+                result: { executionStatus: 'success', responseParts: [] },
+              },
+      },
+    };
+  });
+  await expect(
+    broker.executeV3(
+      'execution',
+      '{"toolName":"run_shell_command","input":{}}',
+      'publication',
+      'token',
+      new AbortController().signal,
+    ),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(starts).toBe(2);
+});
+
+it('preserves an explicit unsupported Tool v3 start rejection', async () => {
+  let statusReads = 0;
+  const broker = await fixture((path) => {
+    if (path.endsWith(':start'))
+      return { code: 501, body: { code: 'runtime_tool_v3_unsupported' } };
+    statusReads++;
+    return { body: { ...identity, status: { state: 'prepared' } } };
+  });
+  await expect(
+    broker.executeV3(
+      'execution',
+      '{"toolName":"run_shell_command","input":{}}',
+      'publication',
+      'token',
+      new AbortController().signal,
+    ),
+  ).rejects.toMatchObject({
+    status: 501,
+    code: 'runtime_tool_v3_unsupported',
+  });
+  expect(statusReads).toBe(0);
+});
+
 it('preserves a definite acquisition refusal from the HTTP response', async () => {
   const broker = await fixture(() => ({
     code: 409,
@@ -264,4 +489,54 @@ it('preserves a definite acquisition refusal from the HTTP response', async () =
   await expect(broker.acquire()).rejects.toEqual(
     new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
   );
+});
+
+it('retries a cancellation whose transport reply was lost without restarting', async () => {
+  const paths: string[] = [];
+  let cancellations = 0;
+  const broker = await fixture((path) => {
+    paths.push(path);
+    if (path.endsWith(':cancel') && ++cancellations === 1)
+      return { drop: true };
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'cancelled' },
+        },
+      },
+    };
+  });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    broker.execute('execution', '{}', abort.signal, 3000, true),
+  ).resolves.toMatchObject({ executionStatus: 'cancelled' });
+  expect(paths.filter((entry) => entry.endsWith(':cancel'))).toHaveLength(2);
+  expect(paths.some((entry) => entry.endsWith(':start'))).toBe(false);
+});
+
+it('stops observation immediately when the original execution is terminally unknown', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return {
+      code: 409,
+      body: {
+        code: 'runtime_broker_execution_unknown',
+        details: { terminal: true, reason: 'runtime_lost' },
+      },
+    };
+  });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    broker.execute('execution', '{}', abort.signal, 500, true),
+  ).rejects.toMatchObject({
+    code: 'runtime_broker_execution_unknown',
+    details: { terminal: true, reason: 'runtime_lost' },
+  });
+  expect(paths).toHaveLength(1);
 });
