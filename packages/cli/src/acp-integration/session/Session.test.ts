@@ -8494,213 +8494,112 @@ describe('Session', () => {
       });
     });
 
-    it('keeps the User OpenAI auth choice when switching to the Responses wire', async () => {
-      const model = {
-        id: 'gpt-6-astra',
-        label: 'GPT-6 Astra',
-        authType: AuthType.USE_OPENAI_RESPONSES,
-        baseUrl: 'https://api.example/v1',
-        registryBaseUrl: 'https://api.example/v1',
-      };
-      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([model]);
-      mockSettings.user.settings.security = {
-        auth: { selectedType: AuthType.USE_OPENAI },
-      };
-      mockSettings.merged.modelProviders = {
-        openai: [
-          {
-            id: model.id,
-            baseUrl: model.baseUrl,
-            wireApi: 'responses',
-          },
-        ],
-      };
-
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: buildAcpModelOptions([model])[0]!.modelId,
-      });
-
-      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+    it.each([
+      ['configured Responses', ['responses'], AuthType.USE_OPENAI],
+      ['raw', [], AuthType.USE_OPENAI_RESPONSES],
+      ['runtime', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      [
+        'duplicate Responses',
+        ['chat-completions', 'responses'],
         AuthType.USE_OPENAI_RESPONSES,
-        'gpt-6-astra',
-        { baseUrl: 'https://api.example/v1' },
-      );
-      expect(mockSettings.setValue).toHaveBeenCalledWith(
-        SettingScope.User,
-        'security.auth.selectedType',
+      ],
+      [
+        'duplicate Chat',
+        ['chat-completions', 'responses'],
         AuthType.USE_OPENAI,
-      );
-      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith(
-        expect.objectContaining({
-          modelId: 'gpt-6-astra',
-          authType: AuthType.USE_OPENAI_RESPONSES,
-        }),
-      );
-    });
-
-    it.each([false, true])(
-      'persists the Responses wire for a raw model with runtime=%s',
-      async (isRuntime) => {
-        const modelId = 'custom-responses';
-        const selectedId = isRuntime
-          ? `$runtime|${AuthType.USE_OPENAI_RESPONSES}|${modelId}`
-          : modelId;
+      ],
+      ['Workspace', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      [
+        'invalid reload',
+        ['responses', 'invalid'],
+        AuthType.USE_OPENAI_RESPONSES,
+      ],
+    ] as const)(
+      'persists the auth choice for %s',
+      async (scenario, wires, expectedAuth) => {
+        const modelId = 'gpt-6-astra';
+        const baseUrl = 'https://api.example/v1';
+        const authType =
+          scenario === 'duplicate Chat'
+            ? AuthType.USE_OPENAI
+            : AuthType.USE_OPENAI_RESPONSES;
+        const scope =
+          scenario === 'Workspace' ? SettingScope.Workspace : SettingScope.User;
+        const owner =
+          scope === SettingScope.Workspace
+            ? mockSettings.workspace
+            : mockSettings.user;
+        Object.assign(mockSettings, {
+          isTrusted: scope === SettingScope.Workspace,
+        });
         mockSettings.user.settings.security = {
           auth: { selectedType: AuthType.USE_OPENAI },
         };
-        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
-          authType: AuthType.USE_OPENAI_RESPONSES,
-          model: modelId,
-        } as ReturnType<Config['getContentGeneratorConfig']>);
-        if (isRuntime) {
-          mockSettings.merged.modelProviders = {
-            openai: [{ id: modelId, wireApi: 'responses' }],
-          };
-        }
-
-        await session.setModel({
-          sessionId: 'test-session-id',
-          modelId: `${selectedId}(${AuthType.USE_OPENAI_RESPONSES})`,
-        });
-
-        expect(mockSettings.setValue).toHaveBeenCalledWith(
-          SettingScope.User,
-          'security.auth.selectedType',
-          AuthType.USE_OPENAI_RESPONSES,
-        );
-      },
-    );
-
-    it.each([AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES])(
-      'persists the selected %s wire for identical model ids and URLs',
-      async (authType) => {
-        const models = [AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES].map(
-          (type) => ({
-            id: 'shared-model',
-            label: type,
-            authType: type,
-            baseUrl: 'https://api.example/v1',
-            registryBaseUrl: 'https://api.example/v1',
-          }),
-        );
-        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
-        mockSettings.user.settings.security = {
+        owner.settings.security = {
           auth: {
             selectedType:
-              authType === AuthType.USE_OPENAI
+              scenario === 'Workspace' || scenario === 'duplicate Chat'
                 ? AuthType.USE_OPENAI_RESPONSES
                 : AuthType.USE_OPENAI,
           },
         };
-        mockSettings.merged.modelProviders = {
-          openai: [
-            {
-              id: 'shared-model',
-              baseUrl: 'https://api.example/v1',
-              wireApi: 'chat-completions',
-            },
-            {
-              id: 'shared-model',
-              baseUrl: 'https://api.example/v1',
-              wireApi: 'responses',
-            },
-          ],
+        owner.settings.modelProviders = {
+          openai: wires.map((wireApi) => ({
+            id: wireApi === 'invalid' ? 'broken' : modelId,
+            baseUrl,
+            wireApi: wireApi as ProviderModelConfig['wireApi'],
+          })),
         };
-        const route = buildAcpModelOptions(models).find(
-          (option) => option.model.authType === authType,
-        )!;
+        mockSettings.merged.modelProviders = owner.settings.modelProviders;
+        const models = wires
+          .filter((wire) => wire !== 'invalid')
+          .map((wire) => ({
+            id: modelId,
+            label: wire,
+            authType:
+              wire === 'responses'
+                ? AuthType.USE_OPENAI_RESPONSES
+                : AuthType.USE_OPENAI,
+            baseUrl,
+            registryBaseUrl: baseUrl,
+          }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType,
+          model: modelId,
+        } as ReturnType<Config['getContentGeneratorConfig']>);
+        const snapshotId = `$runtime|${authType}|${modelId}`;
+        const selectedId =
+          scenario === 'runtime'
+            ? `${snapshotId}(${authType})`
+            : (buildAcpModelOptions(models).find(
+                (option) => option.model.authType === authType,
+              )?.modelId ?? `${modelId}(${authType})`);
 
         await session.setModel({
           sessionId: 'test-session-id',
-          modelId: route.modelId,
+          modelId: selectedId,
         });
 
-        expect(mockSettings.setValue).toHaveBeenCalledWith(
-          SettingScope.User,
-          'security.auth.selectedType',
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter(
+              ([, key]) => key === 'security.auth.selectedType',
+            ),
+        ).toEqual([[scope, 'security.auth.selectedType', expectedAuth]]);
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
           authType,
+          scenario === 'runtime' ? snapshotId : modelId,
+          scenario === 'raw' || scenario === 'runtime'
+            ? undefined
+            : { baseUrl },
         );
+        expect(
+          mockChatRecordingService.recordSessionModel,
+        ).toHaveBeenCalledWith(expect.objectContaining({ authType }));
       },
     );
-
-    it('keeps the owning Workspace auth choice over the User choice', async () => {
-      const model = {
-        id: 'gpt-6-astra',
-        label: 'GPT-6 Astra',
-        authType: AuthType.USE_OPENAI_RESPONSES,
-        baseUrl: 'https://api.example/v1',
-        registryBaseUrl: 'https://api.example/v1',
-      };
-      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([model]);
-      Object.assign(mockSettings, { isTrusted: true });
-      mockSettings.user.settings.security = {
-        auth: { selectedType: AuthType.USE_OPENAI },
-      };
-      mockSettings.workspace.settings.security = {
-        auth: { selectedType: AuthType.USE_OPENAI_RESPONSES },
-      };
-      mockSettings.workspace.settings.modelProviders = {
-        openai: [
-          { id: model.id, baseUrl: model.baseUrl, wireApi: 'responses' },
-        ],
-      };
-      mockSettings.merged.modelProviders =
-        mockSettings.workspace.settings.modelProviders;
-
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: buildAcpModelOptions([model])[0]!.modelId,
-      });
-
-      expect(mockSettings.setValue).toHaveBeenCalledWith(
-        SettingScope.Workspace,
-        'security.auth.selectedType',
-        AuthType.USE_OPENAI_RESPONSES,
-      );
-      expect(mockSettings.setValue).not.toHaveBeenCalledWith(
-        SettingScope.User,
-        'security.auth.selectedType',
-        expect.anything(),
-      );
-    });
-
-    it('keeps switching against the live registry after an invalid provider reload', async () => {
-      const model = {
-        id: 'gpt-6-astra',
-        label: 'GPT-6 Astra',
-        authType: AuthType.USE_OPENAI_RESPONSES,
-      };
-      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([model]);
-      mockSettings.user.settings.security = {
-        auth: { selectedType: AuthType.USE_OPENAI },
-      };
-      mockSettings.merged.modelProviders = {
-        openai: [
-          { id: model.id, wireApi: 'responses' },
-          {
-            id: 'broken',
-            wireApi: 'invalid' as ProviderModelConfig['wireApi'],
-          },
-        ],
-      };
-
-      await session.setModel({
-        sessionId: 'test-session-id',
-        modelId: buildAcpModelOptions([model])[0]!.modelId,
-      });
-
-      expect(mockConfig.switchModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI_RESPONSES,
-        model.id,
-        undefined,
-      );
-      expect(mockSettings.setValue).toHaveBeenCalledWith(
-        SettingScope.User,
-        'security.auth.selectedType',
-        AuthType.USE_OPENAI_RESPONSES,
-      );
-    });
 
     it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
       const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
