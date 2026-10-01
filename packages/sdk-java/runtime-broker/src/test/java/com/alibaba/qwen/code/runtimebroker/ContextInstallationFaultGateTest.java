@@ -261,7 +261,10 @@ class ContextInstallationFaultGateTest {
         rig.killWorker(broker);
 
         assertFalse(broker.warm(HARNESS).ok());
-        assertEquals("runtime_broker_runtime_lost", broker.warm(HARNESS).code());
+        assertEquals("runtime_broker_runtime_lost", FaultGateRig.await(
+                () -> broker.warm(HARNESS),
+                reply -> !"runtime_provision_fenced".equals(reply.code()),
+                "managed worker loss after recovery fencing").code());
         assertEquals(dead.getBindingId(), rig.activeBinding().getBindingId());
         assertEquals(RuntimeBindingRecord.State.LOST, rig.activeBinding().getState());
         assertNull(rig.activeBinding().getStopEvidence());

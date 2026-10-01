@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -15,8 +15,12 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDurableRef,
+  type ManagedSessionDurableRef,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
@@ -38,7 +42,10 @@ const broker = vi.hoisted(() => ({
   warm: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
+  prepareV3: vi.fn(),
   execute: vi.fn(),
+  executeV3: vi.fn(),
+  acknowledgeV3: vi.fn(),
   cancel: vi.fn(),
   release: vi.fn(),
   registerPublisher: vi.fn(),
@@ -47,10 +54,14 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    readonly runtimeSessionId = 'prompt';
     warm = broker.warm;
     acquire = broker.acquire;
     prepare = broker.prepare;
+    prepareV3 = broker.prepareV3;
     execute = broker.execute;
+    executeV3 = broker.executeV3;
+    acknowledgeV3 = broker.acknowledgeV3;
     cancel = broker.cancel;
     release = broker.release;
     registerPublisher = broker.registerPublisher;
@@ -64,6 +75,7 @@ let turn: HostedWorkspaceToolTurn;
 let commit: ConstructorParameters<typeof HostedWorkspaceToolTurn>[4];
 const messageFitsInline = vi.fn(() => true);
 let waiters: HostedApprovalWaiters;
+let expectWritesStopped: boolean;
 function createTurn(
   shell = false,
   approval?: { mode: HostedApprovalMode; timeoutMs?: number },
@@ -78,6 +90,7 @@ function createTurn(
     shell
       ? { resources: session.resources, assertWritable: async () => undefined }
       : undefined,
+    undefined,
     approval && {
       settings: {
         mode: approval.mode,
@@ -103,6 +116,7 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  expectWritesStopped = false;
   for (const method of [
     broker.warm,
     broker.acquire,
@@ -174,7 +188,7 @@ afterEach(async () => {
   await turn?.close();
   vi.restoreAllMocks();
   // A Session whose writes stopped cannot record its own close.
-  if (session?.authority.writesStopped)
+  if (expectWritesStopped)
     await expect(session.close()).rejects.toThrow(/writes stopped/);
   else await session?.close();
   await rm(root, { recursive: true, force: true });
@@ -201,6 +215,10 @@ it('commits the whole batch before the first dispatch and each receipt before re
       promptId: 'prompt',
     });
     expect(authorization.checkpoint.continuation.phase).toBe('await_runtime');
+    expect(authorization.checkpoint.identity).toMatchObject({
+      turnId: 'prompt',
+      promptId: 'prompt',
+    });
     expect(authorization.checkpoint.tools?.items).toHaveLength(2);
     expect((await session.sink.project())[0]?.message?.parts).toEqual(parts);
     return {
@@ -220,6 +238,462 @@ it('commits the whole batch before the first dispatch and each receipt before re
   await turn.consumeResults();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
+});
+
+async function shellReceiptScenario(
+  mode:
+    | 'normal'
+    | 'abandoned'
+    | 'mismatched'
+    | 'truncated'
+    | 'large'
+    | 'sentinel'
+    | 'lost-admission'
+    | 'lost-reserve',
+) {
+  const shellCall = {
+    ...calls[0],
+    name: 'run_shell_command',
+    callId: 'shell-call',
+    args: { command: 'printf hi' },
+  };
+  const shellParts: Part[] = [
+    {
+      functionCall: {
+        id: shellCall.callId,
+        name: shellCall.name,
+        args: shellCall.args,
+      },
+    },
+  ];
+  const manifest = await session.resources.publish(
+    'managed-tool-result-manifest',
+    Buffer.from('{}'),
+  );
+  const sentinelOutput =
+    'Tool output was too large and has been truncated.\nreal payload\n';
+  const envelope = {
+    executionStatus: 'success' as const,
+    responseParts:
+      mode === 'truncated'
+        ? boundedShellPreview([{ text: `HEAD\n${'x'.repeat(10_000)}\nTAIL` }])
+        : [
+            {
+              text:
+                mode === 'sentinel'
+                  ? sentinelOutput
+                  : mode === 'large'
+                    ? `HEAD\n${'x'.repeat(66_000)}\nExit Code: 2`
+                    : 'hi',
+            },
+          ],
+    capture: {
+      manifest,
+      captureStatus: 'complete' as const,
+      captureReason: null,
+      previewTruncated: mode === 'truncated' || mode === 'large',
+      deliveryStatus: 'pending' as const,
+    },
+  };
+  const order: string[] = [];
+  let originalBinding: unknown;
+  broker.prepareV3.mockResolvedValue({
+    executionCallId: 'shell-execution',
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  });
+  broker.executeV3.mockImplementation(async () => {
+    order.push('execute');
+    expect(session.authority.latestCheckpoint?.boundary).toBe('durable_wait');
+    if (
+      mode !== 'normal' &&
+      mode !== 'truncated' &&
+      mode !== 'large' &&
+      mode !== 'sentinel' &&
+      mode !== 'lost-admission' &&
+      mode !== 'lost-reserve'
+    )
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+      );
+    return envelope;
+  });
+  broker.acknowledgeV3.mockImplementation(async () => {
+    order.push('ack');
+    expect((await session.sink.project()).at(-1)?.type).toBe('tool_result');
+    expect(session.authority.latestCheckpoint?.boundary).toBeNull();
+    if (mode === 'abandoned')
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+      );
+  });
+  let admissionRef: ManagedSessionDurableRef | undefined;
+  let admissionBody: string | undefined;
+  const request = vi.fn(async (route: string, body: unknown) => {
+    if (route === '/grants') {
+      order.push(
+        (body as { operation: string }).operation === 'renew'
+          ? 'renew'
+          : 'reserve',
+      );
+      if ((body as { operation: string }).operation === 'reserve')
+        originalBinding = (body as { binding: unknown }).binding;
+      if (
+        mode === 'lost-reserve' &&
+        order.filter((step) => step === 'reserve').length === 1
+      )
+        throw new TypeError('Reservation response lost.');
+      return { state: 'OPEN' };
+    }
+    if (route.endsWith('/finished')) {
+      order.push('finished');
+      return {
+        binding:
+          mode === 'mismatched'
+            ? { ...(originalBinding as object), captureId: randomUUID() }
+            : originalBinding,
+        result: envelope,
+      };
+    }
+    if (route.endsWith('/admissions/prepare')) {
+      order.push('admission');
+      const bytes = JSON.stringify(body);
+      if (admissionBody && admissionBody !== bytes)
+        throw new Error('Admission changed on replay.');
+      admissionBody = bytes;
+      admissionRef ??= await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from(bytes),
+      );
+      if (
+        mode === 'lost-admission' &&
+        order.filter((step) => step === 'admission').length === 1
+      )
+        throw new TypeError('Admission response lost.');
+      return admissionRef;
+    }
+    throw new Error('Unexpected publication route ' + route);
+  });
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    request,
+    rememberAdmission: vi.fn(),
+  } as unknown as HttpToolPublicationOwner;
+  const originalAppend = session.authority.appendExecutionEvent.bind(
+    session.authority,
+  );
+  vi.spyOn(session.authority, 'appendExecutionEvent').mockImplementation(
+    async (...args) => {
+      if (args[0].operation === 'recordToolResult') order.push('receipt');
+      return originalAppend(...args);
+    },
+  );
+  const shellTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async (type, messageParts, model, identity) => {
+      order.push(type);
+      const uuid = identity?.uuid ?? randomUUID();
+      await session.sink.write({
+        uuid,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        model,
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts: messageParts,
+        },
+      });
+      return uuid;
+    },
+    (_type, messageParts) =>
+      mode !== 'large' ||
+      Buffer.byteLength(JSON.stringify(messageParts)) <= 64 * 1024,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  const execution = shellTurn.execute(
+    [shellCall],
+    shellParts,
+    'model',
+    new AbortController().signal,
+  );
+  if (mode === 'mismatched') {
+    await expect(execution).rejects.toBeInstanceOf(
+      HostedToolRecoveryRequiredError,
+    );
+    expect(broker.executeV3).toHaveBeenCalledOnce();
+    expect(
+      session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .filter((event) => event.kind === 'tool.receipt'),
+    ).toHaveLength(0);
+    expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+    return;
+  }
+  const result = await execution;
+  expect(broker.executeV3).toHaveBeenCalledOnce();
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    output:
+      mode === 'truncated'
+        ? expect.stringContaining('TAIL')
+        : mode === 'large'
+          ? expect.stringContaining('Exit Code: 2')
+          : mode === 'sentinel'
+            ? sentinelOutput
+            : 'hi',
+    manifestRef: manifest,
+    captureStatus: 'complete',
+    previewTruncated: mode === 'truncated' || mode === 'large',
+  });
+  if (mode === 'truncated')
+    expect(JSON.stringify(result)).toContain('preview truncated');
+  expect(order).toEqual([
+    'assistant',
+    'reserve',
+    ...(mode === 'lost-reserve' ? ['reserve'] : []),
+    'renew',
+    'execute',
+    ...(mode === 'abandoned' ? ['finished'] : []),
+    'finished',
+    'admission',
+    ...(mode === 'lost-admission' ? ['admission'] : []),
+    'receipt',
+    'tool_result',
+    'ack',
+  ]);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
+  ).toHaveLength(1);
+  expect(broker.acknowledgeV3.mock.calls[0]?.[0]).toBe('shell-execution');
+  const publicationId = broker.prepareV3.mock.calls[0]?.[3] as string;
+  if (mode === 'lost-reserve') {
+    const reservations = request.mock.calls.filter(
+      ([route, body]) =>
+        route === '/grants' &&
+        (body as { operation: string }).operation === 'reserve',
+    );
+    expect(reservations).toHaveLength(2);
+    expect(reservations[0]).toEqual(reservations[1]);
+  }
+  broker.acknowledgeV3.mockRejectedValueOnce(new Error('ACK transport down'));
+  const replayed = await (
+    shellTurn as unknown as {
+      acceptShell: (
+        call: typeof shellCall,
+        executionCallId: string,
+        publicationId: string,
+        publicationToken: string,
+        result: typeof envelope,
+        model: string,
+      ) => Promise<Part[]>;
+    }
+  ).acceptShell(
+    shellCall,
+    'shell-execution',
+    publicationId,
+    'unused-token',
+    envelope,
+    'model',
+  );
+  expect(replayed).toEqual(result);
+  expect(
+    request.mock.calls.filter(([route]) =>
+      String(route).endsWith('/admissions/prepare'),
+    ),
+  ).toHaveLength(mode === 'lost-admission' ? 2 : 1);
+  expect(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.receipt'),
+  ).toHaveLength(1);
+}
+
+it.each([
+  'normal',
+  'abandoned',
+  'mismatched',
+  'truncated',
+  'large',
+  'sentinel',
+  'lost-admission',
+  'lost-reserve',
+] as const)(
+  'uses only the original Shell publication after Broker %s',
+  shellReceiptScenario,
+);
+
+it('records a durable receipt for a proven unstarted Shell', async () => {
+  const call = {
+    ...calls[0],
+    name: 'run_shell_command',
+    callId: 'shell-call',
+    args: { command: 'printf hi' },
+  };
+  const shellParts: Part[] = [
+    {
+      functionCall: { id: call.callId, name: call.name, args: call.args },
+    },
+  ];
+  const envelope = {
+    executionStatus: 'not_started' as const,
+    responseParts: [],
+    error: { message: 'Blocked: split the command into two calls.' },
+    capture: null,
+  };
+  broker.prepareV3.mockResolvedValue({
+    executionCallId: 'shell-execution',
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  });
+  broker.executeV3.mockResolvedValue(envelope);
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    request: vi.fn(async (route: string, body: { operation: string }) => {
+      expect(route).toBe('/grants');
+      return {
+        state: body.operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+      };
+    }),
+  } as unknown as HttpToolPublicationOwner;
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  const result = await turn.execute(
+    [call],
+    shellParts,
+    'model',
+    new AbortController().signal,
+  );
+  expect(result[0]?.functionResponse?.response).toMatchObject({
+    executionStatus: 'not_started',
+    error: envelope.error.message,
+  });
+  expect(
+    (await session.sink.project()).at(-1)?.message?.parts?.[0]?.functionResponse
+      ?.response?.['error'],
+  ).toBe(envelope.error.message);
+  const receipts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'tool.receipt');
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]?.payload['resultRef']).toBeNull();
+  const ref = assertManagedSessionDurableRef(
+    receipts[0]?.payload['toolOutcomeRef'],
+    'unstarted Shell outcome',
+  );
+  expect(
+    JSON.parse((await session.resources.read(ref)).toString()),
+  ).toMatchObject({
+    schemaVersion: 1,
+    decision: 'blocked',
+    envelope,
+    manifestRef: null,
+    history: { model: 'model', parts: result },
+  });
+  expect(broker.acknowledgeV3).not.toHaveBeenCalled();
+});
+
+it('closes proven unstarted reservations after a later batch reservation fails', async () => {
+  const shellCalls = [0, 1].map((index) => ({
+    ...calls[index],
+    name: 'run_shell_command',
+    args: { command: `printf ${index}` },
+  }));
+  const shellParts: Part[] = shellCalls.map((call) => ({
+    functionCall: { id: call.callId, name: call.name, args: call.args },
+  }));
+  broker.prepareV3.mockImplementation(async () => ({
+    executionCallId: `shell-execution-${broker.prepareV3.mock.calls.length}`,
+    runtimeBindingId: 'binding-1',
+    bindingGeneration: '1',
+  }));
+  const events: string[] = [];
+  const request = vi.fn(async (route: string, body: unknown) => {
+    expect(route).toBe('/grants');
+    const operation = (body as { operation: string }).operation;
+    events.push(operation);
+    if (
+      operation === 'reserve' &&
+      events.filter((e) => e === 'reserve').length === 2
+    )
+      throw new Error('Publication capacity exhausted');
+    return {
+      state: operation === 'close_not_started' ? 'NOT_STARTED' : 'OPEN',
+    };
+  });
+  broker.cancel.mockImplementation(async () => {
+    events.push('cancel');
+  });
+  const owner = {
+    owner: async () => ({ writerId: 'worker', writerGeneration: 1 }),
+    request,
+  } as unknown as HttpToolPublicationOwner;
+  const shellTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async (type, messageParts) => {
+      const uuid = randomUUID();
+      await session.sink.write({
+        uuid,
+        parentUuid: null,
+        sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        timestamp: new Date().toISOString(),
+        type,
+        cwd: root,
+        version: 'test',
+        daemonPromptId: 'prompt',
+        message: { role: 'model', parts: messageParts },
+      });
+      return uuid;
+    },
+    () => true,
+    { owner, captureBytes: 1024 * 1024 },
+  );
+  await expect(
+    shellTurn.execute(
+      shellCalls,
+      shellParts,
+      'model',
+      new AbortController().signal,
+    ),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect(events).toEqual([
+    'reserve',
+    'reserve',
+    'cancel',
+    'cancel',
+    'close_not_started',
+    'close_not_started',
+  ]);
+  expect(
+    request.mock.calls
+      .filter(
+        ([, body]) =>
+          (body as { operation: string }).operation === 'close_not_started',
+      )
+      .map(([, body]) => (body as { publicationId: string }).publicationId)
+      .sort(),
+  ).toEqual(broker.prepareV3.mock.calls.map((call) => call[3]).sort());
+  expect(broker.executeV3).not.toHaveBeenCalled();
 });
 
 it.each(['input', 'intent', 'wait', 'result'] as const)(
@@ -565,6 +1039,35 @@ it.each([
 );
 
 it.each(['workspace_busy', 'workspace_unavailable'])(
+  'allows recovery acquisition to retry after a definite %s refusal',
+  async (code) => {
+    const refusal = new HostedWorkspaceBrokerRejection(409, code);
+    broker.acquire.mockRejectedValueOnce(refusal);
+    await expect(turn.resumeCommittedResults()).rejects.toBe(refusal);
+    await expect(turn.finish()).resolves.toBeUndefined();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.release).not.toHaveBeenCalled();
+    await turn.resumeCommittedResults();
+    expect(broker.acquire).toHaveBeenCalledTimes(2);
+  },
+);
+
+it.each([
+  new Error('lost recovery acquire response'),
+  new HostedWorkspaceBrokerRejection(503, 'workspace_unavailable'),
+  new HostedWorkspaceBrokerRejection(409, 'runtime_session_acquire_failed'),
+])('keeps ambiguous recovery acquisition blocked: %s', async (cause) => {
+  broker.acquire.mockRejectedValueOnce(cause);
+  await expect(turn.resumeCommittedResults()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  await expect(turn.finish()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect(broker.release).not.toHaveBeenCalled();
+});
+
+it.each(['workspace_busy', 'workspace_unavailable'])(
   'allows another attempt after a definite %s acquire refusal',
   async (code) => {
     const refusal = new HostedWorkspaceBrokerRejection(409, code);
@@ -629,6 +1132,109 @@ it.each(['x'.repeat(70 * 1024), '中'.repeat(23 * 1024), '"'.repeat(17 * 1024)])
   },
 );
 
+it.each(['refresh', 'warmup'] as const)(
+  'aborts MCP %s without waiting for the original work to finish',
+  async (phase) => {
+    const pending = new Promise<void>(() => undefined);
+    const refresh = vi.fn(() =>
+      phase === 'refresh' ? pending : Promise.resolve(),
+    );
+    const mcp = {
+      broker: { ...broker, runtimeSessionId: 'mcp:session' },
+      ensureReady: () => (phase === 'warmup' ? pending : Promise.resolve()),
+      refresh,
+      tools: () => [],
+    };
+    const mcpTurn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      async () => randomUUID(),
+      () => true,
+      undefined,
+      undefined,
+      undefined,
+      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    );
+    const abort = new AbortController();
+    const reason = new Error('cancelled test turn');
+    const work =
+      phase === 'refresh'
+        ? mcpTurn.declarations(abort.signal)
+        : mcpTurn.execute([], [], 'model', abort.signal);
+    const observed = work.catch((cause: unknown) => cause);
+    abort.abort(reason);
+    await expect(observed).resolves.toBe(reason);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    await expect(mcpTurn.execute([], [], 'model', abort.signal)).rejects.toBe(
+      reason,
+    );
+  },
+);
+
+it('executes against the declarations actually advertised before a catalog replacement', async () => {
+  let name = 'mcp_old';
+  const input = { toolName: 'managed_mcp_call', input: { pinned: 'original' } };
+  const mcp = {
+    broker: { ...broker, runtimeSessionId: 'mcp:session' },
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: vi.fn(() => input),
+  };
+  const mcpTurn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    async () => randomUUID(),
+    () => true,
+    undefined,
+    undefined,
+    undefined,
+    mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+  );
+  expect(
+    (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
+  ).toBe('mcp_old');
+  name = 'mcp_new';
+  const call = { ...calls[0], name: 'mcp_old', args: { text: 'hello' } };
+  await mcpTurn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(broker.execute).toHaveBeenCalledWith(
+    expect.any(String),
+    JSON.stringify(input),
+    expect.any(AbortSignal),
+    630_000,
+    true,
+  );
+  expect(broker.prepare).toHaveBeenCalledWith(
+    expect.any(String),
+    expect.stringMatching(/^sha256:/u),
+    undefined,
+    'prompt',
+  );
+  expect(mcp.toolInput).toHaveBeenCalledWith(
+    call.name,
+    call.args,
+    broker.prepare.mock.calls[0][0],
+  );
+  const intent = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .find((event) => event.kind === 'tool.intent');
+  const saved = await session.resources.read(
+    intent!.payload['toolDefinitionRef'] as unknown as ManagedSessionDurableRef,
+  );
+  expect(JSON.parse(saved.toString()).name).toBe('mcp_old');
+  expect(
+    (await mcpTurn.declarations(new AbortController().signal)).at(-1)?.name,
+  ).toBe('mcp_new');
+});
 it('returns durable errors for a refused Shell batch and permits a corrected call', async () => {
   turn = createTurn(true);
   const shell = {
@@ -716,6 +1322,45 @@ it.each([
   expect(responses[0].functionResponse?.response?.['error']).toContain(message);
   expect(broker.acquire).not.toHaveBeenCalled();
 });
+
+it.each([
+  [{ command: 'pwd', timeout: 0 }, 'timeout must be an integer'],
+  [{ command: 'pwd', is_background: false }, 'foreground command'],
+])(
+  'returns a durable O2 refusal for invalid Shell arguments %j',
+  async (args, message) => {
+    const owner = {
+      owner: vi.fn(),
+      request: vi.fn(),
+      rememberAdmission: vi.fn(),
+    } as unknown as HttpToolPublicationOwner;
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      { owner, captureBytes: 1024 * 1024 },
+    );
+    const call = { ...calls[0], name: 'run_shell_command', args };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      message,
+    );
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      ['assistant', 'tool_result'],
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepareV3).not.toHaveBeenCalled();
+    expect(owner.request).not.toHaveBeenCalled();
+  },
+);
 
 it('accepts the runtime foreground spelling is_background false', async () => {
   turn = createTurn(true);
@@ -1025,7 +1670,7 @@ it('asks before an edit in default mode and runs the batch once the owner allows
   const options = JSON.parse(
     (await session.resources.read(action.optionsRef!)).toString(),
   );
-  expect(options).toMatchObject({
+  expect(options).toEqual({
     v: 1,
     requestId,
     turnId: 'prompt',
@@ -1033,6 +1678,8 @@ it('asks before an edit in default mode and runs the batch once the owner allows
     toolName: 'edit',
     policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
     inputRevision: 1,
+    createdAt: expect.any(Number),
+    expiresAt: expect.any(Number),
     options: [
       { id: 'allow', label: 'Allow' },
       { id: 'deny', label: 'Deny' },
@@ -1141,6 +1788,88 @@ it('commits only refusals when every asked call is denied', async () => {
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
 });
+
+it.each(['allow', 'deny'])(
+  'honors %s approval for an MCP call while retaining its shared owner',
+  async (optionId) => {
+    const input = {
+      toolName: 'managed_mcp_call',
+      input: { pinned: 'original' },
+    };
+    let expiresAt = 1;
+    const mcp = {
+      broker,
+      ensureReady: async () => undefined,
+      refresh: async () => undefined,
+      tools: () => [
+        { name: 'mcp_echo', parametersJsonSchema: { type: 'object' } },
+      ],
+      toolInput: () => ({
+        ...input,
+        input: { ...input.input, grant: { expiresAt } },
+      }),
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+      mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    );
+    const call = { ...calls[0], name: 'mcp_echo', args: { text: 'hello' } };
+    const running = turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const approvedRef = (await checkpoint()).approval!.invocationRef!;
+    const approved = (await session.resources.read(approvedRef)).toString();
+    expiresAt = 2;
+    await resolveHostedAction(session, waiters, requestId, answer(optionId));
+    const result = await running;
+    expect(broker.prepare).toHaveBeenCalledTimes(optionId === 'allow' ? 1 : 0);
+    expect(broker.execute).toHaveBeenCalledTimes(optionId === 'allow' ? 1 : 0);
+    if (optionId === 'allow') {
+      const payload = broker.execute.mock.calls[0][1];
+      expect(JSON.parse(payload)).toEqual({
+        ...input,
+        input: { ...input.input, grant: { expiresAt: 2 } },
+      });
+      expect(broker.prepare.mock.calls[0][1]).toBe(
+        `sha256:${createHash('sha256').update(payload).digest('hex')}`,
+      );
+      const intent = session.authority
+        .eventsInSequenceRange(1, session.authority.committedSequence)
+        .find((event) => event.kind === 'tool.intent')!;
+      const routed = JSON.parse(
+        (
+          await session.resources.read(
+            intent.payload['argsRef'] as unknown as ManagedSessionDurableRef,
+          )
+        ).toString(),
+      );
+      expect(routed.payloadJson).toBe(payload);
+      expect((await session.resources.read(approvedRef)).toString()).toBe(
+        approved,
+      );
+    } else
+      expect(result[0].functionResponse?.response?.['error']).toContain(
+        'denied',
+      );
+    await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).not.toHaveBeenCalled();
+  },
+);
 
 it('asks one call at a time in the model order', async () => {
   const batch = [
@@ -1330,6 +2059,7 @@ it('keeps an answer retryable when it fails before any write', async () => {
 });
 
 it('stops the Turn when a late answer cannot record the expiry', async () => {
+  expectWritesStopped = true;
   turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
   const running = turn.execute(
     [calls[1]],
@@ -1360,6 +2090,7 @@ it('stops the Turn when a late answer cannot record the expiry', async () => {
 });
 
 it('stops a waiting Turn soon after another write stops the Session', async () => {
+  expectWritesStopped = true;
   turn = createTurn(false, { mode: 'default', timeoutMs: 60_000 });
   const running = turn.execute(
     [calls[1]],
@@ -1845,58 +2576,74 @@ it('answers what landed while the decision was published, even once blocked', as
   expect(broker.execute).toHaveBeenCalledOnce();
 });
 
-it('writes nothing when the Session blocks while the decision waits in the queue', async () => {
-  turn = createTurn(false, { mode: 'default' });
-  const running = turn.execute(
-    [calls[1]],
-    [parts[1]],
-    'model',
-    new AbortController().signal,
-  );
-  const requestId = await requested();
-  // Hold another write inside the authority's queue.
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let entered!: () => void;
-  const inQueue = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  const append =
-    LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
-  vi.spyOn(
-    LocalJsonlManagedSessionJournalHandle.prototype,
-    'appendTransaction',
-  ).mockImplementationOnce(async function (
-    this: LocalJsonlManagedSessionJournalHandle,
-    records,
-  ) {
-    entered();
-    await gate;
-    return append.call(this, records);
-  });
-  const held = commit('assistant', [{ text: 'held' }], 'model');
-  await inQueue;
-  const queued = vi.spyOn(session.authority, 'resolveAction');
-  let blocked = false;
-  const answering = resolveHostedAction(
-    session,
-    waiters,
-    requestId,
-    answer('allow'),
-    () => blocked,
-  );
-  await vi.waitFor(() => expect(queued).toHaveBeenCalled());
-  blocked = true;
-  release();
-  await held;
-  await expect(answering).resolves.toEqual({
-    status: 409,
-    code: 'hosted_turn_recovery_required',
-  });
-  expect(session.authority.action(requestId)?.state).toBe('requested');
-  await resolveHostedAction(session, waiters, requestId, answer('deny'));
-  await running;
-  expect(broker.execute).not.toHaveBeenCalled();
-});
+it.each(['decision', 'expiry'])(
+  'writes nothing when the Session blocks while the %s waits in the queue',
+  async (resolution) => {
+    turn = createTurn(false, { mode: 'default' });
+    const running = turn.execute(
+      [calls[1]],
+      [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    const requestId = await requested();
+    // Hold another write inside the authority's queue.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const inQueue = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const append =
+      LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'appendTransaction',
+    ).mockImplementationOnce(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      records,
+    ) {
+      entered();
+      await gate;
+      return append.call(this, records);
+    });
+    const held = commit('assistant', [{ text: 'held' }], 'model');
+    await inQueue;
+    const queued = vi.spyOn(session.authority, 'resolveAction');
+    const now =
+      resolution === 'expiry'
+        ? vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000)
+        : undefined;
+    // Observe only the answer's write; the Turn settles its own Action later.
+    const notify = vi.spyOn(waiters, 'notify').mockImplementation(() => {});
+    let blocked = false;
+    const answering = resolveHostedAction(
+      session,
+      waiters,
+      requestId,
+      answer('allow'),
+      () => blocked,
+    );
+    try {
+      await vi.waitFor(() => expect(queued).toHaveBeenCalled());
+      blocked = true;
+    } finally {
+      release();
+    }
+    await held;
+    await expect(answering).resolves.toEqual({
+      status: 409,
+      code: 'hosted_turn_recovery_required',
+    });
+    expect(session.authority.action(requestId)?.state).toBe('requested');
+    expect(session.authority.writesStopped).toBe(false);
+    expect(notify).toHaveBeenCalledWith(requestId);
+    now?.mockRestore();
+    notify.mockRestore();
+    await resolveHostedAction(session, waiters, requestId, answer('deny'));
+    await running;
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
