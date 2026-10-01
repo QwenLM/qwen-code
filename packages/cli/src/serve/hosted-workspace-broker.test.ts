@@ -617,7 +617,7 @@ it('resolves a durable execution status for recovery reports', async () => {
   });
 });
 
-it('reads unknown only from a definitive not-found', async () => {
+it('distinguishes unknown outcomes from definitive not-found records', async () => {
   const missing = await fixture(() => ({
     code: 404,
     body: { code: 'runtime_execution_not_found' },
@@ -631,7 +631,17 @@ it('reads unknown only from a definitive not-found', async () => {
       details: { terminal: true },
     },
   }));
-  await expect(abandoned.status('execution')).resolves.toBeUndefined();
+  await expect(abandoned.status('execution')).resolves.toEqual({
+    state: 'unknown',
+  });
+
+  const unknown = await fixture(() => ({
+    code: 409,
+    body: { code: 'runtime_broker_execution_unknown' },
+  }));
+  await expect(unknown.status('execution')).resolves.toEqual({
+    state: 'unknown',
+  });
 
   const failing = await fixture(() => ({
     code: 500,

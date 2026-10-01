@@ -258,11 +258,15 @@ export async function stopParkedRuntimeExecutions(input: {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
     const before = await broker.status(item.executionCallId);
+    if (before?.state === 'unknown')
+      throw new Error('Runtime execution outcome is unknown.');
     if (before === undefined || before.state === 'settled') continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = await broker.status(item.executionCallId);
+      if (status?.state === 'unknown')
+        throw new Error('Runtime execution outcome is unknown.');
       if (status === undefined || status.state === 'settled') break;
       if (Date.now() >= deadline) {
         throw new Error(
@@ -329,7 +333,7 @@ export async function recoverHostedRuntimeTurn(input: {
         const status = await broker.status(item.executionCallId);
         states.set(
           item.executionCallId,
-          status === undefined ? undefined : { state: status.state },
+          status?.state === 'unknown' ? undefined : status,
         );
       }
     } else {
