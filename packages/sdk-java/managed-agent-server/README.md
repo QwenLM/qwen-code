@@ -50,7 +50,9 @@ Event replay: [English](../../../docs/design/2026-09-27-managed-agent-event-repl
 Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-durable-lifecycle.zh-CN.md);
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
-[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
+Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
 ## Prerequisites
 
@@ -276,12 +278,20 @@ Harness or Runtime Broker credentials.
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
 Read/Write/Edit Turn supplied with public Session creation. The WebShell creation
 adapter uses the same admission. This requires the Hosted Harness and HTTP
-Session Store, `yolo` approval mode, and a `local-process`, `session`-isolated
+Session Store, a `yolo`, `default` or `auto-edit` approval mode, and a `local-process`, `session`-isolated
 Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
 header alone does not authenticate an actor.
+
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
+`auto-edit`, the Session creator can list, inspect and answer pending permission
+Actions through the public API or WebShell. Responses are durable, idempotent
+operations; their final result follows the committed Harness decision.
+`QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
+The approval mode is pinned at Session creation and must be confirmed by the
+Harness on creation and load.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
 through `POST /v1/agents/sessions`. The server chooses the fixed
@@ -428,6 +438,67 @@ the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
+### Verified original-mount recovery (W1a)
+
+W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
+V25 adds a persistent storage registration, independent `mount_birth_time` and mount fence. Leave
+`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=false` while
+upgrading every Broker and Harness instance. An unregistered mount is refused
+once the option is enabled; it is never registered from the directory found at
+startup.
+
+Marker v2 stores birth time as a canonical `Instant` string preserving nanoseconds. The guard reads creation time, mtime, device and inode in one `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID, keyed by the trimmed machine-id UTF-8 bytes with `Qwen-Code/verified-workspace/v2` as input, rather than the raw machine ID.
+
+Keep the storage root outside **every Git worktree**, with Session cwd in a child project directory. `.qwen-managed-storage.json` is an administrator maintenance file: do not read/write it through model tools or subject it to Git cleanup/stash. Tools are not confined by this layout. Missing or conflicting markers close admission; completed registrations never automatically republish them, including on a same-UUID retry. Marker repair needs a separate design.
+
+Prerelease W1 V21/V24 databases and marker v1 cannot be directly upgraded to V25/v2. Experimental W1 V24 conflicts with main’s Actions V24; renaming the migration does not upgrade an existing database. Do not bypass the mismatch with Flyway `repair`, `outOfOrder` or manual history edits. Preserve backups and design an explicit offline migration for deployments with retained data; only disposable test deployments may be rebuilt.
+
+Stop all processes and external jobs that can write the storage, account for
+old Runtime holders and verify the original root before registration. Apply
+Flyway migrations, then run the private maintenance entry from this module on
+the same Linux host. Give a stable canonical lowercase, hyphenated 36-character UUID to each operation and reuse it after a
+crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
+`W1_JDBC_PASSWORD` environment variables:
+
+```bash
+mvn -q -DskipTests compile exec:java \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
+```
+
+The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
+
+```bash
+java -cp /path/to/app.jar \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.store.WorkspaceStorageRegistrationMain \
+  org.springframework.boot.loader.launch.PropertiesLauncher \
+  register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
+```
+
+`inspect <tenant> <storage> <canonical-root>` is read-only. The same entry also
+accepts `fence` or `restore-original` with a mount revision and the exact
+operation UUID; both require `--offline-confirmed`. A fence has no timeout and requires every holder field to be clear after exact-owner cleanup. Entering a new fence and restoring both require the intact registered root identity and marker. W1 cannot force-fence, re-register or repair a changed identity or missing marker; admission stays closed until the verified original mapping is re-presented, or a separately designed offline repair is performed. Stop new admissions, settle or cancel original executions, prove writers stopped, release holders and stop service/external writer processes before fencing.
+`restore-original` only reopens the still-verified original mapping after its
+holder is clear. Both commands accept retries with the same operation UUID;
+restoring increments the mount revision, so a delayed old fence cannot reopen
+maintenance. Completed registration and restore retries revalidate identity and marker; concurrent same-operation retries do not advance the revision twice. Inspect reports state, revision, active/completed operation, holder and independent identity/marker status, including while fenced. The flag records the operator's offline check; the program
+cannot stop arbitrary processes or external writers itself. Do not use it on
+a live shared storage.
+
+After registration, enable
+`QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` on the
+whole upgraded deployment. On each new attachment, model submission, Runtime
+claim and execute, the server compares the configured canonical root against
+the SQL registration, Linux host/device/inode/birth-time identity and the root marker.
+A missing or conflicting marker, replacement root, missing saved cwd or fenced
+storage blocks new work; original execution status/cancel and authorized
+history remain on their saved identities. The marker is a continuity check,
+not a backup or protection against a malicious same-UID writer. See the
+[W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
+Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
+Workspace resume/next-turn admission still requires product-route integration; this
+internal guard is not a public resume capability yet.
+
 Build the container from the repository root:
 
 ```bash
@@ -458,11 +529,18 @@ rows within the selected schema.
 
 ## Real-model end-to-end check
 
-The repository includes copied full-chain scripts for a future integration.
-Their expected `dist/managed-runtime-worker.js` artifact is not built, so the
-commands below describe intended verification, not passing evidence for this
-integration. The G0 integration test instead starts the supported Hosted Harness
-and worker modes through the packaged `dist/cli.js`.
+The full-chain script starts Spring with its embedded Runtime Broker and runs
+both the Hosted Harness and the worker from the packaged `dist/cli.js`: the
+Harness as `node dist/cli.js serve --profile hosted-harness`, and each worker,
+launched by the Broker, as `node dist/cli.js managed-runtime-worker`. No
+separate worker bundle exists. The G0 integration test
+(`HostedPublicWorkspaceIT`) uses the same packaged `dist/cli.js`.
+
+The real-model run below has not been executed as evidence for this
+integration, so treat it as intended verification, not passing evidence. The
+script also needs `java`, `mysqld`, `mysql` and `mysqladmin` on `PATH`; it
+starts its own temporary MySQL server and exits before starting anything else
+when a command or a required file is missing.
 
 Build the required artifacts first, then run:
 
