@@ -15,6 +15,7 @@ import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
+import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
@@ -232,56 +233,88 @@ function hasUnsettledInput(
   return accepted.size > 0;
 }
 
-async function settleCancelledPreModelHook(
+async function recoverCancelledPreToolHook(
   session: HostedSession,
-): Promise<void> {
-  if (
-    !session.blocked ||
-    session.active ||
-    !session.hooks ||
-    session.hooks.hasPendingOperations
-  )
-    return;
-  const { authority } = session.managed;
-  const events = authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  );
-  const pending = new Map<string, number>();
+  promptId: string,
+  events: readonly ManagedSessionEvent[],
+): Promise<boolean> {
+  const { authority, sink } = session.managed;
+  const attempts = new Map<string, unknown>();
   for (const event of events) {
-    if (event.kind === 'input.accepted')
-      pending.set(event.payload['turnId'] as string, event.sequence);
-    if (event.kind === 'turn.settled')
-      pending.delete(event.payload['turnId'] as string);
+    if (event.kind === 'model.attempt')
+      attempts.set(
+        event.payload['attemptId'] as string,
+        event.payload['state'],
+      );
+    if (
+      event.kind === 'tool.intent' ||
+      event.kind === 'tool.receipt' ||
+      (event.kind === 'action.changed' &&
+        authority.action(event.payload['requestId'] as string)?.state ===
+          'requested')
+    )
+      return false;
   }
-  if (pending.size !== 1) return;
-  const [promptId, sequence] = [...pending][0];
   if (
-    events.some(
-      (event) =>
-        event.sequence > sequence &&
-        (event.kind === 'model.attempt' ||
-          event.kind === 'tool.intent' ||
-          event.kind === 'tool.receipt' ||
-          (event.kind === 'message.committed' &&
-            event.payload['role'] !== 'user')),
+    ![...attempts.values()].includes('output_committed') ||
+    [...attempts.values()].some(
+      (state) => state !== 'output_committed' && state !== 'abandoned',
     )
   )
-    return;
-  const occurrenceIds = new Set([
-    hostedHookOccurrenceId(HookEventName.UserPromptSubmit, promptId),
-    hostedHookOccurrenceId(
-      HookEventName.SessionStart,
-      `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
-    ),
-  ]);
+    return false;
+  const authorization = await authority.harnessRunAuthorization();
+  if (
+    authorization.status !== 'runnable' ||
+    !['before_model', 'model_output_committed'].includes(
+      authorization.checkpoint.continuation.phase,
+    ) ||
+    authorization.checkpoint.tools?.items.length
+  )
+    return false;
+  const history = await readHostedFileHistory(session.managed);
+  if (history?.pendingTurn || history?.pendingUndo) return false;
+  const current = (await sink.project()).filter(
+    (item) => item.daemonPromptId === promptId && item.type !== 'user',
+  );
+  const [assistant, ...tail] = current;
+  if (
+    assistant?.type !== 'assistant' ||
+    tail.some((item) => item.type !== 'tool_result')
+  )
+    return false;
+  const calls = (assistant.message?.parts ?? []).flatMap((part) =>
+    part.functionCall ? [part.functionCall] : [],
+  );
+  if (
+    !calls.length ||
+    calls.some((call) => !call.id || !call.name) ||
+    new Set(calls.map((call) => call.id)).size !== calls.length
+  )
+    return false;
+  const responded = new Set<string>();
+  for (const item of tail) {
+    for (const part of item.message?.parts ?? []) {
+      const response = part.functionResponse;
+      if (
+        !response?.id ||
+        responded.has(response.id) ||
+        !calls.some(
+          (call) => call.id === response.id && call.name === response.name,
+        )
+      )
+        return false;
+      responded.add(response.id);
+    }
+  }
   let cancelled = false;
   for (const { record } of authority.extensionRecordsInDomain(
     'hook_execution',
   )) {
     const execution = parseHookExecution(record);
     if (
-      !occurrenceIds.has(execution.occurrenceId) ||
+      execution.eventName !== HookEventName.PreToolUse ||
+      execution.hookId === '__plan__' ||
+      !execution.cancelRequested ||
       execution.run.state !== 'cancelled' ||
       execution.run.execution !== 'not_started_proven'
     )
@@ -291,30 +324,145 @@ async function settleCancelledPreModelHook(
         (await session.managed.resources.read(execution.inputRef)).toString(),
       ),
     );
-    if (input?.['prompt_id'] === promptId) {
+    if (
+      input?.['prompt_id'] === promptId &&
+      calls.some(
+        (call) =>
+          input['tool_use_id'] === call.id &&
+          input['tool_name'] === call.name &&
+          execution.occurrenceId ===
+            hostedHookOccurrenceId(
+              HookEventName.PreToolUse,
+              `${promptId}:${call.id}`,
+            ),
+      )
+    )
       cancelled = true;
-      break;
-    }
   }
-  if (!cancelled) return;
-  await session.managed.sink.write(
-    record(
-      session,
-      authority.sessionHeader.sessionKey.sessionId,
-      'system',
-      null,
-      {
-        subtype: 'turn_result',
-        systemPayload: {
-          promptId,
-          state: 'cancelled',
-          stopReason: 'cancelled',
-          endedAt: Date.now(),
+  if (!cancelled) return false;
+  const missing = calls.filter((call) => !responded.has(call.id!));
+  if (missing.length)
+    await sink.write(
+      record(
+        session,
+        authority.sessionHeader.sessionKey.sessionId,
+        'tool_result',
+        current.at(-1)!.uuid,
+        {
+          daemonPromptId: promptId,
+          model: assistant.model,
+          message: {
+            role: 'user',
+            parts: missing.flatMap((call) =>
+              convertToFunctionErrorResponse(
+                call.name!,
+                call.id!,
+                [],
+                'The turn was cancelled before this tool call ran.',
+              ),
+            ),
+          },
         },
-      },
-    ),
-  );
-  session.blocked = false;
+      ),
+    );
+  return true;
+}
+
+async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
+  if (
+    !session.blocked ||
+    session.active ||
+    session.hooksBusy ||
+    session.mcpBusy ||
+    session.mcpRecovering ||
+    !session.hooks ||
+    session.hooks.hasPendingOperations
+  )
+    return;
+  session.hooksBusy = true;
+  try {
+    const { authority } = session.managed;
+    const events = authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
+    );
+    const pending = new Map<string, number>();
+    for (const event of events) {
+      if (event.kind === 'input.accepted')
+        pending.set(event.payload['turnId'] as string, event.sequence);
+      if (event.kind === 'turn.settled')
+        pending.delete(event.payload['turnId'] as string);
+    }
+    if (pending.size !== 1) return;
+    const [promptId, sequence] = [...pending][0];
+    const turnEvents = events.filter((event) => event.sequence > sequence);
+    const preModel = !turnEvents.some(
+      (event) =>
+        event.kind === 'model.attempt' ||
+        event.kind === 'tool.intent' ||
+        event.kind === 'tool.receipt' ||
+        (event.kind === 'message.committed' &&
+          event.payload['role'] !== 'user'),
+    );
+    const occurrenceIds = new Set([
+      hostedHookOccurrenceId(HookEventName.UserPromptSubmit, promptId),
+      hostedHookOccurrenceId(
+        HookEventName.SessionStart,
+        `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
+      ),
+    ]);
+    let cancelled = false;
+    if (preModel)
+      for (const { record } of authority.extensionRecordsInDomain(
+        'hook_execution',
+      )) {
+        const execution = parseHookExecution(record);
+        if (
+          !occurrenceIds.has(execution.occurrenceId) ||
+          execution.run.state !== 'cancelled' ||
+          execution.run.execution !== 'not_started_proven'
+        )
+          continue;
+        const input = object(
+          JSON.parse(
+            (
+              await session.managed.resources.read(execution.inputRef)
+            ).toString(),
+          ),
+        );
+        if (input?.['prompt_id'] === promptId) {
+          cancelled = true;
+          break;
+        }
+      }
+    if (!preModel)
+      cancelled = await recoverCancelledPreToolHook(
+        session,
+        promptId,
+        turnEvents,
+      );
+    if (!cancelled) return;
+    await session.managed.sink.write(
+      record(
+        session,
+        authority.sessionHeader.sessionKey.sessionId,
+        'system',
+        null,
+        {
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId,
+            state: 'cancelled',
+            stopReason: 'cancelled',
+            endedAt: Date.now(),
+          },
+        },
+      ),
+    );
+    session.blocked = false;
+  } finally {
+    session.hooksBusy = false;
+  }
 }
 
 async function readShellReceipt(
@@ -1375,7 +1523,7 @@ export function registerHostedHarnessSessionRoutes(
         !settlePromptId
       )
         session.blocked = true;
-      await settleCancelledPreModelHook(session);
+      await settleCancelledHookTurn(session);
       if (resume) {
         const abort = new AbortController();
         session.active = {
@@ -1769,7 +1917,7 @@ export function registerHostedHarnessSessionRoutes(
       .then(async (execution) => {
         if (execution.hookId !== '__plan__')
           await session.hooks!.status(execution.occurrenceId);
-        await settleCancelledPreModelHook(session);
+        await settleCancelledHookTurn(session);
         res.json({
           operationId: execution.hookExecutionId,
           state: execution.run.state,

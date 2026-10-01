@@ -117,9 +117,17 @@ the blocked occurrence. For SessionStart and UserPromptSubmit, explicit cancella
 also settles the admitted turn identified by the Hook's durable input `prompt_id`
 when no model attempt, tool intent/receipt or non-user message has followed
 admission, and no Hook remains pending. An earlier SessionStart cancellation cannot
-settle a later turn. This recovery is durable
-and also runs on load for previously cancelled records; cancellation never
-abandons a model/tool continuation. A process group alone is never accepted as proof.
+settle a later turn. For a refused PreToolUse child explicitly cancelled with
+`not_started_proven`, recovery may also close the first committed tool-call batch:
+all model attempts must have ended, at least one has committed output, no tool
+intent/receipt, pending approval, file-history work or Hook may remain, and the
+cancelled child's occurrence and input must match an original call in the sole
+unsettled turn. Recovery persists a matching refusal for every missing call before
+settling the turn as cancelled. Already committed responses are preserved; failed
+writes retain the barrier and retries do not duplicate them. This recovery is
+serialized with turn and control admission and also runs on load for previously
+cancelled records. Other model/tool continuations stay blocked. A process group
+alone is never accepted as proof.
 Environment inheritance is restricted to execution necessities and explicit
 recipe entries. Async admission waits for the Runtime acknowledgement; it is not
 a completion receipt. Normal acknowledged async work may coexist with later
