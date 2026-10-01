@@ -460,8 +460,10 @@ class ManagedArtifactApiIntegrationTest {
                 .isEqualTo(response.getStatus() == 200);
         if (response.getStatus() == 206) {
             assertThat(response.getHeader("Content-Range")).isNotBlank();
+            assertThat(response.getHeader("Connection")).isNull();
         } else {
             assertThat(response.getHeader("Content-Range")).isNull();
+            assertThat(response.getHeader("Connection")).isEqualTo("close");
         }
     }
 

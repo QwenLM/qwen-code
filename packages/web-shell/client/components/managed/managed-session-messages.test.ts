@@ -295,6 +295,7 @@ it('rejects every documented malformed result identity/status arm', () => {
   const source = { ...result, session_id: 's1', turn_id: 'p1' };
   const invalid = [
     { id: 1 },
+    { id: '' },
     { session_id: 'foreign' },
     { turn_id: 'foreign' },
     { item_id: 'foreign' },
@@ -328,6 +329,94 @@ it('rejects every documented malformed result identity/status arm', () => {
     ).toEqual([]);
   }
 });
+
+it.each([undefined, null, '', 1, ['item-1'], {}])(
+  'rejects matching malformed Item identities %j instead of using the call ID',
+  (itemId) => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_result_updated', {
+          itemId,
+          toolCallId: 'call',
+          result: {
+            ...result,
+            session_id: 's1',
+            turn_id: 'p1',
+            item_id: itemId,
+          },
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({ tools: [{ status: 'pending' }] });
+    expect(
+      messages[0].role === 'tool_group' && messages[0].tools[0].toolResult,
+    ).toBeUndefined();
+  },
+);
+
+it.each([undefined, null, '', 1, ['committed'], {}, 'purged'])(
+  'rejects an unknown delivery status %j',
+  (delivery_status) => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_result_updated', {
+          itemId: 'item-1',
+          result: {
+            ...result,
+            session_id: 's1',
+            turn_id: 'p1',
+            delivery_status,
+          },
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(
+      messages[0].role === 'tool_group' && messages[0].tools[0].toolResult,
+    ).toBeUndefined();
+  },
+);
+
+it.each(['pending', 'committed', 'blocked'])(
+  'accepts the documented delivery status %s',
+  (delivery_status) => {
+    const source = {
+      ...result,
+      session_id: 's1',
+      turn_id: 'p1',
+      delivery_status,
+    };
+    const messages = managedEventsToMessages(
+      [event(1, 'tool_result_updated', { itemId: 'item-1', result: source })],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({ tools: [{ toolResult: source }] });
+  },
+);
+
+it.each([true, false, 'yes', 1, {}, null, undefined])(
+  'marks a preview as truncated only for boolean true: %j',
+  (truncated) => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_result_updated', {
+          itemId: 'item-1',
+          result: {
+            ...result,
+            session_id: 's1',
+            turn_id: 'p1',
+            preview: { text: 'abc', truncated },
+          },
+        }),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0]).toMatchObject({
+      tools: [{ rawOutput: truncated === true ? 'abc\n[truncated]' : 'abc' }],
+    });
+  },
+);
 
 it.each([{}, 'abc', { truncated: true }, { text: 1 }])(
   'ignores malformed preview text %j',

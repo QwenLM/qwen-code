@@ -1971,6 +1971,39 @@ class ToolPublicationStoreTest {
                 .filter(call -> call.getMethod().getName().equals("openReferencedStream")).count()).isEqualTo(2);
     }
 
+    @ParameterizedTest
+    @ValueSource(longs = {-28_800_000, 28_800_000})
+    void artifactCreationTimeUsesPublicEpochDespiteJdbcWallClockOffset(long offset) throws Exception {
+        var fixture = apiFixture();
+        fixture.jdbc().update("DELETE FROM managed_agent_artifact");
+        fixture.jdbc().update("DELETE FROM managed_agent_event");
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state='PENDING', next_attempt_at=0");
+        JdbcTemplate projectionJdbc = new JdbcTemplate(fixture.jdbc().getDataSource()) {
+            @Override
+            public <T> T queryForObject(String sql, Class<T> type) {
+                if ("SELECT CURRENT_TIMESTAMP(6)".equals(sql) && type == java.sql.Timestamp.class) {
+                    return type.cast(new java.sql.Timestamp(System.currentTimeMillis() + offset));
+                }
+                return super.queryForObject(sql, type);
+            }
+        };
+        long before = System.currentTimeMillis();
+        new ManagedToolResultProjector(fixture.results(), projectionJdbc,
+                publicationProvider(fixture.publications()), fixture.reader(), fixture.policy(), fixture.properties())
+                .project(fixture.results().claim().orElseThrow());
+        long after = System.currentTimeMillis();
+        var row = fixture.jdbc().queryForMap("SELECT work_state, descriptor_json FROM managed_agent_tool_result");
+        assertThat(row.get("work_state")).isEqualTo("READY");
+        var descriptor = JSON.readTree((String) row.get("descriptor_json"));
+        long eventCreatedAt = fixture.jdbc().queryForObject("SELECT MAX(created_at) FROM managed_agent_event", Long.class);
+        assertThat(descriptor.path("artifacts")).hasSize(2);
+        for (JsonNode artifact : descriptor.path("artifacts")) {
+            long createdAt = artifact.path("created_at").asLong();
+            assertThat(createdAt).isBetween(before, after);
+            assertThat(eventCreatedAt).isBetween(createdAt, after);
+        }
+    }
+
     @Test
     void quarantineDuringCommitRetriesThenPublishesOnlyMetadata() throws Exception {
         var fixture = apiFixture();

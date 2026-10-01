@@ -61,6 +61,11 @@ Managed WebShell. Downloads read immutable stdout/stderr after the writer is
 sealed, without reviving a Harness. The API requires a trusted actor and a
 current Workspace read grant; a tenant header alone cannot authorize it.
 
+O3 requires O2 publication to be configured, including
+`qwen.managed-agent.tool-publication.verification-bytes-per-second` and
+`qwen.managed-agent.tool-publication.max-verification-timeout`. These required
+O2 verification settings are separate from the O3 content-read timeout below.
+
 All settings below use the `qwen.managed-agent.artifacts` prefix:
 
 | Setting                | Default | Meaning                                                                                                                    |

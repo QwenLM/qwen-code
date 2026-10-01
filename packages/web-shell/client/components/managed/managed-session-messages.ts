@@ -239,8 +239,11 @@ function readResult(
   const result = record(value);
   if (
     typeof result['id'] !== 'string' ||
+    result['id'].length === 0 ||
     result['session_id'] !== event.sessionId ||
     result['turn_id'] !== event.turnId ||
+    typeof result['item_id'] !== 'string' ||
+    result['item_id'].length === 0 ||
     result['item_id'] !== record(event.data)['itemId'] ||
     !Number.isSafeInteger(result['projection_revision']) ||
     Number(result['projection_revision']) < 1 ||
@@ -248,6 +251,8 @@ function readResult(
     !['success', 'error', 'cancelled', 'not_started'].includes(
       result['execution_status'],
     ) ||
+    typeof result['delivery_status'] !== 'string' ||
+    !['pending', 'committed', 'blocked'].includes(result['delivery_status']) ||
     !Array.isArray(result['artifacts'])
   )
     return undefined;

@@ -274,6 +274,10 @@ public class ManagedArtifactService {
         response.setStatus(selection.partial() ? 206 : 200);
         response.setContentType("application/octet-stream");
         response.setContentLengthLong(selection.length());
+        if (!selection.partial()) {
+            // End committed download failures without waiting for the keep-alive timeout.
+            response.setHeader("Connection", "close");
+        }
         response.setHeader("ETag", etag);
         response.setHeader("Accept-Ranges", "bytes");
         response.setHeader("Cache-Control", "private, no-store, no-transform");

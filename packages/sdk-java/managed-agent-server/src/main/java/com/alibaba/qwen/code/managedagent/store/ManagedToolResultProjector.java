@@ -11,7 +11,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -190,7 +189,7 @@ public class ManagedToolResultProjector {
         String policyVersion = policy.version();
         boolean publish = !quarantined
                 && policy.publishOriginal(source.tenantId(), source.workspaceId(), source.sessionId());
-        long createdAt = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).getTime();
+        long createdAt = System.currentTimeMillis();
         List<Artifact> artifacts = new ArrayList<>();
         Map<String, ToolPublicationDataStore.VerifiedStream> verified = new HashMap<>();
         if (publish && "committed".equals(decision)) {
