@@ -2976,6 +2976,10 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    // After a Managed Runtime call ended without a known outcome, the model
+    // must not continue: it could repeat a call that already took effect.
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) throw managedSessionBlock;
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute

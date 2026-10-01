@@ -2929,6 +2929,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('closes managed writers before resource shutdown on connection EOF', async () => {
     const innerConfig = await setupSessionMocks('managed-session');
     const order: string[] = [];
+    // A Managed session's Runtime worker stops before its log is handed off.
+    Object.assign(innerConfig, {
+      getSessionExecutionEngine: vi.fn().mockReturnValue('managed'),
+      // A slow stop: the handoff must wait for it.
+      closeManagedRuntime: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        order.push('runtime');
+      }),
+    });
     vi.mocked(innerConfig.closeSessionWriter).mockImplementation(async () => {
       expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
       order.push('writer');
@@ -2973,7 +2982,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
       handoff: true,
     });
-    expect(order).toEqual(['writer', 'resources']);
+    expect(order).toEqual(['runtime', 'writer', 'resources']);
     expect(mockRunExitCleanup).toHaveBeenCalledOnce();
   });
 
@@ -4555,6 +4564,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
         const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
         expect(hostPolicy?.executionEngine).toBe(engine);
+        // Legacy sessions run their tools in this process.
+        expect(hostPolicy?.managedRuntimeEnvironment).toBeUndefined();
         expect(response._meta).toEqual(
           engine ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } : undefined,
         );
@@ -4587,6 +4598,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   describe('Managed host', () => {
+    const managedRuntimeEnvironment = vi.fn();
+
     async function bootManagedHost() {
       mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
       const agentPromise = runAcpAgent(
@@ -4596,6 +4609,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         {
           privateParentCapability: 'managed-host-capability',
           executionEngine: 'managed',
+          managedRuntimeEnvironment,
         },
       );
       await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -4626,6 +4640,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         const [settings, , , , , , , , , hostPolicy] =
           vi.mocked(loadCliConfig).mock.calls[0]!;
         expect(hostPolicy?.executionEngine).toBe('managed');
+        // Its tools execute in the session's Runtime worker.
+        expect(hostPolicy?.managedRuntimeEnvironment).toBe(
+          managedRuntimeEnvironment,
+        );
         expect(settings?.experimental?.sessionWriterLease).toBe(true);
         expect(response._meta).toEqual({
           [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed',
@@ -4698,6 +4716,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         await expect(refusal).rejects.toHaveProperty('data', {
           errorKind: 'session_execution_engine_unavailable',
         });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it("stops the Runtime worker before it finishes a closed session's log", async () => {
+      const innerConfig = await setupSessionMocks('managed-host-close');
+      const order: string[] = [];
+      Object.assign(innerConfig, {
+        // A slow stop: finishing the log must wait for it.
+        closeManagedRuntime: vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          order.push('runtime');
+        }),
+      });
+      vi.mocked(
+        innerConfig.getChatRecordingService().finalize,
+      ).mockImplementation(() => {
+        order.push('finalize');
+      });
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+          sessionId: 'managed-host-close',
+        });
+        expect(order.slice(0, 2)).toEqual(['runtime', 'finalize']);
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

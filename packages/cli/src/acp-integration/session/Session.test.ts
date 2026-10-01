@@ -21,6 +21,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
   Content,
@@ -37199,6 +37200,203 @@ describe('Session', () => {
               errorType: core.ToolErrorType.EXECUTION_DENIED,
             }),
           );
+        });
+      });
+
+      describe('Managed Runtime outcome', () => {
+        it('fails the turn, reporting no result, when a call outcome is unknown', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const unknown = new ManagedRuntimeOutcomeUnknownError(
+            'The Runtime worker stopped answering for a tool call.',
+          );
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: vi.fn().mockRejectedValue(unknown),
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'write_file',
+                      args: { file_path: '/tmp/test.txt', content: 'x' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'write the file' }],
+            }),
+          ).rejects.toMatchObject({
+            code: -32603,
+            message: unknown.message,
+            data: { errorKind: 'managed_runtime_outcome_unknown' },
+          });
+          // No failure result for the model to act on, and no next request.
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+
+        it.each([false, true])(
+          'fails a cancelled turn whose call outcome became unknown (daemon context: %s)',
+          async (withContext) => {
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            const unknown = new ManagedRuntimeOutcomeUnknownError(
+              'A cancelled Runtime tool call did not settle.',
+            );
+            let started!: () => void;
+            const executing = new Promise<void>((resolve) => {
+              started = resolve;
+            });
+            const tool = {
+              name: 'run_shell_command',
+              kind: core.Kind.Execute,
+              build: vi.fn().mockReturnValue({
+                params: { command: 'sleep 100' },
+                getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                execute: vi.fn((signal: AbortSignal) => {
+                  started();
+                  return new Promise((_resolve, reject) => {
+                    // The worker never settles the cancel.
+                    signal.addEventListener('abort', () => reject(unknown), {
+                      once: true,
+                    });
+                  });
+                }),
+              }),
+            };
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'run_shell_command',
+                        args: { command: 'sleep 100' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+            const running = session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'run' }],
+              },
+              withContext
+                ? {
+                    version: 1,
+                    sessionId: 'test-session-id',
+                    promptId: 'daemon-prompt-id',
+                    originatorClientId: 'client-1',
+                  }
+                : undefined,
+            );
+            const outcome = running.catch((error: unknown) => error);
+            await executing;
+            void session.cancelPendingPrompt();
+            // Not a cancellation: the session is blocked.
+            expect(await outcome).toMatchObject({
+              code: -32603,
+              data: { errorKind: 'managed_runtime_outcome_unknown' },
+            });
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).not.toHaveBeenCalled();
+          },
+        );
+
+        it('releases a prepared call that permission denied', async () => {
+          const release = vi.fn().mockResolvedValue(undefined);
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+              getDescription: vi.fn().mockReturnValue('write'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn(),
+              release,
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'write_file',
+                        args: { file_path: '/tmp/test.txt', content: 'x' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValue(createStreamWithChunks([]));
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'write the file' }],
+          });
+
+          // The execution environment's slot does not outlive the call.
+          await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+          expect(
+            tool.build.mock.results[0]!.value.execute,
+          ).not.toHaveBeenCalled();
+        });
+
+        it('refuses a turn in a session that is blocked', async () => {
+          const unknown = new ManagedRuntimeOutcomeUnknownError(
+            'A cancelled Runtime tool call did not settle.',
+          );
+          mockConfig.getManagedSessionBlock = vi.fn().mockReturnValue(unknown);
+          mockChat.sendMessageStream = vi.fn();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'continue' }],
+            }),
+          ).rejects.toMatchObject({
+            data: { errorKind: 'managed_runtime_outcome_unknown' },
+          });
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
         });
       });
 

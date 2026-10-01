@@ -1709,6 +1709,8 @@ export async function loadCliConfig(
     };
     /** Engine a paired host selected; the Config persists or verifies it. */
     executionEngine?: SessionExecutionEngine;
+    /** Where a Managed session's tools execute; see `ConfigParameters`. */
+    managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2477,6 +2479,7 @@ export async function loadCliConfig(
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     sessionExecutionEngine: hostPolicy?.executionEngine,
+    managedRuntimeEnvironment: hostPolicy?.managedRuntimeEnvironment,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,

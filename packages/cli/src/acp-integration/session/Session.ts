@@ -267,6 +267,7 @@ import {
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
 } from '@qwen-code/qwen-code-core';
+import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
@@ -989,6 +990,16 @@ function recordDaemonLoopDetected(
     }
   }
   return true;
+}
+
+/**
+ * A Managed session whose Runtime tool call ended without a known outcome:
+ * the turn fails, and so does every later one.
+ */
+function managedOutcomeUnknownError(error: Error): RequestError {
+  return new RequestError(-32603, error.message, {
+    errorKind: 'managed_runtime_outcome_unknown',
+  });
 }
 
 function createLoopDetectedTurnError(
@@ -4975,6 +4986,10 @@ export class Session implements SessionContext {
         'Invocation context session does not match the active session',
       );
     }
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) {
+      throw managedOutcomeUnknownError(managedSessionBlock);
+    }
     const turnRecording = this.#beginTurnRecording(params, invocationContext);
     const controller = new AbortController();
     const channelTask =
@@ -5032,10 +5047,18 @@ export class Session implements SessionContext {
       // controlled cancellation so infrastructure failures are not hidden
       // as cancellations, and a non-abort error landing after a successor
       // aborted this turn is a real failure that must surface the same way.
+      // A cancel that left a Managed Runtime call's outcome unknown blocked
+      // the session: that is a failure, not a cancellation.
+      const managedOutcomeUnknown =
+        error instanceof RequestError &&
+        (error.data as { errorKind?: unknown } | undefined)?.errorKind ===
+          'managed_runtime_outcome_unknown';
       const controlledAbort =
-        abortReason === USER_CANCEL_ABORT_REASON ||
-        abortReason === SESSION_DISPOSE_ABORT_REASON ||
-        (abortReason === NEW_PROMPT_ABORT_REASON && this.#isAbortError(error));
+        !managedOutcomeUnknown &&
+        (abortReason === USER_CANCEL_ABORT_REASON ||
+          abortReason === SESSION_DISPOSE_ABORT_REASON ||
+          (abortReason === NEW_PROMPT_ABORT_REASON &&
+            this.#isAbortError(error)));
       if (controlledAbort) {
         const result = { stopReason: 'cancelled' as const };
         await this.#settleTurnRecording('cancelled', turnRecording, result);
@@ -13393,6 +13416,8 @@ export class Session implements SessionContext {
         : Math.round(performance.now() - executionStartedAt);
     let producerObserved = false;
     let terminalStatus: 'success' | 'error' | 'cancelled' | undefined;
+    // Released when the call ends, however it ends, as the core scheduler does.
+    let builtInvocation: { release?: () => Promise<void> } | undefined;
     let toolType: 'native' | 'mcp' = 'native';
     let mcpServerName: string | undefined = undefined;
     const guardContext: { policyToolName?: string } = {};
@@ -13966,6 +13991,7 @@ export class Session implements SessionContext {
                 this.config,
               )
             : tool.build(args);
+          builtInvocation = invocation;
           const callIdAware = invocation as {
             setCallId?: (id: string) => void;
           };
@@ -15944,6 +15970,8 @@ export class Session implements SessionContext {
                 : undefined,
           };
         } catch (e) {
+          // No failure to report: see the outer catch.
+          if (e instanceof ManagedRuntimeOutcomeUnknownError) throw e;
           const error = e instanceof Error ? e : new Error(String(e));
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
@@ -16014,6 +16042,11 @@ export class Session implements SessionContext {
         }
       }); // end runInToolSpanContext
     } catch (e) {
+      // A Managed Runtime call without a known outcome has no result to
+      // report: the prompt fails, and the session refuses to continue.
+      if (e instanceof ManagedRuntimeOutcomeUnknownError) {
+        throw managedOutcomeUnknownError(e);
+      }
       const error = e instanceof Error ? e : new Error(String(e));
       const status = activeToolAbortSignal.aborted ? 'cancelled' : 'error';
       return await earlyErrorResponse(error, toolName, {
@@ -16023,6 +16056,13 @@ export class Session implements SessionContext {
         executionStatus,
       });
     } finally {
+      if (builtInvocation?.release) {
+        void Promise.resolve()
+          .then(() => builtInvocation?.release?.())
+          .catch((error: unknown) => {
+            debugLogger.warn('Tool invocation resource cleanup failed:', error);
+          });
+      }
       if (terminalStatus && terminalStatus !== 'cancelled') {
         this.config.getLlmClient().recordCompletedToolCall(toolName, args);
       }

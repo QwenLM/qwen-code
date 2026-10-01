@@ -1,0 +1,708 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import { processBootLoaderEnv } from '../config/shared-env-keys.js';
+import {
+  createManagedRuntimeEnvironment,
+  currentCliWorkerLaunch,
+  ManagedSessionRuntimeWorker,
+  toToolResult,
+  type ManagedRuntimeWorkerLaunch,
+} from './managed-runtime-session-worker.js';
+
+// A worker that speaks boot v1 and the tool v2 routes, scripted per test.
+const FAKE_WORKER = String.raw`
+import { appendFileSync } from 'node:fs';
+import http from 'node:http';
+const log = (entry) => appendFileSync(process.env.FAKE_LOG, JSON.stringify(entry) + '\n');
+const mode = process.env.FAKE_MODE;
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const boot = JSON.parse(Buffer.concat(chunks).toString());
+log({ boot: boot.runtimeIncarnation, pid: process.pid });
+const settled = (text) => ({
+  protocolVersion: 2,
+  state: 'settled',
+  result: { executionStatus: 'success', responseParts: [{ type: 'text', text }] },
+});
+const server = http.createServer(async (req, res) => {
+  let body = '';
+  for await (const chunk of req) body += chunk;
+  const request = JSON.parse(body);
+  const send = (status, value) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(value));
+  };
+  if (req.headers.authorization !== 'Bearer ' + boot.token) return send(401, {});
+  const route = req.url.split('/').pop();
+  log({ route, request });
+  if (route === 'attest') {
+    if (mode === 'slow-attest') await new Promise((resolve) => setTimeout(resolve, 300));
+    return send(200, {
+      ...request,
+      runtimeInstanceId: boot.runtimeInstanceId,
+      runtimeIncarnation: boot.runtimeIncarnation,
+      leaseId: mode === 'impostor' ? 'another lease' : boot.leaseId,
+      epoch: boot.epoch,
+    });
+  }
+  if (route === 'execute') {
+    if (mode === 'lost-response' || mode === 'unknown') return req.socket.destroy();
+    if (mode === 'refuse') return send(409, { code: 'managed_runtime_identity_conflict', error: 'Refused before it ran.' });
+    if (mode === 'never-settles' || mode === 'settles-late') return;
+    if (mode === 'fails-before-journal') {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return send(500, {});
+    }
+    if (mode === 'cancel-overtakes') {
+      const until = Date.now() + 5000;
+      while (!globalThis.cancelRecorded && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return send(200, { protocolVersion: 2, state: 'settled', result: { executionStatus: 'cancelled', responseParts: [] } });
+    }
+    send(200, settled('ran ' + JSON.stringify(request.input)));
+    if (mode === 'exit-after-call') setTimeout(() => process.exit(0), 20);
+    if (mode === 'stop-listening') {
+      server.close();
+      setInterval(() => undefined, 1000);
+    }
+    return;
+  }
+  if (route === 'status') {
+    if (mode === 'unknown' || mode === 'fails-before-journal') return send(200, { protocolVersion: 2, state: 'unknown' });
+    if (mode === 'never-settles') return send(200, { protocolVersion: 2, state: 'cancel_requested', lastSequence: 2 });
+    if (mode === 'settles-late') return send(200, { protocolVersion: 2, state: 'settled', lastSequence: 3, result: { executionStatus: 'cancelled', responseParts: [] } });
+    return send(200, { ...settled('learned by reference'), lastSequence: 2 });
+  }
+  if (route === 'cancel') {
+    if (mode === 'fails-before-journal') return send(200, { protocolVersion: 2, state: 'unknown' });
+    // The first cancel arrives before the worker recorded the call.
+    if (mode === 'cancel-overtakes' && !globalThis.cancelSeen) {
+      globalThis.cancelSeen = true;
+      return send(200, { protocolVersion: 2, state: 'unknown' });
+    }
+    globalThis.cancelRecorded = true;
+    return send(200, { protocolVersion: 2, state: 'cancel_requested' });
+  }
+  send(404, {});
+});
+server.listen(0, '127.0.0.1', async () => {
+  if (mode === 'slow-ready') await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_READY_MS ?? 400)));
+  process.stdout.write(JSON.stringify({
+    type: 'ready',
+    version: 1,
+    runtimeInstanceId: boot.runtimeInstanceId,
+    runtimeIncarnation: boot.runtimeIncarnation,
+    leaseId: boot.leaseId,
+    epoch: boot.epoch,
+    url: 'http://127.0.0.1:' + server.address().port,
+  }) + '\n');
+});
+// Stopping lets requests in flight finish, as the real worker does.
+process.on('SIGTERM', () =>
+  mode === 'slow-attest' ? server.close(() => process.exit(0)) : process.exit(0),
+);
+`;
+
+const SESSION_ID = '0d3c6b8e-5a43-4f5d-9d2b-6c1f3a7e9b21';
+
+// The fake worker and the assertions use POSIX process signals.
+describe.skipIf(process.platform === 'win32')(
+  'ManagedSessionRuntimeWorker',
+  () => {
+    let root: string;
+    let script: string;
+    let logFile: string;
+    const workers: ManagedSessionRuntimeWorker[] = [];
+
+    beforeEach(async () => {
+      root = await mkdtemp(path.join(os.tmpdir(), 'qwen-m5-worker-'));
+      script = path.join(root, 'fake-worker.mjs');
+      logFile = path.join(root, 'log.jsonl');
+      await writeFile(script, FAKE_WORKER);
+      await writeFile(logFile, '');
+    });
+
+    afterEach(async () => {
+      await Promise.all(workers.splice(0).map((worker) => worker.close()));
+      await rm(root, { recursive: true, force: true });
+    });
+
+    function launch(
+      mode: string,
+      env: NodeJS.ProcessEnv = {},
+    ): () => ManagedRuntimeWorkerLaunch {
+      return () => ({
+        command: process.execPath,
+        args: [script],
+        env: { ...process.env, ...env, FAKE_MODE: mode, FAKE_LOG: logFile },
+      });
+    }
+
+    function worker(
+      mode: string,
+      cancelSettleTimeoutMs?: number,
+      env?: NodeJS.ProcessEnv,
+    ) {
+      const created = new ManagedSessionRuntimeWorker(
+        SESSION_ID,
+        root,
+        launch(mode, env),
+        cancelSettleTimeoutMs,
+      );
+      workers.push(created);
+      return created;
+    }
+
+    async function logged(): Promise<
+      Array<{ boot?: string; pid?: number; route?: string; request?: unknown }>
+    > {
+      return (await readFile(logFile, 'utf8'))
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    }
+
+    function isAlive(pid: number): boolean {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    it('boots, attests and runs a call bound to the session', async () => {
+      const result = await worker('ok').execute(
+        'read_file',
+        { file_path: 'a.txt' },
+        new AbortController().signal,
+      );
+      expect(result).toEqual({
+        executionStatus: 'success',
+        responseParts: [{ type: 'text', text: 'ran {"file_path":"a.txt"}' }],
+      });
+      const entries = await logged();
+      expect(entries.map((entry) => entry.route ?? 'boot')).toEqual([
+        'boot',
+        'attest',
+        'execute',
+      ]);
+      expect(entries[1].request).toMatchObject({
+        protocolVersion: 2,
+        isolationClass: 'session',
+        workspaceCwd: root,
+      });
+      expect(entries[2].request).toMatchObject({
+        protocolVersion: 2,
+        toolName: 'read_file',
+        input: { file_path: 'a.txt' },
+        reference: {
+          sessionId: SESSION_ID,
+          argsDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        },
+      });
+    });
+
+    it('learns the result of a call whose response was lost, without running it again', async () => {
+      const result = await worker('lost-response').execute(
+        'write_file',
+        { file_path: 'a.txt', content: 'x' },
+        new AbortController().signal,
+      );
+      expect(result.responseParts).toEqual([
+        { type: 'text', text: 'learned by reference' },
+      ]);
+      const entries = await logged();
+      expect(entries.filter((entry) => entry.route === 'execute')).toHaveLength(
+        1,
+      );
+      const execute = entries.find((entry) => entry.route === 'execute')!;
+      const status = entries.find((entry) => entry.route === 'status')!;
+      expect((status.request as { reference: unknown }).reference).toEqual(
+        (execute.request as { reference: unknown }).reference,
+      );
+    });
+
+    it('reports a call it cannot learn the outcome of as unknown', async () => {
+      await expect(
+        worker('unknown').execute(
+          'write_file',
+          { file_path: 'a.txt', content: 'x' },
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+    });
+
+    it('reports a call the worker refused as not started', async () => {
+      const result = await worker('refuse').execute(
+        'run_shell_command',
+        { command: 'true' },
+        new AbortController().signal,
+      );
+      expect(result).toEqual({
+        executionStatus: 'not_started',
+        responseParts: [],
+        error: { message: 'Refused before it ran.' },
+      });
+    });
+
+    it('gives up on a cancelled call that does not settle', async () => {
+      const controller = new AbortController();
+      const running = worker('never-settles', 200).execute(
+        'run_shell_command',
+        { command: 'sleep 100' },
+        controller.signal,
+      );
+      while (!(await logged()).some((entry) => entry.route === 'execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      controller.abort();
+      await expect(running).rejects.toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+      expect((await logged()).some((entry) => entry.route === 'cancel')).toBe(
+        true,
+      );
+    });
+
+    it('returns a call cancelled while its worker starts at once, unsent', async () => {
+      const controller = new AbortController();
+      const running = worker('slow-ready', undefined, {
+        FAKE_READY_MS: '10000',
+      }).execute(
+        'run_shell_command',
+        { command: 'touch never' },
+        controller.signal,
+      );
+      while ((await logged()).length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const abortedAt = Date.now();
+      controller.abort();
+      expect(await running).toEqual({
+        executionStatus: 'cancelled',
+        responseParts: [],
+      });
+      // Long before the worker is ready.
+      expect(Date.now() - abortedAt).toBeLessThan(5000);
+      expect((await logged()).some((entry) => entry.route === 'execute')).toBe(
+        false,
+      );
+    });
+
+    it('does not send a call when the session closes as its worker gets ready', async () => {
+      const closing = worker('slow-attest');
+      const running = closing.execute(
+        'run_shell_command',
+        { command: 'touch never' },
+        new AbortController().signal,
+      );
+      const refused = running.catch((error: unknown) => error);
+      while (!(await logged()).some((entry) => entry.route === 'attest')) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // The attestation still completes: the worker finishes requests in
+      // flight while it stops.
+      await closing.close();
+      expect(((await refused) as Error).message).toContain('closing');
+      expect((await logged()).some((entry) => entry.route === 'execute')).toBe(
+        false,
+      );
+    });
+
+    it('does not send a call when the session closes while its worker starts', async () => {
+      const closing = worker('slow-ready');
+      const running = closing.execute(
+        'run_shell_command',
+        { command: 'touch never' },
+        new AbortController().signal,
+      );
+      while ((await logged()).length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const refused = running.catch((error: unknown) => error);
+      await closing.close();
+      expect(await refused).toBeInstanceOf(Error);
+      expect(((await refused) as Error).message).toContain('closing');
+      expect((await logged()).some((entry) => entry.route === 'execute')).toBe(
+        false,
+      );
+    });
+
+    it('retries a cancel that overtook its call', async () => {
+      const controller = new AbortController();
+      const running = worker('cancel-overtakes').execute(
+        'run_shell_command',
+        { command: 'sleep 100' },
+        controller.signal,
+      );
+      while (!(await logged()).some((entry) => entry.route === 'execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      controller.abort();
+      expect(await running).toEqual({
+        executionStatus: 'cancelled',
+        responseParts: [],
+      });
+      expect(
+        (await logged()).filter((entry) => entry.route === 'cancel').length,
+      ).toBeGreaterThan(1);
+    });
+
+    it('stops retrying a cancel once the call ends without an outcome', async () => {
+      const controller = new AbortController();
+      const running = worker('fails-before-journal', 60_000).execute(
+        'run_shell_command',
+        { command: 'sleep 100' },
+        controller.signal,
+      );
+      while (!(await logged()).some((entry) => entry.route === 'execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      controller.abort();
+      await expect(running).rejects.toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+    });
+
+    it('takes one last look at a cancelled call before calling it unknown', async () => {
+      const controller = new AbortController();
+      const running = worker('settles-late', 200).execute(
+        'run_shell_command',
+        { command: 'sleep 100' },
+        controller.signal,
+      );
+      while (!(await logged()).some((entry) => entry.route === 'execute')) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      controller.abort();
+      expect(await running).toEqual({
+        executionStatus: 'cancelled',
+        responseParts: [],
+      });
+    });
+
+    it('refuses a worker that fails attestation and stops it', async () => {
+      await expect(
+        worker('impostor').execute(
+          'read_file',
+          { file_path: 'a.txt' },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('failed attestation');
+      const [{ pid }] = await logged();
+      expect(isAlive(pid!)).toBe(false);
+    });
+
+    it('starts a new worker after one exits between calls', async () => {
+      const replaced = worker('exit-after-call');
+      const signal = new AbortController().signal;
+      await replaced.execute('read_file', { file_path: 'a.txt' }, signal);
+      const [{ pid: first }] = await logged();
+      while (isAlive(first!)) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await replaced.execute('read_file', { file_path: 'b.txt' }, signal);
+      const boots = (await logged()).filter(
+        (entry) => entry.boot !== undefined,
+      );
+      expect(boots).toHaveLength(2);
+      // This one exits on its own too; closing must not race it.
+      while (isAlive(boots[1].pid!)) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    });
+
+    it('reports a call that reached no worker as not started and replaces it', async () => {
+      const replaced = worker('stop-listening');
+      const signal = new AbortController().signal;
+      await replaced.execute('read_file', { file_path: 'a.txt' }, signal);
+      const [{ pid: first }] = await logged();
+
+      expect(
+        await replaced.execute('read_file', { file_path: 'b.txt' }, signal),
+      ).toEqual({
+        executionStatus: 'not_started',
+        responseParts: [],
+        error: { message: 'The Runtime worker was not running.' },
+      });
+      // The silent worker is stopped, and the next call starts another.
+      while (isAlive(first!)) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await replaced.execute('read_file', { file_path: 'c.txt' }, signal);
+      expect(
+        (await logged()).filter((entry) => entry.boot !== undefined),
+      ).toHaveLength(2);
+    });
+
+    it('stops its worker on close and runs nothing afterwards', async () => {
+      const closing = worker('ok');
+      const signal = new AbortController().signal;
+      await closing.execute('read_file', { file_path: 'a.txt' }, signal);
+      const [{ pid }] = await logged();
+      await closing.close();
+      expect(isAlive(pid!)).toBe(false);
+      await expect(
+        closing.execute('read_file', { file_path: 'a.txt' }, signal),
+      ).rejects.toThrow('closing');
+    });
+  },
+);
+
+describe.skipIf(process.platform === 'win32')(
+  'createManagedRuntimeEnvironment',
+  () => {
+    let root: string;
+    let script: string;
+    let logFile: string;
+    let config: Config;
+    let environment: ReturnType<typeof createManagedRuntimeEnvironment>;
+    const signal = new AbortController().signal;
+
+    beforeEach(async () => {
+      root = await mkdtemp(path.join(os.tmpdir(), 'qwen-m5-env-'));
+      script = path.join(root, 'fake-worker.mjs');
+      logFile = path.join(root, 'log.jsonl');
+      await writeFile(script, FAKE_WORKER);
+      await writeFile(logFile, '');
+      config = new Config({
+        sessionId: SESSION_ID,
+        targetDir: root,
+        cwd: root,
+        debugMode: false,
+        model: 'test-model',
+        usageStatisticsEnabled: false,
+        telemetry: { enabled: false },
+        deferTelemetryInitialization: true,
+      });
+    });
+
+    afterEach(async () => {
+      await environment?.dispose();
+      await rm(root, { recursive: true, force: true });
+    });
+
+    function create(mode: string) {
+      environment = createManagedRuntimeEnvironment(config, () => ({
+        command: process.execPath,
+        args: [script],
+        env: { ...process.env, FAKE_MODE: mode, FAKE_LOG: logFile },
+      }));
+      return environment;
+    }
+
+    it('prepares a call here and runs it in the worker', async () => {
+      const file = path.join(root, 'written.txt');
+      const env = create('ok');
+      expect([...env.toolNames!].sort()).toEqual([
+        'edit',
+        'read_file',
+        'run_shell_command',
+        'write_file',
+      ]);
+      const prepared = await env.prepare(
+        {
+          id: 'write',
+          toolName: 'write_file',
+          params: { file_path: file, content: 'x' },
+        },
+        signal,
+      );
+      expect(prepared.locations).toEqual([{ path: file }]);
+      expect(await env.permission('write', signal)).toBe('ask');
+      const result = await env.execute('write', signal);
+      expect(result.llmContent).toEqual([
+        { text: `ran ${JSON.stringify({ file_path: file, content: 'x' })}` },
+      ]);
+      // The host prepared it but never wrote the file.
+      await expect(readFile(file, 'utf8')).rejects.toThrow();
+    });
+
+    it.each([true, 'true'])(
+      'refuses a background command (%j) before it asks or starts a worker',
+      async (isBackground) => {
+        const env = create('ok');
+        await expect(
+          env.prepare(
+            {
+              id: 'background',
+              toolName: 'run_shell_command',
+              params: { command: 'sleep 1', is_background: isBackground },
+            },
+            signal,
+          ),
+        ).rejects.toThrow('foreground only');
+        await expect(env.permission('background', signal)).rejects.toThrow(
+          'Unknown execution invocation',
+        );
+        expect(await readFile(logFile, 'utf8')).toBe('');
+      },
+    );
+
+    it('shows no copy of a file it read', async () => {
+      const env = create('ok');
+      const file = path.join(root, 'a.txt');
+      await env.prepare(
+        { id: 'read', toolName: 'read_file', params: { file_path: file } },
+        signal,
+      );
+      const result = await env.execute('read', signal);
+      expect(result.returnDisplay).toBe('');
+      expect(result.llmContent).toEqual([
+        { text: `ran ${JSON.stringify({ file_path: file })}` },
+      ]);
+    });
+
+    it('gives each session a worker of its own', async () => {
+      const other = new Config({
+        sessionId: '5b0b2a5c-9f53-4a5e-8d0c-2f1b7c4e6a90',
+        targetDir: root,
+        cwd: root,
+        debugMode: false,
+        model: 'test-model',
+        usageStatisticsEnabled: false,
+        telemetry: { enabled: false },
+        deferTelemetryInitialization: true,
+      });
+      const launch = () => ({
+        command: process.execPath,
+        args: [script],
+        env: { ...process.env, FAKE_MODE: 'ok', FAKE_LOG: logFile },
+      });
+      const first = createManagedRuntimeEnvironment(config, launch);
+      const second = createManagedRuntimeEnvironment(other, launch);
+      try {
+        for (const [env, id] of [
+          [first, 'one'],
+          [second, 'two'],
+        ] as const) {
+          await env.prepare(
+            {
+              id,
+              toolName: 'read_file',
+              params: { file_path: path.join(root, 'a.txt') },
+            },
+            signal,
+          );
+          await env.execute(id, signal);
+        }
+        const entries = (await readFile(logFile, 'utf8'))
+          .split('\n')
+          .filter(Boolean)
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                pid?: number;
+                request?: { reference?: { sessionId?: string } };
+              },
+          );
+        expect(new Set(entries.flatMap((entry) => entry.pid ?? [])).size).toBe(
+          2,
+        );
+        expect(
+          entries.flatMap((entry) => entry.request?.reference?.sessionId ?? []),
+        ).toEqual([SESSION_ID, '5b0b2a5c-9f53-4a5e-8d0c-2f1b7c4e6a90']);
+      } finally {
+        await first.dispose();
+        await second.dispose();
+      }
+    });
+
+    it('blocks the session when a call outcome is unknown', async () => {
+      const env = create('unknown');
+      await env.prepare(
+        {
+          id: 'read',
+          toolName: 'read_file',
+          params: { file_path: path.join(root, 'a.txt') },
+        },
+        signal,
+      );
+      const failure = env.execute('read', signal);
+      await expect(failure).rejects.toBeInstanceOf(
+        ManagedRuntimeOutcomeUnknownError,
+      );
+      expect(config.getManagedSessionBlock()).toBe(
+        await failure.catch((error: unknown) => error),
+      );
+      // Whatever the worker still runs is stopped with it.
+      const [{ pid }] = (await readFile(logFile, 'utf8'))
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { pid?: number });
+      expect(() => process.kill(pid!, 0)).toThrow();
+    });
+  },
+);
+
+describe('toToolResult', () => {
+  it('reports the model parts of a successful call', () => {
+    expect(
+      toToolResult({
+        executionStatus: 'success',
+        responseParts: [
+          { type: 'text', text: 'line' },
+          { inlineData: { mimeType: 'image/png', data: 'AA==' } },
+        ],
+      }),
+    ).toEqual({
+      llmContent: [
+        { text: 'line' },
+        { inlineData: { mimeType: 'image/png', data: 'AA==' } },
+      ],
+      returnDisplay: 'line',
+    });
+  });
+
+  it('keeps the error type the worker reports', () => {
+    expect(
+      toToolResult({
+        executionStatus: 'error',
+        responseParts: [],
+        error: { message: 'timed out', type: 'execution_timeout' },
+      }).error,
+    ).toEqual({ message: 'timed out', type: 'execution_timeout' });
+  });
+
+  it.each([
+    ['error', { message: 'boom' }, 'boom'],
+    ['not_started', { message: 'refused' }, 'refused'],
+    ['cancelled', undefined, 'The tool call was cancelled.'],
+  ] as const)(
+    'reports a %s call as an error',
+    (executionStatus, error, message) => {
+      expect(
+        toToolResult({ executionStatus, responseParts: [], error }),
+      ).toEqual({
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      });
+    },
+  );
+});
+
+describe('currentCliWorkerLaunch', () => {
+  afterEach(() => processBootLoaderEnv.clear());
+
+  it('starts this CLI as a worker with the loader vars this process booted with', () => {
+    processBootLoaderEnv.set('NODE_OPTIONS', '--import tsx/esm');
+    const launch = currentCliWorkerLaunch();
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.args.at(-1)).toBe('managed-runtime-worker');
+    expect(launch.args.some((arg) => arg.startsWith('--inspect'))).toBe(false);
+    expect(launch.env?.['NODE_OPTIONS']).toBe('--import tsx/esm');
+  });
+});
