@@ -250,7 +250,8 @@ class PlannedTaskContractTest {
                 "cancelWebShellTask")) {
             assertThat(CONTRACT.responsePointer(
                     CONTRACT.operation(operationId), 403))
-                    .as("%s declares 403", operationId).isNotNull();
+                    .as("%s declares the tenant filter refusal", operationId)
+                    .isEqualTo("/components/responses/Forbidden");
         }
     }
 

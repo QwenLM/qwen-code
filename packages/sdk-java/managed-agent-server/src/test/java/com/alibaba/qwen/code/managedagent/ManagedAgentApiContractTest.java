@@ -1641,8 +1641,8 @@ class ManagedAgentApiContractTest {
         }
         fail("""
                 The Managed Agent API drifted from %s.
-                Fix new drift. Record a line in %s only for a gap that a \
-                later slice closes.
+                Fix new drift. Actor-scope code drift is not deferrable.
+                Record eligible gaps in %s only if a later slice closes them.
                 %s
                 Remove resolved gaps from %s:
                 %s""".formatted(OpenApiContract.RESOURCE, KNOWN_GAPS,
