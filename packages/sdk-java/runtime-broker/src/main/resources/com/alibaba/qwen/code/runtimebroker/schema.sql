@@ -1,3 +1,8 @@
+CREATE TABLE IF NOT EXISTS qwen_runtime_placement_guard (
+    tenant_key CHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(512) NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     request_key CHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(512) NOT NULL,
@@ -8,6 +13,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding_slot (
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
     provisioner_kind VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(256),
     last_generation BIGINT NOT NULL,
     active_binding_id VARCHAR(512)
 );
@@ -24,6 +30,7 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     isolation_class VARCHAR(32) NOT NULL,
     isolation_key VARCHAR(512),
     provisioner_kind VARCHAR(512) NOT NULL,
+    storage_id VARCHAR(256),
     runtime_generation BIGINT NOT NULL,
     binding_state VARCHAR(32) NOT NULL,
     provision_request_id VARCHAR(512),
@@ -31,6 +38,8 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     credential_key_id VARCHAR(512),
     resource_handle_version INT,
     resource_handle_json LONGTEXT,
+    loss_evidence_json LONGTEXT,
+    stop_evidence_json LONGTEXT,
     runtime_instance_id VARCHAR(512),
     runtime_endpoint VARCHAR(2048),
     runtime_lease_id VARCHAR(512),
@@ -50,6 +59,28 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
         UNIQUE (request_key, runtime_generation),
     INDEX idx_runtime_binding_scope
         (scope_key, isolation_key, binding_state)
+);
+
+CREATE TABLE IF NOT EXISTS managed_workspace_operator_recovery (
+    recovery_id CHAR(36) PRIMARY KEY,
+    binding_id VARCHAR(512) NOT NULL,
+    runtime_generation BIGINT NOT NULL,
+    storage_key CHAR(64) NOT NULL,
+    holder_key CHAR(64) NOT NULL,
+    runtime_session_id VARCHAR(512) NOT NULL,
+    provision_request_id VARCHAR(512) NOT NULL,
+    resource_handle_json LONGTEXT NOT NULL,
+    runtime_lease_id VARCHAR(512) NOT NULL,
+    runtime_epoch BIGINT NOT NULL,
+    blocked_execution_call_id VARCHAR(512) NOT NULL,
+    operator_id VARCHAR(512) NOT NULL,
+    reason VARCHAR(2048) NOT NULL,
+    prepared_at DATETIME(6) NOT NULL,
+    attestation_json LONGTEXT,
+    attestation_sha256 CHAR(64),
+    attested_at DATETIME(6),
+    completed_at DATETIME(6),
+    UNIQUE (binding_id, runtime_generation)
 );
 
 CREATE TABLE IF NOT EXISTS qwen_runtime_session (
@@ -97,6 +128,8 @@ CREATE TABLE IF NOT EXISTS qwen_tool_execution (
     dispatch_generation BIGINT NOT NULL,
     record_version BIGINT NOT NULL,
     settled_at DATETIME(6),
+    abandoned_at DATETIME(6),
+    loss_evidence_id VARCHAR(512),
     CONSTRAINT uq_tool_execution_idempotency
         UNIQUE (idempotency_key_hash),
     INDEX idx_tool_execution_session

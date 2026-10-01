@@ -22,6 +22,19 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class EmbeddedRuntimeBrokerTest {
+    @Test
+    void stepCallBackstopExceedsEveryShippedCalleeWait() {
+        // The never-answering step backstop is twice the operation lease; it
+        // must stay above the provisioner and transport declared waits, or a
+        // slow-but-healthy runtime is cut mid-wait and never converges.
+        long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
+    }
+
+
     private static final String SESSION_ID =
             "550e8400-e29b-41d4-a716-446655440000";
 
@@ -29,6 +42,46 @@ class EmbeddedRuntimeBrokerTest {
     void usesFetchCompatibleDefaultBrokerPort() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isFalse();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rebootRecoveryRequiresDurableLocalProvisioning(boolean local) throws Exception {
+        var properties = properties();
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(!local);
+        if (local) {
+            properties.getRuntimeBroker().setProvisioner("local-process");
+            properties.getRuntimeBroker().setWorkspaceId("");
+        }
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("requires durable local-process");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void recoveryDirectoryCannotBeInsideLegacyOrManagedWorkspace(boolean managed,
+            @org.junit.jupiter.api.io.TempDir Path root) throws Exception {
+        ManagedAgentProperties properties = properties();
+        var config = properties.getRuntimeBroker();
+        config.setProvisioner("local-process");
+        config.setWorkspaceId("");
+        Path workspace = java.nio.file.Files.createDirectory(root.resolve("workspace")).toRealPath();
+        config.setWorkspaceCwd(workspace.toString());
+        config.setDurableLocalProcess(true);
+        config.setNodeExecutable("node");
+        config.setWorkerEntry("worker.js");
+        config.setCliEntry("cli.js");
+        Path storage = managed ? java.nio.file.Files.createDirectory(root.resolve("storage")).toRealPath() : workspace;
+        if (managed) {
+            config.setWorkspaceMounts(java.util.List.of(new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
+                    "tenant", "storage", storage.toString())));
+        }
+        config.setStateDirectory(storage.resolve("recovery").toString());
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside Workspace roots");
     }
 
     @Test
@@ -65,8 +118,8 @@ class EmbeddedRuntimeBrokerTest {
                 "storage-a", ".", "config-a", 1);
         when(store.findSessionById(SESSION_ID)).thenReturn(Optional.of(
                 new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
-                        null, "ACTIVE", null, null, 0, 0, 1, 1, null, 0,
-                        binding)));
+                        null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null,
+                        0, binding)));
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
             assertThatThrownBy(() -> broker.warm(SESSION_ID)
                     .toCompletableFuture().join())
@@ -79,7 +132,7 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
-    void rejectsUnsupportedBrokerRoutesBeforeAnySideEffects()
+    void rejectsUnsupportedOrMalformedBrokerRoutesBeforeAnySideEffects()
             throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
         try (EmbeddedRuntimeBroker broker = broker(store, properties())) {
@@ -94,10 +147,12 @@ class EmbeddedRuntimeBrokerTest {
                         "Bearer broker-token");
                 connection.setDoOutput(true);
                 connection.getOutputStream().write("{}".getBytes());
-                assertThat(connection.getResponseCode()).isEqualTo(501);
+                boolean unsupported = route.endsWith(":resolve");
+                assertThat(connection.getResponseCode()).isEqualTo(unsupported ? 501 : 409);
                 assertThat(new String(connection.getErrorStream()
                         .readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
-                        .contains("runtime_broker_operation_unsupported");
+                        .contains(unsupported ? "runtime_broker_operation_unsupported"
+                                : "runtime_broker_protocol_conflict");
                 connection.disconnect();
             }
             org.mockito.Mockito.verifyNoInteractions(store);

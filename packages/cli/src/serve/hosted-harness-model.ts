@@ -4,16 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
+import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
+import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+
 export interface HostedHarnessModelResult {
   text: string;
+  parts?: Part[];
   model: string;
+}
+
+export interface HostedHarnessTextDeltas {
+  delta(text: string): Promise<void>;
+  /** Whether the current model message already published durable text. */
+  published(): boolean;
 }
 
 export async function runHostedHarnessTextTurn(input: {
@@ -23,6 +34,12 @@ export async function runHostedHarnessTextTurn(input: {
   prompt: string;
   promptId: string;
   signal: AbortSignal;
+  resumeFromToolResults?: readonly Part[];
+  toolTurn?: Pick<
+    HostedWorkspaceToolTurn,
+    'execute' | 'consumeResults' | 'declarations'
+  >;
+  textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -69,14 +86,23 @@ export async function runHostedHarnessTextTurn(input: {
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
-    const history: Content[] = input.history.flatMap((record) => {
+    const historyRecords = input.resumeFromToolResults
+      ? input.history.slice(
+          0,
+          input.history.findLastIndex((record) => record.type === 'assistant') +
+            1,
+        )
+      : input.history;
+    const history: Content[] = historyRecords.flatMap((record) => {
       if (
-        (record.type === 'user' || record.type === 'assistant') &&
+        (record.type === 'user' ||
+          record.type === 'assistant' ||
+          (input.toolTurn && record.type === 'tool_result')) &&
         record.message?.parts
       ) {
         return [
           {
-            role: record.type === 'user' ? 'user' : 'model',
+            role: record.type === 'assistant' ? 'model' : 'user',
             parts: record.message.parts,
           },
         ];
@@ -91,47 +117,115 @@ export async function runHostedHarnessTextTurn(input: {
     client
       .getChat()
       .setHistory(
-        history.filter((entry, index) =>
-          entry.role === 'user'
-            ? answered(history[index + 1])
-            : answered(entry),
-        ),
+        input.toolTurn
+          ? history
+          : history.filter((entry, index) =>
+              entry.role === 'user'
+                ? answered(history[index + 1])
+                : answered(entry),
+            ),
       );
-    let text = '';
-    let finished = false;
-    for await (const event of client.sendMessageStream(
-      [{ text: input.prompt }],
-      input.signal,
-      input.promptId,
-    )) {
-      if (event.type === LlmEventType.Content) text += event.value;
-      else if (event.type === LlmEventType.Finished) finished = true;
-      else if (event.type === LlmEventType.Retry) {
-        if (!event.isContinuation) text = '';
-      } else if (event.type === LlmEventType.ModelFallback) {
-        text = '';
-      } else if (
-        event.type === LlmEventType.ToolCallRequest ||
-        event.type === LlmEventType.ToolCallConfirmation ||
-        event.type === LlmEventType.ToolCallResponse
-      ) {
-        throw new Error('Hosted Harness no-tool turn refused a tool call.');
-      } else if (event.type === LlmEventType.Error) {
-        throw new Error(event.value.error.message);
-      } else if (event.type === LlmEventType.UserCancelled) {
-        throw new Error('Hosted Harness turn was cancelled.');
-      } else if (
-        event.type !== LlmEventType.ChatCompressed &&
-        event.type !== LlmEventType.Thought &&
-        event.type !== LlmEventType.Citation
-      ) {
-        throw new Error(
-          'Hosted Harness model returned an unsupported continuation.',
-        );
+    let request: Part[] = input.resumeFromToolResults
+      ? [...input.resumeFromToolResults]
+      : [{ text: input.prompt }];
+    for (let round = 0; round < 16; round++) {
+      input.signal.throwIfAborted();
+      if (input.toolTurn)
+        client.getChat().setTools([
+          {
+            functionDeclarations: await input.toolTurn.declarations(
+              input.signal,
+            ),
+          },
+        ]);
+      let calls: ToolCallRequestInfo[] = [];
+      let text = '';
+      let finished = false;
+      for await (const event of client.sendMessageStream(
+        request,
+        input.signal,
+        input.promptId,
+        {
+          type:
+            round === 0 && !input.resumeFromToolResults
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+        },
+      )) {
+        if (event.type === LlmEventType.Content) {
+          text += event.value;
+          await input.textDeltas?.delta(event.value);
+        } else if (event.type === LlmEventType.Finished) finished = true;
+        else if (event.type === LlmEventType.Retry) {
+          calls = [];
+          if (!event.isContinuation) {
+            if (input.textDeltas?.published()) {
+              throw new Error(
+                'Hosted Harness cannot retract a published model attempt.',
+              );
+            }
+            text = '';
+          }
+        } else if (event.type === LlmEventType.ModelFallback) {
+          if (input.textDeltas?.published()) {
+            throw new Error(
+              'Hosted Harness cannot retract a published model attempt.',
+            );
+          }
+          calls = [];
+          text = '';
+        } else if (
+          event.type === LlmEventType.ToolCallRequest &&
+          input.toolTurn
+        ) {
+          calls.push(event.value);
+        } else if (
+          event.type === LlmEventType.ToolCallRequest ||
+          event.type === LlmEventType.ToolCallConfirmation ||
+          event.type === LlmEventType.ToolCallResponse
+        ) {
+          throw new Error('Hosted Harness no-tool turn refused a tool call.');
+        } else if (event.type === LlmEventType.Error) {
+          throw new Error(event.value.error.message);
+        } else if (event.type === LlmEventType.UserCancelled) {
+          throw new Error('Hosted Harness turn was cancelled.');
+        } else if (
+          event.type !== LlmEventType.ChatCompressed &&
+          event.type !== LlmEventType.Thought &&
+          event.type !== LlmEventType.Citation
+        ) {
+          throw new Error(
+            'Hosted Harness model returned an unsupported continuation.',
+          );
+        }
       }
+      if (!finished)
+        throw new Error('Hosted Harness model turn did not finish.');
+      if (!input.toolTurn) return { text, model: config.getModel() };
+      if (round > 0 || input.resumeFromToolResults)
+        await input.toolTurn.consumeResults();
+      const output = client.getHistory().at(-1);
+      if (output?.role !== 'model' || !output.parts)
+        throw new Error('Hosted model output is unavailable.');
+      const parts = structuredClone(output.parts);
+      const functions = parts.filter((part) => part.functionCall);
+      if (functions.length !== calls.length)
+        throw new Error('Hosted model call history is inconsistent.');
+      for (const [index, part] of functions.entries()) {
+        const call = calls[index];
+        if (part.functionCall!.name !== call.name)
+          throw new Error('Hosted model call identity changed.');
+        part.functionCall!.id = call.callId;
+      }
+      if (calls.length === 0) return { text, parts, model: config.getModel() };
+      request = await input.toolTurn.execute(
+        calls,
+        parts,
+        config.getModel(),
+        input.signal,
+      );
     }
-    if (!finished) throw new Error('Hosted Harness model turn did not finish.');
-    return { text, model: config.getModel() };
+    throw new Error('Hosted tool turn exceeded 16 model rounds.');
   } finally {
     try {
       await config.shutdown({

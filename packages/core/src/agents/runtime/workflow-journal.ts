@@ -20,8 +20,9 @@
  * journal is not on disk is refused: there is nothing to replay, and running
  * every agent again under the old run id would only read as a continuation.
  *
- * Only `result` feeds the cache; `started` and `failed` are diagnostic. What
- * they buy on resume is the ability to say WHY a call is running live again:
+ * `started` and `failed` invalidate older results for the same key. On the
+ * first cache miss, results outside the reused prefix are removed atomically
+ * before live work begins. Diagnostic records remain to explain retries:
  * `failed` means the previous run's dispatch settled without a value, while
  * a bare `started` means the run was interrupted with that agent in flight.
  * A run the user cancelled writes no `failed` records at all, so every key it
@@ -45,10 +46,14 @@
  * precondition that makes prefix-hash caching correct.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
-import { read, writeLine } from '../../utils/jsonl-utils.js';
+import {
+  parseLineTolerantWithIntegrity,
+  writeLine,
+} from '../../utils/jsonl-utils.js';
+import { renameWithRetry } from '../../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
@@ -125,7 +130,7 @@ export type JournalLoadResult =
 export interface JournalReplay {
   sourceRef?: WorkflowSourceRef;
   sourceError?: string;
-  /** key → the completed result entry (last write wins). */
+  /** key → the latest success, unless a later attempt invalidated it. */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
   started: Map<string, JournalStartedEntry[]>;
@@ -243,10 +248,8 @@ export function deriveArgsSeed(args: unknown): string {
 }
 
 /**
- * Build the replay maps from a flat list of journal entries. `result`
- * entries win last-write; `started` entries accumulate (so a key started
- * N times surfaces N prior attempts for the respawn telemetry); `failed`
- * keys are collected as a set.
+ * Build replay maps in record order: the latest attempt supersedes an older
+ * success or failure. Starts accumulate for respawn telemetry.
  *
  * An entry type this build does not know is skipped rather than rejected, so
  * a journal written by a newer build still replays here for the records this
@@ -261,7 +264,9 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
   for (const e of entries) {
     if (e.type === 'result') {
       results.set(e.key, e);
+      failed.delete(e.key);
     } else if (e.type === 'started') {
+      results.delete(e.key);
       // A later attempt supersedes the prior terminal failure. If it is
       // interrupted, the next resume must describe it as interrupted rather
       // than carrying the stale failure classification forward forever.
@@ -270,6 +275,7 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       if (list) list.push(e);
       else started.set(e.key, [e]);
     } else if (e.type === 'failed') {
+      results.delete(e.key);
       failed.add(e.key);
     } else if (e.type === 'source') {
       try {
@@ -301,14 +307,54 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export class WorkflowJournalWriteError extends Error {
+  readonly __wfRunFailure = true;
+
+  constructor(cause: unknown) {
+    super(
+      'Could not persist workflow replay invalidation; subsequent agents were not started. Check storage and retry.',
+      { cause },
+    );
+    this.name = 'WorkflowJournalWriteError';
+  }
+}
+
+async function readEntries(journalPath: string): Promise<JournalEntry[]> {
+  const contents = await fs.readFile(journalPath, 'utf8');
+  const entries: JournalEntry[] = [];
+  for (const line of contents.split('\n')) {
+    if (!line.trim()) continue;
+    const parsed = parseLineTolerantWithIntegrity<Record<string, unknown>>(
+      line,
+      journalPath,
+    );
+    if (!parsed.complete)
+      throw new Error('Workflow journal contains incomplete records.');
+    for (const entry of parsed.records) {
+      if (
+        typeof entry['type'] !== 'string' ||
+        (['started', 'failed', 'result'].includes(entry['type']) &&
+          (typeof entry['key'] !== 'string' ||
+            typeof entry['agentId'] !== 'string' ||
+            (entry['type'] === 'result' && !Object.hasOwn(entry, 'result')))) ||
+        (entry['type'] === 'launched' && entry['version'] !== 1)
+      ) {
+        throw new Error('Workflow journal contains invalid records.');
+      }
+      entries.push(entry as unknown as JournalEntry);
+    }
+  }
+  return entries;
+}
+
 /**
- * Append-only JSONL journal for one workflow run. A read says whether the file
- * was there (see {@link JournalLoadResult}); appends are fire-and-forget at the call site (the
- * orchestrator does not await them on the hot path — a journal write
- * failure must not fail the dispatch).
+ * JSONL journal with serialized append and atomic replay-prefix retention.
+ * Ordinary appends are best-effort at the call site. Prefix retention must
+ * succeed before a resumed run starts live work.
  */
 export class WorkflowJournal {
   private pending = Promise.resolve();
+  private writeError: WorkflowJournalWriteError | undefined;
   readonly path: string;
 
   constructor(
@@ -388,6 +434,8 @@ export class WorkflowJournal {
    */
   async load(): Promise<JournalLoadResult> {
     try {
+      if (await this.hasSymlinkedPath())
+        throw new Error('Workflow journal path is symlinked.');
       await fs.stat(this.path);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -397,9 +445,7 @@ export class WorkflowJournal {
       return { kind: 'unreadable', reason: describeError(e) };
     }
     try {
-      const entries = await read<JournalEntry>(this.path, {
-        throwOnNonEnoentError: true,
-      });
+      const entries = await readEntries(this.path);
       return { kind: 'loaded', replay: buildReplay(entries) };
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
@@ -419,9 +465,65 @@ export class WorkflowJournal {
     );
   }
 
-  /** Append one entry. Rejects only on I/O error (callers `.catch`). */
+  retainReplayPrefix(keys: ReadonlySet<string>): Promise<void> {
+    const prefix = new Set(keys);
+    const operation = this.pending.then(async () => {
+      if (this.writeError) throw this.writeError;
+      let temporaryPath: string | undefined;
+      try {
+        if (await this.hasSymlinkedPath())
+          throw new Error('Workflow journal path is symlinked.');
+        const stat = await fs.stat(this.path);
+        if (process.geteuid && stat.uid !== process.geteuid()) {
+          throw new Error('Workflow journal is owned by another user.');
+        }
+        const entries = await readEntries(this.path);
+        const replay = buildReplay(entries);
+        if (replay.sourceError) throw new Error(replay.sourceError);
+        const retained = entries.filter(
+          (entry) => entry.type !== 'result' || prefix.has(entry.key),
+        );
+        const candidate = `${this.path}.${randomUUID()}.tmp`;
+        const file = await fs.open(candidate, 'wx', 0o600);
+        temporaryPath = candidate;
+        try {
+          await file.writeFile(
+            retained.map((entry) => JSON.stringify(entry) + '\n').join(''),
+            'utf8',
+          );
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        if (await this.hasSymlinkedPath())
+          throw new Error('Workflow journal path is symlinked.');
+        await renameWithRetry(temporaryPath, this.path, 3, 10, fs.rename);
+        temporaryPath = undefined;
+      } catch (cause) {
+        this.writeError = new WorkflowJournalWriteError(cause);
+        throw this.writeError;
+      } finally {
+        if (temporaryPath) {
+          await fs
+            .unlink(temporaryPath)
+            .catch((error) =>
+              debugLogger.warn(
+                `Workflow journal temporary file cleanup failed: ${error}`,
+              ),
+            );
+        }
+      }
+    });
+    this.pending = operation.catch(() => undefined);
+    return operation;
+  }
+
+  /** Append one entry; a failed invalidation blocks all later writes. */
   append(entry: JournalEntry): Promise<void> {
-    const operation = this.pending.then(() => writeLine(this.path, entry));
+    const operation = this.pending.then(() => {
+      if (this.writeError) throw this.writeError;
+      return writeLine(this.path, entry);
+    });
     this.pending = operation.catch(() => undefined);
     return operation;
   }

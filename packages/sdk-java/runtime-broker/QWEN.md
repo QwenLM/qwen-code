@@ -26,6 +26,16 @@ mvn test
 mvn checkstyle:check
 ```
 
+## Fault gates
+
+The `fault-gate` tests (profile `fault-gates`) inject faults only through
+the network, the database link and the process table. Never add a fault
+hook to production code for them. Three gates pin current behaviour: a
+restart that cannot adopt a `LocalProcessRuntimeProvisioner` worker, the
+#12670 `LOST` wedge, and a worker's context refusal recorded as `UNKNOWN`. A
+change to any of these behaviours updates its pin and the design document in
+the same change.
+
 ## Workspace binding package
 
 Keep `com.alibaba.qwen.code.runtimebroker.managedworkspace` on the JDK alone:

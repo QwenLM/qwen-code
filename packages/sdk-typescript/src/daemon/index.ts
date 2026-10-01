@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 export {
   DaemonClient,
   DaemonHttpError,
@@ -22,6 +23,7 @@ export {
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
+  type ResumeSessionRequest,
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
@@ -569,6 +571,7 @@ export type {
   DaemonWorkspaceRemovalResult,
   DaemonRuntimeStopRequest,
   DaemonRuntimeStopSession,
+  DaemonRuntimeStopChannel,
   DaemonRuntimeStopResult,
   DaemonRuntimeStopSnapshot,
   DaemonRuntimeStopOption,
@@ -598,6 +601,7 @@ export type {
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   HistoricalBranchSessionRequest,
+  WorktreeBranchSessionRequest,
   DaemonPersistedBranchedSession,
   DaemonSideTaskSession,
   DaemonForkSessionResult,
@@ -637,6 +641,8 @@ export type {
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
+  DaemonMcpAppToolCall,
+  DaemonMcpAppToolResult,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -716,6 +722,7 @@ export type {
   DaemonLogIssue,
   DaemonLogMode,
   DaemonStatusReport,
+  DaemonUpdateStatus,
   DaemonStatusReportDetail,
   DaemonStatusReportIssue,
   DaemonStatusReportLevel,

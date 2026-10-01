@@ -2,11 +2,14 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellResyncRequired;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub.Delivery;
 import com.alibaba.qwen.code.managedagent.service.SessionEventHub.Subscription;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import java.io.IOException;
 import java.time.Duration;
@@ -19,6 +22,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @Service
 public class ManagedEventStreamService {
+    static final String RESYNC = "agent.session.resync_required";
+    // Read the Session and its Items, then resume after the Snapshot.
+    static final String RESYNC_ACTION = "reload_snapshot";
     private final ManagedAgentService agentService;
     private final SessionEventHub eventHub;
     private final ExecutorService executor;
@@ -79,8 +85,17 @@ public class ManagedEventStreamService {
                     break;
                 }
                 if (reconcile) {
-                    List<EventRecord> events = agentService.streamEvents(
-                            session, sequence);
+                    List<EventRecord> events;
+                    try {
+                        events = agentService.streamEvents(session, sequence);
+                    } catch (ReplayCursorExpired expired) {
+                        ReplayWindow window = expired.window();
+                        resync(emitter, closed, new SessionResyncRequired(
+                                RESYNC, sessionId, window.floorSequence(),
+                                window.snapshotThroughSequence(),
+                                RESYNC_ACTION));
+                        break;
+                    }
                     for (EventRecord record : events) {
                         PublicEvent event = agentService.publicEvent(record);
                         if (!stillReadable(emitter, closed, actorId, session)) {
@@ -95,7 +110,7 @@ public class ManagedEventStreamService {
                             break;
                         }
                     }
-                    if (events.size() == 100) {
+                    if (events.size() == ManagedAgentService.STREAM_PAGE) {
                         continue;
                     }
                     reconcile = false;
@@ -154,8 +169,17 @@ public class ManagedEventStreamService {
                     break;
                 }
                 if (reconcile) {
-                    List<EventRecord> events = agentService.streamEvents(
-                            session, sequence);
+                    List<EventRecord> events;
+                    try {
+                        events = agentService.streamEvents(session, sequence);
+                    } catch (ReplayCursorExpired expired) {
+                        ReplayWindow window = expired.window();
+                        resync(emitter, closed, new WebShellResyncRequired(
+                                RESYNC, sessionId, window.floorSequence(),
+                                window.snapshotThroughSequence(),
+                                RESYNC_ACTION));
+                        break;
+                    }
                     for (EventRecord record : events) {
                         WebShellEvent event = agentService.webShellEvent(record);
                         if (!stillReadable(emitter, closed, actorId, session)) {
@@ -170,7 +194,7 @@ public class ManagedEventStreamService {
                             break;
                         }
                     }
-                    if (events.size() == 100) {
+                    if (events.size() == ManagedAgentService.STREAM_PAGE) {
                         continue;
                     }
                     reconcile = false;
@@ -211,6 +235,14 @@ public class ManagedEventStreamService {
         } catch (RuntimeException error) {
             completeWithError(emitter, closed, error);
         }
+    }
+
+    // The frame has no id, so a reconnect does not move past the events the
+    // client still lacks; the client reloads the Snapshot instead.
+    private static void resync(SseEmitter emitter, AtomicBoolean closed,
+            Object frame) throws IOException {
+        emitter.send(SseEmitter.event().name(RESYNC).data(frame));
+        complete(emitter, closed);
     }
 
     private Duration waitDuration(long heartbeatAt) {
