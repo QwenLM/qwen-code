@@ -555,9 +555,25 @@ public class HarnessCoordinator {
             // reach a different attachment and the Turn would stay CANCELLING;
             // only cancellation recovery, which has no live attachment, may
             // attach passively.
-            Attachment attachment = harness.createOrLoad(
-                    session.tenantId(), session.sessionId(),
-                    session.harnessBootId() != null);
+            Attachment attachment;
+            try {
+                attachment = harness.createOrLoad(
+                        session.tenantId(), session.sessionId(),
+                        session.harnessBootId() != null);
+            } catch (RuntimeException refusal) {
+                // A refused attach can never reach the running Turn, and no
+                // sweeper re-claims a Turn whose lease the live consumer keeps
+                // renewing: settle the Turn the API already answered 202 for
+                // instead of dropping the cancel, which would leave it running
+                // and then settling COMPLETED.
+                LOG.warn("Managed Turn cancellation was refused tenant={}"
+                                + " session={} turn={} failure={}",
+                        tenantId, sessionId, turnId,
+                        refusal.getClass().getSimpleName());
+                fail(turn, cancelRefusalCode(refusal),
+                        "The Hosted Harness refused the Turn cancellation.");
+                return;
+            }
             if (store.bindHarness(tenantId, sessionId,
                     turnId, owner, attachment.bootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());
@@ -580,6 +596,14 @@ public class HarnessCoordinator {
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, code, message);
         return true;
+    }
+
+    private static String cancelRefusalCode(RuntimeException refusal) {
+        if (refusal instanceof RuntimeBrokerException broker
+                && broker.getCode() != null) {
+            return broker.getCode();
+        }
+        return "hosted_harness_unavailable";
     }
 
     private boolean transientFailure(TurnRecord turn,

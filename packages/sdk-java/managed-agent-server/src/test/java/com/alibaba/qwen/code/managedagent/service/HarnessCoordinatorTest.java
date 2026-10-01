@@ -254,6 +254,31 @@ class HarnessCoordinatorTest {
         }
     }
 
+    @Test
+    void failsTheTurnWhenTheCancelAttachIsRefused() {
+        AgentStateStore store = boundCancellingStore();
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.createOrLoad("tenant", "session", true))
+                .thenThrow(WorkspaceExecutionStore.unavailable());
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.cancel("tenant", "session", "turn");
+            // The abort never reached the Harness, so the cancel the API
+            // already answered must not be a silent no-op that leaves the
+            // Turn running and then settling COMPLETED.
+            verify(harness, never()).cancel(anyString(), anyString());
+            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq("workspace_unavailable"),
+                    anyString());
+        } finally {
+            coordinator.close();
+        }
+    }
+
     private static AgentStateStore boundCancellingStore() {
         AgentStateStore store = mock(AgentStateStore.class);
         when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(
