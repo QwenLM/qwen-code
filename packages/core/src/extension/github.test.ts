@@ -2210,6 +2210,130 @@ describe('git extension helpers', () => {
       ).rejects.toThrow(MISSING_MANIFEST);
     });
 
+    async function stageManifestArchive(
+      format: 'zip' | 'tar.gz',
+      entries: ZipEntry[],
+    ) {
+      const archivePath = path.join(tempDir, `manifest-source.${format}`);
+      await writeArchive(
+        archivePath,
+        (archive) => {
+          for (const entry of entries)
+            archive.append(entry.content, { name: entry.name });
+        },
+        format === 'zip' ? 'zip' : 'tar',
+        format === 'tar.gz' ? { gzip: true } : undefined,
+      );
+      const destination = path.join(tempDir, 'extracted-manifest-source');
+      await fs.mkdir(destination);
+      return { archivePath, destination };
+    }
+
+    it.each(['zip', 'tar.gz'] as const)(
+      'flattens a %s wrapper beside unreadable root plugin metadata',
+      async (format) => {
+        const malformed = '{"name":';
+        const { archivePath, destination } = await stageManifestArchive(
+          format,
+          [
+            { name: 'plugin.json', content: malformed },
+            manifestEntry('wrapped-extension', 'wrapped/'),
+          ],
+        );
+        await extractArchiveFile(archivePath, destination);
+        await expect(
+          fs.readFile(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            'utf8',
+          ),
+        ).resolves.toContain('wrapped-extension');
+        await expect(
+          fs.stat(path.join(destination, 'wrapped')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(
+          fs.readFile(path.join(destination, 'plugin.json'), 'utf8'),
+        ).resolves.toBe(malformed);
+        await expect(
+          convertCompatibleExtension(destination),
+        ).resolves.toMatchObject({
+          extensionDir: destination,
+          originSource: 'QwenCode',
+        });
+      },
+    );
+
+    it.each(['zip', 'tar.gz'] as const)(
+      'rejects a %s archive whose only manifest is unreadable plugin metadata',
+      async (format) => {
+        const { archivePath, destination } = await stageManifestArchive(
+          format,
+          [{ name: 'plugin.json', content: '{"name":' }],
+        );
+        await expect(
+          extractArchiveFile(archivePath, destination),
+        ).rejects.toThrow(MISSING_MANIFEST);
+      },
+    );
+
+    it.each(['zip', 'tar.gz'] as const)(
+      'keeps root Qwen manifest precedence over unreadable plugin metadata in %s',
+      async (format) => {
+        const { archivePath, destination } = await stageManifestArchive(
+          format,
+          [
+            { name: 'plugin.json', content: '{"name":' },
+            manifestEntry('root-extension'),
+            manifestEntry('wrapped-extension', 'wrapped/'),
+          ],
+        );
+        await extractArchiveFile(archivePath, destination);
+        await expect(
+          fs.readFile(
+            path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+            'utf8',
+          ),
+        ).resolves.toContain('root-extension');
+        await expect(
+          fs.readFile(
+            path.join(destination, 'wrapped', EXTENSIONS_CONFIG_FILENAME),
+            'utf8',
+          ),
+        ).resolves.toContain('wrapped-extension');
+        await expect(
+          convertCompatibleExtension(destination),
+        ).resolves.toMatchObject({ originSource: 'QwenCode' });
+      },
+    );
+
+    it.each(['zip', 'tar.gz'] as const)(
+      'preserves unsupported Agent Plugins schema diagnostics for %s archives',
+      async (format) => {
+        const manifest = JSON.stringify({
+          $schema: 'https://agent-plugins.org/schemas/2.0.0/plugin.schema.json',
+          name: 'future-plugin',
+        });
+        const { archivePath, destination } = await stageManifestArchive(
+          format,
+          [
+            { name: 'plugin.json', content: manifest },
+            manifestEntry('wrapped-extension', 'wrapped/'),
+          ],
+        );
+        await expect(
+          extractArchiveFile(archivePath, destination),
+        ).resolves.toBeUndefined();
+        await expect(convertCompatibleExtension(destination)).rejects.toThrow(
+          'Unsupported Agent Plugins schema',
+        );
+        await expect(
+          fs.readFile(
+            path.join(destination, 'wrapped', EXTENSIONS_CONFIG_FILENAME),
+            'utf8',
+          ),
+        ).resolves.toContain('wrapped-extension');
+      },
+    );
+
     it('should extract and flatten a tar.gz archive with a wrapped extension directory', async () => {
       const archivePath = path.join(tempDir, 'wrapped-extension.tar.gz');
       const sourceRoot = path.join(tempDir, 'tar-source');

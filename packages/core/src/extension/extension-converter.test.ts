@@ -80,6 +80,63 @@ describe('Agent Plugins extension conversion', () => {
     });
   });
 
+  it('preserves unreadable plugin metadata when converting a marketplace selection', async () => {
+    const selectedRoot = path.join(pluginRoot, 'plugin-src');
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(selectedRoot, '.claude-plugin'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'sample-marketplace',
+        owner: { name: 'Test Owner' },
+        plugins: [
+          {
+            name: 'requested-plugin',
+            version: '2.0.0',
+            source: './plugin-src',
+          },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(selectedRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'requested-plugin', version: '2.0.0' }),
+    );
+    const malformed = '{"metadata":';
+    fs.writeFileSync(path.join(selectedRoot, 'plugin.json'), malformed);
+    const selected = await convertCompatibleExtension(
+      pluginRoot,
+      'requested-plugin',
+    );
+    try {
+      expect(selected.originSource).toBe('Claude');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(selected.extensionDir, 'qwen-extension.json'),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ name: 'requested-plugin', version: '2.0.0' });
+      expect(
+        fs.readFileSync(
+          path.join(selected.extensionDir, 'plugin.json'),
+          'utf8',
+        ),
+      ).toBe(malformed);
+      expect(
+        fs.readFileSync(path.join(selectedRoot, 'plugin.json'), 'utf8'),
+      ).toBe(malformed);
+      await expect(
+        convertCompatibleExtension(selected.extensionDir),
+      ).resolves.toMatchObject({ originSource: 'QwenCode' });
+    } finally {
+      fs.rmSync(selected.extensionDir, { recursive: true, force: true });
+    }
+  });
+
   it('honors an explicit marketplace selection over a root Agent Plugin manifest', async () => {
     fs.writeFileSync(
       path.join(pluginRoot, 'plugin.json'),

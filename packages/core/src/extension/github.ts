@@ -1431,8 +1431,10 @@ function getSupportedManifestList(): string {
 }
 
 function hasSupportedExtensionSourceManifest(rootPath: string): boolean {
+  const agentPluginStatus = getAgentPluginSchemaStatus(rootPath);
   return (
-    getAgentPluginSchemaStatus(rootPath) !== 'unrelated' ||
+    agentPluginStatus === 'supported' ||
+    agentPluginStatus === 'unsupported' ||
     SUPPORTED_EXTENSION_MANIFESTS.some((manifestPath) =>
       fs.existsSync(path.join(rootPath, manifestPath)),
     )
