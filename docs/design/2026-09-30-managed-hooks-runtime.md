@@ -122,8 +122,16 @@ recipe entries. Async admission waits for the Runtime acknowledgement; it is not
 a completion receipt. Normal acknowledged async work may coexist with later
 turns; unknown work blocks new admission and retains its Runtime hold.
 
+For a cancelled or timed-out trusted function Hook, Runtime waits up to one second
+for its actual callback Promise to settle before issuing a terminal failure receipt.
+A callback that never started is also safe to settle. Callback resolution or
+rejection is completion evidence; an abort signal alone is not. A callback still
+pending after the grace period keeps its unknown outcome and original Runtime
+hold, with no replay. Native Legacy function-Hook cancellation remains unchanged.
+
 HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
-refused. A received failure response can settle; a lost response after sending
+refused. A local runner-construction failure before dispatch is a settled failure
+under the saved fail policy. A received failure response can settle; a lost response after sending
 remains unknown and cannot be retried automatically. Hook outputs are bounded.
 Individual receipts and aggregate outputs use a 60 KiB bound. An oversized
 initial plan (including event input, descriptors and snapshot references) saves a
@@ -157,7 +165,15 @@ scope. Notification, expansion and closing events can acquire a `hook_operation`
 activation without creating a user turn, task completion, tool loop or startup
 Hook. Both subjects use the Session's monotonically increasing activation epoch.
 The scope remains held until the provider call actually settles, even if the
-provider ignores timeout cancellation.
+provider ignores timeout cancellation. If installing a Hook activation fails after
+release, the controller still restores the Session activation. If restoration
+also fails, new prompts are rejected before admission until activation recovery.
+HTTP journal commits retry a transient transport failure, 429 or 5xx response up
+to three attempts, 250 ms apart, using the identical transaction identity, record
+bytes, resources and writer scope. A replay must return the matching original
+receipt before local authority advances. Permanent rejection, a mismatched
+receipt or exhausted retries still stops writes and requires journal recovery;
+no failure clears the write fence or installs a different speculative activation.
 
 Model attempts and usage are associated with the original Hook operation and
 originating turn when present. Budget accounting follows the existing Session
@@ -207,7 +223,7 @@ Sessions without a Hook pin retain their current behavior.
 
 Changed areas are Core Hook dispatch/activation/record validation, CLI Hosted
 orchestration and Runtime execution, Java Broker transport and Session Store
-projection, and their collocated tests. Migration V26 records the first admission
+projection, and their collocated tests. Migration V27 records the first admission
 journal sequence as `first_sequence`, which later revisions preserve. The latest
 settled catalog is chosen by this sequence, matching native registration order
 even when an older registration settles later, independently of clocks or UUIDs.

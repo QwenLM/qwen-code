@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
+import { ManagedHookActivationController } from './managed-hook-activation.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
@@ -316,6 +317,159 @@ describe('HTTP Managed Session store', () => {
       await session.close();
     }
   });
+
+  it.each([
+    'uncommitted-503',
+    'lost-commit-response',
+    'lost-response-body',
+    'permanent-409',
+    'exhausted-503',
+    'changed-receipt',
+    'invalid-json',
+  ])(
+    'preserves activation transaction identity and failure fencing after %s',
+    async (failure) => {
+      const server = new FakeManagedSessionStore();
+      const runtimeBaseDir = await mkdtemp(
+        path.join(tmpdir(), 'managed-http-store-'),
+      );
+      temporaryDirectories.push(runtimeBaseDir);
+      const requests: string[] = [];
+      const recoverable =
+        failure === 'uncommitted-503' ||
+        failure === 'lost-commit-response' ||
+        failure === 'lost-response-body';
+      let armed = false;
+      let replay: unknown;
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) => {
+          if (armed && requestUrl(input).endsWith('/transactions:commit')) {
+            const body = JSON.parse(String(init?.body)) as Record<
+              string,
+              unknown
+            >;
+            if (body['operation'] === 'installActivation') {
+              requests.push(String(init?.body));
+              if (failure === 'permanent-409' || failure === 'exhausted-503')
+                return jsonResponse(
+                  { error: { code: 'commit_rejected' } },
+                  failure === 'permanent-409' ? 409 : 503,
+                );
+              if (failure === 'changed-receipt') {
+                const receipt = (await (
+                  await server.fetch(input, init)
+                ).json()) as Record<string, unknown>;
+                return jsonResponse({ ...receipt, transactionId: 'different' });
+              }
+              if (failure === 'invalid-json')
+                return new Response('{', {
+                  headers: { 'Cache-Control': 'no-store' },
+                });
+              if (requests.length === 1) {
+                if (failure === 'uncommitted-503')
+                  return jsonResponse(
+                    { error: { code: 'temporary_failure' } },
+                    503,
+                  );
+                replay = await (await server.fetch(input, init)).json();
+                if (failure === 'lost-response-body')
+                  return new Response(
+                    new ReadableStream({
+                      start(controller) {
+                        controller.error(
+                          new TypeError('Response stream terminated'),
+                        );
+                      },
+                    }),
+                    { headers: { 'Cache-Control': 'no-store' } },
+                  );
+                throw new TypeError('Commit response lost');
+              }
+              armed = false;
+              if (replay !== undefined) return jsonResponse(replay);
+            }
+          }
+          return server.fetch(input, init);
+        },
+      });
+      const definitionRef = await stores.resourceStore.publish(
+        'managed-session-definition',
+        Buffer.from('{}'),
+      );
+      const rootSnapshotRef = await stores.resourceStore.publish(
+        'managed-session-root-snapshot',
+        Buffer.from('{}'),
+      );
+      const session = await openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: 'harness-a',
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+      });
+      try {
+        armed = true;
+        const controller = new ManagedHookActivationController(session);
+        const run = vi.fn(async () => 'completed');
+        const operation = controller.runHookOperation(
+          {
+            operationId: 'notification',
+            occurrenceId: 'notification',
+            originTurnId: null,
+          },
+          run,
+        );
+        if (recoverable) {
+          await expect(operation).resolves.toBe('completed');
+          expect(run).toHaveBeenCalledOnce();
+          expect(requests).toHaveLength(2);
+          const transaction = JSON.parse(requests[0]) as Record<
+            string,
+            unknown
+          >;
+          expect(
+            server.commits.filter(
+              (commit) =>
+                commit['transactionId'] === transaction['transactionId'],
+            ),
+          ).toHaveLength(1);
+          expect(session.authority.writesStopped).toBe(false);
+          expect(session.authority.currentActivation).toMatchObject({
+            ...session.activation,
+            phase: 'active',
+            epoch: 3,
+          });
+          expect(session.authority.currentActivationSubject?.type).not.toBe(
+            'hook_operation',
+          );
+          await expect(
+            controller.runTurn('next-turn', async () => 'accepted'),
+          ).resolves.toBe('accepted');
+        } else {
+          await expect(operation).rejects.toThrow('writes stopped');
+          expect(run).not.toHaveBeenCalled();
+          expect(requests).toHaveLength(failure === 'exhausted-503' ? 3 : 1);
+          expect(session.authority.writesStopped).toBe(true);
+          await expect(controller.runTurn('next-turn', run)).rejects.toThrow(
+            'current Session activation',
+          );
+        }
+        expect(requests.every((body) => body === requests[0])).toBe(true);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   it('commits staged resources and restores without a local transcript', async () => {
     const server = new FakeManagedSessionStore();

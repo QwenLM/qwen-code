@@ -1342,4 +1342,34 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     expect(service.getTotalOutputTokens('session-a')).toBe(170);
     expect(service.getTotalOutputTokens('session-b')).toBe(9);
   });
+
+  it.each(['constructor', 'toString', 'hasOwnProperty', '__proto__'])(
+    'accumulates source %s after restoring a JSON model ledger',
+    (source) => {
+      const service = new UiTelemetryService();
+      service.addEvent(response('main', 120), 'session-a');
+      const saved = JSON.parse(
+        JSON.stringify(service.getMetricsForSession('session-a').models),
+      );
+      service.reset();
+
+      service.restoreSessionModelMetrics('session-a', saved);
+      expect(() =>
+        service.addEvent(
+          apiResponse('main', 10, [5, 20, 25, 0, 0], {
+            subagent_name: source,
+          }),
+          'session-a',
+        ),
+      ).not.toThrow();
+
+      const restored = service.getMetricsForSession('session-a').models;
+      expect(Object.getPrototypeOf(restored['main'].bySource)).toBeNull();
+      expect(restored['main'].bySource[source].api.totalRequests).toBe(1);
+      expect(restored['main'].bySource[source].tokens.candidates).toBe(20);
+      expect(service.getTotalOutputTokens('session-a')).toBe(140);
+      expect(service.getMetrics().models['main'].tokens.candidates).toBe(20);
+      expect(Object.hasOwn(saved['main'].bySource, source)).toBe(false);
+    },
+  );
 });

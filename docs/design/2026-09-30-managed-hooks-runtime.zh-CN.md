@@ -93,7 +93,13 @@ turn。此前 SessionStart 的取消不能结算后来的 turn。Load 同样修�
 ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn 共存；未知工作阻塞新准入
 并保留 Runtime hold。
 
+trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认真实回调 Promise
+已结束后再给出终态失败回执；回调从未开始时也可安全结算。回调 resolve 或 reject
+是结束证据，仅有 abort signal 不是。超过宽限期仍未结束的回调保留 unknown 结果和
+原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
+
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
+执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。单项回执和聚合输出上限均为 60 KiB。
 初始计划（含事件输入、descriptor 和快照引用）超限时，保存有界 blocking 回执及原始
 语义输入的摘要。恢复直接返回该拒绝，不派发或消费 once，即使没有匹配 handler 也能
@@ -117,6 +123,12 @@ blocking 回执，PermissionRequest 始终返回 deny，不受失败策略影响
 Notification、扩展和关闭事件可以领取 `hook_operation` activation，不创建用户 turn、
 任务完成、工具循环或 startup Hook。两种 subject 共用 Session 单调递增的 activation
 epoch。即使 provider 忽略超时取消，scope 也会保持占用直到调用实际结束。
+释放旧 activation 后若安装 Hook activation 失败，控制器仍会恢复 Session activation。
+如果恢复也失败，则在 activation 恢复前拒绝接收新的 prompt。
+HTTP journal 提交遇到临时传输失败、429 或 5xx 时，最多尝试三次，间隔 250 ms，
+保持事务身份、记录字节、资源和 writer scope 完全相同。重放必须返回匹配的原回执，
+本地 authority 才能推进。永久拒绝、回执不匹配或重试耗尽仍会停止写入并要求 journal
+恢复；不会清除写入屏障或尝试安装另一个未经确认的 activation。
 
 模型尝试和用量关联原 Hook operation，并在存在时关联原 turn。预算记账沿用 Session
 与 turn 的现有语义；Hook operation 不得重置原预算。本变更不增加金额预算策略或独立
@@ -158,7 +170,7 @@ tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投
 保持原有行为。
 
 变更涉及 Core Hook dispatch/activation/record 校验、CLI Hosted 编排与 Runtime 执行、
-Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V26 将首次
+Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V27 将首次
 准入的日志序号保存为 `first_sequence`，后续修订保持不变。最新已结算目录按该序号选择，
 与原生注册顺序一致；即使旧注册较晚结算，也不受时钟或 UUID 排序影响。
 

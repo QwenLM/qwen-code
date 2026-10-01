@@ -76,6 +76,7 @@ export class ManagedHookError extends Error {
 const identifier = /^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,511}$/u;
 const MAX_OPERATIONS = 4096;
 const MAX_BYTES = 60 * 1024;
+const FUNCTION_SETTLEMENT_GRACE_MS = 1000;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new ManagedHookError('managed_hook_invalid');
@@ -690,6 +691,7 @@ export class ManagedHookRuntime {
     directory: string,
   ): Promise<void> {
     let dispatched = false;
+    let functionCompletion: Promise<boolean> | undefined;
     try {
       let config: HookConfig;
       if (definition.config.type === 'function') {
@@ -710,11 +712,21 @@ export class ManagedHookRuntime {
         } catch {
           throw new ManagedHookError('managed_hook_handler_unavailable');
         }
+        const callback = registered['callback'] as FunctionHookCallback;
         config = {
           ...definition.config,
           type: HookType.Function,
           id: handler.handlerId,
-          callback: registered['callback'] as FunctionHookCallback,
+          callback: (input, context) => {
+            const pending = Promise.resolve().then(() =>
+              callback(input, context),
+            );
+            functionCompletion = pending.then(
+              () => true,
+              () => true,
+            );
+            return pending;
+          },
           errorMessage: 'Managed hook handler failed.',
           ...(registered['onHookSuccess']
             ? {
@@ -805,11 +817,28 @@ export class ManagedHookRuntime {
         };
         return;
       }
+      let functionSettled = true;
+      if (
+        config.type === HookType.Function &&
+        (result.outcome === 'timeout' || result.outcome === 'cancelled') &&
+        functionCompletion
+      ) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        functionSettled = await Promise.race([
+          functionCompletion,
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(
+              () => resolve(false),
+              FUNCTION_SETTLEMENT_GRACE_MS,
+            );
+          }),
+        ]);
+        clearTimeout(timer);
+      }
       const uncertain =
         (config.type === HookType.Command &&
           result.processTreeDrained !== true) ||
-        (config.type === HookType.Function &&
-          (result.outcome === 'timeout' || result.outcome === 'cancelled')) ||
+        (config.type === HookType.Function && !functionSettled) ||
         (config.type === HookType.Http &&
           (!result.httpRequestState ||
             result.httpRequestState === 'outcome_unknown'));
@@ -836,6 +865,19 @@ export class ManagedHookRuntime {
             outcome: 'non_blocking_error',
             duration: 0,
             error: 'Managed hook authorization expired before dispatch.',
+          },
+        };
+        return;
+      }
+      if (!dispatched && !(error instanceof ManagedHookError)) {
+        entry.view = {
+          operationId: control.operationId,
+          state: 'settled',
+          result: {
+            success: false,
+            outcome: 'non_blocking_error',
+            duration: 0,
+            error: 'Managed hook failed before dispatch.',
           },
         };
         return;

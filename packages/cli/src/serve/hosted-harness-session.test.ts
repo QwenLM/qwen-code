@@ -432,6 +432,55 @@ describe('Hosted Harness no-tool session', () => {
     expect((await running).status).toBe(200);
   });
 
+  it.each([1, 2])(
+    'recovers Hook activation after %s failed installation(s) without accepting stranded prompts',
+    async (failures) => {
+      const { server, authorize } = await hookApp();
+      const install = vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'installActivation',
+      );
+      for (let index = 0; index < failures; index++)
+        install.mockRejectedValueOnce(new Error('activation unavailable'));
+      const operation = {
+        operationId: randomUUID(),
+        event: 'Notification',
+        input: { message: 'ready', notification_type: 'test' },
+      };
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+      )
+        .send(operation)
+        .expect(503);
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      if (failures === 2) {
+        await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+          .expect(409);
+        expect(state.model).not.toHaveBeenCalled();
+        await authorize(
+          supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+        )
+          .send(operation)
+          .expect(200);
+      }
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+      });
+      expect(state.model).toHaveBeenCalledOnce();
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
+
   it.each([
     [
       'managed_hook_handler_unavailable',

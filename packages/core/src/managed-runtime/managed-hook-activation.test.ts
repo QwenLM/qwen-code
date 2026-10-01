@@ -255,6 +255,34 @@ describe('Managed Hook model activation', () => {
     await other.runHookOperation(operation, async () => undefined);
   });
 
+  it('restores a turn activation when installing a Hook activation fails', async () => {
+    const { session, controller } = await fixture();
+    const failure = new Error('install resource failed');
+    vi.spyOn(session.authority, 'installActivation').mockRejectedValueOnce(
+      failure,
+    );
+    const evaluate = vi.fn();
+
+    await expect(controller.runHookOperation(operation, evaluate)).rejects.toBe(
+      failure,
+    );
+
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(session.authority.currentActivation).toMatchObject({
+      ...session.activation,
+      phase: 'active',
+    });
+    expect(session.authority.currentActivationSubject?.type).not.toBe(
+      'hook_operation',
+    );
+    await expect(
+      controller.runTurn('next-turn', async () => 'accepted'),
+    ).resolves.toBe('accepted');
+    await expect(
+      controller.runHookOperation(operation, async () => 'retry'),
+    ).resolves.toBe('retry');
+  });
+
   it('serializes prompt Hooks inside a turn and preserves the checkpoint', async () => {
     const { session, controller } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();
