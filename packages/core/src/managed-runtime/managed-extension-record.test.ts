@@ -90,6 +90,7 @@ interface SchemaDefinition {
 const BEYOND_SCHEMA = {
   grant: [
     'generation-past-int64',
+    'operation-id-high-surrogate-followed-by-a',
     'operation-id-lone-low-surrogate',
     'operation-id-lone-surrogate',
     'operation-id-not-nfc',

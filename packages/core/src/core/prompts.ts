@@ -281,9 +281,11 @@ export interface PromptToolSurface {
  * or — for Agent alone — reachable through the deferred-tool bridge (see
  * `gateToolGuidance`). A line that named an uncallable tool would send the
  * model after something it cannot call, which is the defect this gating exists
- * to fix. Lines absent from this table are policy that holds regardless of the
- * tool surface (tool fallback, parallel calls, respecting denials) and are
- * never dropped.
+ * to fix. Any other deferred tool is reachable but not declared, so its line
+ * drops; its selection rule travels in the first description line the
+ * deferred-tool reminder shows instead (#12702). Lines absent from this table
+ * are policy that holds regardless of the tool surface (tool fallback, parallel
+ * calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;

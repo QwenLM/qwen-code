@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -1286,8 +1287,63 @@ public final class ToolPublicationDataStore {
     private byte[] readRangeInternal(JsonNode key, String publicationId,
             JsonNode manifestRef, JsonNode expectedIdentity, String streamId,
             long offset, int length, boolean requireFinished, Runnable heartbeat) {
-        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT,
-                "Invalid publication range");
+        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT, "Invalid publication range");
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity,
+                streamId, requireFinished, heartbeat).readRange(offset, length, heartbeat);
+    }
+
+    VerifiedStream openReferencedStream(JsonNode key, String publicationId,
+            JsonNode outcomeRef, JsonNode manifestRef, JsonNode expectedIdentity,
+            String streamId, long revision, long sequence) {
+        requireReferenced(key, publicationId, outcomeRef, revision, sequence);
+        JsonNode outcome = ToolPublicationContract.readJson(referencedResource(key,
+                publicationId, outcomeRef, "managed-tool-outcome", MAX_TERMINAL));
+        require("committed".equals(text(outcome, "decision"))
+                && manifestRef.equals(outcome.path("manifestRef")),
+                "Publication did not commit this representation");
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, () -> {});
+    }
+
+    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
+            long revision, long sequence) {
+        require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
+                outcomeRef, revision, sequence), "Publication receipt is unavailable");
+    }
+
+    Map<String, Map<String, Object>> referencedPublications(JsonNode key, List<String> ids) {
+        Map<String, Map<String, Object>> result = new java.util.HashMap<>();
+        if (ids.isEmpty()) {
+            return result;
+        }
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(scope(key));
+        arguments.add(text(key, "tenantId"));
+        arguments.add(text(key, "workspaceId"));
+        arguments.add(text(key, "sessionId"));
+        arguments.addAll(ids);
+        var rows = jdbc.queryForList("SELECT publication_id, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " FROM qwen_tool_publication WHERE scope_key = ?"
+                + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id IN ("
+                + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", arguments.toArray());
+        for (var row : rows) {
+            result.put((String) row.get("publication_id"), row);
+        }
+        return result;
+    }
+
+    static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
+        return row != null && "REFERENCED".equals(row.get("producer_phase"))
+                && row.get("quarantined") instanceof Number mark && mark.intValue() == 0
+                && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
+                && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
+                && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
+                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
+    }
+
+    private VerifiedStream verifiedStream(JsonNode key, String publicationId,
+            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished,
+            Runnable heartbeat) {
         String scope = scope(key);
         var publication = jdbc.queryForMap("SELECT binding_json, producer_phase,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM qwen_tool_publication"
@@ -1331,17 +1387,17 @@ public final class ToolPublicationDataStore {
         require(selected != null && selected.path("byteLength").canConvertToLong(),
                 "Publication stream is missing");
         long size = selected.path("byteLength").longValue();
-        require(size >= 0 && offset <= size && length <= size - offset,
-                "Publication range exceeds stream");
-        byte[] result = new byte[length];
+        require(size >= 0, "Publication stream length is invalid");
+        var parts = new ArrayList<StreamPart>();
         JsonNode body = selected.path("body");
         if (body.has("ref")) {
             JsonNode ref = body.path("ref");
             Resource content = catalogResource(key, publicationId, text(ref, "resourceId"));
             require(refMatches(content, ref, "managed-tool-result-content")
-                    && content.length() == size, "Publication content reference conflicts");
-            copyVerified(content, scope, publicationId, offset, result, 0, length, heartbeat);
-            return result;
+                    && content.length() == size && size <= MAX_SEGMENT,
+                    "Publication content reference conflicts");
+            parts.add(new StreamPart(0, content));
+            return new VerifiedStream(scope, publicationId, size, parts);
         }
         require(body.path("pages").isArray(), "Publication stream has no pages");
         long expectedOffset = 0;
@@ -1370,15 +1426,9 @@ public final class ToolPublicationDataStore {
                         && rows.get(0).digest().equals(text(segment, "digest")),
                         "Publication page segment conflicts");
                 long position = expectedOffset + pageLength;
-                long overlapStart = Math.max(position, offset);
-                long overlapEnd = Math.min(position + segmentLength, offset + length);
-                if (overlapEnd > overlapStart) {
-                    Resource bytes = new Resource(rows.get(0).slot(), null, segmentLength,
-                            rows.get(0).digest(), rows.get(0).objectKey(), null, rows.get(0).state());
-                    copyVerified(bytes, scope, publicationId, overlapStart - position, result,
-                            Math.toIntExact(overlapStart - offset), Math.toIntExact(overlapEnd - overlapStart),
-                            heartbeat);
-                }
+                parts.add(new StreamPart(position, new Resource(rows.get(0).slot(), null,
+                        segmentLength, rows.get(0).digest(), rows.get(0).objectKey(), null,
+                        rows.get(0).state())));
                 pageLength += segmentLength;
                 segmentCount++;
                 expectedOrdinal++;
@@ -1389,7 +1439,98 @@ public final class ToolPublicationDataStore {
             expectedOffset += pageLength;
         }
         require(expectedOffset == size, "Publication stream page length conflicts");
-        return result;
+        return new VerifiedStream(scope, publicationId, size, parts);
+    }
+
+    private record StreamPart(long offset, Resource resource) {}
+
+    final class VerifiedStream {
+        private final String scope;
+        private final String publicationId;
+        private final long size;
+        private final List<StreamPart> parts;
+
+        private VerifiedStream(String scope, String publicationId, long size,
+                List<StreamPart> parts) {
+            this.scope = scope;
+            this.publicationId = publicationId;
+            this.size = size;
+            this.parts = List.copyOf(parts);
+        }
+
+        long size() { return size; }
+
+        long rangeVerificationBytes(long offset, int length) {
+            return parts.stream().filter(part -> part.offset() < offset + length
+                            && part.offset() + part.resource().length() > offset)
+                    .mapToLong(part -> part.resource().length()).sum();
+        }
+
+        InputStream open(Runnable guard) {
+            return new InputStream() {
+                private int partIndex;
+                private byte[] verified;
+                private int position;
+                private boolean closed;
+
+                @Override
+                public int read() throws IOException {
+                    byte[] one = new byte[1];
+                    return read(one, 0, 1) < 0 ? -1 : one[0] & 255;
+                }
+
+                @Override
+                public int read(byte[] target, int offset, int length) throws IOException {
+                    Objects.checkFromIndexSize(offset, length, target.length);
+                    if (closed) {
+                        throw new IOException("Artifact stream is closed");
+                    }
+                    if (length == 0) {
+                        return 0;
+                    }
+                    guard.run();
+                    while (verified == null || position == verified.length) {
+                        if (partIndex == parts.size()) {
+                            return -1;
+                        }
+                        var part = parts.get(partIndex);
+                        byte[] candidate = new byte[Math.toIntExact(part.resource().length())];
+                        copyVerified(part.resource(), scope, publicationId, 0,
+                                candidate, 0, candidate.length, guard);
+                        verified = candidate;
+                        position = 0;
+                        partIndex++;
+                    }
+                    int count = Math.min(Math.min(length, 64 * 1024), verified.length - position);
+                    guard.run();
+                    System.arraycopy(verified, position, target, offset, count);
+                    position += count;
+                    return count;
+                }
+
+                @Override
+                public void close() {
+                    closed = true;
+                    verified = null;
+                }
+            };
+        }
+
+        byte[] readRange(long offset, int length, Runnable guard) {
+            require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT
+                    && offset <= size && length <= size - offset, "Invalid publication range");
+            byte[] result = new byte[length];
+            for (var part : parts) {
+                long start = Math.max(offset, part.offset());
+                long end = Math.min(offset + length, part.offset() + part.resource().length());
+                if (end > start) {
+                    copyVerified(part.resource(), scope, publicationId, start - part.offset(),
+                            result, Math.toIntExact(start - offset), Math.toIntExact(end - start), guard);
+                }
+            }
+            guard.run();
+            return result;
+        }
     }
 
     private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
@@ -1457,7 +1598,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private static String scope(JsonNode key) {
+    static String scope(JsonNode key) {
         require(key != null && key.isObject(), "Invalid publication scope");
         return hash(JSON.createArrayNode().add(text(key, "tenantId"))
                 .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
