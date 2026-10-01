@@ -472,24 +472,6 @@ describe('Hosted Harness no-tool session', () => {
       false,
     ],
     [
-      'managed_hook_handler_unavailable',
-      HookEventName.InstructionsLoaded,
-      false,
-      false,
-    ],
-    [
-      'managed_hook_handler_unavailable',
-      HookEventName.InstructionsLoaded,
-      true,
-      false,
-    ],
-    [
-      'managed_hook_handler_unavailable',
-      HookEventName.InstructionsLoaded,
-      false,
-      true,
-    ],
-    [
       'managed_hook_command_isolation_unavailable',
       HookEventName.SessionStart,
       false,
@@ -531,6 +513,36 @@ describe('Hosted Harness no-tool session', () => {
       false,
       true,
     ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.InstructionsLoaded,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_command_isolation_unavailable',
+      HookEventName.InstructionsLoaded,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.InstructionsLoaded,
+      true,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.InstructionsLoaded,
+      false,
+      true,
+    ],
+    [
+      'unrecognized_runtime_error',
+      HookEventName.InstructionsLoaded,
+      false,
+      false,
+    ],
   ] as const)(
     'settles only a cancelled pre-model Hook (%s, %s, reload=%s, modelStarted=%s)',
     async (code, event, reload, modelStarted) => {
@@ -569,7 +581,7 @@ describe('Hosted Harness no-tool session', () => {
             event === HookEventName.SessionStart
               ? `session-start:${SESSION_ID}`
               : event === HookEventName.InstructionsLoaded
-                ? `${promptId}:native:instructions:0`
+                ? `${promptId}:native:${'c'.repeat(64)}:0`
                 : promptId!,
             { prompt_id: promptId },
             signal,
@@ -592,8 +604,8 @@ describe('Hosted Harness no-tool session', () => {
         });
       });
       const child = requests.find((entry) => entry.kind === 'hook-execute')!;
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
       const write = vi.spyOn(ManagedSessionRecordSink.prototype, 'write');
-      const originalWrite = write.getMockImplementation()!;
       if (reload)
         write.mockImplementation(function (
           this: ManagedSessionRecordSink,
@@ -641,7 +653,11 @@ describe('Hosted Harness no-tool session', () => {
       const status = await authorize(
         supertest(server).get(`/session/${SESSION_ID}/status`),
       );
-      if (event === HookEventName.PreToolUse || modelStarted) {
+      if (
+        event === HookEventName.PreToolUse ||
+        modelStarted ||
+        code === 'unrecognized_runtime_error'
+      ) {
         expect(status.body.recoveryBlocked).toBe(true);
         await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
           .send({ prompt, promptId: randomUUID(), payloadDigest })
@@ -685,7 +701,6 @@ describe('Hosted Harness no-tool session', () => {
   it.each([
     'single',
     'batch',
-    'large-batch',
     'result-write-failure',
     'result-ack-failure',
     'terminal-write-failure',
@@ -694,26 +709,44 @@ describe('Hosted Harness no-tool session', () => {
     'unfinished-model',
     'wrong-prompt',
     'wrong-call',
+    'large-batch',
+    'large-batch-partial',
+    'large-batch-reload',
+    'large-batch-utf8',
   ])(
     'recovers only proven-unstarted cancelled PreToolUse (%s)',
     async (mode) => {
-      if (mode === 'large-batch') {
+      const { server, authorize, catalog, requests, definition } =
+        await hookApp();
+      const large = mode.startsWith('large-batch');
+      if (large) {
+        const actual = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js')
+        >(
+          '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
+        );
+        const bounded = actual.createHttpManagedSessionStores({
+          baseUrl: 'http://store.test',
+          writerId: BOOT_ID,
+          sessionKey: {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        }).resourceStore;
         const publish = LocalManagedSessionResourceStore.prototype.publish;
         vi.spyOn(
           LocalManagedSessionResourceStore.prototype,
           'publish',
-        ).mockImplementation(function (
+        ).mockImplementation(async function (
           this: LocalManagedSessionResourceStore,
           kind,
           bytes,
         ) {
-          if (bytes.byteLength > 64 * 1024)
-            throw new Error('Session resource exceeds 64 KiB.');
+          await bounded.publish(kind, bytes);
           return publish.call(this, kind, bytes);
         });
       }
-      const { server, authorize, catalog, requests, definition } =
-        await hookApp();
       Object.assign(catalog, {
         hooks: [{ ...catalog.hooks[0], eventName: HookEventName.PreToolUse }],
       });
@@ -761,14 +794,13 @@ describe('Hosted Harness no-tool session', () => {
         };
       });
       const calls = Array.from(
-        { length: mode === 'single' ? 1 : mode === 'large-batch' ? 650 : 2 },
+        { length: large ? 650 : mode === 'single' ? 1 : 2 },
         (_, i) => ({
-          name: mode === 'large-batch' ? 'read_file' : 'write_file',
-          callId: `call-${i}`,
-          args:
-            mode === 'large-batch'
-              ? { file_path: 'a' }
-              : { file_path: `notes-${i}.txt`, content: 'hello' },
+          name: large ? 'read_file' : 'write_file',
+          callId: mode === 'large-batch-utf8' ? `调用-${i}` : `call-${i}`,
+          args: large
+            ? { file_path: 'x' }
+            : { file_path: `notes-${i}.txt`, content: 'hello' },
           isClientInitiated: false,
           prompt_id: PROMPT_ID,
         }),
@@ -808,20 +840,29 @@ describe('Hosted Harness no-tool session', () => {
         });
       });
       const child = requests.find((entry) => entry.kind === 'hook-execute')!;
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
       const write = vi.spyOn(ManagedSessionRecordSink.prototype, 'write');
-      const originalWrite = write.getMockImplementation()!;
-      const fail = mode.includes('failure') || mode === 'reload';
+      const reload = mode === 'reload' || mode === 'large-batch-reload';
+      const fail =
+        mode.includes('failure') || reload || mode === 'large-batch-partial';
+      let resultWrites = 0;
       if (fail)
         write.mockImplementation(async function (
           this: ManagedSessionRecordSink,
           record,
         ) {
+          if (large && record.type === 'tool_result' && ++resultWrites === 2)
+            throw new Error('second result write unavailable');
           if (record.type === 'tool_result' && mode.startsWith('result-')) {
             if (mode === 'result-ack-failure')
               await originalWrite.call(this, record);
             throw new Error('result write unavailable');
           }
-          if (record.subtype === 'turn_result' && !mode.startsWith('result-'))
+          if (
+            !large &&
+            record.subtype === 'turn_result' &&
+            !mode.startsWith('result-')
+          )
             throw new Error('settlement unavailable');
           return originalWrite.call(this, record);
         });
@@ -843,12 +884,40 @@ describe('Hosted Harness no-tool session', () => {
         await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
           .send({ prompt, promptId: randomUUID(), payloadDigest })
           .expect(409);
+        if (large || mode === 'result-ack-failure') {
+          const partial = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/transcript`),
+          );
+          const results: ChatRecord[] = partial.body.events.flatMap(
+            (event: { data?: { record?: ChatRecord } }) =>
+              event.data?.record?.type === 'tool_result'
+                ? [event.data.record]
+                : [],
+          );
+          expect(results).toHaveLength(1);
+          expect(results[0].message!.parts!.length).toBeGreaterThan(0);
+          if (large)
+            expect(results[0].message!.parts!.length).toBeLessThan(
+              calls.length,
+            );
+          else
+            expect(
+              results[0].message!.parts!.map(
+                (part) => part.functionResponse?.id,
+              ),
+            ).toEqual(calls.map((call) => call.callId));
+          expect(
+            partial.body.events.filter(
+              (event: { type: string }) => event.type === 'turn_complete',
+            ),
+          ).toHaveLength(0);
+        }
         if (!fail) return;
       }
       write.mockRestore();
       let owner = authorize;
       let recovered = server;
-      if (mode === 'reload') {
+      if (reload) {
         await authorize(
           supertest(server).post(`/session/${SESSION_ID}/detach`),
         ).expect(204);
@@ -889,6 +958,35 @@ describe('Hosted Harness no-tool session', () => {
             part.functionResponse ? [part.functionResponse] : [],
           ) ?? [],
       );
+      if (large) {
+        const results = records.filter(
+          (record) => record.type === 'tool_result',
+        );
+        expect(results).toHaveLength(2);
+        for (const record of results)
+          expect(Buffer.byteLength(JSON.stringify(record))).toBeLessThanOrEqual(
+            64 * 1024,
+          );
+        const assistant = records.find(
+          (record) => record.type === 'assistant',
+        )!;
+        expect(results[0].parentUuid).toBe(assistant.uuid);
+        expect(results[1].parentUuid).toBe(results[0].uuid);
+        expect(
+          Buffer.byteLength(JSON.stringify(assistant)),
+        ).toBeLessThanOrEqual(64 * 1024);
+        expect(
+          Buffer.byteLength(
+            JSON.stringify({
+              ...results[0],
+              message: {
+                role: 'user',
+                parts: results.flatMap((record) => record.message!.parts!),
+              },
+            }),
+          ),
+        ).toBeGreaterThan(64 * 1024);
+      }
       expect(responses).toEqual(
         calls.map((call) => ({
           id: call.callId,
@@ -920,80 +1018,89 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it('does not settle a later turn from a previously cancelled SessionStart', async () => {
-    const { server, authorize, catalog, requests, definition } =
-      await hookApp();
-    Object.assign(catalog, {
-      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.SessionStart }],
-    });
-    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
-    const original = control.getMockImplementation()!;
-    control.mockImplementation(async (operation) => {
-      if (operation.kind !== 'hook-execute') return original(operation);
-      requests.push(operation);
-      return {
-        operationId: operation.operationId,
-        state: 'settled',
-        error: { code: 'managed_hook_handler_unavailable' },
-      };
-    });
-    state.model.mockImplementationOnce(async ({ hooks, promptId, signal }) => {
-      await hooks!.fire(
-        HookEventName.SessionStart,
-        `session-start:${SESSION_ID}`,
-        { prompt_id: promptId },
-        signal,
-      );
-      throw new Error('The refused Hook must stop this turn.');
-    });
-    const prompt = [{ type: 'text', text: 'hello' }];
-    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
-    const submit = (promptId: string) =>
-      authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send({
-        prompt,
-        promptId,
-        payloadDigest,
+  it.each([HookEventName.SessionStart, HookEventName.InstructionsLoaded])(
+    'does not settle a later turn from a previously cancelled %s',
+    async (event) => {
+      const { server, authorize, catalog, requests, definition } =
+        await hookApp();
+      Object.assign(catalog, {
+        hooks: [{ ...catalog.hooks[0], eventName: event }],
       });
-    const expectBlocked = () =>
-      vi.waitFor(
-        async () => {
-          const status = await authorize(
-            supertest(server).get(`/session/${SESSION_ID}/status`),
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+      const original = control.getMockImplementation()!;
+      control.mockImplementation(async (operation) => {
+        if (operation.kind !== 'hook-execute') return original(operation);
+        requests.push(operation);
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          error: { code: 'managed_hook_handler_unavailable' },
+        };
+      });
+      state.model.mockImplementationOnce(
+        async ({ hooks, promptId, signal }) => {
+          await hooks!.fire(
+            event,
+            event === HookEventName.SessionStart
+              ? `session-start:${SESSION_ID}`
+              : `${promptId}:native:${'c'.repeat(64)}:0`,
+            { prompt_id: promptId },
+            signal,
           );
-          expect(status.body).toMatchObject({
-            hasActivePrompt: false,
-            recoveryBlocked: true,
-          });
+          throw new Error('The refused Hook must stop this turn.');
         },
-        { timeout: 10_000 },
       );
-    await submit(PROMPT_ID).expect(202);
-    await expectBlocked();
-    const child = requests.find(
-      (operation) => operation.kind === 'hook-execute',
-    )!;
-    const route = `/session/${SESSION_ID}/hooks/operations/${child.operationId}`;
-    await authorize(supertest(server).post(`${route}/cancel`)).expect(200);
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      const submit = (promptId: string) =>
+        authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send(
+          {
+            prompt,
+            promptId,
+            payloadDigest,
+          },
+        );
+      const expectBlocked = () =>
+        vi.waitFor(
+          async () => {
+            const status = await authorize(
+              supertest(server).get(`/session/${SESSION_ID}/status`),
+            );
+            expect(status.body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: true,
+            });
+          },
+          { timeout: 10_000 },
+        );
+      await submit(PROMPT_ID).expect(202);
+      await expectBlocked();
+      const child = requests.find(
+        (operation) => operation.kind === 'hook-execute',
+      )!;
+      const route = `/session/${SESSION_ID}/hooks/operations/${child.operationId}`;
+      await authorize(supertest(server).post(`${route}/cancel`)).expect(200);
 
-    state.model.mockRejectedValueOnce(new HostedHookRecoveryRequiredError());
-    await submit(randomUUID()).expect(202);
-    await expectBlocked();
-    await authorize(supertest(server).get(route)).expect(200);
-    await submit(randomUUID()).expect(409);
-    await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/detach`),
-    ).expect(204);
-    const replacement = await app(true);
-    const loaded = await headers(
-      supertest(replacement).post(`/session/${SESSION_ID}/load`),
-    )
-      .send(definition)
-      .expect(200);
-    expect(loaded.body.recoveryRequired).toBe(true);
-    expect(
-      requests.filter((operation) => operation.kind === 'hook-execute'),
-    ).toHaveLength(1);
-  });
+      state.model.mockRejectedValueOnce(new HostedHookRecoveryRequiredError());
+      await submit(randomUUID()).expect(202);
+      await expectBlocked();
+      await authorize(supertest(server).get(route)).expect(200);
+      await submit(randomUUID()).expect(409);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send(definition)
+        .expect(200);
+      expect(loaded.body.recoveryRequired).toBe(true);
+      expect(
+        requests.filter((operation) => operation.kind === 'hook-execute'),
+      ).toHaveLength(1);
+    },
+  );
 
   it.each([
     undefined,
