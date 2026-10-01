@@ -126,6 +126,11 @@ const TRACKED_ENV = [
   'QWEN_TEST_PROVIDER_KEY',
   'DEMO_VAR',
   'QWEN_CODE_MODELS_DEV_URL',
+  // The CLI test setup exports QWEN_CODE_MODELS_DEV=off process-wide, so the
+  // switch keys must be cleared per test (and restored after) for an
+  // undefined assertion to mean "the project file was rejected".
+  'QWEN_CODE_MODELS_DEV',
+  'QWEN_CODE_MODELS_DEV_REFRESH',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -628,38 +633,55 @@ describe('model catalog download source environment', () => {
   });
 
   it.each(['.env', '.qwen/.env', 'settings.env'])(
-    'rejects a project-scoped catalog URL from %s',
+    'rejects the project-scoped catalog keys from %s',
     (source) => {
       const workspace = makeWorkspace();
       const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      // All three catalog keys are operator decisions: the URL picks where
+      // the shared global cache comes from, and the two switches decide
+      // whether it is consulted or refreshed at all — on the serve fast path
+      // one workspace's file would otherwise freeze that choice for every
+      // other workspace the daemon hosts.
+      const projectKeys = {
+        QWEN_CODE_MODELS_DEV_URL: 'https://project.example.com/api.json',
+        // `on` is the attack shape: the value that would flip the catalog
+        // daemon-wide, or over an operator's exported `off`.
+        QWEN_CODE_MODELS_DEV: 'on',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'on',
+      } as const;
       if (source === 'settings.env') {
-        settings.env = {
-          QWEN_CODE_MODELS_DEV_URL: 'https://project.example.com/api.json',
-          RUNTIME_SETTINGS_ONLY: 'allowed',
-        };
+        settings.env = { ...projectKeys, RUNTIME_SETTINGS_ONLY: 'allowed' };
       } else {
         const envPath = path.join(workspace, source);
         fs.mkdirSync(path.dirname(envPath), { recursive: true });
         fs.writeFileSync(
           envPath,
-          'QWEN_CODE_MODELS_DEV_URL=https://project.example.com/api.json\nRUNTIME_DOTENV=allowed\n',
+          `${Object.entries(projectKeys)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n')}\nRUNTIME_DOTENV=allowed\n`,
         );
       }
       // The allowed control proves the project file itself was applied; the
-      // exclusion, not a discovery failure, is what drops the catalog URL.
+      // exclusion, not a discovery failure, is what drops the catalog keys.
       const allowedKey =
         source === 'settings.env' ? 'RUNTIME_SETTINGS_ONLY' : 'RUNTIME_DOTENV';
 
       loadEnvironment(settings, workspace);
-      expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+      for (const key of Object.keys(projectKeys)) {
+        expect(process.env[key]).toBeUndefined();
+      }
       expect(process.env[allowedKey]).toBe('allowed');
 
       reloadEnvironment(settings, workspace);
-      expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+      for (const key of Object.keys(projectKeys)) {
+        expect(process.env[key]).toBeUndefined();
+      }
       expect(process.env[allowedKey]).toBe('allowed');
 
       const snapshot = buildRuntimeEnvironment(settings, workspace, {});
-      expect(snapshot.effectiveEnv['QWEN_CODE_MODELS_DEV_URL']).toBeUndefined();
+      for (const key of Object.keys(projectKeys)) {
+        expect(snapshot.effectiveEnv[key]).toBeUndefined();
+      }
       expect(snapshot.effectiveEnv[allowedKey]).toBe('allowed');
     },
   );
