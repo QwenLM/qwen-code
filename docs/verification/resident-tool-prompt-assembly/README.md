@@ -18,14 +18,14 @@
 
 `prompts.test.ts` 已有以下结构化测试；合并前仍需确认当前 HEAD 的 CI 结果，不能把历史通过记录当作当前验证：
 
-| 已自动覆盖                                             | 测试                                                                    |
-| ------------------------------------------------------ | ----------------------------------------------------------------------- |
-| 无快照与声明全部工具的渲染一致                         | 17 份完整提示词快照 + `renders identically when every tool is declared` |
-| 无快照到文件白名单的节省量在预期区间（900–1,500 字符） | `saves about 1.1k characters of policy text for a file-work allowlist`  |
-| 只有两个被门控段落发生变化                             | `changes nothing outside the two gated sections`                        |
-| 被门控段落里不出现未声明的工具（机械扫描全部工具名）   | `never names an undeclared tool inside the gated sections`              |
-| code mode 完全不受门控影响（反向检查）                 | `leaves CodeModeOnly guidance untouched by the declared set`            |
-| 快照确实从 `Config` 传到提示词构建器                   | `keeps Agent guidance when Agent is bridge-reachable`（#13033 重命名后同时断言 `getPromptAgentReachable()` 快照）                       |
+| 已自动覆盖                                             | 测试                                                                                                              |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| 无快照与声明全部工具的渲染一致                         | 17 份完整提示词快照 + `renders identically when every tool is declared`                                           |
+| 无快照到文件白名单的节省量在预期区间（900–1,500 字符） | `saves about 1.1k characters of policy text for a file-work allowlist`                                            |
+| 只有两个被门控段落发生变化                             | `changes nothing outside the two gated sections`                                                                  |
+| 被门控段落里不出现未声明的工具（机械扫描全部工具名）   | `never names an undeclared tool inside the gated sections`                                                        |
+| code mode 完全不受门控影响（反向检查）                 | `leaves CodeModeOnly guidance untouched by the declared set`                                                      |
+| 快照确实从 `Config` 传到提示词构建器                   | `keeps Agent guidance when Agent is bridge-reachable`（#13033 重命名后同时断言 `getPromptAgentReachable()` 快照） |
 
 **因此这份文档只剩两类事需要真实会话：** 一是**真实请求的 token 是否真的下降**（单元测试只能量字符数，量不到 provider 的计费口径，也证明不了 `tools.eager` 在你们部署上真的被接受）；二是**召回率与其他模块在真实会话中的表现**（§5、§6）。
 
