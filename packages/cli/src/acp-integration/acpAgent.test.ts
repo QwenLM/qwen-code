@@ -4688,15 +4688,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         );
       const { agent, agentPromise } = await bootManagedHost();
       try {
-        await expect(
-          agent.newSession({
-            cwd: '/tmp',
-            mcpServers: [],
-            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
-          }),
-        ).rejects.toMatchObject({
-          code: -32024,
-          data: { errorKind: 'session_execution_engine_unavailable' },
+        const refusal = agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        await expect(refusal).rejects.toMatchObject({ code: -32024 });
+        // Only a caller-supplied id is attached.
+        await expect(refusal).rejects.toHaveProperty('data', {
+          errorKind: 'session_execution_engine_unavailable',
         });
       } finally {
         mockConnectionState.resolve();
@@ -4855,6 +4855,35 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('maps a session another engine owns to -32024 on a Legacy host', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440003';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.initialize = vi
+      .fn()
+      .mockRejectedValue(
+        new SessionExecutionEngineError(
+          sessionId,
+          'belongs to managed, cannot execute with legacy',
+        ),
+      );
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const refusal = agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: { 'qwen-code/sessionId': sessionId },
+      });
+      await expect(refusal).rejects.toMatchObject({ code: -32024 });
+      await expect(refusal).rejects.toHaveProperty('data', {
+        errorKind: 'session_execution_engine_unavailable',
+        sessionId,
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('creates a session when OpenTelemetry is disabled', async () => {

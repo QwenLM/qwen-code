@@ -22,6 +22,7 @@ import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
 import { MCPServerConfig } from './mcp-server-config.js';
 import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
+import { McpClientManager } from '../tools/mcp-client-manager.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
   ManagedSessionRecordRefusedError,
@@ -1334,14 +1335,41 @@ describe('Managed Session log recording', () => {
 });
 
 describe('Managed host tools', () => {
-  it('builds a registry without tools', async () => {
+  it('builds a registry without offering it any tool', async () => {
+    const offers = [
+      vi.spyOn(ToolRegistry.prototype, 'registerTool'),
+      vi.spyOn(ToolRegistry.prototype, 'registerFactory'),
+      vi.spyOn(ToolRegistry.prototype, 'registerPermissionDeferredFactory'),
+    ];
     const legacy = await managedConfig({
       sessionExecutionEngine: 'legacy',
     }).createToolRegistry(undefined, { skipDiscovery: true });
     expect(legacy.getAllToolNames()).not.toHaveLength(0);
+    expect(offers.some((offer) => offer.mock.calls.length > 0)).toBe(true);
+    for (const offer of offers) offer.mockClear();
 
-    const managed = await managedConfig().createToolRegistry();
+    const managed = await managedConfig().createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
     expect(managed.getAllToolNames()).toEqual([]);
+    for (const offer of offers) expect(offer).not.toHaveBeenCalled();
+  });
+
+  it('hands a pending MCP budget callback to its registry once', async () => {
+    const setOnBudgetEvent = vi.spyOn(
+      McpClientManager.prototype,
+      'setOnBudgetEvent',
+    );
+    const config = managedConfig();
+    const callback = vi.fn();
+    config.setMcpBudgetEventCallback(callback);
+
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    expect(setOnBudgetEvent).toHaveBeenCalledExactlyOnceWith(callback);
+
+    // A later registry, such as a subagent's, does not inherit it.
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    expect(setOnBudgetEvent).toHaveBeenCalledOnce();
   });
 
   it.each([

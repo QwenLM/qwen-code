@@ -333,15 +333,20 @@ Managed 工作的双引擎 runtime 不会运行任何 Managed 进程。Bridge �
 - M3 没有针对 `general.chatRecording: false` 的规则。M6 注册引擎之后，带这项设置的工作区
   会选中 Managed，并让每个新会话以 -32024 失败，而 daemon 的 HTTP 层会把它表述为会话
   无法恢复。M6 必须先加入这条规则，判为 `deferred`。
-- 指名工具的 omni 策略在空登记表下会失败：启用 omni 并配置了
-  `omni.processing.fixedPolicies` 或 `policyTools` 时，每次 Managed 创建都会以 omni 配置
-  错误失败。M3 也没有 omni 规则；M6 必须在注册之前加入一条，判为 `deferred`。
+- omni 策略都指名工具，而空登记表里没有这些工具。只要启用 omni（`omni.enabled` 或
+  `QWEN_CODE_ENABLE_OMNI=1`），即使没有配置任何策略，每次 Managed 创建也都会以 omni
+  配置错误失败，因为系统默认的 transport-guard 策略指名了 `omni_downsample_image`、
+  `omni_downscale_video` 与 `omni_downsample_audio` 工具。M3 也没有 omni 规则；M6 必须
+  在注册之前加入一条，判为 `deferred`。
 - M3 对任何它不认识的转发参数都返回 `unknown`。M2 的 factory 会在子进程参数中加入
   `--acp-execution-engine managed`，因此 M6 在选择器和宿主复核中交给评估的参数，必须是
   Legacy factory 的参数，不含这个模式参数。
 - 宿主侧副作用并非都是工具。除上述斜杠命令外，初始化仍会在宿主中清扫该工作区过期的
   `agent-*` worktree，与 Legacy 子进程对同一工作区的做法相同。由 M5 或 M6 决定 Managed
   宿主是否继续这样做。
+- 宿主仍会把两个内部 Config 构建为 Legacy，带完整工具集，但不做 MCP 发现、不加载
+  hooks：fork 复制源时的临时目标 Config，以及 transcript 回放。对 Managed 会话，前者会被 Legacy owner 检查拒绝，后者
+  只读，所以目前都不会运行工具。M6 在实现 Managed 恢复路径时一并决定它们的引擎。
 - 有 Managed 工作的双引擎 runtime 占用 daemon 进程预算中的两个名额，通道替换期间最多
   四个。冷启动与整个进程树的资源测量仍留给 M6，在注册之前完成。
 

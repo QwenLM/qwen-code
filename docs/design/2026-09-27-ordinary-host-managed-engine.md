@@ -431,10 +431,13 @@ process tree.
   engine, a workspace with that setting would select Managed and fail every
   new session with -32024, which the daemon's HTTP layer words as a session
   that cannot be resumed. M6 must add the rule, as `deferred`, first.
-- Omni policies that name tools fail against the empty registry: with omni
-  enabled and `omni.processing.fixedPolicies` or `policyTools` configured,
-  every Managed creation fails with the omni configuration error. M3 has no
-  omni rule either; M6 must add one, as `deferred`, before registration.
+- Omni policies name tools, and the empty registry has none of them. With
+  omni enabled, by `omni.enabled` or `QWEN_CODE_ENABLE_OMNI=1`, every Managed
+  creation fails with the omni configuration error, even with no policy
+  configured, because the system's default transport-guard policies name the
+  `omni_downsample_image`, `omni_downscale_video` and `omni_downsample_audio`
+  tools. M3 has no omni rule either; M6 must add one, as `deferred`, before
+  registration.
 - M3 answers `unknown` for any forwarded argument it does not know. The M2
   factory adds `--acp-execution-engine managed` to the child's arguments, so
   the arguments M6 passes to the evaluation, in the selector and in the host's
@@ -443,6 +446,11 @@ process tree.
   initialization still sweeps stale `agent-*` worktrees of the workspace from
   the host, as a Legacy child does for the same workspace. M5 or M6 decides
   whether a Managed host keeps doing so.
+- The host still builds two internal Configs as Legacy, with the full tool
+  set but without MCP discovery or hooks: the temporary target of a fork's
+  source copy, and the transcript replay. For a Managed session the first is refused by the Legacy owner check
+  and the second only reads, so neither runs a tool today. M6 decides their
+  engine together with the Managed restore path.
 - A paired runtime with Managed work takes two slots of the daemon's process
   budget, and up to four while channels are replaced. The cold-start and
   whole-tree resource measurements stay with M6, before registration.

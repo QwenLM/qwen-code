@@ -344,8 +344,12 @@ export class ToolRegistry {
    * so its registry takes no tool from any path, including tools registered
    * after the session starts (image generation, workflows, advisor).
    */
+  private refusesHostTools(): boolean {
+    return this.config.getSessionExecutionEngine?.() === 'managed';
+  }
+
   private refusesHostTool(name: string): boolean {
-    if (this.config.getSessionExecutionEngine?.() !== 'managed') return false;
+    if (!this.refusesHostTools()) return false;
     debugLogger.info(
       `Tool "${name}" skipped: a Managed session has no host tools.`,
     );
@@ -554,7 +558,13 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
-    if (this.config.getSessionExecutionEngine?.() === 'managed') return;
+    // The writes below bypass registerTool, so this refusal covers them all.
+    if (this.refusesHostTools()) {
+      debugLogger.info(
+        'Discovered tools skipped: a Managed session has no host tools.',
+      );
+      return;
+    }
     for (const [key, tool] of source.mcpAppTools) {
       if (
         !this.mcpAppTools.has(key) &&

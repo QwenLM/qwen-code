@@ -1133,6 +1133,16 @@ function withExecutionEngineReceipt<
   };
 }
 
+function mapSessionExecutionEngineRequestError(
+  error: SessionExecutionEngineError,
+  sessionId: string | undefined,
+): RequestError {
+  return new RequestError(-32024, error.message, {
+    errorKind: error.errorKind,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+  });
+}
+
 function mapSessionRestoreRequestError(
   error: unknown,
   sessionId: string,
@@ -1140,10 +1150,7 @@ function mapSessionRestoreRequestError(
   const mappedWriterError = mapSessionWriterRequestError(error);
   if (mappedWriterError !== error) return mappedWriterError;
   if (error instanceof SessionExecutionEngineError) {
-    return new RequestError(-32024, error.message, {
-      errorKind: error.errorKind,
-      sessionId,
-    });
+    return mapSessionExecutionEngineRequestError(error, sessionId);
   }
   if (error instanceof SessionTranscriptSnapshotUnavailableError) {
     return new RequestError(-32010, error.message, {
@@ -15165,12 +15172,10 @@ class QwenAgent implements Agent {
       if (sessionId && restoreOptions) {
         throw mapSessionRestoreRequestError(error, sessionId);
       }
-      // A Managed session without chat recording is refused, not degraded.
+      // A session the host's engine cannot record or own, such as a Managed
+      // one without chat recording, is refused rather than degraded.
       if (error instanceof SessionExecutionEngineError) {
-        throw new RequestError(-32024, error.message, {
-          errorKind: error.errorKind,
-          ...(sessionId !== undefined ? { sessionId } : {}),
-        });
+        throw mapSessionExecutionEngineRequestError(error, sessionId);
       }
       throw error;
     }
