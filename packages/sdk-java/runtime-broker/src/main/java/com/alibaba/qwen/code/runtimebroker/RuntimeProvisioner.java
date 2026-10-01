@@ -57,7 +57,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
      * call, so a slow observation may take as long as the provisioner's own
      * declared waits. A call that never answers at all is backstopped well
      * past those waits and surfaces as a retryable
-     * {@code runtime_broker_reconcile_timeout}.
+     * {@code runtime_broker_reconcile_timeout}. Implementations must not
+     * block the calling thread: the renewal ticks share a single-thread
+     * scheduler with the caller on some paths, so a synchronous wait can
+     * starve the renewal that keeps the claim alive — hand long waits to
+     * another executor and return a pending stage.
      */
     default CompletionStage<RuntimeObservation> reconcile(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,

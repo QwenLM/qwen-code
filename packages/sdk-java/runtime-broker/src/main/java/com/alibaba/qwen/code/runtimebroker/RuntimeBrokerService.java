@@ -1901,7 +1901,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             // The loop's renewal owns claim liveness, so
                             // the transport's own timeout bounds attestation.
                             return adoptObservation(bindingId,
-                                    operationGeneration, step.observation(), 0);
+                                    operationGeneration, step.observation(), 0,
+                                    renewal);
                     }
                 });
     }
@@ -1909,6 +1910,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<BindingContext> adoptObservation(String bindingId,
             long operationGeneration, RuntimeObservation observation,
             long attestBoundMillis) {
+        return adoptObservation(bindingId, operationGeneration, observation,
+                attestBoundMillis, null);
+    }
+
+    private CompletionStage<BindingContext> adoptObservation(String bindingId,
+            long operationGeneration, RuntimeObservation observation,
+            long attestBoundMillis, BindingRenewal loopRenewal) {
         RuntimeBindingRecord current = bindingRepository.findById(bindingId);
         if (current == null || !ownsOperation(current, operationGeneration)
                 || !canReconcile(current)) {
@@ -1965,6 +1973,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 "runtime_broker_attestation_conflict",
                                 "Managed Runtime attestation conflicts."));
                     }
+                    if (loopRenewal != null) {
+                        // stop the loop's ticks (close() waits out one in
+                        // flight) so the snapshot below CASes deterministically
+                        loopRenewal.close();
+                    }
                     Instant now = clock.instant();
                     RuntimeBindingRecord latest =
                             bindingRepository.findById(bindingId);
@@ -1974,6 +1987,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         return failed(unavailable("runtime_provision_fenced",
                                 "Runtime recovery claim expired"));
                     }
+                    latest = renewRecoveryClaim(latest);
                     RuntimeBindingRecord ready =
                             bindingRepository.compareAndSet(latest,
                                     latest.withAttestation(lease, handle,
@@ -2041,7 +2055,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private CompletionStage<RuntimeBindingRecord> cleanupLost(RuntimeBindingRecord claimed) {
         return safeStage(() -> {
             RuntimeBindingRecord recovered = bindingRepository.recoverLost(
-                    sessionRepository, executionRepository, claimed);
+                    sessionRepository, executionRepository, renewRecoveryClaim(claimed));
             if (recovered == null) {
                 return failed(unavailable("runtime_provision_fenced", "Runtime recovery claim expired"));
             }
