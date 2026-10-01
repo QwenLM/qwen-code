@@ -104,11 +104,9 @@ export function registerAgentHostConnectionRoutes(
         provider: input.provider,
       });
     } catch (error) {
-      res
-        .status(400)
-        .json({
-          error: error instanceof Error ? error.message : 'Connection failed.',
-        });
+      res.status(400).json({
+        error: error instanceof Error ? error.message : 'Connection failed.',
+      });
     }
   });
 
