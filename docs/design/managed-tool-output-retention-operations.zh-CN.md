@@ -14,7 +14,7 @@
 
 ## 可复现门禁入口
 
-使用 Java 21，先按 Java SDK 和 Runtime Broker 的 README 构建并安装本 checkout 的依赖。O4 profile 要求启用 performance*schema 的真实 MySQL 8.4，不会静默替换为 H2。提供已有专用数据库 URL，库名以 `qwen_o4*`开头，例如`jdbc:mysql://127.0.0.1:3306/qwen*o4_gate`。测试身份需要隔离测试服务器上的 CREATE/DROP DATABASE 权限，以及对 performance_schema.data_lock_waits、data_locks、threads 的 SELECT 权限。这些元数据仅用于按 writer 连接 ID、随机库名和 tenant 表观察真实 InnoDB 锁等待。每个用例创建全新随机 `qwen_o4*` 数据库、迁移并只删除该生成库；不会清理传入的数据库。主测试数据源使用最多四个连接的池，删库前先关闭池。runner 中断后，清理前核对生成库名、用例目录及自己创建的子进程 PID；不得删除传入库。
+使用 Java 21，先按 Java SDK 和 Runtime Broker 的 README 构建并安装本 checkout 的依赖。O4 profile 要求启用 `performance_schema` 的真实 MySQL 8.4，不会静默替换为 H2。提供已有专用数据库 URL，库名以 `qwen_o4_` 开头，例如 `jdbc:mysql://127.0.0.1:3306/qwen_o4_gate`。测试身份需要隔离测试服务器上的 CREATE/DROP DATABASE 权限，以及对 `performance_schema.data_lock_waits`、`performance_schema.data_locks`、`performance_schema.threads` 的 SELECT 权限。这些元数据仅用于按 writer 连接 ID、随机库名和 tenant 表观察真实 InnoDB 锁等待。每个用例创建全新随机 `qwen_o4_` 数据库、迁移并只删除该生成库；不会清理传入的数据库。主测试数据源使用最多四个连接的池，删库前先关闭池。runner 中断后，清理前核对生成库名、用例目录及自己创建的子进程 PID；不得删除传入库。
 
 通过测试环境设置 `QWEN_O4_MYSQL_PASSWORD`，不要放入命令参数。JDBC URL 和日志中不得包含凭据。支持 IPv6 literal host，以及 allowPublicKeyRetrieval、useSSL、sslMode、characterEncoding、connectTimeout、socketTimeout 这些非敏感选项，原样保留到生成库和子进程。拒绝 user/password、插件、userinfo 及其他选项。从干净报告目录运行完整 profile，不使用集成测试选择器；显式 Gate 类不属于普通 CI 的 IT 家族。仅 Maven 成功不足以作为证据，下面的源码导出报告检查也必须通过，且不得有跳过/失败用例或选择器属性。插件的 failIfNoSpecifiedTests 不能覆盖所有方法选择器的零测试情况，因此必须保留以 && 连接的两阶段入口，任一失败都不算门禁通过：
 
