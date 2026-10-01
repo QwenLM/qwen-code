@@ -76,7 +76,7 @@ class HostedPublicWorkspaceIT {
     void ownerAnswersHostedApprovalsThroughBothSurfaces() throws Exception {
         approvals = true;
         runFiles();
-        assertThat(answered).hasSize(4);
+        assertThat(answered).hasSize(8);
     }
 
     private void runFiles() throws Exception {
@@ -166,14 +166,8 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, changed, workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("idempotency_conflict");
             request("GET", "/v1/agents/sessions/" + session, null, null, "other", 404);
-            // The approval run registers its own reader and answers only the initial Turn;
-            // later Turns are covered by the files run.
-            if (approvals) continue;
             // A later Turn runs under the creator's grants: another actor who can read the
             // Session keeps the refusal, and the creator's second Turn runs the file tools again.
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read,"
-                    + " can_create) VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace,
-                    "reader".getBytes(StandardCharsets.UTF_8));
             Map<String, Object> later = Map.of("type", "agent.session.input.message", "input",
                     List.of(Map.of("type", "input_text", "text", "G0_AGAIN")));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -185,6 +179,8 @@ class HostedPublicWorkspaceIT {
                         null, caller, 200).path("capabilities").path("workspaceTurns").asBoolean())
                         .as(caller).isEqualTo("actor".equals(caller));
             }
+            // Only the later Turn can restore this; the initial Turn asserted "after" above.
+            Files.writeString(roots.get(index).resolve("child/proof.txt"), "x");
             String laterTurn = request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "later-" + workspace, "actor", 202).path("turn_id").asText();
             assertThat(laterTurn).isNotBlank();
@@ -196,6 +192,7 @@ class HostedPublicWorkspaceIT {
                             + Files.readString(temporary.resolve("harness.log")));
                 }
             }).untilAsserted(() -> {
+                if (approvals) answerActions(session, webShell);
                 assertThat(modelFailure.get()).isNull();
                 assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn"
                         + " WHERE session_id = ? AND turn_id = ?", String.class, session, laterTurn))
@@ -206,6 +203,10 @@ class HostedPublicWorkspaceIT {
             assertThat(modelRequests).hasSize(requests + 4);
             assertThat(Files.readString(roots.get(index).resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(decoy.resolve("proof.txt")).doesNotExist();
+            // The cancel and rename probes below keep a held model reply, so they stay in
+            // the files run to fit the method timeout; the approvals run has already pinned
+            // that a later Turn under approval-mode=default is admitted and completes.
+            if (approvals) continue;
 
             // The creator can cancel a running later Turn; the Hosted Harness aborts it before
             // any tool runs. Another reader keeps the refusal.
@@ -235,8 +236,27 @@ class HostedPublicWorkspaceIT {
                     "reader", 409).path("error").path("code").asText()).isEqualTo("workspace_unavailable");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
+
+            // With the running Turn settled, revoking the creator's read grant hides the
+            // bound Session from every later-Turn path: submit, cancel and rename all fall
+            // through to the legacy gate and answer session_not_found.
+            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "revoked-later-" + workspace, "actor", 404).path("error").path("code").asText())
+                    .isEqualTo("session_not_found");
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "revoked-cancel-" + workspace, "actor", 404).path("error").path("code").asText())
+                    .isEqualTo("session_not_found");
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "revoked-rename-" + workspace, "actor", 404).path("error").path("code").asText())
+                    .isEqualTo("session_not_found");
+            jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
-        assertThat(modelRequests).hasSize(approvals ? 8 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -269,7 +289,7 @@ class HostedPublicWorkspaceIT {
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(approvals ? 8 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -336,8 +356,11 @@ class HostedPublicWorkspaceIT {
                 tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                         + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
-        if (approvals) jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create) VALUES (?, ?, ?, TRUE, FALSE)",
-                tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8));
+        // The reader grant exists in both runs so the later-Turn block can also run under
+        // approval-mode=default without colliding with the access table's primary key.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                        + " VALUES (?, ?, ?, TRUE, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
+                !approvals);
     }
 
     private void answerActions(String session, boolean web) throws Exception {
