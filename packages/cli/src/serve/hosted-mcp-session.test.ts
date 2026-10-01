@@ -518,23 +518,48 @@ it('reconciles an older unknown configuration during close after a legacy writer
   ).toEqual(['released', 'released']);
 });
 
-it('closes a never-dispatched configuration after workspace admission is refused', async () => {
-  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValue(
-    new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
-  );
-  await expect(mcp.ensureReady()).rejects.toThrow('workspace_busy');
-  await mcp.close();
-  const configuration = parseMcpConfiguration(
-    session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
-  );
-  expect(configuration).toMatchObject({
-    releaseState: 'released',
-    run: { state: 'cancelled', execution: 'not_started_proven' },
-  });
-  expect(requests).toEqual([]);
-  expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledOnce();
-  expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
-});
+it.each([false, true])(
+  'closes a never-dispatched configuration after workspace admission is refused (interrupted drain commit: %s)',
+  async (interrupted) => {
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+    );
+    await expect(mcp.ensureReady()).rejects.toThrow('workspace_busy');
+    if (interrupted) {
+      const commit = session.authority.commitExtensionRecord.bind(
+        session.authority,
+      );
+      const save = vi
+        .spyOn(session.authority, 'commitExtensionRecord')
+        .mockImplementation(async (...args) => {
+          if (
+            args[1].domain === 'mcp_configuration' &&
+            parseMcpConfiguration(args[1].record).releaseState === 'drained'
+          )
+            throw new Error('drain commit interrupted');
+          return commit(...args);
+        });
+      await expect(mcp.close()).rejects.toThrow('drain commit interrupted');
+      save.mockRestore();
+      mcp = new HostedMcpSession(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        [pin],
+      );
+    }
+    await mcp.close();
+    const configuration = parseMcpConfiguration(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+    );
+    expect(configuration).toMatchObject({
+      releaseState: 'released',
+      run: { state: 'cancelled', execution: 'not_started_proven' },
+    });
+    expect(requests).toEqual([]);
+    expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledOnce();
+    expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
+  },
+);
 
 it('publishes a new immutable configuration after catalog invalidation, without replacing old pins', async () => {
   await mcp.ensureReady();
@@ -708,13 +733,23 @@ it('confirms a lost Broker release acknowledgement before marking connections re
     parseMcpConfiguration(
       session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     ).releaseState,
-  ).toBe('releasing');
+  ).toBe('drained');
   const reloaded = new HostedMcpSession(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     [pin],
   );
+  expect(reloaded.broker.runtimeSessionId).toBe(mcp.broker.runtimeSessionId);
+  expect(reloaded.recoveryBlocked).toBe(true);
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire)
+    .mockClear()
+    .mockRejectedValue(new Error('runtime_session_not_ready'));
+  vi.mocked(HostedWorkspaceBroker.prototype.control)
+    .mockClear()
+    .mockRejectedValue(new Error('runtime_session_not_ready'));
   await reloaded.close();
+  expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
+  expect(HostedWorkspaceBroker.prototype.control).not.toHaveBeenCalled();
   expect(
     parseMcpConfiguration(
       session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
@@ -724,6 +759,106 @@ it('confirms a lost Broker release acknowledgement before marking connections re
     1,
   );
 });
+
+it('does not release the owner until the physical drain receipt is durably committed', async () => {
+  await mcp.ensureReady();
+  const commit = session.authority.commitExtensionRecord.bind(
+    session.authority,
+  );
+  const save = vi
+    .spyOn(session.authority, 'commitExtensionRecord')
+    .mockImplementation(async (...args) => {
+      if (
+        args[1].domain === 'mcp_configuration' &&
+        parseMcpConfiguration(args[1].record).releaseState === 'drained'
+      )
+        throw new Error('drain receipt commit failed');
+      return commit(...args);
+    });
+  await expect(mcp.close()).rejects.toThrow('drain receipt commit failed');
+  expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+  save.mockRestore();
+  const owner = mcp.broker.runtimeSessionId;
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  await mcp.close();
+  expect(mcp.broker.runtimeSessionId).toBe(owner);
+  expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
+    1,
+  );
+  expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
+});
+
+it.each([
+  { status: 409, code: 'runtime_session_not_ready', retry: true, held: false },
+  {
+    status: 409,
+    code: 'runtime_session_not_acquirable',
+    retry: true,
+    held: false,
+  },
+  { status: 409, code: 'runtime_session_not_ready', retry: true, held: true },
+  { status: 503, code: 'runtime_session_not_ready', retry: false, held: false },
+  { status: 409, code: 'runtime_admission_closed', retry: false, held: false },
+  { status: 409, code: 'runtime_session_conflict', retry: false, held: false },
+  { status: 403, code: 'workspace_access_denied', retry: false, held: false },
+  { status: 0, code: 'network failure', retry: false, held: false },
+])(
+  'recovers legacy releasing records only after a closed-owner rejection ($status $code, held: $held)',
+  async ({ status, code, retry, held }) => {
+    await mcp.ensureReady();
+    const saved =
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0];
+    const record = {
+      ...parseMcpConfiguration(saved.record),
+      releaseState: 'releasing',
+    };
+    await session.authority.commitExtensionRecord(
+      {
+        operation: 'legacy-release',
+        commandId: randomUUID(),
+        sessionKey: session.authority.sessionHeader.sessionKey,
+        contentDigest: 'a'.repeat(64),
+      },
+      { domain: 'mcp_configuration', record },
+      { class: 'trusted_entry' },
+    );
+    const owner = mcp.broker.runtimeSessionId;
+    mcp = new HostedMcpSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      [pin],
+    );
+    const failure = status
+      ? new HostedWorkspaceBrokerRejection(status, code)
+      : new Error(code);
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValue(
+      failure,
+    );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    if (held)
+      release.mockRejectedValue(new Error('still owns unfinished work'));
+    if (retry && !held) await mcp.close();
+    else
+      await expect(mcp.close()).rejects.toThrow(
+        held ? 'still owns unfinished work' : failure.message,
+      );
+    expect(mcp.broker.runtimeSessionId).toBe(owner);
+    expect(release).toHaveBeenCalledTimes(retry ? 1 : 0);
+    expect(
+      parseMcpConfiguration(
+        session.authority.extensionRecordsInDomain('mcp_configuration')[0]
+          .record,
+      ).releaseState,
+    ).toBe(retry && !held ? 'released' : 'releasing');
+    expect(
+      requests.filter((entry) => entry.kind === 'mcp-release'),
+    ).toHaveLength(0);
+  },
+);
 
 it('keeps advertised calls on their original catalog when a newer definition is installed', async () => {
   await mcp.ensureReady();
@@ -974,45 +1109,76 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   await mcp.close();
 });
 
-it('retries an undelivered release with the original immutable identity', async () => {
-  await mcp.ensureReady();
-  const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
-  const physical = control.getMockImplementation()!;
-  const releases: ManagedMcpControl[] = [];
-  let delivered = false;
-  control.mockImplementation(async (operation) => {
-    if (operation.kind === 'mcp-release') {
-      releases.push(operation);
-      if (releases.length === 1) throw new Error('failed before delivery');
-      delivered = true;
-    }
-    return physical(operation);
-  });
-  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-  release.mockImplementation(async () => {
-    if (!delivered) throw new Error('connection still holds its owner');
-  });
-  await expect(mcp.close()).rejects.toBeInstanceOf(
-    HostedMcpRecoveryRequiredError,
-  );
-  expect(release).not.toHaveBeenCalled();
-  await mcp.close();
-  expect(releases).toHaveLength(2);
-  const identities = releases.map((operation) => {
-    if (!('grant' in operation)) throw new Error('missing grant');
-    const { grant: _grant, ...identity } = operation;
-    return identity;
-  });
-  expect(identities[1]).toEqual(identities[0]);
-  expect(
-    session.authority
-      .extensionRecordsInDomain('mcp_configuration')
-      .every(
-        (entry) =>
-          parseMcpConfiguration(entry.record).releaseState === 'released',
-      ),
-  ).toBe(true);
-});
+it.each([
+  { count: 1, reload: false },
+  { count: 1, reload: true },
+  { count: 2, reload: false },
+  { count: 2, reload: true },
+])(
+  'retries an undelivered release before fencing the owner ($count servers, reload: $reload)',
+  async ({ count, reload }) => {
+    const pins = [pin, { ...pin, serverId: 'second' }].slice(0, count);
+    mcp = new HostedMcpSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      pins,
+    );
+    await mcp.ensureReady();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const physical = control.getMockImplementation()!;
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const acquired = acquire.getMockImplementation()!;
+    const releases: ManagedMcpControl[] = [];
+    const drained = new Set<string>();
+    let ownerReleasing = false;
+    acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      if (ownerReleasing) throw new Error('runtime_session_not_ready');
+      return acquired.call(this);
+    });
+    control.mockImplementation(async (operation) => {
+      if (ownerReleasing) throw new Error('runtime_session_not_ready');
+      if (operation.kind === 'mcp-release') {
+        releases.push(operation);
+        if (releases.length === 1) throw new Error('failed before delivery');
+        drained.add(operation.serverId);
+      }
+      return physical(operation);
+    });
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockImplementation(async () => {
+      ownerReleasing = true;
+      if (drained.size !== count)
+        throw new Error('connection still holds its owner');
+    });
+    await expect(mcp.close()).rejects.toBeInstanceOf(
+      HostedMcpRecoveryRequiredError,
+    );
+    expect(release).not.toHaveBeenCalled();
+    if (reload)
+      mcp = new HostedMcpSession(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        pins,
+      );
+    await mcp.close();
+    expect(release).toHaveBeenCalledOnce();
+    expect(releases).toHaveLength(count + 1);
+    const identities = releases.map((operation) => {
+      if (!('grant' in operation)) throw new Error('missing grant');
+      const { grant: _grant, ...identity } = operation;
+      return identity;
+    });
+    expect(identities[1]).toEqual(identities[0]);
+    expect(
+      session.authority
+        .extensionRecordsInDomain('mcp_configuration')
+        .every(
+          (entry) =>
+            parseMcpConfiguration(entry.record).releaseState === 'released',
+        ),
+    ).toBe(true);
+  },
+);
 
 it('discards discovery from a configuration superseded while the request was pending', async () => {
   await mcp.ensureReady();

@@ -1246,7 +1246,10 @@ export class LlmClient {
     }
     const deferredTools = this.resolveDeferredToolsForReminder(deferredSummary);
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
-    const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
+    // Some providers reject an empty tool list; offer none instead.
+    const tools: Tool[] = toolDeclarations.length
+      ? [{ functionDeclarations: toolDeclarations }]
+      : [];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
     this.queueMcpServerInstructionsReminder(
