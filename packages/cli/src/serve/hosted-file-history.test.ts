@@ -18,6 +18,7 @@ import {
   assertHostedFileHistoryCapacity,
   commitHostedFileHistory,
   HostedFileHistoryRefusedError,
+  HOSTED_UUID,
   readHostedFileHistory,
   type HostedFileHistoryRecord,
 } from './hosted-file-history.js';
@@ -125,27 +126,43 @@ it('accepts older records without receipts', async () => {
 });
 
 it.each([
-  'null list',
-  'object list',
-  'null receipt',
-  'array receipt',
-  'missing field',
-  'extra field',
-  'invalid request ID',
-  'non-string request ID',
-  'invalid prompt ID',
-  'unknown prompt',
-  'duplicate request ID',
-  'non-boolean conflict',
-  'non-array paths',
-  'non-string path',
-  'untracked path',
-  'prototype path',
-  'noncanonical path',
-  'duplicate path',
-  'changed conflict',
-  'mismatched pending prompt',
-])('refuses persisted receipts with %s', async (fault) => {
+  ['null list', 'expected an array'],
+  ['object list', 'expected an array'],
+  [
+    'null receipt',
+    'expected exactly requestId, promptId, filesChanged and conflict',
+  ],
+  [
+    'array receipt',
+    'expected exactly requestId, promptId, filesChanged and conflict',
+  ],
+  [
+    'missing field',
+    'expected exactly requestId, promptId, filesChanged and conflict',
+  ],
+  [
+    'extra field',
+    'expected exactly requestId, promptId, filesChanged and conflict',
+  ],
+  ['invalid request ID', 'requestId must be a lowercase UUID v1-v5'],
+  ['non-string request ID', 'requestId must be a lowercase UUID v1-v5'],
+  ['v7 request ID', 'requestId must be a lowercase UUID v1-v5'],
+  ['uppercase request ID', 'requestId must be a lowercase UUID v1-v5'],
+  ['invalid prompt ID', 'promptId must be a lowercase UUID v1-v5'],
+  ['v7 prompt ID', 'promptId must be a lowercase UUID v1-v5'],
+  ['uppercase prompt ID', 'promptId must be a lowercase UUID v1-v5'],
+  ['unknown prompt', 'promptId is not a retained snapshot'],
+  ['duplicate request ID', 'requestId is duplicated'],
+  ['non-boolean conflict', 'conflict must be a boolean'],
+  ['non-array paths', 'filesChanged must be an array'],
+  ['non-string path', 'filesChanged must contain only tracked paths'],
+  ['untracked path', 'filesChanged must contain only tracked paths'],
+  ['prototype path', 'filesChanged must contain only tracked paths'],
+  ['noncanonical path', 'filesChanged must contain only tracked paths'],
+  ['duplicate path', 'filesChanged contains duplicate paths'],
+  ['changed conflict', 'conflict must have no changed paths'],
+  ['mismatched pending prompt', 'promptId does not match pendingUndo'],
+])('refuses persisted receipts with %s', async (fault, reason) => {
   const record = history(1, true);
   const file = Object.keys(record.state.files)[0];
   const receipt: Record<string, unknown> = {
@@ -182,6 +199,20 @@ it.each([
       break;
     case 'invalid prompt ID':
       receipt['promptId'] = '';
+      break;
+    case 'v7 request ID':
+      receipt['requestId'] = 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
+      break;
+    case 'uppercase request ID':
+      receipt['requestId'] = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+      break;
+    case 'v7 prompt ID':
+      receipt['promptId'] = record.state.snapshots[0].promptId =
+        'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
+      break;
+    case 'uppercase prompt ID':
+      receipt['promptId'] = record.state.snapshots[0].promptId =
+        'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
       break;
     case 'unknown prompt':
       receipt['promptId'] = randomUUID();
@@ -224,8 +255,34 @@ it.each([
   }
   await persistRaw({ ...record, undoReceipts });
   await expect(readHostedFileHistory(session)).rejects.toThrow(
-    'Invalid Hosted file history undo receipts.',
+    new Error(
+      `Invalid Hosted file history undo ${fault.endsWith('list') ? 'receipts' : `receipt ${fault === 'duplicate request ID' ? 1 : 0}`}: ${reason}.`,
+    ),
   );
+});
+
+it('accepts every UUID version and variant admitted by the undo API', async () => {
+  const record = history(1, false);
+  const snapshot = record.state.snapshots[0];
+  record.state.snapshots = [];
+  record.undoReceipts = [];
+  for (const version of ['1', '2', '3', '4', '5']) {
+    for (const variant of ['8', '9', 'a', 'b']) {
+      const promptId = `aaaaaaaa-aaaa-${version}aaa-${variant}aaa-aaaaaaaaaaaa`;
+      const requestId = `bbbbbbbb-bbbb-${version}bbb-${variant}bbb-bbbbbbbbbbbb`;
+      expect(HOSTED_UUID.test(promptId)).toBe(true);
+      expect(HOSTED_UUID.test(requestId)).toBe(true);
+      record.state.snapshots.push({ ...snapshot, promptId });
+      record.undoReceipts.push({
+        requestId,
+        promptId,
+        filesChanged: [],
+        conflict: false,
+      });
+    }
+  }
+  await persistRaw({ ...record });
+  await expect(readHostedFileHistory(session)).resolves.toEqual(record);
 });
 
 it('retains cumulative outcomes and matching pending receipts across file state changes', async () => {

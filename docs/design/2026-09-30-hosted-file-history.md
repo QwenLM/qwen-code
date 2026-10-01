@@ -161,6 +161,12 @@ unique canonical tracked paths, including legal prototype-named files. A
 conflict receipt has no changed paths. Missing `undoReceipts` means an empty list
 for older records; null, malformed entries and unsupported fields are refused.
 An invalid record follows the existing read/recovery error paths before effects.
+The provider boundary also refuses rewind outcomes with duplicate or untracked
+changed paths, a missing requested snapshot, or changed paths on conflict before
+a receipt can be persisted. Unknown effects keep the readable pending record and
+existing recovery boundary. Receipt errors identify the index and failed rule;
+load and history-read failures log the cause server-side without changing client
+error codes or exposing validation details.
 
 Receipts are immutable historical outcomes, not a description of current file
 contents. Later undo and Write/Edit commits preserve them in order, and replay
@@ -169,6 +175,11 @@ Do not compare an old receipt with the latest prompt or current fingerprints.
 A post-effect record may contain both the matching receipt and `pendingUndo`
 until release is confirmed; the pending marker still prevents replay and load.
 If that pending request already has a receipt, their prompt IDs must agree.
+
+Hosted snapshots and tracked paths currently never shrink: prepare refuses a new
+prompt at 100 snapshots, and rewind passes `truncateHistory = false`. Future
+retention or pruning must remove receipts referencing evicted prompts or paths
+in the same durable commit, preserving replay for all retained receipts.
 
 This follow-up changes validation and disclosure only. Retention, pruning,
 same-prompt reconciliation, cancellation during undo, I/O optimization and

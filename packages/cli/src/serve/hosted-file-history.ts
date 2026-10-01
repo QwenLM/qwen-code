@@ -29,7 +29,7 @@ export interface HostedFileHistoryRecord {
 
 export class HostedFileHistoryRefusedError extends Error {}
 
-const UUID =
+export const HOSTED_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export async function assertHostedFileHistoryCapacity(
@@ -123,33 +123,61 @@ export async function readHostedFileHistory(
   const undoReceipts =
     record.undoReceipts === undefined ? [] : record.undoReceipts;
   if (!Array.isArray(undoReceipts))
-    throw new Error('Invalid Hosted file history undo receipts.');
+    throw new Error(
+      'Invalid Hosted file history undo receipts: expected an array.',
+    );
   const requests = new Set<string>();
+  // Hosted rewind never truncates snapshots and prepare refuses at capacity.
+  // Future retention (#13124) must prune dependent receipts in the same commit.
   const prompts = new Set(state.snapshots.map((snapshot) => snapshot.promptId));
-  for (const receipt of undoReceipts) {
+  for (const [index, receipt] of undoReceipts.entries()) {
+    const invalid = (reason: string): never => {
+      throw new Error(
+        `Invalid Hosted file history undo receipt ${index}: ${reason}.`,
+      );
+    };
     if (
       !receipt ||
       typeof receipt !== 'object' ||
       Array.isArray(receipt) ||
       Object.keys(receipt).sort().join(',') !==
-        'conflict,filesChanged,promptId,requestId' ||
+        'conflict,filesChanged,promptId,requestId'
+    )
+      invalid(
+        'expected exactly requestId, promptId, filesChanged and conflict',
+      );
+    if (
       typeof receipt.requestId !== 'string' ||
-      !UUID.test(receipt.requestId) ||
+      !HOSTED_UUID.test(receipt.requestId)
+    )
+      invalid('requestId must be a lowercase UUID v1-v5');
+    if (
       typeof receipt.promptId !== 'string' ||
-      !UUID.test(receipt.promptId) ||
-      !prompts.has(receipt.promptId) ||
-      requests.has(receipt.requestId) ||
-      typeof receipt.conflict !== 'boolean' ||
-      !Array.isArray(receipt.filesChanged) ||
+      !HOSTED_UUID.test(receipt.promptId)
+    )
+      invalid('promptId must be a lowercase UUID v1-v5');
+    if (!prompts.has(receipt.promptId))
+      invalid('promptId is not a retained snapshot');
+    if (requests.has(receipt.requestId)) invalid('requestId is duplicated');
+    if (typeof receipt.conflict !== 'boolean')
+      invalid('conflict must be a boolean');
+    if (!Array.isArray(receipt.filesChanged))
+      invalid('filesChanged must be an array');
+    if (
       receipt.filesChanged.some(
         (file) => typeof file !== 'string' || !Object.hasOwn(state.files, file),
-      ) ||
-      new Set(receipt.filesChanged).size !== receipt.filesChanged.length ||
-      (receipt.conflict && receipt.filesChanged.length !== 0) ||
-      (record.pendingUndo?.requestId === receipt.requestId &&
-        record.pendingUndo.promptId !== receipt.promptId)
+      )
     )
-      throw new Error('Invalid Hosted file history undo receipts.');
+      invalid('filesChanged must contain only tracked paths');
+    if (new Set(receipt.filesChanged).size !== receipt.filesChanged.length)
+      invalid('filesChanged contains duplicate paths');
+    if (receipt.conflict && receipt.filesChanged.length !== 0)
+      invalid('conflict must have no changed paths');
+    if (
+      record.pendingUndo?.requestId === receipt.requestId &&
+      record.pendingUndo.promptId !== receipt.promptId
+    )
+      invalid('promptId does not match pendingUndo');
     requests.add(receipt.requestId);
   }
   return {

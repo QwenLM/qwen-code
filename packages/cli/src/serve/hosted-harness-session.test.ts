@@ -4102,6 +4102,7 @@ describe('Hosted Harness tool approvals', () => {
     'conflict',
     'closing',
     'old-history-unavailable',
+    'corrupt-receipt',
     'release',
     'busy',
     'warm',
@@ -4251,6 +4252,68 @@ describe('Hosted Harness tool approvals', () => {
         supertest(server).get(`/session/${SESSION_ID}/files/history`),
       ).set('X-Qwen-Client-Id', clientId);
       expect(before.body.history.state).toEqual(historyState);
+      if (scenario === 'corrupt-receipt') {
+        const read = LocalManagedSessionResourceStore.prototype.read;
+        const fault = vi
+          .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+          .mockImplementation(async function (
+            this: LocalManagedSessionResourceStore,
+            ref,
+          ) {
+            const bytes = await read.call(this, ref);
+            if (ref.kind !== 'managed-file_history') return bytes;
+            const record = JSON.parse(bytes.toString('utf8'));
+            record.undoReceipts = [
+              {
+                requestId: randomUUID(),
+                promptId: PROMPT_ID,
+                filesChanged: ['missing.txt'],
+                conflict: false,
+              },
+            ];
+            return Buffer.from(JSON.stringify(record));
+          });
+        const log = vi
+          .spyOn(stdio, 'writeStderrLineSafe')
+          .mockImplementation(() => {});
+        const detail =
+          'Invalid Hosted file history undo receipt 0: filesChanged must contain only tracked paths.';
+        const failed = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/files/history`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(failed.status).toBe(503);
+        expect(failed.body).toEqual({
+          error: 'hosted_file_history_failed',
+          code: 'hosted_file_history_failed',
+        });
+        expect(log).toHaveBeenCalledWith(
+          `qwen serve: Hosted file history read failed: Error: ${detail}`,
+        );
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({})
+          .expect(204);
+        log.mockClear();
+        const failedLoad = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({ managedSessionStore: store(), toolProfile: files });
+        expect(failedLoad.status).toBe(503);
+        expect(failedLoad.body).toEqual({
+          error: 'managed_session_open_failed',
+          code: 'managed_session_open_failed',
+        });
+        expect(log).toHaveBeenCalledWith(
+          `qwen serve: Hosted Session open failed: Error: ${detail}`,
+        );
+        fault.mockRestore();
+        await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+          .send({ managedSessionStore: store(), toolProfile: files })
+          .expect(200);
+        await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        ).expect(204);
+        return;
+      }
       if (releaseFails)
         vi.mocked(
           HostedWorkspaceBroker.prototype.release,

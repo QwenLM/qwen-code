@@ -1166,7 +1166,7 @@ it.each(['files', 'shell', 'mcp'])(
       'prompt',
       commit,
       messageFitsInline,
-      profile !== 'files'
+      profile === 'shell'
         ? {
             resources: session.resources,
             assertWritable: async () => undefined,
@@ -1195,12 +1195,24 @@ it.each(['files', 'shell', 'mcp'])(
         expect(description).toContain('validate a fresh backup');
       }
     }
-    if (profile !== 'files')
+    if (profile === 'shell')
       expect(
         declarations.find((tool) => tool.name === 'run_shell_command')
           ?.description,
       ).toContain('Shell file mutations are not backed up');
-    if (profile === 'mcp') expect(declarations.at(-1)).toEqual(remote);
+    else
+      expect(
+        declarations.find((tool) => tool.name === 'run_shell_command'),
+      ).toBeUndefined();
+    if (profile === 'mcp') {
+      expect(declarations.map((tool) => tool.name)).toEqual([
+        'read_file',
+        'write_file',
+        'edit',
+        'mcp_write',
+      ]);
+      expect(declarations.at(-1)).toEqual(remote);
+    }
     expect(declarations.find((tool) => tool.name === 'read_file')).toEqual(
       original[0],
     );
