@@ -1274,6 +1274,30 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordAbsorbedSnapshotOffset', () => {
+    it('re-appends an offset restored after resume', async () => {
+      svc.restoreAbsorbedSnapshotOffset({
+        absorbedSnapshotCount: 2,
+        boundaryPromptId: 'p2',
+        boundaryTurnIndex: 2,
+      });
+      user('keep');
+      svc.rewindRecording(0, { truncatedCount: 1 });
+      await svc.flush();
+      expect(
+        writes().filter(
+          (record) => record.subtype === 'absorbed_snapshot_offset',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          systemPayload: {
+            absorbedSnapshotCount: 2,
+            boundaryPromptId: 'p2',
+            boundaryTurnIndex: 2,
+          },
+        }),
+      ]);
+    });
+
     it('does not keep a rejected offset for rewind to re-append', async () => {
       svc.recordAbsorbedSnapshotOffset({
         absorbedSnapshotCount: 2,

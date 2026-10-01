@@ -819,7 +819,23 @@ export interface RewindRecordPayload {
  */
 export interface AbsorbedSnapshotOffsetRecordPayload {
   absorbedSnapshotCount: number;
+  /** First live snapshot, or the last absorbed snapshot when `boundaryExclusive` is set. */
   boundaryPromptId?: string;
+  /** Live tail starts one past `boundaryPromptId`. */
+  boundaryExclusive?: boolean;
+  /** `rewindRecording` index of the first live user turn. */
+  boundaryTurnIndex?: number;
+}
+
+function isRewindUserTurn(record: ChatRecord): boolean {
+  return (
+    record.type === 'user' &&
+    record.subtype !== 'goal_runtime' &&
+    record.subtype !== 'notification' &&
+    record.subtype !== 'cron' &&
+    record.subtype !== 'mid_turn_user_message' &&
+    record.subtype !== 'realtime_message'
+  );
 }
 
 export function isAbsorbedSnapshotOffsetPayload(
@@ -833,10 +849,23 @@ export function isAbsorbedSnapshotOffsetPayload(
   ) {
     return false;
   }
+  if (
+    record.boundaryPromptId !== undefined &&
+    (typeof record.boundaryPromptId !== 'string' ||
+      record.boundaryPromptId.length === 0)
+  ) {
+    return false;
+  }
+  if (
+    record.boundaryExclusive !== undefined &&
+    typeof record.boundaryExclusive !== 'boolean'
+  ) {
+    return false;
+  }
   return (
-    record.boundaryPromptId === undefined ||
-    (typeof record.boundaryPromptId === 'string' &&
-      record.boundaryPromptId.length > 0)
+    record.boundaryTurnIndex === undefined ||
+    (Number.isInteger(record.boundaryTurnIndex) &&
+      record.boundaryTurnIndex >= 0)
   );
 }
 
@@ -3021,6 +3050,34 @@ export class ChatRecordingService {
    * Persists the compression rewind offset so resume does not infer it
    * from the live snapshot and prompt counts.
    */
+  getRecordedUserTurnCount(): number {
+    return this.turnParentUuids.length;
+  }
+
+  recordedTurnIndexForPrompt(promptId: string): number | undefined {
+    let index = 0;
+    for (const record of this.activeBranchRecords) {
+      if (!isRewindUserTurn(record)) continue;
+      if (record.promptId === promptId) return index;
+      index++;
+    }
+    return undefined;
+  }
+
+  /**
+   * Remembers the offset after resume without appending another record.
+   * Later rewinds re-append whatever this holds.
+   */
+  restoreAbsorbedSnapshotOffset(
+    payload: AbsorbedSnapshotOffsetRecordPayload | undefined,
+  ): void {
+    if (!isAbsorbedSnapshotOffsetPayload(payload)) {
+      this.currentAbsorbedSnapshotOffset = undefined;
+      return;
+    }
+    this.currentAbsorbedSnapshotOffset = payload;
+  }
+
   recordAbsorbedSnapshotOffset(
     payload: AbsorbedSnapshotOffsetRecordPayload,
   ): void {

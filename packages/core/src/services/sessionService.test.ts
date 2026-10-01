@@ -3608,6 +3608,36 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('remaps an absorbed snapshot boundary when forking', async () => {
+      const { file } = seedSession([
+        sys('offset-1', 'u2', 'absorbed_snapshot_offset', 3, {
+          absorbedSnapshotCount: 1,
+          boundaryPromptId: `${oldId}########1`,
+          boundaryTurnIndex: 1,
+        }),
+      ]);
+      void file;
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written).toContainEqual(
+        expect.objectContaining({
+          sessionId: newId,
+          subtype: 'absorbed_snapshot_offset',
+          systemPayload: expect.objectContaining({
+            absorbedSnapshotCount: 1,
+            boundaryPromptId: `${newId}########1`,
+            boundaryTurnIndex: 1,
+          }),
+        }),
+      );
+    });
+
     it('copies the selected branch approval state into a fork', async () => {
       const { file, lines } = seedSession();
       lines[1]!['parentUuid'] = 'approval-yolo';
