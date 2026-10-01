@@ -542,6 +542,9 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
+                // Only the Session creator may answer; after the service says
+                // so, further clicks would only repeat the same refusal.
+                disabled={approvalForbidden}
                 extraDescriptionId={
                   pendingApproval.rawInput === undefined
                     ? argumentsCaveatId

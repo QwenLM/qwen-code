@@ -473,28 +473,38 @@ describe('ManagedSessionsPage', () => {
         capabilities: { canSend: false, canCancel: false, actions: true },
       }),
     );
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
     provider = {
       ...provider,
       actions: {
         listPending: vi.fn().mockResolvedValue([pendingAction]),
-        respond: vi
-          .fn()
-          .mockRejectedValue(
-            new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
-          ),
+        respond,
       },
     };
     await render('s1');
-    const allow = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Yes, allow once'),
-    );
+    const allow = () =>
+      Array.from(container.querySelectorAll('button')).find((button) =>
+        button.textContent?.includes('Yes, allow once'),
+      ) as HTMLButtonElement;
     await act(async () => {
-      allow!.click();
+      allow().click();
       await flush();
     });
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       'Only the Session creator can answer this approval.',
     );
+    // The refusal is final for this viewer, so the card stops offering the
+    // answer instead of sending one 403 per click.
+    expect(allow().disabled).toBe(true);
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(1);
   });
 
   it('does not read approvals for a Session without the actions capability', async () => {
