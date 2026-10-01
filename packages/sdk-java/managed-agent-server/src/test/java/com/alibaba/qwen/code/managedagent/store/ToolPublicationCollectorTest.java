@@ -101,7 +101,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, created_at) VALUES (?, ?, 'workspace-1', ?, 'z-inline',"
                         + " 'managed-tool-result-content', 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
-                scope, tenant, session, scope, new byte[] {2});
+                ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, scope, new byte[] {2});
         retire();
         var gc = collector(objects);
         assertThat(gc.runOnce()).isTrue();
@@ -214,6 +214,125 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         retryNow();
         assertThat(gc.runOnce()).isTrue();
         assertThat(held()).isZero();
+    }
+
+    @Test
+    void expiredClaimStopsBeforeDeletingTheNextObject() {
+        addObject("a", "exact/a", null);
+        addObject("b", "exact/b", null);
+        var expire = new AtomicBoolean(true);
+        var objects = new DeletingObjects() {
+            @Override public void deleteIfPresent(String key) {
+                super.deleteIfPresent(key);
+                if (expire.getAndSet(false)) {
+                    jdbc.update("UPDATE qwen_tool_publication SET gc_claim_until = 0 WHERE scope_key = ?", scope);
+                }
+            }
+        };
+        retire();
+        assertThat(collector(objects).runOnce()).isFalse();
+        assertThat(objects.deleted).containsExactly("exact/a");
+        assertThat(state()).isEqualTo("DELETING");
+        assertThat(held()).isEqualTo(3000);
+        assertThat(collector(objects).runOnce()).isTrue();
+        assertThat(objects.deleted).containsExactly("exact/a", "exact/a", "exact/b");
+        assertThat(held()).isZero();
+    }
+
+    @Test
+    void expiredClaimCannotConfirmTheLastPhysicalDeletion() {
+        addObject("one", "exact/one", null);
+        var expire = new AtomicBoolean(true);
+        var objects = new DeletingObjects() {
+            @Override public void deleteIfPresent(String key) {
+                super.deleteIfPresent(key);
+                if (expire.getAndSet(false)) {
+                    jdbc.update("UPDATE qwen_tool_publication SET gc_claim_until = 0 WHERE scope_key = ?", scope);
+                }
+            }
+        };
+        retire();
+        var gc = collector(objects);
+        assertThat(gc.runOnce()).isFalse();
+        assertThat(state()).isEqualTo("DELETING");
+        assertThat(held()).isEqualTo(3000);
+        assertThat(gc.runOnce()).isFalse();
+        retryNow();
+        assertThat(collector(objects).runOnce()).isTrue();
+        assertThat(objects.deleted).containsExactly("exact/one", "exact/one");
+        assertThat(held()).isZero();
+    }
+
+    @org.springframework.context.annotation.Configuration
+    @org.springframework.scheduling.annotation.EnableScheduling
+    static class SchedulingHarness {}
+
+    @Test
+    void slowCollectionDoesNotStallMessageMaterializer() throws Exception {
+        addObject("one", "exact/one", null);
+        retire();
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var advanced = new java.util.concurrent.CountDownLatch(1);
+        var objects = new DeletingObjects() {
+            @Override public void deleteIfPresent(String key) {
+                entered.countDown();
+                try { assertThat(release.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue(); }
+                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                super.deleteIfPresent(key);
+            }
+        };
+        var state = org.mockito.Mockito.mock(AgentStateStore.class);
+        org.mockito.Mockito.when(state.findMaterializationTargets(org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(List.of(new StoreModels.MaterializationTarget(tenant, "other-session")));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            if (entered.getCount() == 0) { advanced.countDown(); }
+            return null;
+        }).when(state).materializeNextBatch(org.mockito.ArgumentMatchers.eq(tenant),
+                org.mockito.ArgumentMatchers.eq("other-session"), org.mockito.ArgumentMatchers.anyInt());
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.register(SchedulingHarness.class,
+                    org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration.class,
+                    com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration.class);
+            context.registerBean(ManagedAgentProperties.class, ManagedAgentProperties::new);
+            context.registerBean("managedToolOutputScheduler",
+                    org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler.class,
+                    () -> new com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration()
+                            .managedToolOutputScheduler(new org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder()));
+            context.registerBean("collector", ToolPublicationCollector.class, () -> collector(objects));
+            context.registerBean("materializer", com.alibaba.qwen.code.managedagent.service.MessageMaterializer.class,
+                    () -> new com.alibaba.qwen.code.managedagent.service.MessageMaterializer(state));
+            try {
+                context.refresh();
+                assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                assertThat(advanced.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            } finally { release.countDown(); }
+        }
+    }
+
+    @Test
+    void scheduledFailureRetainsQuotaAndLogsTheCause() {
+        addObject("one", "exact/one", null);
+        retire();
+        var objects = new DeletingObjects() {
+            @Override public void deleteIfPresent(String key) { throw new IllegalStateException("denied"); }
+        };
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(ToolPublicationCollector.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            collector(objects).tick();
+            assertThat(appender.list).singleElement().satisfies(event -> {
+                assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.WARN);
+                assertThat(event.getThrowableProxy()).isNotNull();
+            });
+            assertThat(state()).isEqualTo("DELETING");
+            assertThat(held()).isEqualTo(3000);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test
