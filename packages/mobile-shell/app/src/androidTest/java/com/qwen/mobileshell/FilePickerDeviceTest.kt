@@ -187,6 +187,13 @@ class FilePickerDeviceTest {
         assertEquals(2, countingContext.permissionChecks)
     }
 
+    @Test fun secondAuthorityInOneSelectionIsResolvedSeparately() {
+        val uris = listOf(document(), android.provider.Settings.System.CONTENT_URI)
+        val countingContext = CountingContext(context)
+        assertNull(delivered(selection(uris), pickerContext = countingContext))
+        assertEquals(2, countingContext.providerManagerReads)
+    }
+
     @Test fun unsupportedModeAndStaleDocumentCancelWithoutLaunching() {
         val calls = mutableListOf<Array<Uri>?>()
         val picker = NativeFilePicker(context) { fail("Must not launch") }
