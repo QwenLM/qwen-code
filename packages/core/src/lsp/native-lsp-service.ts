@@ -83,7 +83,9 @@ function describeLspServerState(name: string, handle: LspServerHandle): string {
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   const reason =
-    lines && lines.length > 0 ? lines[lines.length - 1]!.slice(-200) : undefined;
+    lines && lines.length > 0
+      ? lines[lines.length - 1]!.slice(-200)
+      : undefined;
   const state = handle.status.toLowerCase().replace(/_/g, ' ');
   return `${name} is ${state}${reason ? ` (${reason})` : ''}`;
 }
@@ -655,9 +657,7 @@ export class NativeLspService {
     );
     const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
     const skipped = configured
-      .filter(
-        ([, handle]) => !this.serverDeclaredIrrelevant(handle, extension),
-      )
+      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
       .map(([name, handle]) => describeLspServerState(name, handle));
     if (skipped.length > 0) {
       throw new Error(
@@ -725,7 +725,10 @@ export class NativeLspService {
     handle: LspServerHandle,
     extension: string | undefined,
   ): boolean {
-    if (extension === undefined || !KNOWN_DIAGNOSTIC_EXTENSIONS.has(extension)) {
+    if (
+      extension === undefined ||
+      !KNOWN_DIAGNOSTIC_EXTENSIONS.has(extension)
+    ) {
       return false;
     }
     const owned = this.declaredDiagnosticExtensions(handle);

@@ -2476,9 +2476,7 @@ describe('NativeLspService disk document synchronization', () => {
         // unbounded, so the join must shrink entries to a shared budget
         // without dropping a server name.
         const secondConnection = createConnection();
-        secondConnection.request.mockRejectedValue(
-          new Error('y'.repeat(5000)),
-        );
+        secondConnection.request.mockRejectedValue(new Error('y'.repeat(5000)));
         withServers([
           ['test', handle],
           [
@@ -2824,7 +2822,7 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
-    it('does not let an irrelevant server\'s failed pull veto a clean document answer', async () => {
+    it("does not let an irrelevant server's failed pull veto a clean document answer", async () => {
       // A ready python server that rejects textDocument/diagnostic (e.g. it
       // never implemented pull diagnostics) says nothing about main.ts; the
       // typescript server's authoritative empty report stands.
@@ -2839,7 +2837,11 @@ describe('NativeLspService disk document synchronization', () => {
           'pyright',
           {
             ...handle,
-            config: { ...handle.config, name: 'pyright', languages: ['python'] },
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
             connection: failingConnection,
           },
         ],
@@ -2849,7 +2851,7 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
-    it('lets an irrelevant server\'s failed pull veto an unbacked workspace report', async () => {
+    it("lets an irrelevant server's failed pull veto an unbacked workspace report", async () => {
       // The workspace leg stays unqualified: with no queried file there is
       // no relevance test, so any failed pull vetoes an empty report.
       mockDiagnosticsResponses(connection);
@@ -2863,7 +2865,11 @@ describe('NativeLspService disk document synchronization', () => {
           'pyright',
           {
             ...handle,
-            config: { ...handle.config, name: 'pyright', languages: ['python'] },
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
             connection: failingConnection,
           },
         ],

@@ -5,11 +5,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, readFile, unlink, writeFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
@@ -36,7 +34,6 @@ const operations: string[] = [];
 let clientId = '';
 let modelCalls = 0;
 let proxyFailure: unknown;
-let writer: FileHandle | undefined;
 const headers = {
   'X-Qwen-Tenant-Id': config.tenantId,
   'Content-Type': 'application/json',
@@ -189,9 +186,10 @@ const proxy = createServer(async (req, res) => {
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks);
     const url = new URL(req.url!, config.brokerUrl);
-    operations.push(
-      req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!,
-    );
+    const operation =
+      req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    operations.push(operation);
+    if (operation === 'start') await writeFile(`${proof}.read-gate`, '');
     const upstream = await fetch(url, {
       method: req.method,
       headers: {
@@ -242,8 +240,6 @@ const observers = [
 const [publicBefore, webBefore, publicAfter, webAfter] = observers;
 
 try {
-  await unlink(proof);
-  execFileSync('mkfifo', [proof]);
   await cli.start(model.baseUrl, {
     extraArgs: [
       '--managed-runtime-broker-url',
@@ -284,16 +280,12 @@ try {
     },
     202,
   );
-  await waitUntil(async () => {
-    try {
-      writer = await open(proof, constants.O_WRONLY | constants.O_NONBLOCK);
-      return true;
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ENXIO') throw cause;
-      return false;
-    }
+  await waitUntil(() => {
+    if (proxyFailure) throw proxyFailure;
+    return existsSync(`${proof}.read-entered`);
   });
-  assert((await lstat(proof)).isFIFO());
+  assert((await lstat(proof)).isFile());
+  assert.equal(await readFile(proof, 'utf8'), 'x');
   assert.equal(
     (await privateJson(`/session/${sessionId}/status`)).hasActivePrompt,
     true,
@@ -308,9 +300,7 @@ try {
     webBefore.frames.map((frame) => frame.id),
     [1],
   );
-  await writer!.write('x');
-  await writer!.close();
-  writer = undefined;
+  await unlink(`${proof}.read-gate`);
   await waitUntil(
     async () =>
       !(await privateJson(`/session/${sessionId}/status`)).hasActivePrompt,
@@ -448,7 +438,6 @@ try {
 } finally {
   await Promise.allSettled(observers.map((observer) => observer.close()));
   await cli.close();
-  await writer?.close();
   await model.close();
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

@@ -308,6 +308,39 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     assert(Buffer.byteLength(JSON.stringify(receipts[0].content)) < 64 * 1024);
     return { content: 'SHELL_DONE' };
   }
+  if (current === 'HISTORY_FILES') {
+    if (!receipts.length)
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'write_file',
+            { file_path: 'history-existing.txt', content: 'middle' },
+            'history-existing',
+          ),
+          fakeToolCall(
+            'write_file',
+            { file_path: 'history-new.txt', content: 'created' },
+            'history-new',
+          ),
+        ],
+      };
+    if (receipts.length === 2)
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'edit',
+            {
+              file_path: 'history-existing.txt',
+              old_string: 'middle',
+              new_string: 'final',
+            },
+            'history-edit',
+          ),
+        ],
+      };
+    assert.equal(receipts.length, 3);
+    return { content: 'HISTORY_FILES_DONE' };
+  }
   if (current.startsWith('RUN_TOOLS')) {
     if (!receipts.length)
       return {
@@ -854,6 +887,96 @@ try {
       sessionId = originalSessionId;
       clientId = originalClientId;
     }
+    await writeFile(
+      path.join(session.directory, 'history-existing.txt'),
+      'original',
+    );
+    const historyEvents = await prompt('HISTORY_FILES');
+    const targetPrompt = historyEvents
+      .filter((event) => event.type === 'turn_complete')
+      .at(-1)!.promptId;
+    assert.equal(
+      await readFile(
+        path.join(session.directory, 'history-existing.txt'),
+        'utf8',
+      ),
+      'final',
+    );
+    const history = await json(`/session/${sessionId}/files/history`);
+    assert.equal(history.history.pendingTurn, null);
+    assert.equal(
+      history.history.state.snapshots.filter(
+        (snapshot: { promptId: string }) => snapshot.promptId === targetPrompt,
+      ).length,
+      1,
+    );
+    await json(`/session/${sessionId}/detach`, {}, 204);
+    clientId = (
+      await json(`/session/${sessionId}/load`, {
+        managedSessionStore: connection,
+        toolProfile: session.toolProfile,
+      })
+    ).clientId;
+    assert.deepEqual(
+      (await json(`/session/${sessionId}/files/history`)).history,
+      history.history,
+    );
+    await writeFile(
+      path.join(session.directory, 'history-existing.txt'),
+      'external',
+    );
+    const conflictRequest = { promptId: targetPrompt, requestId: randomUUID() };
+    const conflict = await json(
+      `/session/${sessionId}/files/rewind`,
+      conflictRequest,
+      409,
+    );
+    assert.equal(conflict.conflict, true);
+    assert.equal(
+      await readFile(path.join(session.directory, 'history-new.txt'), 'utf8'),
+      'created',
+    );
+    await writeFile(
+      path.join(session.directory, 'history-existing.txt'),
+      'final',
+    );
+    const undoRequest = { promptId: targetPrompt, requestId: randomUUID() };
+    const undone = await json(
+      `/session/${sessionId}/files/rewind`,
+      undoRequest,
+    );
+    assert.equal(undone.conflict, false);
+    assert.equal(
+      await readFile(
+        path.join(session.directory, 'history-existing.txt'),
+        'utf8',
+      ),
+      'original',
+    );
+    await assert.rejects(
+      access(path.join(session.directory, 'history-new.txt')),
+    );
+    assert.deepEqual(
+      await json(`/session/${sessionId}/files/rewind`, undoRequest),
+      undone,
+    );
+    assert.deepEqual(
+      await json(`/session/${sessionId}/files/rewind`, conflictRequest, 409),
+      conflict,
+    );
+    const repeatedUndo = await json(`/session/${sessionId}/files/rewind`, {
+      promptId: targetPrompt,
+      requestId: randomUUID(),
+    });
+    assert.deepEqual(repeatedUndo.filesChanged, []);
+    assert.deepEqual(
+      await json(`/session/${sessionId}/files/rewind`, undoRequest),
+      undone,
+    );
+    assert.equal(
+      await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
+      'decoy',
+    );
     if (index === 1) {
       loseStatus = true;
       const before = modelCalls;
@@ -881,7 +1004,7 @@ try {
     } else await json(`/session/${sessionId}/detach`, {}, 204);
   }
   assert(droppedStart);
-  assert.equal(starts.size, 15);
+  assert.equal(starts.size, 21);
   assert.equal(shellExpected.length, 1);
   await writeFile(
     config.resultFile,
@@ -889,7 +1012,7 @@ try {
   );
   assert([...starts.values()].every((count) => count === 1));
   console.log(
-    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, correctable file_path refusal, same-Workspace second Session, parallel warmup, file replay, 100 MiB Shell, Java cold load without profile, Harness process restart, damaged durable empty Shell seal refusal, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
+    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, correctable file_path refusal, same-Workspace second Session, parallel warmup, file replay, durable backups, reload/undo/conflict checks, 100 MiB Shell, Java cold load without profile, Harness process restart, damaged durable empty Shell seal refusal, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
   );
 } catch (cause) {
   console.error(cli.output);
