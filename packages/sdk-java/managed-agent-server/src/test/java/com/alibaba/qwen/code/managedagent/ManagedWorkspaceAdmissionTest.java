@@ -552,6 +552,15 @@ class ManagedWorkspaceAdmissionTest {
                 .isFalse();
         assertThat(registry.createdSession("tenant-" + UUID.randomUUID(),
                 "actor-a", sessionId)).isFalse();
+        // The lookup pins this Session, not any bound Session the actor
+        // created in the tenant: actor-b's own Session does not admit
+        // actor-a, and vice versa.
+        String otherSession = store.insertWorkspaceSessionCommand(tenant,
+                "actor-b", "create-b", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        assertThat(registry.createdSession(tenant, "actor-a", otherSession))
+                .isFalse();
 
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
@@ -569,6 +578,19 @@ class ManagedWorkspaceAdmissionTest {
                         + " managed_agent_turn WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 Integer.class, tenant, sessionId)).isEqualTo(1);
+        // Unarchive stays gated for bound Sessions even under the opt-in;
+        // the enabled store opens rename only.
+        assertThatThrownBy(() -> transaction.execute(status ->
+                gated.beginSessionMutation(tenant, "UNARCHIVE_SESSION",
+                        "unarchive-1", digest, sessionId,
+                        SessionMutationKind.UNARCHIVE)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("workspace_unavailable"));
+        // Cancel stays open for a bound Session under the opt-in.
+        assertThat(gated.insertCancelCommand(tenant, "CANCEL", "cancel-1",
+                digest, sessionId, admission.turnId()).turnId())
+                .isEqualTo(admission.turnId());
     }
 
     @Test
@@ -671,7 +693,11 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.workspace.workspaceId")
                         .value("ws-a"))
-                .andExpect(jsonPath("$.workspace.cwdRelative").value("services/api"));
+                .andExpect(jsonPath("$.workspace.cwdRelative").value("services/api"))
+                // The opt-in is off, so even the creator may not send later
+                // Turns; this pins the isWorkspaceFilesAvailable clause.
+                .andExpect(jsonPath("$.capabilities.workspaceTurns")
+                        .value(false));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, "actor-a"))
