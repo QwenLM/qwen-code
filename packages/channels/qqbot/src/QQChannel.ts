@@ -2851,20 +2851,36 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    this.streamOrphanBuffer.set(
-      sessionId,
-      existing === undefined
-        ? {
-            turn: taggedTurn,
-            text: sealed,
-            pre: sealed,
-          }
-        : {
-            turn: existing.turn,
-            text: sealed + existing.text,
-            pre: sealed + (existing.pre ?? ''),
-          },
-    );
+    const limit = this.streamBufferLimit(state);
+    // This is the second write site for the side buffer. The sealed head is the
+    // reason this handoff exists, so it is kept whole and only the successor's
+    // contribution is capped. The stash is therefore at most
+    // max(streamBufferLimit(state), sealed.length); `sealed` is itself bounded —
+    // a carried seal plus a boundary seal, each derived from a capped buffer —
+    // so this write site cannot grow without bound.
+    const room = Math.max(0, limit - sealed.length);
+    let merged = { turn: taggedTurn, text: sealed, pre: sealed };
+    if (existing !== undefined) {
+      const successorText = truncateUtf16Units(existing.text, room);
+      merged = {
+        turn: existing.turn,
+        text: sealed + successorText,
+        pre: sealed + truncateUtf16Units(existing.pre ?? '', room),
+      };
+      // `pre` is a prefix of `text` and is what onResponseComplete prepends, so
+      // it must never outrun the kept text; the trims above keep that true, and
+      // this stays as the safety net.
+      if (merged.pre.length > merged.text.length) {
+        merged.pre = merged.text;
+      }
+      const dropped = existing.text.length - successorText.length;
+      if (dropped > 0) {
+        process.stderr.write(
+          `[QQ:${this.name}] dropping ${dropped} chars of handed-off sealed head over the buffer limit for ${sanitizeLogText(sessionId, 64)}\n`,
+        );
+      }
+    }
+    this.streamOrphanBuffer.set(sessionId, merged);
   }
 
   override onSessionDied(sessionId: string): void {

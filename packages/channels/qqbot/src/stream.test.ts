@@ -2396,6 +2396,149 @@ describe('buffer limit flush (#11)', () => {
     resolveSend(mockResponse(true));
     await drain();
   });
+
+  it('caps the handed-off stash merge while keeping the sealed head (R20-2)', async () => {
+    const ch = makeChannel({ bufferFlushLength: 40 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      { sealedPre?: string; boundaryClearedInFlight?: string }
+    >;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    // Turn 1: 'HEAD' buffers, a boundary seals it, and the drain takes it with
+    // the send still unresolved.
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // A residual buffers, completion parks turn 1, and turn 2's chunk diverts
+    // into the side buffer under turn 2; a boundary then seals its `pre`.
+    onResponseChunk(ch, 'test-chat', 'Q', 's1');
+    await onResponseComplete(ch, 'test-chat', 'HEAD', 's1');
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    const long = 'X'.repeat(38);
+    onResponseChunk(ch, 'test-chat', long, 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: long, pre: long });
+    const state = stateMap.get('s1')!;
+
+    // Turn 1's permanent failure hands its sealed head off in front of that
+    // 38-char stash: 4 + 38 = 42 exceeds the 40-char limit.
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const limit = (chp['streamBufferLimit'] as (s: unknown) => number).call(
+      ch,
+      state,
+    );
+    expect(limit).toBe(40);
+    const stashed = orphanBuffer.get('s1')!;
+    expect(stashed.turn).toBe(2);
+    expect(stashed.text.length).toBeLessThanOrEqual(limit);
+    // The sealed head is the reason the handoff exists, so it survives whole.
+    expect(stashed.text).toBe('HEAD' + 'X'.repeat(36));
+    expect(stashed.text.startsWith('HEAD')).toBe(true);
+    expect(stashed.pre).toBe(stashed.text);
+    expect(stashed.text.startsWith(stashed.pre!)).toBe(true);
+    const drops = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((line) =>
+        line.includes('handed-off sealed head over the buffer limit'),
+      )
+      .map((line) => Number(/dropping (\d+) chars/.exec(line)?.[1] ?? '0'));
+    expect(drops).toEqual([2]);
+    // The logged loss telescopes: kept + dropped is what the merge held.
+    expect(stashed.text.length + drops[0]).toBe('HEAD'.length + long.length);
+    stderrSpy.mockRestore();
+  });
+
+  it('keeps the sealed head whole when the limit is smaller than the head (R20-2)', async () => {
+    const ch = makeChannel({ bufferFlushLength: 40 });
+    const chp = ch as unknown as Record<string, unknown>;
+    const stateMap = chp['streamState'] as Map<
+      string,
+      { sealedPre?: string; sourceLabel?: string }
+    >;
+    const orphanBuffer = chp['streamOrphanBuffer'] as Map<
+      string,
+      { turn: number; text: string; pre?: string }
+    >;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setReplyMsgId(ch, 'test-chat', 'msg-A');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-A');
+
+    onResponseChunk(ch, 'test-chat', 'HEAD', 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    let rejectSend!: (e: unknown) => void;
+    mockSendQQMessage.mockReturnValueOnce(
+      new Promise<MockResponse>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    onResponseChunk(ch, 'test-chat', 'Q', 's1');
+    await onResponseComplete(ch, 'test-chat', 'HEAD', 's1');
+    setReplyMsgId(ch, 'test-chat', 'msg-B');
+    onPromptStart(ch, 'test-chat', 's1', 'msg-B');
+    const long = 'X'.repeat(38);
+    onResponseChunk(ch, 'test-chat', long, 's1');
+    onResponseBoundary(ch, 'test-chat', 's1');
+    expect(orphanBuffer.get('s1')).toEqual({ turn: 2, text: long, pre: long });
+    const state = stateMap.get('s1')!;
+    // A very long rendered source label shrinks this state's limit below the
+    // sealed head's own length: the head must still survive whole.
+    state.sourceLabel = 'L'.repeat(36); // limit 3
+
+    rejectSend(new DeliveryError('RETRY_EXHAUSTED', 'permanent failure'));
+    await drain();
+
+    const limit = (chp['streamBufferLimit'] as (s: unknown) => number).call(
+      ch,
+      state,
+    );
+    expect(limit).toBe(3);
+    const stashed = orphanBuffer.get('s1')!;
+    expect(stashed.turn).toBe(2);
+    // The sealed head is the reason the handoff exists, so it is kept whole
+    // even though it is longer than the limit...
+    expect(stashed.text).toBe('HEAD');
+    expect(stashed.text.length).toBeGreaterThan(limit);
+    // ...and the successor's contribution is dropped entirely.
+    expect(stashed.text).not.toContain('X');
+    expect(stashed.pre).toBe('HEAD');
+    expect(stashed.text.startsWith(stashed.pre!)).toBe(true);
+    const drops = stderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((line) =>
+        line.includes('handed-off sealed head over the buffer limit'),
+      )
+      .map((line) => Number(/dropping (\d+) chars/.exec(line)?.[1] ?? '0'));
+    // The whole successor tail, measured from what was kept.
+    expect(drops).toEqual([long.length]);
+    expect(stashed.text.length + drops[0]).toBe('HEAD'.length + long.length);
+    stderrSpy.mockRestore();
+  });
 });
 
 // The send path now reports why it did not reach the wire, but only
