@@ -1153,7 +1153,7 @@ export class ToolRegistry {
    */
   getReviewedDeclaration(name: string): string | undefined {
     const chat = this.getReviewedChat();
-    const client = this.config.getLlmClient?.();
+    const client = chat ? undefined : this.config.getLlmClient?.();
     const history =
       chat?.getHistoryShallow(true) ??
       (client?.isInitialized?.() ? client.getHistoryShallow(true) : undefined);
