@@ -9,6 +9,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
@@ -121,12 +122,19 @@ class QwenHostedHarnessConnectorTest {
 
         assertThatThrownBy(() -> cold.createOrLoad("tenant-a", SESSION_ID, true))
                 .isSameAs(refusal);
-        verify(client, never()).createSession(any());
-        verify(client, never()).loadSession(any());
+        verifyNoInteractions(client);
     }
 
     @Test
     void transientAuthorizationFailurePropagatesUnchanged() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
@@ -136,15 +144,21 @@ class QwenHostedHarnessConnectorTest {
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution,
-                mock(ManagedActionStore.class));
-        ReflectionTestUtils.setField(connector, "client", mock(HostedHarnessClient.class));
+                actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        clearInvocations(execution, client);
         DataAccessResourceFailureException transientFailure =
                 new DataAccessResourceFailureException("db unavailable");
         doThrow(transientFailure).when(execution).authorize(session);
 
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
                 .isSameAs(transientFailure);
+        verify(execution).authorize(session);
+        verifyNoInteractions(client);
     }
 
     @Test
