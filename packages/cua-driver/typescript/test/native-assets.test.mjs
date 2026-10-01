@@ -19,6 +19,7 @@ import {
 } from "../dist/native-assets.js"
 import {
   ensureNativePayload,
+  installUiAccessWorker,
   parseChecksums,
   uiAccessWorkerPath,
 } from "../scripts/install-native.mjs"
@@ -212,7 +213,6 @@ test("UIAccess worker uses the versioned secure Windows path", () => {
   assert.throws(() => uiAccessWorkerPath("1.2.3", {}), /ProgramFiles/u)
 })
 
-
 test("default Windows native installation needs no UIAccess worker or Program Files", async () => {
   const directory = mkdtempSync(join(tmpdir(), "cua-sdk-windows-ordinary-"));
   try {
@@ -226,3 +226,39 @@ test("default Windows native installation needs no UIAccess worker or Program Fi
     assert.equal(result, directory);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+test("installUiAccessWorker names elevation when the deploy target is not writable", async () => {
+  // The Windows Program Files ACL denial arrives as EPERM/EACCES from the
+  // mkdir; the user-facing message must name elevation and the elevated
+  // install.ps1 alternative (which deploys the byte-identical path, letting
+  // this installer short-circuit afterwards). Both effects are injected —
+  // Linux has no `powershell`, and this test runs as root, where permission
+  // bits cannot produce the denial.
+  const eperm = Object.assign(new Error("mkdir EPERM"), { code: "EPERM" })
+  await assert.rejects(
+    installUiAccessWorker(
+      "unused-source.exe",
+      "0.0.0-test",
+      { ProgramFiles: join(tmpdir(), "cua-program-files-probe") },
+      async () => {},
+      async () => {
+        throw eperm
+      },
+    ),
+    /elevat/i,
+  )
+  // A non-permission mkdir failure propagates unmapped.
+  const enospc = Object.assign(new Error("mkdir ENOSPC"), { code: "ENOSPC" })
+  await assert.rejects(
+    installUiAccessWorker(
+      "unused-source.exe",
+      "0.0.0-test",
+      { ProgramFiles: join(tmpdir(), "cua-program-files-probe") },
+      async () => {},
+      async () => {
+        throw enospc
+      },
+    ),
+    (error) => error === enospc,
+  )
+})
