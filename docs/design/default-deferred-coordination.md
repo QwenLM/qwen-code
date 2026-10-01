@@ -34,6 +34,11 @@ keep their existing scheduling and reminder cadence. Keyword discovery filters
 out declarations that are unavailable in the current context before applying
 `max_results`, including Goal proposal when its host turn key is absent.
 
+Shared Goal continuation instructions name the discovery and invocation path
+for hidden `get_goal` and `update_goal`: `tool_search` then `tool_call` in Direct
+mode, or the returned JavaScript binding through `exec` in Code Mode. This
+applies to ordinary, objective-updated, and wind-down turns on every host.
+
 ## Risks and acceptance
 
 An extra discovery request can offset the first-request saving. Natural
@@ -47,6 +52,8 @@ and prompts on the base and candidate, with no `tools.eager` override:
    discovery, launch, result retrieval, and successful final answer.
 3. A user-requested Goal: verify proposal consent, progress, completion evidence,
    and verifier outcome through the bridge; refusal must not start a Goal.
+   Hidden Goal tools must have actionable continuation instructions on every
+   host, including objective-updated and wind-down turns.
 4. `tools.visible`, a disabled bridge, denied tools, and a resumed direct-call
    history: verify the existing visibility and permission contracts.
 5. ACP direct and bridged Agent calls: verify concurrent delegation and the
