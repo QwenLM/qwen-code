@@ -146,11 +146,16 @@ export function useManagedActions(
   // `pending.sessionId` is set by the success branch of a read only.
   const loaded = pending.sessionId === sessionId;
   const action = actions.find((entry) => !answered.has(entry.actionId));
+  const current = useRef({ sessionId, actions });
+  current.current = { sessionId, actions };
 
   const respond = useCallback(
     async (actionId: string, optionId: string) => {
       const target = actions.find((entry) => entry.actionId === actionId);
       if (!target || !reader) return;
+      const isPending = () =>
+        current.current.sessionId === target.sessionId &&
+        current.current.actions.some((entry) => entry.actionId === actionId);
       setAnswered((current) => new Set(current).add(actionId));
       try {
         // One key per Action and option: a retried click replays the same
@@ -159,10 +164,14 @@ export function useManagedActions(
           clientId,
           idempotencyKey: `${target.actionId}:${optionId}`,
         });
-        setAnswerError(undefined);
-        answerFailure.current = undefined;
+        if (!isPending()) return;
+        if (answerFailure.current === actionId) {
+          setAnswerError(undefined);
+          answerFailure.current = undefined;
+        }
         setRevision((value) => value + 1);
       } catch (failure) {
+        if (!isPending()) throw failure;
         setAnswered((current) => {
           const next = new Set(current);
           next.delete(actionId);
@@ -181,5 +190,13 @@ export function useManagedActions(
     setRevision((value) => value + 1);
   }, []);
 
-  return { action, loadError, loaded, answerError, respond, retry };
+  return {
+    action,
+    loadError,
+    loaded,
+    answerError:
+      answerFailure.current === action?.actionId ? answerError : undefined,
+    respond,
+    retry,
+  };
 }

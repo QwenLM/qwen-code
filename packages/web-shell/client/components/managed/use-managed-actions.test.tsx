@@ -172,6 +172,70 @@ describe('useManagedActions', () => {
     expect(hook.latest?.loadError).toBeUndefined();
   });
 
+  it.each([
+    ['Session switch', 'fails'],
+    ['Session switch', 'succeeds'],
+    ['Action replacement', 'fails'],
+    ['Action replacement', 'succeeds'],
+  ])(
+    'keeps the current warning after %s when an old answer %s',
+    async (change, outcome) => {
+      let resolveAnswer!: () => void;
+      let rejectAnswer!: (failure: Error) => void;
+      const respond = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              resolveAnswer = resolve;
+              rejectAnswer = reject;
+            }),
+        )
+        .mockRejectedValueOnce(new Error('current-offline'));
+      const next = {
+        ...pending,
+        actionId: 'tool_approval_2',
+        sessionId: change === 'Session switch' ? 'session-2' : 'session-1',
+      };
+      const listPending = vi
+        .fn()
+        .mockResolvedValueOnce([pending])
+        .mockResolvedValue([next]);
+      const provider = {
+        actions: { listPending, respond },
+      } as unknown as ManagedAgentProvider;
+      const hook = mount(provider, { enabled: true, events: [] });
+      await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+      let oldAnswer!: Promise<unknown>;
+      await act(async () => {
+        oldAnswer = hook
+          .latest!.respond(pending.actionId, 'allow')
+          .catch((failure: unknown) => failure);
+      });
+      hook.rerender(
+        change === 'Session switch'
+          ? { sessionId: next.sessionId }
+          : { events: [update(7)] },
+      );
+      await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
+      await act(async () => {
+        await expect(
+          hook.latest!.respond(next.actionId, 'allow'),
+        ).rejects.toThrow('current-offline');
+      });
+      expect(hook.latest?.answerError).toEqual(new Error('current-offline'));
+
+      await act(async () => {
+        if (outcome === 'fails') rejectAnswer(new Error('old-offline'));
+        else resolveAnswer();
+        await oldAnswer;
+      });
+      expect(hook.latest?.action).toEqual(next);
+      expect(hook.latest?.answerError).toEqual(new Error('current-offline'));
+    },
+  );
+
   it('stops retrying after a bound and reads again on demand', async () => {
     vi.useFakeTimers();
     const listPending = vi
