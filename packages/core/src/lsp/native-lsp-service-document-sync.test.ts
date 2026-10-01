@@ -2628,7 +2628,8 @@ describe('NativeLspService disk document synchronization', () => {
         handle.status = 'FAILED';
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toBeDefined();
-        expect(result.error?.message).toContain('failed');
+        // The state word, not the tool's `LSP diagnostics failed:` prefix.
+        expect(result.error?.message).toContain('test is failed');
         expect(result.llmContent).not.toContain('No diagnostics found');
         expect(connection.request).not.toHaveBeenCalled();
       },
@@ -2711,6 +2712,86 @@ describe('NativeLspService disk document synchronization', () => {
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toBeUndefined();
         expect(result.llmContent).toContain('real warning');
+      },
+    );
+
+    /** Swap in an explicit server map so a test can drive two servers. */
+    function withServers(servers: Array<[string, LspServerHandle]>) {
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        getHandles: () => new Map(servers),
+        warmupTypescriptServer: vi.fn(),
+        isTypescriptServer: () => false,
+      };
+    }
+
+    /** A READY server that answers every pull with a valid empty report. */
+    function emptyReportHandle(name: string): LspServerHandle {
+      const emptyConnection = createConnection();
+      emptyConnection.request.mockImplementation(async (method) =>
+        method === 'workspace/diagnostic'
+          ? { items: [] }
+          : { kind: 'full', items: [] },
+      );
+      return {
+        ...handle,
+        config: { ...handle.config, name },
+        connection: emptyConnection,
+      };
+    }
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'reports a failed %s pull when the surviving server retrieves nothing',
+      async (operation) => {
+        withServers([
+          ['test', handle],
+          ['healthy', emptyReportHandle('healthy')],
+        ]);
+        connection.request.mockRejectedValue(new Error('server exploded'));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('server exploded');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names a server that was never queried when %s retrieves nothing',
+      async (operation) => {
+        connection.request.mockImplementation(async (method) =>
+          method === 'workspace/diagnostic'
+            ? { items: [] }
+            : { kind: 'full', items: [] },
+        );
+        const pendingHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'pyright' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['pyright', pendingHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        // The ready server was queried; the pending one is named, not dropped.
+        expect(connection.request).toHaveBeenCalled();
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('pyright is in progress');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects %s when a disposed connection answers with no response',
+      async (operation) => {
+        // `sendRequest` resolves `undefined` once disposed instead of
+        // rejecting, so the handle still looks READY and answerable.
+        connection.request.mockResolvedValue(undefined);
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri))
+            : run(service.workspaceDiagnostics()),
+        ).rejects.toThrow('server returned no response');
       },
     );
   });

@@ -58,21 +58,33 @@ import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
 
+/** Render one server a diagnostics query could not use, by name and state. */
+function describeLspServerState(name: string, handle: LspServerHandle): string {
+  if (handle.status === 'READY' && !handle.connection) {
+    return `${name} has no active connection`;
+  }
+  return `${name} is ${handle.status.toLowerCase().replace(/_/g, ' ')}`;
+}
+
 /**
- * Build the rejection for a diagnostics query in which every selected server
- * failed its pull request; a partial failure still returns the surviving
- * servers' results, so this is only reached when nothing was retrieved.
+ * Build the rejection for a diagnostics query that retrieved nothing while
+ * something was wrong: a selected server whose pull failed or answered
+ * unusably, or a configured server that was never queried because it is not
+ * ready. Whatever was retrieved is always returned instead, so a partial
+ * success survives and only an unbacked clean answer is refused.
  */
-function allDiagnosticRequestsFailed(
+function nothingRetrievedForDiagnostics(
   failures: Array<{ name: string; error: unknown }>,
+  skipped: string[],
 ): Error {
-  const detail = failures
-    .map(
+  const detail = [
+    ...failures.map(
       ({ name, error }) =>
         `${name}: ${(error as Error)?.message || String(error)}`,
-    )
-    .join('; ');
-  return new Error(`All LSP diagnostic requests failed (${detail})`);
+    ),
+    ...skipped,
+  ].join('; ');
+  return new Error(`No LSP diagnostics could be retrieved (${detail})`);
 }
 
 /**
@@ -563,27 +575,37 @@ export class NativeLspService {
   }
 
   /**
-   * Ready handles for a diagnostics query, rejecting states that an empty
-   * ready set would otherwise report as a clean result: no matching server,
-   * a server that failed or never started, and a server still starting up.
+   * Ready handles for a diagnostics query, plus the rendered state of every
+   * configured server that query will not reach. Rejects outright when nothing
+   * is ready — no matching server, a server that failed or never started, a
+   * server still starting up — because an empty ready set would otherwise be
+   * reported as a clean result. When the ready set is only a subset, the
+   * servers left out are returned alongside it so a query that retrieves
+   * nothing can name them instead of certifying the part of the workspace they
+   * own as clean. `getReadyHandles` itself must keep returning an empty array
+   * for the not-ready case: `replayOpenDocuments` skips handles missing from
+   * its map rather than rejecting.
    */
-  private getDiagnosticHandles(
-    serverName?: string,
-  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+  private getDiagnosticHandles(serverName?: string): {
+    handles: Array<
+      [string, LspServerHandle & { connection: LspConnectionInterface }]
+    >;
+    skipped: string[];
+  } {
     const handles = this.getReadyHandles(serverName);
+    const skipped = Array.from(this.serverManager.getHandles())
+      .filter(
+        ([name]) =>
+          (!serverName || name === serverName) &&
+          !handles.some(([readyName]) => readyName === name),
+      )
+      .map(([name, handle]) => describeLspServerState(name, handle));
     if (handles.length > 0) {
-      return handles;
+      return { handles, skipped };
     }
-    const states = Array.from(this.serverManager.getHandles())
-      .filter(([name]) => !serverName || name === serverName)
-      .map(([name, handle]) =>
-        handle.status === 'READY' && !handle.connection
-          ? `${name} has no active connection`
-          : `${name} is ${handle.status.toLowerCase().replace(/_/g, ' ')}`,
-      );
     throw new Error(
-      states.length > 0
-        ? `No LSP server is ready to provide diagnostics (${states.join('; ')})`
+      skipped.length > 0
+        ? `No LSP server is ready to provide diagnostics (${skipped.join('; ')})`
         : serverName
           ? `No LSP server named ${serverName} is configured or running`
           : 'No LSP servers are configured or running',
@@ -1796,7 +1818,7 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getDiagnosticHandles(serverName);
+    const { handles, skipped } = this.getDiagnosticHandles(serverName);
     const allDiagnostics: LspDiagnostic[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
 
@@ -1814,7 +1836,15 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
+        if (response === undefined) {
+          // A disposed connection resolves `undefined` instead of rejecting,
+          // so without this an unusable answer would count as a clean empty
+          // one and never reach the ledger below.
+          failures.push({
+            name,
+            error: new Error('server returned no response'),
+          });
+        } else if (response && typeof response === 'object') {
           const responseObj = response as Record<string, unknown>;
           const items = responseObj['items'];
           if (Array.isArray(items)) {
@@ -1831,7 +1861,7 @@ export class NativeLspService {
         }
       } catch (error) {
         // A failed pull is not a clean result: keep partial results from
-        // healthier servers, but reject when every server failed.
+        // healthier servers, but reject when nothing was retrieved.
         debugLogger.warn(
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
@@ -1840,8 +1870,11 @@ export class NativeLspService {
       }
     }
 
-    if (failures.length === handles.length) {
-      throw allDiagnosticRequestsFailed(failures);
+    if (
+      allDiagnostics.length === 0 &&
+      (failures.length > 0 || skipped.length > 0)
+    ) {
+      throw nothingRetrievedForDiagnostics(failures, skipped);
     }
     return allDiagnostics;
   }
@@ -1853,7 +1886,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const handles = this.getDiagnosticHandles(serverName);
+    const { handles, skipped } = this.getDiagnosticHandles(serverName);
     const results: LspFileDiagnostics[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
 
@@ -1927,7 +1960,16 @@ export class NativeLspService {
           },
         );
 
-        if (response && typeof response === 'object') {
+        if (response === undefined) {
+          // A disposed connection resolves `undefined` instead of rejecting,
+          // so without this an unusable answer would count as a clean empty
+          // one and never reach the ledger below. The staleness guard above
+          // cannot see it: identity, status and map membership are unchanged.
+          failures.push({
+            name,
+            error: new Error('server returned no response'),
+          });
+        } else if (response && typeof response === 'object') {
           const responseObj = response as Record<string, unknown>;
           const items = responseObj['items'];
           if (Array.isArray(items)) {
@@ -1947,7 +1989,7 @@ export class NativeLspService {
         }
       } catch (error) {
         // A failed pull is not a clean result: keep partial results from
-        // healthier servers, but reject when every server failed.
+        // healthier servers, but reject when nothing was retrieved.
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
         failures.push({ name, error });
       }
@@ -1957,8 +1999,8 @@ export class NativeLspService {
       }
     }
 
-    if (failures.length === handles.length) {
-      throw allDiagnosticRequestsFailed(failures);
+    if (results.length === 0 && (failures.length > 0 || skipped.length > 0)) {
+      throw nothingRetrievedForDiagnostics(failures, skipped);
     }
     return results.slice(0, limit);
   }
