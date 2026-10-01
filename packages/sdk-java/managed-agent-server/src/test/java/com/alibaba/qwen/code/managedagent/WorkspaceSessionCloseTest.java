@@ -95,7 +95,10 @@ class WorkspaceSessionCloseTest {
                 .header("Idempotency-Key", "other").principal(actor(tenant, "other")))
                 .andExpect(status().isNotFound());
         jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
-                + " VALUES (?, ?, 'action', 'requested', '{}', 0)", tenant, session);
+                + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, session,
+                "tool_approval_" + UUID.randomUUID().toString().replace("-", ""),
+                mapper.writeValueAsString(java.util.Map.of("expiresAt", System.currentTimeMillis() + 86_400_000L,
+                        "inputRevision", 1, "policyRevision", "policy")));
         mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
                 .header("Idempotency-Key", "approval").principal(actor(tenant, "owner")))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("turn_active"));
@@ -108,6 +111,23 @@ class WorkspaceSessionCloseTest {
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("turn_active"));
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("ACTIVE");
         assertThat(runtime.fenced).doesNotContainKey(session);
+    }
+
+    @Test
+    void expiredOrUndecidableApprovalDoesNotPreventClose() throws Exception {
+        for (String options : java.util.List.of("{\"expiresAt\":1}", "{}")) {
+            String tenant = "close-expired-" + UUID.randomUUID();
+            String session = create(tenant);
+            jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id, action_id, state, options_json, created_at)"
+                    + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, session,
+                    "tool_approval_" + UUID.randomUUID().toString().replace("-", ""), options);
+            mvc.perform(post("/v1/agents/sessions/" + session + "/close").header(TenantContextFilter.HEADER, tenant)
+                    .header("Idempotency-Key", "expired").principal(actor(tenant, "owner")))
+                    .andExpect(status().isAccepted());
+            await().untilAsserted(() -> assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED"));
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_action WHERE tenant_id = ?",
+                    Integer.class, tenant)).isEqualTo(1);
+        }
     }
 
     @Test

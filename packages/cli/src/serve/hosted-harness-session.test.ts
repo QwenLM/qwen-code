@@ -299,6 +299,7 @@ describe('Hosted Harness no-tool session', () => {
           payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
         });
       expect(rejected.status).toBe(409);
+      expect(rejected.body.code).toBe('hosted_session_closing');
       expect(state.model).not.toHaveBeenCalled();
     } finally {
       release();

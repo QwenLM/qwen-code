@@ -360,6 +360,7 @@ public final class RuntimeBindingRecord {
         // A local worker without a lease or attested generation never
         // admitted a Session; failed startup still blocks its own slot.
         boolean unreclaimed = state == State.LOST
+                || state == State.DRAINING
                 || state == State.OPERATOR_RECOVERY
                 || state == State.RECOVERY_BLOCKED
                         && (!LocalProcessRuntimeProvisioner.KIND.equals(
@@ -370,7 +371,7 @@ public final class RuntimeBindingRecord {
         return unreclaimed
                 && request.getScope().getTenantId().equals(candidate.getScope().getTenantId())
                 && (!request.isManagedContext()
-                        || (state == State.OPERATOR_RECOVERY || state == State.LOST
+                        || (state == State.OPERATOR_RECOVERY || state == State.LOST || state == State.DRAINING
                                 || state == State.RECOVERY_BLOCKED || state == State.FAILED)
                                 && (request.getStorageId().equals(candidate.getStorageId())
                                         || request.getScope().getCanonicalCwd().equals(

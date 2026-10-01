@@ -2126,12 +2126,26 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         if ("ACTIVE".equals(status)
                 && (hasActiveTurn(session.tenantId(), session.sessionId())
-                        || session.workspace() != null && jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_action"
-                                + " WHERE tenant_id = ? AND session_id = ? AND state = 'requested'", Integer.class,
-                                session.tenantId(), session.sessionId()) > 0)) {
+                        || session.workspace() != null && hasDecidableAction(session))) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session has an active Turn.");
         }
+    }
+
+    private boolean hasDecidableAction(SessionRecord session) {
+        long now = lifecycleDatabaseTime();
+        for (String options : jdbc.queryForList("SELECT options_json FROM managed_agent_action"
+                + " WHERE tenant_id = ? AND session_id = ? AND state = 'requested'", String.class,
+                session.tenantId(), session.sessionId())) {
+            try {
+                if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {
+                    return true;
+                }
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException("Stored Action options are invalid", error);
+            }
+        }
+        return false;
     }
 
     // ARCHIVING remains only for an archive admitted before V17, which closes

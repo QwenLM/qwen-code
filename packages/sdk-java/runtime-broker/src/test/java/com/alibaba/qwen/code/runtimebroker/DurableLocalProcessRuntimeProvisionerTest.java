@@ -599,6 +599,48 @@ class DurableLocalProcessRuntimeProvisionerTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"INTENT", "LAUNCHING", "REGISTERED"})
+    void drainedStopAcceptsOnlyTrustedSameHostRebootProof(String state) throws Exception {
+        var request = closeRequest();
+        var store = store();
+        try (var first = provisioner(store)) {
+            var handle = await(first.ensureResource(request, SEED, null));
+            var lease = state.equals("REGISTERED") ? launch(first, store, request) : null;
+            var originalWorker = registration(store, request, handle).process();
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(new LocalRuntimeStore.Registration(handle, LocalRuntimeStore.State.valueOf(state),
+                        record.pid(), record.started(), record.endpoint()));
+                return null;
+            });
+            var binding = closeBinding(request, handle, lease);
+            var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
+                    "22222222-2222-2222-2222-222222222222", "pid:[2]", "time:[2]");
+            var foreign = new LocalRuntimeStore.HostIdentity("b".repeat(32), reboot.bootId(),
+                    reboot.pidNamespace(), reboot.timeNamespace());
+            if (state.equals("LAUNCHING")) {
+                assertBlocked(first.stopDrained(binding));
+            }
+            for (var host : List.of(foreign, reboot)) {
+                try (var refused = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                        null, new LocalRuntimeStore(directory.toRealPath(), host), host == foreign)) {
+                    assertBlocked(refused.stopDrained(binding));
+                }
+            }
+            try (var recovered = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
+                    null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
+                assertTrue(await(recovered.stopDrained(binding)).matches(binding));
+                assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+                assertTrue(await(recovered.stopDrained(binding)).matches(binding));
+                if (originalWorker != null) {
+                    assertTrue(originalWorker.isAlive(), "A PID in a different boot must not be signalled");
+                }
+                Files.delete(directory.resolve(handle.getValue().get("resourceId") + ".json"));
+                assertBlocked(recovered.stopDrained(binding));
+            }
+        }
+    }
+
     @Test
     void drainedIntentNeverLaunchesAndAmbiguousStartupStaysBlocked() throws Exception {
         var request = closeRequest();

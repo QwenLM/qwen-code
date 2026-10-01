@@ -1256,6 +1256,7 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
@@ -1313,7 +1314,6 @@ export function registerHostedHarnessSessionRoutes(
       });
       return;
     }
-    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (session.blocked || session.mcp?.hasPendingOperations())
       return error(res, 409, 'hosted_turn_recovery_required');

@@ -12,7 +12,7 @@ D4 持久接纳生命周期操作，但拒绝 Workspace 绑定。Embedded Broker
 
 ## API 与准入
 
-沿用 close 路由，返回 202 和原 actor 范围的幂等 operation。当前有读权限的 Workspace 创建者可以接纳 close；不可读返回 404，可读但非创建者返回 403。幂等重放先于生命周期状态校验。在公共 Session 锁内检查活跃 Turn 和未完成操作，持久保存 operation，并将 ACTIVE 改为 CLOSING。新 writer acquire 先锁公共 Session，再锁 journal；绑定会话非 ACTIVE 时拒绝获取新 writer。已有 writer 可完成结算并 seal。
+沿用 close 路由，返回 202 和原 actor 范围的幂等 operation。当前有读权限的 Workspace 创建者可以接纳 close；不可读返回 404，可读但非创建者返回 403。幂等重放先于生命周期状态校验。在公共 Session 锁内检查活跃 Turn 和未完成操作，持久保存 operation，并将 ACTIVE 改为 CLOSING。新 writer acquire 先锁公共 Session，再锁 journal；绑定会话非 ACTIVE 时拒绝获取新 writer。已有 writer 可续租、完成结算并 seal。requested Action 仅在保存的 expiresAt 按数据库时间仍未过期时阻止接纳；过期或缺失过期时间的 Action 保留历史，不得让空闲 Session 永远无法关闭。
 
 新增可选能力 `session_close` / `sessionClose`，缺省 false。绑定 close 仅对支持持久 local-process 停机证明的 files/1 开放；`session_lifecycle` 保持 false。完成时将 CLOSING 改为 CLOSED，发出既有 close 事件并确认 operation。已接纳的清理使用保存的身份，权限或挂载变化不影响继续处理。
 
@@ -28,11 +28,11 @@ D4 持久接纳生命周期操作，但拒绝 Workspace 绑定。Embedded Broker
 
 ## Worker 停机与完成
 
-新增缺省拒绝的 `RuntimeProvisioner.stopDrained(binding)` 和独立 `RuntimeDrainReceipt`，在 binding 上持久保存。既有丢弃资源的 release 语义不变，正常停机不归类为 JOURNAL_LOST。只有已排空的文件 profile worker 可以产生该凭据。
+新增缺省拒绝的 `RuntimeProvisioner.stopDrained(binding)` 和独立 `RuntimeDrainReceipt`，在 binding 上持久保存。既有丢弃资源的 release 语义不变，正常停机不归类为 JOURNAL_LOST。只有已排空的文件 profile worker 可以产生该凭据。已配置的同主机可信重启策略也可证明原 boot 已停止；持久保存退休和 drain receipt，不向其他 boot 的 PID 发信号，不生成丢失证据。缺少 registration、外部主机或不可信 boot 仍保持阻塞。这不会绕过仍活跃的逻辑 Session 释放，也不新增通用恢复编排。
 
-持久 local provider 在永久 registration 锁下校验 seed、handle、host/boot/namespaces 和 PID/start identity。先退休原 registration，再向精确进程发送信号；TERM 后等待 5 秒，必要时 KILL 后再等待 5 秒，并确认进程已消失。INTENT 可不启动进程而退休。没有持久 PID 的 LAUNCHING、缺失 registration 或不可验证身份保持阻塞。重试继续处理原 registration，不能创建替代 worker。
+持久 local provider 在永久 registration 锁下校验 seed、handle、host/boot/namespaces 和 PID/start identity。先退休原 registration，再向精确进程发送信号；TERM 后等待 5 秒，必要时 KILL 后再等待 5 秒，并确认进程已消失。INTENT 可不启动进程而退休。原 boot 内没有持久 PID 的 LAUNCHING 保持阻塞；缺失 registration 或不可验证身份也保持阻塞。重试继续处理原 registration，不能创建替代 worker。
 
-binding 退休前必须确认：无活跃逻辑 Session、无未结算 execution、原代际 holder 已消失、停机证明已持久保存。公共完成还要求持久 close 栅栏和无数据库时间下的有效 journal writer。writer 检查锁住 journal head，等待正在提交的续租、结算或封存事务，再核对数据库时间；未提交的续租不能被误判为 writer 已过期。租约使用数据库时间并续租，阻止旧 claim 提交完成。临时故障沿用退避重试；身份或执行结果不明时暴露 recovery_blocked 和稳定 failure code，生命周期恢复仅核对原资源。通用 Runtime maintenance 跳过已封闭的 binding，避免将正常退休伪造成 JOURNAL_LOST；已记录 LOST 证据仍可沿用既有 recovery/operator 路径完成清理。
+binding 退休前必须确认：无活跃逻辑 Session、无未结算 execution、原代际 holder 已消失、停机证明已持久保存。公共完成还要求持久 close 栅栏和无数据库时间下的有效 journal writer。writer 检查锁住 journal head，等待正在提交的续租、结算或封存事务，再核对数据库时间；未提交的续租不能被误判为 writer 已过期。租约使用数据库时间并续租，阻止旧 claim 提交完成。每个 binding drain 使用既有四倍租期的 operation 超时；超时后停止续租，尽力释放 claim，并允许重试。迟到回调不能提交 binding 退休。DRAINING 在停机证明允许 RELEASED 前持续阻止原 storage 或 canonical directory 的竞争 placement，包括停机失败后。临时故障沿用退避重试；身份或执行结果不明时暴露 recovery_blocked 和稳定 failure code，生命周期恢复仅核对原资源。通用 Runtime maintenance 跳过已封闭的 binding，避免将正常退休伪造成 JOURNAL_LOST；已记录 LOST 证据仍可沿用既有 recovery/operator 路径完成清理。
 
 ## 实现区域
 
@@ -46,4 +46,4 @@ Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAP
 
 MySQL close 测试为每个测试使用独立数据库，不能提前迁移共享库而破坏旧数据的分级升级测试。并发回归要求栅栏提交后所有等待中的准入均被拒绝，并要求无栅栏记录的查询尚在事务内时，其他租户仍可完成栅栏写入。移除数据库隔离、placement 锁或取得锁后的快照顺序，都必须让这些检查失败。
 
-本地已通过 build/typecheck/bundle、定向 TS/Java 测试、真实 MySQL 准入与 claim 并发，以及注入测试主机身份的真实 POSIX worker 停机。既有 Hosted 文件与审批 E2E 通过。持久 close E2E 在 macOS 本地实际跳过；后续 Linux CI 已通过包含生产 host/boot/PID namespace 校验的正常 close 验收。完整物理恢复故障矩阵仍未执行。上游 #13037 已实现公开 Artifact 读取，其 API 回归验证 writer seal 且 Session CLOSED 后仍能读取已提交内容；close 路径保留这些行和对象。这些读取回归补充原有 close 对历史、resources 和文件的保留断言。命令与详细结果记录在 `.qwen/e2e-tests/workspace-session-reliable-close.md`。
+本地已通过 build/typecheck/bundle、定向 TS/Java 测试、真实 MySQL 准入与 claim 并发，以及注入测试主机身份的真实 POSIX worker 停机。既有 Hosted 文件与审批 E2E 通过。持久 close E2E 在 macOS 本地实际跳过；后续 Linux CI 已通过包含生产 host/boot/PID namespace 校验的正常 close 验收。完整物理恢复故障矩阵仍未执行。审查回归补充挂起 stop/reconcile/release 的有界超时、第二 Broker 接管和迟到回调，JDBC 与内存中的 pending/failed drain placement，偏移应用时钟下的数据库时间审批过期判断，关闭期间的 prompt 错误码，以及模拟可信与不可信 boot 身份；模拟重启不代表物理重启覆盖。上游 #13037 已实现公开 Artifact 读取，其 API 回归验证 writer seal 且 Session CLOSED 后仍能读取已提交内容；close 路径保留这些行和对象。这些读取回归补充原有 close 对历史、resources 和文件的保留断言。命令与详细结果记录在 `.qwen/e2e-tests/workspace-session-reliable-close.md`。

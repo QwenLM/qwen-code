@@ -74,6 +74,29 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     @Test
+    void approvalExpiryUsesDatabaseTimeAndRetainsItsHistory() {
+        var store = store(Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        var tenant = "mysql-close-expiry-" + UUID.randomUUID();
+        var session = create(store, tenant);
+        var action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
+        long now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).getTime();
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, action_id, session_id, state, options_json, created_at)"
+                + " VALUES (?, ?, ?, 'requested', ?, 0)", tenant, action, session,
+                "{\"expiresAt\":" + (now + 86_400_000) + "}");
+        assertCode(outcome(() -> transaction(() -> store.beginWorkspaceClose(tenant, session, OWNER,
+                ACTOR_DIGEST, "close", "digest", true))), "turn_active");
+        jdbc.update("UPDATE managed_agent_action SET options_json = ? WHERE tenant_id = ? AND action_id = ?",
+                "{\"expiresAt\":1}", tenant, action);
+        var admitted = transaction(() -> store.beginWorkspaceClose(tenant, session, OWNER,
+                ACTOR_DIGEST, "close", "digest", true));
+        assertThat(admitted.operation().state()).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_session WHERE tenant_id = ?"
+                + " AND session_id = ?", String.class, tenant, session)).isEqualTo("CLOSING");
+        assertThat(jdbc.queryForObject("SELECT state FROM managed_agent_action WHERE tenant_id = ? AND action_id = ?",
+                String.class, tenant, action)).isEqualTo("requested");
+    }
+
+    @Test
     void closeSerializesNewWriterAndPreservesAnAlreadyAcquiredWriter() throws Exception {
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());

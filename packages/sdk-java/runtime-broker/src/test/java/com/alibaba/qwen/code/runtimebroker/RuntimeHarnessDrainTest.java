@@ -9,6 +9,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -83,6 +85,86 @@ class RuntimeHarnessDrainTest {
             service.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
             assertEquals(0, provisioner.stops);
             assertEquals(0, transport.releases);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"stop", "reconcile", "release"})
+    void stalledDrainReleasesItsClaimAndFencesLateCompletion(String step) throws Exception {
+        var binding = ready();
+        if (!"stop".equals(step)) {
+            bindings.admitSession(sessions, candidate(binding, "original"));
+        }
+        var stopped = new CompletableFuture<RuntimeDrainReceipt>();
+        var observed = new CompletableFuture<RuntimeObservation>();
+        var released = new CompletableFuture<Boolean>();
+        provisioner.stop = "stop".equals(step) ? stopped : null;
+        provisioner.observation = "reconcile".equals(step) ? observed : null;
+        transport.releaseResponse = "release".equals(step) ? released : null;
+        try (var first = service(Duration.ofMillis(600)); var second = service()) {
+            first.requestHarnessDrain("tenant", "harness");
+            var close = first.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            var timeout = assertThrows(ExecutionException.class, () -> close.get(6, TimeUnit.SECONDS));
+            var failure = assertInstanceOf(RuntimeBrokerException.class, timeout.getCause());
+            assertEquals("runtime_broker_reconcile_timeout", failure.getCode());
+            assertTrue(failure.isRetryable());
+            assertNull(bindings.findById(binding.getBindingId()).getOperationOwner());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            provisioner.observation = null;
+            transport.releaseResponse = null;
+            var replacementStop = new CompletableFuture<RuntimeDrainReceipt>();
+            provisioner.stop = replacementStop;
+            var replacement = second.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            var current = bindings.findById(binding.getBindingId());
+            stopped.complete(receipt(binding));
+            observed.complete(RuntimeObservation.ready(binding.getResourceHandle(), binding.getLease().getEndpoint(),
+                    binding.getLease().getRuntimeInstanceId(), binding.getLease().getLeaseId(), binding.getLease().getEpoch()));
+            released.complete(true);
+            assertFalse(replacement.isDone());
+            assertEquals(current.getOperationGeneration(), bindings.findById(binding.getBindingId()).getOperationGeneration());
+            assertEquals(RuntimeBindingRecord.State.DRAINING, bindings.findById(binding.getBindingId()).getState());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            replacementStop.complete(receipt(binding));
+            replacement.get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED, bindings.findById(binding.getBindingId()).getState());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void drainingBlocksRivalStoragePlacementUntilStopIsProven(boolean jdbc) throws Exception {
+        RuntimeBindingRepository registry = jdbc ? bindings : new InMemoryRuntimeBindingRepository();
+        var ready = ready(registry);
+        var claimed = registry.claimOperation(ready.getBindingId(), "block", Duration.ofSeconds(10));
+        var blocked = registry.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                claimed.getLease(), Instant.now()));
+        assertNotNull(blocked);
+        var binding = registry.releaseOperation(blocked.getBindingId(), "block", blocked.getOperationGeneration());
+        var rivalScope = new RuntimeScope("tenant", "other-workspace", "1", "/different-path",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        var rival = new RuntimeProvisionRequest(rivalScope, "rival", "local-process", "storage");
+        assertEquals("runtime_placement_recovery_required",
+                assertThrows(RuntimeBrokerException.class, () -> registry.findOrCreate(rival)).getCode());
+        var stop = new CompletableFuture<RuntimeDrainReceipt>();
+        provisioner.stop = stop;
+        try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.failedFuture(new AssertionError()),
+                provisioner, transport, registry, sessions, executions, "drainer", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            var close = service.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            assertEquals(RuntimeBindingRecord.State.DRAINING, registry.findById(binding.getBindingId()).getState());
+            assertEquals("runtime_placement_recovery_required",
+                    assertThrows(RuntimeBrokerException.class, () -> registry.findOrCreate(rival)).getCode());
+            registry.findOrCreate(new RuntimeProvisionRequest(rivalScope, "unrelated", "local-process", "other-storage"));
+            stop.completeExceptionally(LocalRuntimeStore.blocked());
+            var failure = assertThrows(ExecutionException.class, close::get);
+            assertEquals("runtime_broker_recovery_blocked", ((RuntimeBrokerException) failure.getCause()).getCode());
+            assertNull(registry.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals("runtime_placement_recovery_required",
+                    assertThrows(RuntimeBrokerException.class, () -> registry.findOrCreate(rival)).getCode());
+            provisioner.stop = null;
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
+            assertEquals(RuntimeBindingRecord.State.RELEASED, registry.findById(binding.getBindingId()).getState());
+            assertNotNull(registry.findOrCreate(rival));
         }
     }
 
@@ -188,6 +270,32 @@ class RuntimeHarnessDrainTest {
             assertEquals(RuntimeSessionRecord.State.RELEASED, released.getState());
             assertEquals(binding.getGeneration(), released.getRuntimeGeneration());
             assertEquals(2, transport.releases);
+            assertEquals(1, provisioner.stops);
+        }
+    }
+
+    @Test
+    void claimCleanupFailureDoesNotMaskPersistedDrainCompletion() throws Exception {
+        var binding = ready();
+        var tracked = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
+                new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
+                    if (method.getName().equals("releaseOperation")) {
+                        throw new IllegalStateException("Claim cleanup connection failed");
+                    }
+                    try {
+                        return method.invoke(bindings, arguments);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.failedFuture(new AssertionError()),
+                provisioner, transport, tracked, sessions, executions, "drainer", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get(5, TimeUnit.SECONDS);
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(binding));
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get(5, TimeUnit.SECONDS);
             assertEquals(1, provisioner.stops);
         }
     }
@@ -335,9 +443,13 @@ class RuntimeHarnessDrainTest {
     }
 
     private RuntimeBrokerService service() {
+        return service(Duration.ofSeconds(2));
+    }
+
+    private RuntimeBrokerService service(Duration leaseDuration) {
         return new RuntimeBrokerService(ignored -> CompletableFuture.failedFuture(
                 new IllegalStateException("Current authorization/mount is unavailable")), provisioner, transport,
-                bindings, sessions, executions, UUID.randomUUID().toString(), Duration.ofSeconds(2), Duration.ofSeconds(2));
+                bindings, sessions, executions, UUID.randomUUID().toString(), leaseDuration, leaseDuration);
     }
 
     private RuntimeBrokerService warmingService() {
@@ -346,15 +458,19 @@ class RuntimeHarnessDrainTest {
     }
 
     private RuntimeBindingRecord ready() {
-        var initial = bindings.findOrCreate(request);
-        var claimed = bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
+        return ready(bindings);
+    }
+
+    private RuntimeBindingRecord ready(RuntimeBindingRepository registry) {
+        var initial = registry.findOrCreate(request);
+        var claimed = registry.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
         var seed = claimed.getProvisionSeed();
         var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9999"),
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         var handle = handle();
-        var ready = bindings.compareAndSet(claimed, claimed.withAttestation(lease, handle, Instant.now(), Instant.now()));
+        var ready = registry.compareAndSet(claimed, claimed.withAttestation(lease, handle, Instant.now(), Instant.now()));
         provisioner.original = ready;
-        return bindings.releaseOperation(ready.getBindingId(), "setup", ready.getOperationGeneration());
+        return registry.releaseOperation(ready.getBindingId(), "setup", ready.getOperationGeneration());
     }
 
     private RuntimeSessionRecord candidate(RuntimeBindingRecord binding, String id) {
@@ -375,6 +491,7 @@ class RuntimeHarnessDrainTest {
     private class Provider implements RuntimeProvisioner {
         RuntimeBindingRecord original;
         CompletableFuture<RuntimeDrainReceipt> stop;
+        CompletableFuture<RuntimeObservation> observation;
         CompletableFuture<RuntimeResourceHandle> resource;
         boolean loseReply;
         boolean usable = true;
@@ -399,6 +516,9 @@ class RuntimeHarnessDrainTest {
                 RuntimeProvisionSeed seed, RuntimeResourceHandle handle, RuntimeLease lease) {
             observations++;
             assertEquals(original.getProvisionSeed(), seed);
+            if (observation != null) {
+                return observation;
+            }
             return CompletableFuture.completedFuture(RuntimeObservation.ready(handle, lease.getEndpoint(),
                     lease.getRuntimeInstanceId(), lease.getLeaseId(), lease.getEpoch()));
         }
@@ -423,6 +543,7 @@ class RuntimeHarnessDrainTest {
         boolean allowAcquire;
         boolean loseReleaseReply;
         RuntimeBrokerException releaseFailure;
+        CompletableFuture<Boolean> releaseResponse;
         public java.util.concurrent.CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
                 RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
             assertTrue(allowAcquire, "Close must not attest or reacquire");
@@ -446,6 +567,9 @@ class RuntimeHarnessDrainTest {
                 RuntimeSession session, java.util.Map<String, Object> ref) { throw new AssertionError("Idle close must not cancel"); }
         public java.util.concurrent.CompletionStage<Boolean> release(RuntimeLease lease, RuntimeSession session) {
             releases++;
+            if (releaseResponse != null) {
+                return releaseResponse;
+            }
             if (releaseFailure != null) {
                 return CompletableFuture.failedFuture(releaseFailure);
             }
