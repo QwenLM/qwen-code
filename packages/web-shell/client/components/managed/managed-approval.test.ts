@@ -86,5 +86,9 @@ describe('Managed approval presentation', () => {
     const request = toManagedPermissionRequest(unresolved, []);
     expect(request).not.toHaveProperty('toolCallId');
     expect(request).not.toHaveProperty('rawInput');
+    // The notice is the card's own content, so assistive technology reads it
+    // with the approval rather than beside it.
+    const noticed = toManagedPermissionRequest(action, [], 'No arguments');
+    expect(noticed.content).toEqual([{ type: 'text', text: 'No arguments' }]);
   });
 });

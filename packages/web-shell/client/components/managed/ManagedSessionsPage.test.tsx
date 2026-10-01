@@ -36,13 +36,18 @@ vi.mock('../MessageList', () => ({
     messages,
     hasOlderHistory,
     onLoadOlderHistory,
+    pendingApproval,
   }: {
     messages: unknown[];
     hasOlderHistory: boolean;
     onLoadOlderHistory: () => Promise<void>;
+    pendingApproval?: { id: string } | null;
   }) => (
     <>
       <pre data-testid="messages">{JSON.stringify(messages)}</pre>
+      <pre data-testid="message-list-approval">
+        {pendingApproval?.id ?? ''}
+      </pre>
       {hasOlderHistory && (
         <button onClick={() => void onLoadOlderHistory()}>Older history</button>
       )}
@@ -215,6 +220,11 @@ describe('ManagedSessionsPage', () => {
     const card = container.querySelector('[data-testid="managed-approval"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('Tool arguments are unavailable');
+    // The transcript keeps the Turn that owns the pending call unfolded.
+    const listed = container.querySelector(
+      '[data-testid="message-list-approval"]',
+    );
+    expect(listed?.textContent).toBe('tool_approval_1');
     const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Yes, allow once'),
     );
@@ -242,6 +252,7 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
   it.each([
@@ -258,7 +269,9 @@ describe('ManagedSessionsPage', () => {
     'shows available %s arguments inside the approval card',
     async (toolName, input) => {
       mocks.client.getSession.mockResolvedValue(
-        summary('s1', { capabilities: { canSend: false, actions: true } }),
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: true, actions: true },
+        }),
       );
       mocks.client.getTranscript.mockResolvedValue({
         events: [
@@ -292,7 +305,9 @@ describe('ManagedSessionsPage', () => {
 
   it('offers a direct retry when pending approvals could not be loaded', async () => {
     mocks.client.getSession.mockResolvedValue(
-      summary('s1', { capabilities: { canSend: false, actions: true } }),
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
     );
     const listPending = vi
       .fn()
@@ -327,7 +342,9 @@ describe('ManagedSessionsPage', () => {
 
   it('explains that a reader cannot answer a creator-only approval', async () => {
     mocks.client.getSession.mockResolvedValue(
-      summary('s1', { capabilities: { canSend: false, actions: true } }),
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      }),
     );
     provider = {
       ...provider,

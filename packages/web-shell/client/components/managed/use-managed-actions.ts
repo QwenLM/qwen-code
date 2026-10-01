@@ -11,13 +11,46 @@ const EXPIRY_GRACE_MS = 1_000;
 // A failed read of the pending approvals is retried a few times, so one
 // transient failure does not hide an approval until it expires.
 const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+// The contract answers these when the Action already ended, so retrying the
+// answer can never succeed.
+const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
+  'action_expired',
+  'action_cancelled',
+  'action_already_resolved',
+]);
+
+/** A 4xx other than a timeout or rate limit fails the same way again. */
+export function isNonRetryableClientError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('status' in error)) {
+    return false;
+  }
+  const status = (error as { status?: unknown }).status;
+  return (
+    typeof status === 'number' &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  );
+}
+
+function endedAction(error: unknown): boolean {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return typeof code === 'string' && ENDED_ACTION_CODES.has(code);
+}
 
 export interface ManagedActionsState {
   /** The approval to show; answered ones stay hidden while they settle. */
   action?: ManagedAgentPendingAction;
-  /** Reading the pending approvals failed; retries run in the background. */
+  /**
+   * Reading the pending approvals failed. Transient failures are retried in
+   * the background; a client error is not.
+   */
   loadError?: unknown;
-  /** Sending an answer failed; the approval is shown again. */
+  /** Answering the shown approval failed; it is shown again. */
   answerError?: unknown;
   respond(actionId: string, optionId: string): Promise<void>;
   /** Reads the pending approvals again now. */
@@ -26,26 +59,34 @@ export interface ManagedActionsState {
 
 /**
  * Loads a Session's pending Hosted approvals and answers them. It re-reads
- * when the stream reports an approval change or a gap, when an approval
- * expires, and after an answer.
+ * when the stream reports an approval change or a reconciled gap, when an
+ * approval expires, and after an answer. `enabled` is undefined while the
+ * Session summary is unknown, for example during a reload: the shown approval
+ * stays and can be answered, and reads resume once the capability is known.
  */
 export function useManagedActions(
   provider: ManagedAgentProvider,
   sessionId: string | undefined,
   clientId: string,
-  enabled: boolean,
+  enabled: boolean | undefined,
   events: readonly ManagedAgentSessionEvent[],
 ): ManagedActionsState {
-  const reader = enabled ? provider.actions : undefined;
+  const reader = enabled === false ? undefined : provider.actions;
   const [pending, setPending] = useState<{
     sessionId?: string;
     actions: ManagedAgentPendingAction[];
   }>({ actions: [] });
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [loadError, setLoadError] = useState<unknown>();
-  const [answerError, setAnswerError] = useState<unknown>();
+  const [failedAnswer, setFailedAnswer] = useState<{
+    actionId: string;
+    cause: unknown;
+  }>();
   const [revision, setRevision] = useState(0);
   const loadFailures = useRef(0);
+  // Only a read started by the retry timer continues the retry ladder; any
+  // other read starts it again.
+  const retrying = useRef(false);
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -59,8 +100,7 @@ export function useManagedActions(
   useEffect(() => {
     setAnswered(new Set());
     setLoadError(undefined);
-    setAnswerError(undefined);
-    loadFailures.current = 0;
+    setFailedAnswer(undefined);
   }, [sessionId]);
 
   useEffect(() => {
@@ -68,33 +108,36 @@ export function useManagedActions(
       setPending({ actions: [] });
       return undefined;
     }
+    if (enabled === undefined) return undefined;
+    if (!retrying.current) loadFailures.current = 0;
+    retrying.current = false;
     const abort = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
       .listPending(sessionId, { clientId, signal: abort.signal })
       .then((actions) => {
         if (abort.signal.aborted) return;
-        loadFailures.current = 0;
         setPending({ sessionId, actions });
         setLoadError(undefined);
       })
       .catch((failure: unknown) => {
         if (abort.signal.aborted) return;
         setLoadError(failure);
+        if (isNonRetryableClientError(failure)) return;
         const delay = LOAD_RETRY_DELAYS_MS[loadFailures.current];
         loadFailures.current += 1;
         if (delay !== undefined) {
-          retryTimer = setTimeout(
-            () => setRevision((value) => value + 1),
-            delay,
-          );
+          retryTimer = setTimeout(() => {
+            retrying.current = true;
+            setRevision((value) => value + 1);
+          }, delay);
         }
       });
     return () => {
       abort.abort();
       clearTimeout(retryTimer);
     };
-  }, [reader, sessionId, clientId, trigger, revision]);
+  }, [reader, enabled, sessionId, clientId, trigger, revision]);
 
   const earliestExpiry = pending.actions.length
     ? Math.min(...pending.actions.map((action) => action.expiresAt))
@@ -126,15 +169,22 @@ export function useManagedActions(
           clientId,
           idempotencyKey: `${target.actionId}:${optionId}`,
         });
-        setAnswerError(undefined);
+        setFailedAnswer(undefined);
         setRevision((value) => value + 1);
       } catch (failure) {
+        if (endedAction(failure)) {
+          // Another answer or the expiry ended it; keep it hidden and read
+          // the list again instead of offering a retry that cannot succeed.
+          setFailedAnswer(undefined);
+          setRevision((value) => value + 1);
+          return;
+        }
         setAnswered((current) => {
           const next = new Set(current);
           next.delete(actionId);
           return next;
         });
-        setAnswerError(failure);
+        setFailedAnswer({ actionId, cause: failure });
         throw failure;
       }
     },
@@ -142,9 +192,13 @@ export function useManagedActions(
   );
 
   const retry = useCallback(() => {
-    loadFailures.current = 0;
     setRevision((value) => value + 1);
   }, []);
 
+  // The failure belongs to one approval: it is not shown beside another.
+  const answerError =
+    failedAnswer && action?.actionId === failedAnswer.actionId
+      ? failedAnswer.cause
+      : undefined;
   return { action, loadError, answerError, respond, retry };
 }
