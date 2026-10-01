@@ -305,6 +305,9 @@ try {
       assert.equal(rejected.error, 'hosted_turn_recovery_required');
     }
     const traffic = exchanges.length;
+    const callsBeforeReload = modelCalls;
+    const retryRelease = ['release', 'release-before-forward'].includes(fault);
+    const rejectLoad = blocked && !retryRelease;
     await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
       `/session/${sessionId}/load`,
@@ -312,17 +315,53 @@ try {
         managedSessionStore: connection,
         toolProfile: 'hosted-workspace-files/1',
       },
-      blocked ? 409 : 200,
+      rejectLoad ? 409 : 200,
     );
-    if (blocked) assert.equal(loaded.error, 'hosted_turn_recovery_required');
+    if (rejectLoad) assert.equal(loaded.error, 'hosted_turn_recovery_required');
     else {
       clientId = loaded.clientId;
+      if (retryRelease) {
+        await waitUntil(async () => {
+          if (proxyFailure) throw proxyFailure;
+          return !(await json(`/session/${sessionId}/status`)).hasActivePrompt;
+        });
+        assert.equal(
+          (await json(`/session/${sessionId}/status`)).recoveryBlocked,
+          fault === 'release-before-forward',
+          cli.output,
+        );
+        const page = await json(
+          `/session/${sessionId}/transcript?cursor=0&limit=256`,
+        );
+        assert.equal(page.hasMore, false);
+        const recoveredEvents: typeof events = page.events;
+        assert.deepEqual(
+          recoveredEvents
+            .filter(
+              (event) =>
+                event.promptId === promptId && event.type.startsWith('turn_'),
+            )
+            .map((event) => event.type),
+          fault === 'release' ? ['turn_complete'] : [],
+        );
+        assert.equal(
+          recoveredEvents.filter(
+            (event) => event.data.record?.type === 'tool_result',
+          ).length,
+          1,
+        );
+      }
       await json(`/session/${sessionId}/detach`, {}, 204);
     }
+    assert.deepEqual(
+      exchanges.slice(traffic).map((entry) => entry.operation),
+      retryRelease ? ['release'] : [],
+      'Reload may only retry the original runtime release',
+    );
     assert.equal(
-      exchanges.length,
-      traffic,
-      'Reload must not replay Broker work',
+      modelCalls,
+      callsBeforeReload,
+      'Reload must not call the model',
     );
     reports.push({ fault, promptId, executionCallId, idempotencyKey });
     console.log(

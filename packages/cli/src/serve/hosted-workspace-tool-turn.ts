@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readHostedFileHistory,
+  commitHostedFileHistory,
+  assertHostedFileHistoryCapacity,
+  HostedFileHistoryRefusedError,
+  canSettleHostedFileHistory,
+} from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
@@ -43,6 +50,7 @@ import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
+  isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
@@ -131,7 +139,7 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   {
     name: 'write_file',
     description:
-      'Write a file in the remote Workspace. Read before overwriting an existing file. No undo backup is provided by this private profile.',
+      'Write a file in the remote Workspace. Read before overwriting an existing file.',
     parametersJsonSchema: {
       type: 'object',
       properties: { file_path: pathProperty, content: { type: 'string' } },
@@ -142,7 +150,7 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   {
     name: 'edit',
     description:
-      'Replace exact text in a remote Workspace file that you have read. No undo backup is provided by this private profile.',
+      'Replace exact text in a remote Workspace file that you have read.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -259,17 +267,61 @@ export class HostedWorkspaceToolTurn {
   async resumeCommittedResults(): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
-    await this.acquire();
+    await this.acquire(true);
     this.uncertain = false;
   }
 
-  private async acquire(): Promise<void> {
+  private async acquire(recovering = false): Promise<void> {
     this.uncertain = true;
     try {
       await this.broker.acquire();
       this.acquired = true;
+      if (!this.mcp) {
+        const saved = await readHostedFileHistory(this.session);
+        if (saved?.pendingUndo)
+          throw new Error('Hosted file history requires recovery.');
+        if (saved?.pendingTurn) {
+          if (
+            !recovering ||
+            saved.pendingTurn !== this.promptId ||
+            !(await canSettleHostedFileHistory(this.session, saved))
+          )
+            throw new Error('Hosted file history requires recovery.');
+          const state = await this.broker.fileHistory({
+            kind: 'raw-file-history',
+            action: 'snapshot',
+          });
+          if (!isDeepStrictEqual(state.snapshots, saved.state.snapshots))
+            throw new Error('Original file history snapshots changed.');
+          await commitHostedFileHistory(this.session, {
+            schemaVersion: 1,
+            state,
+            pendingTurn: null,
+            pendingUndo: null,
+          });
+          return;
+        }
+        try {
+          await this.broker.fileHistory({
+            kind: 'raw-file-history',
+            action: 'bind',
+            state: saved?.state ?? null,
+          });
+        } catch (cause) {
+          // A saved continuation still needs this original runtime ID.
+          if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
+          await this.broker.release();
+          this.acquired = false;
+          throw new HostedFileHistoryRefusedError(
+            cause.reason ?? cause.message,
+          );
+        }
+      }
     } catch (cause) {
-      if (isRetryableWorkspaceAcquisition(cause)) {
+      if (
+        (!this.acquired && isRetryableWorkspaceAcquisition(cause)) ||
+        cause instanceof HostedFileHistoryRefusedError
+      ) {
         this.uncertain = false;
         throw cause;
       }
@@ -467,6 +519,50 @@ export class HostedWorkspaceToolTurn {
             reason,
           );
     };
+    const paths = requests.flatMap((request, index) =>
+      !this.mcp &&
+      refusals[index] === undefined &&
+      ['write_file', 'edit'].includes(request.call.name)
+        ? [request.input['file_path'] as string]
+        : [],
+    );
+    if (paths.length) {
+      try {
+        const state = await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'prepare',
+          promptId: this.promptId,
+          paths: [...new Set(paths)],
+        });
+        const prepared = {
+          schemaVersion: 1 as const,
+          state,
+          pendingTurn: this.promptId,
+          pendingMessageId: messageId,
+          pendingUndo: null,
+        };
+        await assertHostedFileHistoryCapacity(this.session, prepared);
+        await commitHostedFileHistory(this.session, prepared);
+      } catch (cause) {
+        if (
+          !isHostedFileHistoryRefusal(cause) &&
+          !(cause instanceof HostedFileHistoryRefusedError)
+        )
+          throw new HostedToolRecoveryRequiredError(cause);
+        const reason =
+          cause instanceof HostedWorkspaceBrokerRejection
+            ? (cause.reason ?? cause.message)
+            : cause.message;
+        for (const [index, request] of requests.entries())
+          if (
+            refusals[index] === undefined &&
+            ['write_file', 'edit'].includes(request.call.name)
+          )
+            refusals[index] =
+              `Hosted file history refused this batch's Write/Edit before execution: ${reason.slice(0, 512)}`;
+        paths.length = 0;
+      }
+    }
     if (refusals.every((reason) => reason !== undefined)) {
       const responses = requests.flatMap((_, index) => refusal(index)!);
       try {
@@ -509,23 +605,38 @@ export class HostedWorkspaceToolTurn {
             'managed-tool-input',
             request.inputBytes,
           ));
-        const prepared =
-          request.isShell && this.publication
-            ? await this.broker.prepareV3(
-                request.runtimeCallId,
-                request.argsDigest,
-                request.digest,
-                request.publicationId!,
-              )
-            : null;
-        const executionCallId =
-          prepared?.executionCallId ??
-          (await this.broker.prepare(
-            request.runtimeCallId,
-            request.digest,
-            request.inputDigest,
-            this.promptId,
-          ));
+        let prepared;
+        let executionCallId: string;
+        try {
+          prepared =
+            request.isShell && this.publication
+              ? await this.broker.prepareV3(
+                  request.runtimeCallId,
+                  request.argsDigest,
+                  request.digest,
+                  request.publicationId!,
+                )
+              : null;
+          executionCallId =
+            prepared?.executionCallId ??
+            (await this.broker.prepare(
+              request.runtimeCallId,
+              request.digest,
+              request.inputDigest,
+              this.promptId,
+            ));
+        } catch (cause) {
+          if (
+            !(cause instanceof HostedWorkspaceBrokerRejection) ||
+            cause.status !== 409 ||
+            cause.code !== 'runtime_execution_conflict'
+          )
+            throw cause;
+          refusals[ordinal] =
+            'Runtime refused this execution reservation before dispatch: ' +
+            (cause.reason ?? cause.message).slice(0, 512);
+          continue;
+        }
         reserved.set(ordinal, executionCallId);
         const toolDefinitionRef = await this.session.resources.publish(
           'managed-tool-definition',
@@ -634,10 +745,11 @@ export class HostedWorkspaceToolTurn {
           );
         }
       }
-      await this.harness.commitAwaitRuntimeBatch(bindings, {
-        turnId: this.promptId,
-        promptId: this.promptId,
-      });
+      if (bindings.length)
+        await this.harness.commitAwaitRuntimeBatch(bindings, {
+          turnId: this.promptId,
+          promptId: this.promptId,
+        });
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
         const authority = this.session.authority;
@@ -905,6 +1017,18 @@ export class HostedWorkspaceToolTurn {
         await this.harness.resolveAwaitRuntime(executionCallId, outcomeRef);
         if (receipt) await this.broker.acknowledge(executionCallId, receipt);
         responses.push(...converted);
+      }
+      if (paths.length) {
+        const state = await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'snapshot',
+        });
+        await commitHostedFileHistory(this.session, {
+          schemaVersion: 1,
+          state,
+          pendingTurn: null,
+          pendingUndo: null,
+        });
       }
       this.uncertain = false;
       return responses;

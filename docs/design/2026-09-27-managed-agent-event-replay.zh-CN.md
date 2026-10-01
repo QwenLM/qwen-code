@@ -71,8 +71,9 @@ resync。
   之后继续，因为帧中的值可能比客户端随后读到的 Snapshot 更旧。
 - WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
   返回全部 Items、Snapshot 之前除 `turn.accepted`、`item.output_text.delta`、
-  `item.reasoning.delta` 与 `item.tool_call.updated`（Items 已包含其内容）以外的
-  事件，以及之后的所有事件；其他情况下由 `limit` 限定事件分页。
+  `item.reasoning.delta`、`item.tool_call.updated` 与 `item.tool_result.updated`
+  （Items 已包含其内容）以外的事件，以及之后的所有事件；其他情况下由 `limit`
+  限定事件分页。
 - `PublicEvent` 与 `WebShellEvent` 写明事件以被接受时的版本与身份回放，唯一的例外
   是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。由于 Snapshot
   在它之后重建，公共客户端要重新读取 Items，直到其 `snapshot_through_sequence`
@@ -93,7 +94,7 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 | `turn.accepted`                                             | `data.itemId`，否则为 `item_<turn>_input`                                         | 无；该事件填充多个 Part                                                                                   |
 | 带文本的 `item.output_text.delta` 与 `item.reasoning.delta` | `data.itemId`，否则为 `item_<turn>_assistant`                                     | 如果紧邻的上一条事件是同一类型、同一 Item 的增量，则沿用它的 Part；否则为 `part_<turn>_<type>_<sequence>` |
 | 文本为空的文本增量                                          | 无                                                                                | 无；投影会跳过它                                                                                          |
-| `item.tool_call.updated`                                    | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
+| `item.tool_call.updated` 与 `item.tool_result.updated`      | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
 | 其他事件                                                    | 无                                                                                | 无                                                                                                        |
 
 这正是物化器构建 Items 时已经采用的规则，物化器现在也通过同一组辅助方法命名。
