@@ -571,7 +571,6 @@ export class HostedHookSession {
     } else {
       if (this.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
-      signal.throwIfAborted();
       const { messages: suppliedMessages, ...eventFields } = fields;
       const input: HookInput = {
         ...eventFields,

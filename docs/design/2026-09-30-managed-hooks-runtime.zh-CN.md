@@ -33,6 +33,11 @@ ordinal、registration、plan、有效输入、原 Runtime Session、取消意�
 聚合。保存结果前应用 fail-open/fail-closed，包括由 status 对账取得的回执。失败或
 未知的 once 尝试不会重新获得资格。
 
+目录就绪且没有待恢复操作时，即使取消发生在新 occurrence 建立前，也会保存计划和
+取消结果，不派发子 Hook，也不消耗其 once key。PreToolUse 因而可以先持久化拒绝
+每个已提交的 assistant 工具调用（包括同批次的后续调用），再以 cancelled 结束
+turn。已有未知副作用或 journal 写入失败仍会阻塞该续行。
+
 目录替换是带预期 registration 数量的幂等操作。同一目录命名空间内 revision 递增。
 重试旧操作只确认原结果，不恢复旧的有效目录。新 revision 删除 Hook 只影响未来事件。
 部署的 Session/agent 条目携带明确 owner；先做 owner 过滤，再复用原生配置去重，避免
@@ -125,6 +130,17 @@ blocking 回执，PermissionRequest 始终返回 deny，不受失败策略影响
 持久化该结果。立即返回的已结算拒绝必须先返回，不能被异步准入成功掩盖。这个永久容量上限区别于临时并发拒绝。容量回收需要持久确认协议，
 留待后续实现；
 未保存的拒绝若丢失响应，查询仍保持 unknown。
+
+H2 明确接受真正 unknown 带来的无期限可用性损失。SessionEnd 或 SessionDelete
+结果未知时，DELETE 返回 503，保留已 attach 的 Session 和原 Workspace owner。
+重试观察同一个已保存的 occurrence，不重新派发。Detach 也要求全部 Hook 副作用
+已结算。保留的 owner 可能阻塞同 Workspace 的其他 Session 的工具执行，不会阻塞
+不同 Workspace 的 Runtime worker。未知操作在 worker 生命周期内持续占用 16 个
+准入名额之一并保留 hold；包括已结算结果在内的全部已保存回执都计入 4096 条生命周期
+上限。超时、用户取消、DELETE 或进程替换都不能证明完成或允许重放。H2 不提供运维
+放弃 unknown 的接口；回执对账和有持久化屏障的回收在
+[#13133](https://github.com/QwenLM/qwen-code/issues/13133) 跟踪。这是明确接受的恢复
+限制，不代表有界恢复或可用性保证，也不表示原评审问题已解决。
 
 ## 模型 activation
 
