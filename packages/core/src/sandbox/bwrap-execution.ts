@@ -37,7 +37,7 @@ export async function executeBwrap(
   options: ShellExecuteOptions = {},
 ): Promise<SandboxExecutionHandle> {
   const relay = sandboxAsset('bwrap-relay');
-  const inputBridge = resolveStdinBridge();
+  const inputBridge = payload.inheritStdin ? resolveStdinBridge() : undefined;
   const node = realpathSync(process.execPath);
   const requestedBwrap = policy.bwrapPath ?? '/usr/bin/bwrap';
   if (!path.isAbsolute(requestedBwrap))

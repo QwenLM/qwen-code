@@ -101,7 +101,6 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import {
   BWRAP_MIGRATION_MESSAGE,
-  normalizeSandboxArguments,
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
@@ -583,14 +582,7 @@ export async function parseArguments(): Promise<CliArgs> {
     rawArgv = rawArgv.slice(1);
   }
 
-  const normalizedSandbox = normalizeSandboxArguments(rawArgv);
-  const yargsInstance = yargs(normalizedSandbox.argv)
-    .middleware((argv) => {
-      if (normalizedSandbox.sandbox !== undefined)
-        argv['sandbox'] = normalizedSandbox.sandbox;
-      if (normalizedSandbox.sandbox === 'bwrap')
-        throw new FatalConfigError(BWRAP_MIGRATION_MESSAGE);
-    }, true)
+  const yargsInstance = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
     .usage(TOP_LEVEL_USAGE)
@@ -639,7 +631,21 @@ export async function parseArguments(): Promise<CliArgs> {
           DEFAULT_COMMAND_OPTIONS['append-system-prompt'],
         )
         .option('output-style', DEFAULT_COMMAND_OPTIONS['output-style'])
-        .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
+        .option('sandbox', {
+          ...DEFAULT_COMMAND_OPTIONS.sandbox,
+          coerce: (raw: string | boolean | Array<string | boolean>) => {
+            const value = Array.isArray(raw) ? raw.at(-1) : raw;
+            if (typeof value === 'boolean') return value;
+            const selection = (value ?? '').trim().toLowerCase();
+            if (['', 'true', '1'].includes(selection)) return true;
+            if (['false', '0'].includes(selection)) return false;
+            return selection;
+          },
+        })
+        .middleware((argv) => {
+          if (argv['sandbox'] === 'bwrap')
+            throw new FatalConfigError(BWRAP_MIGRATION_MESSAGE);
+        }, true)
         .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
         .option('yolo', DEFAULT_COMMAND_OPTIONS.yolo)
         .option('approval-mode', DEFAULT_COMMAND_OPTIONS['approval-mode'])

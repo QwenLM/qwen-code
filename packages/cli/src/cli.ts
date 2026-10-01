@@ -452,7 +452,6 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     .strictCommands()
     .demandCommand(1, 'You need at least one command before continuing.')
     .fail((message: string | null, error: Error | undefined, yargs: Argv) => {
-      if (error instanceof FatalError) throw error;
       writeStderrLine(message || error?.message || 'Unknown argument error');
       yargs.showHelp();
       process.exitCode = 1;

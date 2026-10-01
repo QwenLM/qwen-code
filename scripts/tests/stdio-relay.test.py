@@ -115,6 +115,7 @@ print(json.dumps({'read': len(data), 'regular': stat.S_ISREG(os.fstat(0).st_mode
             result = subprocess.run([HELPER, '--relay-stdin', '/does-not-exist'], stdin=descriptor,
                                     capture_output=True, timeout=3)
             self.assertEqual(result.returncode, 125)
+            self.assertIn(b'qwen-landlock-run: exec failed:', result.stderr)
             self.assertEqual(os.lseek(descriptor.fileno(), 0, os.SEEK_CUR), 0)
 
     @unittest.skipUnless(sys.platform == 'linux', 'fault injection uses the Linux helper')
@@ -145,8 +146,9 @@ int main(int argc, char **argv) {
 }
 ''')
         helper = self.root / 'fault-helper'
-        subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(helper)],
-                       check=True, capture_output=True, timeout=10)
+        compiled = subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(helper)],
+                                  capture_output=True, timeout=10)
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
         ready = self.root / 'ready'
         receipt = self.root / 'receipt'
         payload = '''

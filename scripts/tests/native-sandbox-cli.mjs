@@ -39,7 +39,7 @@ const report = {
   mode,
   platform: process.platform,
   arch: process.arch,
-  uid: process.getuid(),
+  uid: typeof process.getuid === 'function' ? process.getuid() : null,
   kernel: os.release(),
   sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
     encoding: 'utf8',
@@ -130,7 +130,7 @@ async function run(f, args) {
   child.stderr.on('data', (chunk) => {
     stderr += chunk;
   });
-  let timer;
+  let timer, grace;
   try {
     const exit = await new Promise((resolve, reject) => {
       child.once('error', (error) => {
@@ -151,8 +151,10 @@ async function run(f, args) {
         } catch {
           // The process group may have exited before cancellation.
         }
-        child.unref();
-        resolve({ code: null, signal: 'SIGKILL' });
+        grace = setTimeout(() => {
+          child.unref();
+          resolve({ code: null, signal: 'SIGKILL', outputComplete: false });
+        }, 5_000);
       }, 45_000);
     });
     return {
@@ -165,6 +167,7 @@ async function run(f, args) {
     };
   } finally {
     clearTimeout(timer);
+    clearTimeout(grace);
     child.stdout.destroy();
     child.stderr.destroy();
   }

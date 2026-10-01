@@ -14,6 +14,15 @@ on:
       - 'packages/cli/src/config/**'
       - 'packages/cli/src/utils/write-with-backup*'
       - 'packages/cli/src/utils/flush-output*'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'packages/core/src/services/shellExecutionService.ts'
+      - 'packages/core/src/tools/shell.ts'
+      - 'packages/cli/src/nonInteractive/io/BaseJsonOutputAdapter.ts'
+      - 'esbuild.config.js'
+      - 'scripts/copy_bundle_assets.js'
+      - 'scripts/prepare.js'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   push:
     branches:
       - 'main'
@@ -29,6 +38,15 @@ on:
       - 'packages/cli/src/config/**'
       - 'packages/cli/src/utils/write-with-backup*'
       - 'packages/cli/src/utils/flush-output*'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'packages/core/src/services/shellExecutionService.ts'
+      - 'packages/core/src/tools/shell.ts'
+      - 'packages/cli/src/nonInteractive/io/BaseJsonOutputAdapter.ts'
+      - 'esbuild.config.js'
+      - 'scripts/copy_bundle_assets.js'
+      - 'scripts/prepare.js'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
   workflow_dispatch:
 
 permissions:
@@ -51,9 +69,7 @@ jobs:
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: 'Build CLI'
-        run: |-
-          corepack pnpm install --frozen-lockfile
-          npm run bundle
+        run: 'corepack pnpm install --frozen-lockfile'
       - name: 'Verify stdin transport ownership'
         working-directory: 'packages/core'
         run: 'npx vitest run src/sandbox/bwrap-relay.test.ts'

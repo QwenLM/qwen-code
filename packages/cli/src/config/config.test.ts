@@ -36,6 +36,7 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { addCommand } from '../commands/mcp/add.js';
 import * as Mem0Settings from './mem0-settings.js';
 import {
   isCrossSessionMessagingActive,
@@ -369,6 +370,133 @@ describe('parseArguments', () => {
     });
     process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
     expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
+  it('keeps the MCP scope alias in its own command grammar', async () => {
+    const handler = vi
+      .spyOn(addCommand, 'handler')
+      .mockImplementation(() => {});
+    process.argv = [
+      'node',
+      'script.js',
+      '--debug',
+      'mcp',
+      'add',
+      '-s',
+      'project',
+      'myserver',
+      'npx',
+      '-y',
+      'foo',
+    ];
+    await expect(parseArguments()).rejects.toThrow(
+      'process.exit unexpectedly called with "0"',
+    );
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: 'project', name: 'myserver' }),
+    );
+    handler.mockRestore();
+  });
+
+  it.each([
+    ['--sandbox=docker', 'mcp', 'list'],
+    ['-s', 'docker', 'mcp', 'list'],
+    ['--sandbox=podman', 'extensions', 'list'],
+  ])(
+    'rejects session options on subcommands instead of starting a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown argument'),
+      );
+    },
+  );
+
+  it.each([
+    ['--sandbox=true', 'query'],
+    ['--sandbox', '-p', 'query'],
+  ])(
+    'supports explicit automatic selection with a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt: 'query',
+      });
+    },
+  );
+
+  it('uses one option grammar and stops parsing options after --', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'docker',
+      query: 'explain what does',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      'fix',
+      'the',
+      '--sandbox',
+      'false',
+      'bug',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'fix the bug',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect((await parseArguments())._).toEqual([
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ]);
+  });
+
+  it.each(['explain what -s docker does', 'fix the --sandbox false bug'])(
+    'keeps option-like text inside an explicit prompt: %s',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--sandbox=true', '-p', prompt];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt,
+      });
+    },
+  );
+
+  it('keeps last-wins selection without treating an absent option as false', async () => {
+    for (const flags of [
+      ['--sandbox=docker', '--no-sandbox'],
+      ['--sandbox=true', '--sandbox=false'],
+    ]) {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+      expect((await parseArguments()).sandbox).toBe(false);
+    }
+    process.argv = ['node', 'script.js', '-p', 'query'];
+    expect((await parseArguments()).sandbox).toBeUndefined();
   });
 
   it('includes every approval mode description in --help', async () => {

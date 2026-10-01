@@ -79,3 +79,12 @@ it.each(['bwrap', 'BWRAP', ' BWRAP '])(
     expect(stderr).toContain('Whole-CLI bwrap has been removed');
   },
 );
+
+it.each(['bwrap', 'BWRAP', ' BWRAP '])(
+  'rejects the legacy QWEN_SANDBOX bwrap selection %j',
+  (marker) => {
+    const { status, stderr } = runSandboxCommand(marker);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain('Whole-CLI bwrap has been removed');
+  },
+);

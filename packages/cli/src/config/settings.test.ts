@@ -2317,6 +2317,52 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it('keeps Workspace recovery available when the preserved file cannot be reset', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+      );
+      (fs.writeFileSync as Mock).mockImplementation(() => {
+        throw Object.assign(new Error('read-only file system'), {
+          code: 'EROFS',
+        });
+      });
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(loaded.corruptedPath).toBe(
+        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      );
+      expect(loaded.wasRecovered).toBe(false);
+      expect(loaded.workspace.settings).toEqual({});
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        MOCK_WORKSPACE_SETTINGS_PATH,
+        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      );
+    });
+
+    it('refuses to reset malformed Workspace settings when no copy can be preserved', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+      );
+      (fs.copyFileSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES');
+      });
+      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
+        'Cannot preserve malformed workspace settings',
+      );
+      expect(fs.writeFileSync).not.toHaveBeenCalledWith(
+        MOCK_WORKSPACE_SETTINGS_PATH,
+        '{}',
+        'utf-8',
+      );
+    });
+
     it('does not revive User recovery from inherited corruption metadata', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) =>

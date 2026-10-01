@@ -148,6 +148,8 @@ qwen -p "run the test suite"
 >
 > If `QWEN_SANDBOX` is set, it **overrides** the CLI flag and `settings.json`.
 
+`--sandbox` and `-s` accept an optional value: `true`, `false`, `docker`, `podman` or `sandbox-exec`. For automatic selection with a prompt, use `qwen --sandbox=true "query"` or `qwen --sandbox -p "query"`. Unlike the old boolean-only parser, `qwen --sandbox "query"` now treats `query` as a backend value and rejects an unknown backend. Options before `--` use the same grammar even after positional words; use `-p "..."` for literal option text within a prompt. `--` stops option parsing, but its trailing tokens are not forwarded as the default-command prompt. Session sandbox flags are not accepted on management subcommands, whose `-s` aliases retain their own meaning.
+
 ### Configure the sandbox image (Docker/Podman)
 
 - **CLI flag**: `--sandbox-image <image>`

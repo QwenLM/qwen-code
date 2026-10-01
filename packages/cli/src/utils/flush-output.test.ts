@@ -54,7 +54,7 @@ describe('output completion through real OS pipes', () => {
     expect(stderr).toEqual(
       Buffer.concat([Buffer.alloc(1024 * 1024, 66), Buffer.from('ERR-TAIL')]),
     );
-  }, 15_000);
+  });
 
   it('allows EPIPE cancellation when the downstream pipe closes', async () => {
     const child = spawn(
@@ -83,5 +83,5 @@ describe('output completion through real OS pipes', () => {
     child.stderr.resume();
     const [code] = await closed;
     expect(code).toBe(141);
-  }, 15_000);
+  });
 });

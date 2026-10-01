@@ -185,54 +185,6 @@ function sandboxSettingsFromScopes(
   return { tools: { executionSandbox, sandbox } };
 }
 
-export function normalizeSandboxArguments(rawArgs: readonly string[]): {
-  argv: string[];
-  sandbox: boolean | string | undefined;
-} {
-  const argv: string[] = [];
-  let sandbox: boolean | string | undefined;
-  const values = [
-    'bwrap',
-    'docker',
-    'podman',
-    'sandbox-exec',
-    'true',
-    'false',
-    '0',
-    '1',
-  ];
-  for (let index = 0; index < rawArgs.length; index++) {
-    const arg = rawArgs[index];
-    if (arg === '--') {
-      argv.push(...rawArgs.slice(index));
-      break;
-    }
-    if (arg === '--no-sandbox') {
-      sandbox = false;
-      argv.push(arg);
-      continue;
-    }
-    const equals = arg.match(/^(?:--sandbox|-s)=(.*)$/);
-    if (equals || arg === '--sandbox' || arg === '-s') {
-      const next = rawArgs[index + 1]?.trim().toLowerCase();
-      const value = equals
-        ? equals[1].trim().toLowerCase()
-        : next && values.includes(next)
-          ? (index++, next)
-          : 'true';
-      sandbox = ['false', '0'].includes(value)
-        ? false
-        : ['true', '1'].includes(value)
-          ? true
-          : value;
-      argv.push(sandbox === false ? '--no-sandbox' : '--sandbox');
-    } else {
-      argv.push(arg);
-    }
-  }
-  return { argv, sandbox };
-}
-
 export function validateExecutionSandboxSelection(
   settings: SandboxSettingsInput,
   args: { sandbox?: boolean | string } = {},

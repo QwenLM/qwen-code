@@ -107,7 +107,9 @@ export async function executeLandlock(
     throw new Error('Landlock cannot enforce masked paths.');
   const runner = resolveLandlockRunner(policy.landlockPath);
   const relay = sandboxAsset('landlock-relay');
-  const inputBridge = resolveStdinBridge();
+  const inputBridge = payload.inheritStdin
+    ? resolveStdinBridge(policy.landlockPath)
+    : undefined;
   const node = realpathSync(process.execPath);
   return executeSandboxRelay(
     policy,

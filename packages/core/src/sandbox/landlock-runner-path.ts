@@ -12,10 +12,14 @@ import { resolveBundleDir } from '../utils/bundlePaths.js';
 const moduleFile = fileURLToPath(import.meta.url);
 const moduleDirectory = resolveBundleDir(import.meta.url);
 
-export function resolveStdinBridge(): string | undefined {
+export function resolveStdinBridge(requestedPath?: string): string | undefined {
   if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch))
     return undefined;
-  return resolveLandlockRunner();
+  try {
+    return resolveLandlockRunner(requestedPath);
+  } catch {
+    return undefined;
+  }
 }
 
 export function landlockRunnerPath(

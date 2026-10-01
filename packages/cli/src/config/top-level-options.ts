@@ -224,8 +224,9 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   sandbox: {
     alias: 's',
-    type: 'boolean' as const,
-    description: 'Run in sandbox?',
+    type: 'string' as const,
+    description:
+      'Run in a sandbox: true, false, docker, podman, sandbox-exec. Use --sandbox -p <prompt> for automatic selection.',
   },
   'sandbox-image': {
     type: 'string' as const,

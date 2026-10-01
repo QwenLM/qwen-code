@@ -18,6 +18,9 @@ describe('Landlock execution receipts', () => {
   );
 
   it('positively identifies empty and explicit pre-exec failures', () => {
+    expect(
+      parseLandlockStatus('{"state":"stdio-setup-failed"}\n', 125),
+    ).toEqual({ state: 'unconfirmed', payloadExitObserved: false });
     expect(parseLandlockStatus('', 125)).toEqual({
       state: 'unconfirmed',
       payloadExitObserved: false,

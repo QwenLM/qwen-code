@@ -52,14 +52,20 @@ fs.writeFileSync(ready, 'ready');`,
       );
       const closed = once(reader, 'close');
       let output = '';
+      let stderr = '';
       reader.stdout.on('data', (chunk: Buffer) => {
         output += chunk.toString();
+      });
+      reader.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
       });
       try {
         const deadline = Date.now() + 10_000;
         while (!fs.existsSync(ready)) {
           if (reader.exitCode !== null || Date.now() >= deadline)
-            throw new Error('Concurrent reader did not become ready');
+            throw new Error(
+              `Concurrent reader did not become ready (exit ${reader.exitCode}, signal ${reader.signalCode}): ${stderr}`,
+            );
           await delay(20);
         }
         let successfulWrites = 0;

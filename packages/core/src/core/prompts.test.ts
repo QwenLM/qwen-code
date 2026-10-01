@@ -998,8 +998,10 @@ describe('main-session style: reminder decision matches prompt section', () => {
           state: '/state',
         }),
       };
-      expect(getMainSessionBaseSystemPrompt(config)).toContain(
-        `command network policy is ${network}`,
+      const prompt = getMainSessionBaseSystemPrompt(config);
+      expect(prompt).toContain(`command network policy is ${network}`);
+      expect(prompt.includes('Closed networking prevents')).toBe(
+        network === 'closed',
       );
     },
   );
@@ -1024,6 +1026,7 @@ describe('main-session style: reminder decision matches prompt section', () => {
 
       const prompt = getMainSessionBaseSystemPrompt(config);
       expect(prompt).toContain('# Tool Execution Sandbox (Landlock, partial)');
+      expect(prompt).toContain('Command network policy is open');
       expect(prompt).toContain(
         `workspace is ${filesystem === 'workspace-write' ? 'writable' : 'read-only'}`,
       );

@@ -88,7 +88,7 @@ const child = spawn(
 let wire = '';
 let bytes = 0;
 let failed = false;
-// Only a bwrap spawn error proves the payload never ran. A status-stream
+// A backend or input-helper spawn error proves the payload never ran. A status-stream
 // transport error or a wire overflow can happen after the payload has
 // executed, so those must stay unattested (PR #12067 review, round 2).
 let spawnFailed = false;
@@ -107,7 +107,7 @@ child.on('error', () => {
 });
 child.on('close', (code, signal) => {
   clearInterval(parentWatch);
-  // A spawn failure of bwrap itself means the payload provably never ran —
+  // A spawn failure of the backend or input helper means the payload never ran —
   // attest that explicitly so the finalizer can clean up instead of
   // retaining the dirs for inspection. Every other failure mode leaves the
   // field absent: absence of evidence is not evidence of absence.

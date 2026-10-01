@@ -1240,7 +1240,13 @@ function readSettingsLayers(
               `Cannot preserve malformed workspace settings ${filePath}: ${getErrorMessage(copyError)}`,
             );
           }
-          fs.writeFileSync(filePath, '{}', 'utf-8');
+          try {
+            fs.writeFileSync(filePath, '{}', 'utf-8');
+          } catch (writeError) {
+            debugLogger.warn(
+              `Could not reset malformed workspace settings ${filePath}: ${getErrorMessage(writeError)}. Using empty Workspace settings; the preserved copy is ${corruptedPath}.`,
+            );
+          }
           return {
             settings: {},
             migrationWarnings: [],

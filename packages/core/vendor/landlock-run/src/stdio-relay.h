@@ -5,7 +5,6 @@
  */
 
 #include <poll.h>
-#include <limits.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 
@@ -15,53 +14,45 @@ static void relay_signal(int signal_number) {
   if (relay_child > 0) kill((pid_t)relay_child, signal_number);
 }
 
+static int relay_setup_failed(void) {
+  dprintf(3, "{\"state\":\"stdio-setup-failed\"}\n");
+  return 125;
+}
+
 /* Host-backed stdin must not reach the payload. Retain the private pipe's
  * read end so queued bytes can be deducted from regular-file consumption. */
 static int relay_stdin(char **command) {
   struct stat input;
-  if (fstat(STDIN_FILENO, &input) != 0) return 125;
+  if (fstat(STDIN_FILENO, &input) != 0) return relay_setup_failed();
   int regular = S_ISREG(input.st_mode);
   off_t initial = regular ? lseek(STDIN_FILENO, 0, SEEK_CUR) : 0;
-  if (regular && initial < 0) return 125;
+  if (regular && initial < 0) return relay_setup_failed();
   int source = STDIN_FILENO;
   if (S_ISFIFO(input.st_mode)) {
-#ifdef __linux__
     source = open("/proc/self/fd/0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-#elif defined(__APPLE__)
-    char fifo_path[PATH_MAX];
-    if (fcntl(STDIN_FILENO, F_GETPATH, fifo_path) < 0) return 125;
-    source = open(fifo_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-#else
-    return 125;
-#endif
-    if (source < 0) return 125;
+    if (source < 0) return relay_setup_failed();
   }
   int channel[2];
-  if (pipe(channel) != 0) return 125;
+  if (pipe(channel) != 0) return relay_setup_failed();
   int flags = fcntl(channel[1], F_GETFL);
   if (flags < 0 || fcntl(channel[1], F_SETFL, flags | O_NONBLOCK) != 0)
-    return 125;
+    return relay_setup_failed();
   pid_t parent = getppid();
-#ifdef __linux__
   if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent)
-    return 125;
-#endif
+    return relay_setup_failed();
   pid_t bridge = getpid();
   pid_t child = fork();
-  if (child < 0) return 125;
+  if (child < 0) return relay_setup_failed();
   if (child == 0) {
-#ifdef __linux__
     if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != bridge)
-      _exit(125);
-#else
-    (void)bridge;
-#endif
-    if (dup2(channel[0], STDIN_FILENO) < 0) _exit(125);
+      _exit(relay_setup_failed());
+    if (dup2(channel[0], STDIN_FILENO) < 0) _exit(relay_setup_failed());
     close(channel[0]);
     close(channel[1]);
     if (source != STDIN_FILENO) close(source);
     execvp(command[0], command);
-    _exit(125);
+    fprintf(stderr, "qwen-landlock-run: exec failed: %s\n", strerror(errno));
+    _exit(relay_setup_failed());
   }
   relay_child = child;
   signal(SIGINT, relay_signal);
