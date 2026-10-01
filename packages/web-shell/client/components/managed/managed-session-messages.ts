@@ -146,6 +146,7 @@ export function managedEventsToMessages(
       tools.set(key, tool);
       if (legacyKey) tools.set(legacyKey, tool);
       if (typeof itemId === 'string') tool.callId = key;
+      if (typeof callId === 'string') tool.toolCallId = callId;
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
       if (data['input'] !== undefined) {

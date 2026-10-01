@@ -30,9 +30,15 @@ export function findManagedApprovalTool(
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (exact ? tool.callId === exact : tool.callId.endsWith(suffix)) {
-        found = tool;
-      }
+      // Rows keyed by a Java itemId keep the call ID separately.
+      const matches =
+        tool.toolCallId !== undefined
+          ? tool.toolCallId === action.functionCallId &&
+            (!action.turnId || tool.callId.startsWith(`${action.turnId}:`))
+          : exact
+            ? tool.callId === exact
+            : tool.callId.endsWith(suffix);
+      if (matches) found = tool;
     }
   }
   return found;

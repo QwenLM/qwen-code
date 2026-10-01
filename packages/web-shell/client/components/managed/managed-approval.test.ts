@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../../adapters/types';
 import type { ManagedAgentPendingAction } from './managed-agent-provider';
+import { managedEventsToMessages } from './managed-session-messages';
 import {
   findManagedApprovalTool,
   toManagedPermissionRequest,
@@ -86,5 +87,32 @@ describe('Managed approval presentation', () => {
     const request = toManagedPermissionRequest(unresolved, []);
     expect(request).not.toHaveProperty('toolCallId');
     expect(request).not.toHaveProperty('rawInput');
+  });
+
+  it('matches a row keyed by a Java itemId through its tool call ID', () => {
+    const messages = managedEventsToMessages(
+      [
+        {
+          id: 7,
+          at: 7,
+          type: 'tool_started',
+          sessionId: 's1',
+          turnId: 'turn-2',
+          data: {
+            itemId: 'item_tool_1',
+            toolCallId: 'call-1',
+            toolName: 'write_file',
+            input: { file_path: 'notes.md', content: 'turn-2' },
+          },
+        },
+      ],
+      '[truncated]',
+    );
+    const request = toManagedPermissionRequest(action, messages);
+    expect(request.toolCallId).toBe('turn-2:item_tool_1');
+    expect(request.rawInput).toEqual({
+      file_path: 'notes.md',
+      content: 'turn-2',
+    });
   });
 });
