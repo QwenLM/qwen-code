@@ -744,11 +744,62 @@ describe('FeishuChannel', () => {
       sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
     });
 
-    onMessage(event('media-image', 'image', { image_key: 'img_1' }));
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const image = new Uint8Array([1, 2, 3]);
+    const resourceUrl =
+      'https://open.feishu.cn/open-apis/im/v1/messages/media-image/resources/img_1?type=image';
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/auth/v3/tenant_access_token/internal')) {
+          return jsonResponse({
+            tenant_access_token: 'test_token',
+            expire: 3600,
+          });
+        }
+        if (url === resourceUrl) {
+          return new Response(image, {
+            headers: { 'Content-Type': 'image/png' },
+          });
+        }
+        return jsonResponse({ code: 0, data: {} });
+      });
 
-    onMessage(event('plain-text', 'text', { text: 'inspect this' }));
-    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    try {
+      onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      expect(fetchSpy).toHaveBeenCalledWith(
+        resourceUrl,
+        expect.objectContaining({
+          method: 'GET',
+          headers: { Authorization: 'Bearer test_token' },
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        1,
+        'session-1',
+        expect.any(String),
+        expect.objectContaining({
+          images: [
+            {
+              data: Buffer.from(image).toString('base64'),
+              mimeType: 'image/png',
+            },
+          ],
+        }),
+      );
+
+      onMessage(event('plain-text', 'text', { text: 'inspect this' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      expect(bridge.prompt).toHaveBeenNthCalledWith(
+        2,
+        'session-1',
+        expect.stringContaining('inspect this'),
+        expect.anything(),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('preserves text after platform-normalized mentions with spaced names', async () => {
