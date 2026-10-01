@@ -2356,11 +2356,7 @@ describe('Settings Loading and Merging', () => {
       expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
         'Cannot preserve malformed workspace settings',
       );
-      expect(fs.writeFileSync).not.toHaveBeenCalledWith(
-        MOCK_WORKSPACE_SETTINGS_PATH,
-        '{}',
-        'utf-8',
-      );
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it

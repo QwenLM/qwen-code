@@ -430,6 +430,24 @@ describe('parseArguments', () => {
     },
   );
 
+  it('keeps a positional query separate from explicit automatic sandbox selection', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', 'explain the parser'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'explain the parser',
+    });
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--sandbox=true',
+      'explain the parser',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      query: 'explain the parser',
+    });
+  });
+
   it('uses one option grammar and stops parsing options after --', async () => {
     process.argv = [
       'node',
