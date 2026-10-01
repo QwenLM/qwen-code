@@ -341,30 +341,43 @@ async function recoverCancelledPreToolHook(
   }
   if (!cancelled) return false;
   const missing = calls.filter((call) => !responded.has(call.id!));
-  if (missing.length)
-    await sink.write(
-      record(
-        session,
-        authority.sessionHeader.sessionKey.sessionId,
-        'tool_result',
-        current.at(-1)!.uuid,
-        {
-          daemonPromptId: promptId,
-          model: assistant.model,
-          message: {
-            role: 'user',
-            parts: missing.flatMap((call) =>
-              convertToFunctionErrorResponse(
-                call.name!,
-                call.id!,
-                [],
-                'The turn was cancelled before this tool call ran.',
-              ),
-            ),
-          },
-        },
-      ),
+  const refusalRecord = (parts: Part[], parentUuid: string) =>
+    record(
+      session,
+      authority.sessionHeader.sessionKey.sessionId,
+      'tool_result',
+      parentUuid,
+      {
+        daemonPromptId: promptId,
+        model: assistant.model,
+        message: { role: 'user', parts },
+      },
     );
+  let result = refusalRecord([], current.at(-1)!.uuid);
+  const maxBytes = HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+  for (const part of missing.flatMap((call) =>
+    convertToFunctionErrorResponse(
+      call.name!,
+      call.id!,
+      [],
+      'The turn was cancelled before this tool call ran.',
+    ),
+  )) {
+    result.message!.parts!.push(part);
+    if (Buffer.byteLength(JSON.stringify(result)) <= maxBytes) continue;
+    result.message!.parts!.pop();
+    if (!result.message!.parts!.length)
+      throw new Error(
+        'Hosted tool refusal exceeds the inline Session Store limit.',
+      );
+    await sink.write(result);
+    result = refusalRecord([part], result.uuid);
+    if (Buffer.byteLength(JSON.stringify(result)) > maxBytes)
+      throw new Error(
+        'Hosted tool refusal exceeds the inline Session Store limit.',
+      );
+  }
+  if (result.message!.parts!.length) await sink.write(result);
   return true;
 }
 
@@ -417,8 +430,13 @@ async function settleCancelledHookTurn(session: HostedSession): Promise<void> {
         'hook_execution',
       )) {
         const execution = parseHookExecution(record);
+        const cancelledInstructions =
+          execution.eventName === HookEventName.InstructionsLoaded &&
+          execution.hookId !== '__plan__' &&
+          execution.cancelRequested;
         if (
-          !occurrenceIds.has(execution.occurrenceId) ||
+          (!occurrenceIds.has(execution.occurrenceId) &&
+            !cancelledInstructions) ||
           execution.run.state !== 'cancelled' ||
           execution.run.execution !== 'not_started_proven'
         )

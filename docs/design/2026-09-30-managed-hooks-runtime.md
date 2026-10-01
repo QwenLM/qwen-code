@@ -113,7 +113,8 @@ not a sandbox against scripts deliberately modifying the cgroup control plane.
 Missing isolation, including macOS and Windows, returns
 `managed_hook_command_isolation_unavailable` before command execution. The ledger
 records `not_started_proven` with `handler_unavailable`, and cancellation can close
-the blocked occurrence. For SessionStart and UserPromptSubmit, explicit cancellation
+the blocked occurrence. For SessionStart, UserPromptSubmit and native
+InstructionsLoaded before model execution, explicit cancellation
 also settles the admitted turn identified by the Hook's durable input `prompt_id`
 when no model attempt, tool intent/receipt or non-user message has followed
 admission, and no Hook remains pending. An earlier SessionStart cancellation cannot
@@ -123,7 +124,11 @@ all model attempts must have ended, at least one has committed output, no tool
 intent/receipt, pending approval, file-history work or Hook may remain, and the
 cancelled child's occurrence and input must match an original call in the sole
 unsettled turn. Recovery persists a matching refusal for every missing call before
-settling the turn as cancelled. Already committed responses are preserved; failed
+settling the turn as cancelled. Responses are split by the actual UTF-8 size of
+each complete record, including metadata, to respect the 64 KiB inline limit;
+each successful record becomes the parent of the next. A response that cannot
+fit alone retains the recovery barrier without truncating its identity.
+Already committed responses are preserved across partial batches; failed
 writes retain the barrier and retries do not duplicate them. This recovery is
 serialized with turn and control admission and also runs on load for previously
 cancelled records. Other model/tool continuations stay blocked. A process group
