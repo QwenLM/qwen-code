@@ -3,9 +3,14 @@ package com.alibaba.qwen.code.managedagent.harness;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import java.util.List;
 import java.util.Map;
+import com.fasterxml.jackson.databind.JsonNode;
 
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
+
+    default boolean isWorkspaceFilesAvailable() {
+        return false;
+    }
 
     Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting);
@@ -13,6 +18,17 @@ public interface HarnessConnector extends AutoCloseable {
     default Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         return createOrLoad(tenantId, sessionId, loadExisting);
+    }
+
+    /**
+     * Loads a previously attached Session for a Turn takeover, settling or
+     * reporting its parked Runtime executions. A plain cold load must stay
+     * inert, so only this path may touch the Broker for a parked Turn.
+     */
+    default Attachment recoverManagedRuntime(String tenantId, String sessionId,
+            boolean cancellation) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime recovery is unavailable");
     }
 
     Admission submit(String tenantId, String sessionId, String promptId,
@@ -33,6 +49,14 @@ public interface HarnessConnector extends AutoCloseable {
 
     SourceStream stream(String tenantId, String sessionId, long lastEventId,
             String eventEpoch);
+
+    default void resolveAction(
+            String tenantId,
+            String sessionId,
+            String actionId,
+            JsonNode response) {
+        throw new UnsupportedOperationException("Hosted Actions are unavailable");
+    }
 
     void cancel(String tenantId, String sessionId);
 

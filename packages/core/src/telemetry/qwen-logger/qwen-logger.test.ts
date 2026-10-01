@@ -105,10 +105,7 @@ describe('QwenLogger', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T12:00:00.000Z'));
     mockConfig = makeFakeConfig();
-    debugLoggerSpy.debug.mockClear();
-    debugLoggerSpy.info.mockClear();
-    debugLoggerSpy.warn.mockClear();
-    debugLoggerSpy.error.mockClear();
+    Object.values(debugLoggerSpy).forEach((fn) => fn.mockClear());
     // Clear singleton instance
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (QwenLogger as any).instance = undefined;
@@ -123,6 +120,41 @@ describe('QwenLogger', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (QwenLogger as any).instance = undefined;
   });
+
+  /** Runs `log` on a fresh logger for `config`; returns its enqueue spy. */
+  const logWith = (log: (logger: QwenLogger) => void, config = mockConfig) => {
+    const logger = QwenLogger.getInstance(config)!;
+    const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+    log(logger);
+    return enqueueSpy;
+  };
+
+  /** Like logWith; also expects an enqueued event containing `fields`. */
+  const expectLogged = (
+    log: (logger: QwenLogger) => void,
+    fields: Record<string, unknown>,
+    config = mockConfig,
+  ) => {
+    const enqueueSpy = logWith(log, config);
+    expect(enqueueSpy).toHaveBeenCalledWith(expect.objectContaining(fields));
+    return enqueueSpy;
+  };
+
+  const testEvent = (name = 'test-event'): RumEvent => ({
+    timestamp: Date.now(),
+    event_type: 'action',
+    type: 'test',
+    name,
+  });
+
+  /** A successful command hook with no output. */
+  const shortHook = (
+    eventName: string,
+    hookName = 'test-hook.sh',
+    input: Record<string, unknown> = {},
+    durationMs = 100,
+  ) =>
+    new HookCallEvent(eventName, 'command', hookName, input, durationMs, true);
 
   describe('getInstance', () => {
     it('returns undefined when usage statistics are disabled', () => {
@@ -144,6 +176,27 @@ describe('QwenLogger', () => {
   });
 
   describe('getProxyAgent', () => {
+    // A runner that exports `no_proxy` would otherwise decide these cases.
+    const savedNoProxy = process.env['no_proxy'];
+    const savedNoProxyUpper = process.env['NO_PROXY'];
+
+    beforeEach(() => {
+      delete process.env['no_proxy'];
+      delete process.env['NO_PROXY'];
+    });
+
+    afterEach(() => {
+      if (savedNoProxy === undefined) delete process.env['no_proxy'];
+      else process.env['no_proxy'] = savedNoProxy;
+      if (savedNoProxyUpper === undefined) delete process.env['NO_PROXY'];
+      else process.env['NO_PROXY'] = savedNoProxyUpper;
+    });
+
+    const loggerWithProxy = () =>
+      QwenLogger.getInstance(
+        makeFakeConfig({ getProxy: () => 'http://corp.example.com:8080' }),
+      )!;
+
     it('accepts uppercase proxy URL schemes', () => {
       const config = makeFakeConfig({
         getProxy: () => 'HTTPS://proxy.example.com:8080',
@@ -152,22 +205,50 @@ describe('QwenLogger', () => {
 
       expect(logger.getProxyAgent()).toBeDefined();
     });
+
+    it('returns no agent when NO_PROXY is a bare wildcard', () => {
+      process.env['NO_PROXY'] = '*';
+
+      expect(loggerWithProxy().getProxyAgent()).toBeUndefined();
+    });
+
+    it('returns no agent when a NO_PROXY suffix matches the upload host', () => {
+      process.env['NO_PROXY'] = '.rum.aliyuncs.com';
+
+      expect(loggerWithProxy().getProxyAgent()).toBeUndefined();
+    });
+
+    it('prefers lowercase no_proxy over NO_PROXY', () => {
+      process.env['NO_PROXY'] = 'unrelated.example.com';
+      process.env['no_proxy'] = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
+
+      expect(loggerWithProxy().getProxyAgent()).toBeUndefined();
+    });
+
+    it('still proxies when a port-qualified NO_PROXY entry names another port', () => {
+      process.env['NO_PROXY'] = 'rum.aliyuncs.com:8443';
+
+      expect(loggerWithProxy().getProxyAgent()).toBeDefined();
+    });
+
+    it('still proxies when NO_PROXY does not match the upload host', () => {
+      process.env['NO_PROXY'] = 'localhost,127.0.0.1,.example.com';
+
+      expect(loggerWithProxy().getProxyAgent()).toBeDefined();
+    });
   });
 
   describe('createRumPayload', () => {
-    it('includes os metadata in payload', async () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const payload = await (
-        logger as unknown as {
-          createRumPayload(): Promise<RumPayload>;
-        }
+    const rumPayload = (logger = QwenLogger.getInstance(mockConfig)!) =>
+      (
+        logger as unknown as { createRumPayload(): Promise<RumPayload> }
       ).createRumPayload();
 
+    it('includes os metadata in payload', async () => {
+      const payload = await rumPayload();
+
       expect(payload.os).toEqual(
-        expect.objectContaining({
-          type: os.platform(),
-          version: os.release(),
-        }),
+        expect.objectContaining({ type: os.platform(), version: os.release() }),
       );
     });
 
@@ -179,25 +260,17 @@ describe('QwenLogger', () => {
           baseUrl: 'https://api.example.com',
         }),
       });
-      const logger = QwenLogger.getInstance(config)!;
 
-      const payload = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
+      const payload = await rumPayload(QwenLogger.getInstance(config)!);
 
       expect(payload.properties?.['base_url']).toBe('https://api.example.com');
     });
 
+    // The source.json cases can only check the payload's shape: exercising
+    // real source information needs actual file system operations.
     it('includes source when source.json exists with valid source', async () => {
-      // Note: Testing source information requires actual file system operations
-      // This test verifies that the payload structure is correct
-      const logger = QwenLogger.getInstance(mockConfig)!;
+      const payload = await rumPayload();
 
-      const payload = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
-
-      // Verify that payload has app.channel property
       expect(payload.app).toHaveProperty('channel');
       // channel should be either undefined or a string
       expect(
@@ -208,57 +281,27 @@ describe('QwenLogger', () => {
 
     it('caches source info and does not read file on every payload creation', async () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
-
-      // Get the cached sourceInfo value
       const cachedSourceInfo = logger['sourceInfo'];
 
-      // Create multiple payloads
-      const payload1 = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
-      const payload2 = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
+      const payload1 = await rumPayload(logger);
+      const payload2 = await rumPayload(logger);
 
-      // Both payloads should use the same cached source info
+      // Both payloads use the cached source info, which does not change.
       expect(payload1.app.channel).toBe(payload2.app.channel);
-      // The cached value should not have changed
       expect(logger['sourceInfo']).toBe(cachedSourceInfo);
     });
+    // 'does not include source when source value is unknown' was an exact
+    // duplicate of this case.
     it('does not include source when source.json does not exist', async () => {
-      // Note: Testing source information requires actual file system operations
-      // This test verifies the payload structure is correct
-      const logger = QwenLogger.getInstance(mockConfig)!;
+      const payload = await rumPayload();
 
-      const payload = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
-
-      // Verify that channel property exists (may be undefined or have a value)
-      expect(payload.app).toHaveProperty('channel');
-    });
-    it('does not include source when source value is unknown', async () => {
-      // Note: Testing source information requires actual file system operations
-      // This test verifies the payload structure is correct
-      const logger = QwenLogger.getInstance(mockConfig)!;
-
-      const payload = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
-
-      // Verify that channel property exists
+      // channel exists (may be undefined or have a value)
       expect(payload.app).toHaveProperty('channel');
     });
     it('handles source.json parsing errors gracefully', async () => {
-      // Note: Testing source information requires actual file system operations
-      // This test verifies the payload structure is correct
-      const logger = QwenLogger.getInstance(mockConfig)!;
+      const payload = await rumPayload();
 
-      const payload = await (
-        logger as unknown as { createRumPayload(): Promise<RumPayload> }
-      ).createRumPayload();
-
-      // Verify that payload is created successfully (no crash on errors)
+      // No crash on errors.
       expect(payload).toBeDefined();
       expect(payload.app).toHaveProperty('channel');
     });
@@ -268,14 +311,8 @@ describe('QwenLogger', () => {
     it('should handle event overflow gracefully', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
 
-      // Fill the queue beyond capacity
       for (let i = 0; i < TEST_ONLY.MAX_EVENTS + 10; i++) {
-        logger.enqueueLogEvent({
-          timestamp: Date.now(),
-          event_type: 'action',
-          type: 'test',
-          name: `test-event-${i}`,
-        });
+        logger.enqueueLogEvent(testEvent(`test-event-${i}`));
       }
 
       const events = logger['events'].toArray() as RumEvent[];
@@ -288,23 +325,14 @@ describe('QwenLogger', () => {
 
     it('should handle enqueue errors gracefully', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
-
-      // Mock the events deque to throw an error
       const originalPush = logger['events'].push;
       logger['events'].push = vi.fn(() => {
         throw new Error('Test error');
       });
 
-      logger.enqueueLogEvent({
-        timestamp: Date.now(),
-        event_type: 'action',
-        type: 'test',
-        name: 'test-event',
-      });
+      logger.enqueueLogEvent(testEvent());
 
       expect(logger['events'].size).toBe(0);
-
-      // Restore original method
       logger['events'].push = originalPush;
     });
   });
@@ -312,19 +340,13 @@ describe('QwenLogger', () => {
   describe('concurrent flush protection', () => {
     it('should handle concurrent flush requests', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
-
-      // Manually set the flush in progress flag to simulate concurrent access
+      // Simulate another flush already in progress.
       logger['isFlushInProgress'] = true;
 
-      // Try to flush while another flush is in progress
       const result = logger.flushToRum();
 
       expect(logger['pendingFlush']).toBe(true);
-
-      // Should return a resolved promise
       expect(result).toBeInstanceOf(Promise);
-
-      // Reset the flag
       logger['isFlushInProgress'] = false;
     });
   });
@@ -332,18 +354,11 @@ describe('QwenLogger', () => {
   describe('failed event retry mechanism', () => {
     it('should requeue failed events with size limits', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
-
       const failedEvents: RumEvent[] = [];
       for (let i = 0; i < TEST_ONLY.MAX_RETRY_EVENTS + 50; i++) {
-        failedEvents.push({
-          timestamp: Date.now(),
-          event_type: 'action',
-          type: 'test',
-          name: `failed-event-${i}`,
-        });
+        failedEvents.push(testEvent(`failed-event-${i}`));
       }
 
-      // Call the private method using bracket notation
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (logger as any).requeueFailedEvents(failedEvents);
 
@@ -352,29 +367,13 @@ describe('QwenLogger', () => {
 
     it('should handle empty retry queue gracefully', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
-
-      // Fill the queue to capacity first
+      // Fill the queue to capacity, then requeue with no space available.
       for (let i = 0; i < TEST_ONLY.MAX_EVENTS; i++) {
-        logger.enqueueLogEvent({
-          timestamp: Date.now(),
-          event_type: 'action',
-          type: 'test',
-          name: `event-${i}`,
-        });
+        logger.enqueueLogEvent(testEvent(`event-${i}`));
       }
 
-      // Try to requeue when no space is available
-      const failedEvents: RumEvent[] = [
-        {
-          timestamp: Date.now(),
-          event_type: 'action',
-          type: 'test',
-          name: 'failed-event',
-        },
-      ];
-
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (logger as any).requeueFailedEvents(failedEvents);
+      (logger as any).requeueFailedEvents([testEvent('failed-event')]);
 
       expect(logger['events'].size).toBe(TEST_ONLY.MAX_EVENTS);
     });
@@ -382,19 +381,15 @@ describe('QwenLogger', () => {
 
   describe('event handlers', () => {
     it('logs ripgrep runtime recovery without search details', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = new RipgrepRuntimeRecoveryEvent({
         selection_mode: 'builtin',
         retry_triggered: true,
         retry_succeeded: true,
         failure_kind: 'eagain',
       });
-
-      logger.logRipgrepRuntimeRecoveryEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
+      const enqueueSpy = expectLogged(
+        (logger) => logger.logRipgrepRuntimeRecoveryEvent(event),
+        {
           event_type: 'action',
           type: 'misc',
           name: 'ripgrep_runtime_recovery',
@@ -406,7 +401,7 @@ describe('QwenLogger', () => {
             retry_succeeded: true,
             failure_kind: 'eagain',
           },
-        }),
+        },
       );
       expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).not.toMatch(
         /pattern|path|stdout|stderr|needle/,
@@ -417,75 +412,59 @@ describe('QwenLogger', () => {
       // A loop stop must stay attributable in the journal (issue #9450
       // requirement #7): dropping the loop_type spread would record the
       // stop as an unattributable failure.
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = new SubagentExecutionEvent('worker-a', 'failed', {
         terminate_reason: 'loop_detected',
         loop_type: 'consecutive_identical_tool_calls',
       });
-
-      logger.logSubagentExecutionEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'tool',
-          name: 'subagent_execution',
-          properties: expect.objectContaining({
-            subagent_name: 'worker-a',
-            status: 'failed',
-            terminate_reason: 'loop_detected',
-            loop_type: 'consecutive_identical_tool_calls',
-          }),
+      expectLogged((l) => l.logSubagentExecutionEvent(event), {
+        event_type: 'action',
+        type: 'tool',
+        name: 'subagent_execution',
+        properties: expect.objectContaining({
+          subagent_name: 'worker-a',
+          status: 'failed',
+          terminate_reason: 'loop_detected',
+          loop_type: 'consecutive_identical_tool_calls',
         }),
-      );
+      });
     });
 
     it('omits loop_type from subagent journals when no loop fired', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = new SubagentExecutionEvent('worker-b', 'completed');
-
-      logger.logSubagentExecutionEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.not.objectContaining({
-            loop_type: expect.anything(),
-          }),
+      expectLogged((l) => l.logSubagentExecutionEvent(event), {
+        properties: expect.not.objectContaining({
+          loop_type: expect.anything(),
         }),
-      );
+      });
     });
 
+    /** Journals a Goal event (Goal id g-1); returns the first RUM event. */
+    const journalGoal = (
+      fields: Omit<Parameters<typeof makeGoalStateEvent>[0], 'goal_id'>,
+    ) =>
+      logWith((logger) =>
+        logger.logGoalStateEvent(
+          makeGoalStateEvent({ ...fields, goal_id: 'g-1' }),
+        ),
+      ).mock.calls[0]![0];
+
     it('journals a Goal transition without its Goal id or absent figures', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const figures = {
+        cause: 'blocked',
+        revision: 4,
+        status: 'blocked',
+        turn_count: 7,
+        tokens_used: 9_000,
+        no_progress_turns: 3,
+      } as const;
 
-      logger.logGoalStateEvent(
-        makeGoalStateEvent({
-          cause: 'blocked',
-          goal_id: 'g-1',
-          revision: 4,
-          status: 'blocked',
-          turn_count: 7,
-          tokens_used: 9_000,
-          no_progress_turns: 3,
-        }),
-      );
+      const rumEvent = journalGoal(figures);
 
-      const rumEvent = enqueueSpy.mock.calls[0]![0];
       expect(rumEvent).toMatchObject({
         event_type: 'action',
         type: 'goal',
         name: 'goal_state',
-        properties: {
-          cause: 'blocked',
-          revision: 4,
-          status: 'blocked',
-          turn_count: 7,
-          tokens_used: 9_000,
-          no_progress_turns: 3,
-        },
+        properties: { ...figures },
       });
       const keys = Object.keys(rumEvent.properties ?? {});
       expect(keys).not.toContain('goal_id');
@@ -494,29 +473,7 @@ describe('QwenLogger', () => {
     });
 
     it('journals every allowed Goal property without the Goal id', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      logger.logGoalStateEvent(
-        makeGoalStateEvent({
-          cause: 'usage_limited',
-          goal_id: 'g-1',
-          revision: 4,
-          status: 'usage_limited',
-          limit_kind: 'time_budget',
-          turn_count: 7,
-          tokens_used: 9_000,
-          no_progress_turns: 3,
-          token_budget: 80_000,
-          turn_budget: 50,
-          active_time_ms: 60_000,
-          active_time_budget_ms: 60_000,
-          objective_length: 22,
-        }),
-      );
-
-      const rumEvent = enqueueSpy.mock.calls[0]![0];
-      expect(rumEvent.properties).toEqual({
+      const figures = {
         cause: 'usage_limited',
         revision: 4,
         status: 'usage_limited',
@@ -529,39 +486,28 @@ describe('QwenLogger', () => {
         active_time_ms: 60_000,
         active_time_budget_ms: 60_000,
         objective_length: 22,
-      });
+      } as const;
+
+      const rumEvent = journalGoal(figures);
+
+      expect(rumEvent.properties).toEqual({ ...figures });
       expect(Object.keys(rumEvent.properties ?? {})).not.toContain('goal_id');
     });
 
     it('preserves zero Goal figures in analytics', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      logger.logGoalStateEvent(
-        makeGoalStateEvent({
-          cause: 'create',
-          goal_id: 'g-1',
-          revision: 1,
-          status: 'active',
-          turn_count: 0,
-          tokens_used: 0,
-          active_time_ms: 0,
-        }),
-      );
-
-      expect(enqueueSpy.mock.calls[0]![0].properties).toEqual({
+      const figures = {
         cause: 'create',
         revision: 1,
         status: 'active',
         turn_count: 0,
         tokens_used: 0,
         active_time_ms: 0,
-      });
+      } as const;
+
+      expect(journalGoal(figures).properties).toEqual({ ...figures });
     });
 
     it('logs protocol tag sanitization without model content', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = new ProtocolTagSanitizedEvent({
         model: 'test-model',
         promptId: 'prompt-id',
@@ -569,80 +515,47 @@ describe('QwenLogger', () => {
         tagName: 'thinking',
         toolCallCount: 3,
       });
-
-      logger.logProtocolTagSanitizedEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'misc',
-          name: 'protocol_tag_sanitized',
-          properties: {
-            model: 'test-model',
-            prompt_id: 'prompt-id',
-            response_id: 'response-id',
-            tag_name: 'thinking',
-            tool_call_count: 3,
-          },
-        }),
-      );
+      expectLogged((l) => l.logProtocolTagSanitizedEvent(event), {
+        event_type: 'action',
+        type: 'misc',
+        name: 'protocol_tag_sanitized',
+        properties: {
+          model: 'test-model',
+          prompt_id: 'prompt-id',
+          response_id: 'response-id',
+          tag_name: 'thinking',
+          tool_call_count: 3,
+        },
+      });
     });
 
     it('should log IDE connection events', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
       const event = new IdeConnectionEvent(IdeConnectionType.SESSION);
-
-      logger.logIdeConnectionEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'ide',
-          name: 'ide_connection',
-          properties: {
-            connection_type: IdeConnectionType.SESSION,
-          },
-        }),
-      );
+      expectLogged((l) => l.logIdeConnectionEvent(event), {
+        event_type: 'action',
+        type: 'ide',
+        name: 'ide_connection',
+        properties: { connection_type: IdeConnectionType.SESSION },
+      });
     });
 
     it('should log Kitty sequence overflow events', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
       const event = new KittySequenceOverflowEvent(1024, 'truncated...');
-
-      logger.logKittySequenceOverflowEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'exception',
-          type: 'overflow',
-          name: 'kitty_sequence_overflow',
-          subtype: 'kitty_sequence_overflow',
-          properties: {
-            sequence_length: 1024,
-          },
-          snapshots: JSON.stringify({
-            truncated_sequence: 'truncated...',
-          }),
-        }),
-      );
+      expectLogged((l) => l.logKittySequenceOverflowEvent(event), {
+        event_type: 'exception',
+        type: 'overflow',
+        name: 'kitty_sequence_overflow',
+        subtype: 'kitty_sequence_overflow',
+        properties: { sequence_length: 1024 },
+        snapshots: JSON.stringify({ truncated_sequence: 'truncated...' }),
+      });
     });
 
     it('should flush start session events immediately', async () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const flushSpy = vi.spyOn(logger, 'flushToRum').mockResolvedValue({});
 
-      const testConfig = makeFakeConfig({
-        getModel: () => 'test-model',
-        getEmbeddingModel: () => 'test-embedding',
-      });
-      const event = new StartSessionEvent(testConfig);
-
-      logger.logStartSessionEvent(event);
+      logger.logStartSessionEvent(new StartSessionEvent(makeFakeConfig()));
 
       expect(flushSpy).toHaveBeenCalled();
     });
@@ -653,19 +566,13 @@ describe('QwenLogger', () => {
         logger as unknown as { readSourceInfo(): string },
         'readSourceInfo',
       );
-
       const testConfig = makeFakeConfig({
-        getModel: () => 'test-model',
-        getEmbeddingModel: () => 'test-embedding',
         getSessionId: () => 'new-session-id',
       });
-      const event = new StartSessionEvent(testConfig);
 
-      await logger.logStartSessionEvent(event);
+      await logger.logStartSessionEvent(new StartSessionEvent(testConfig));
 
-      // readSourceInfo should be called when starting a new session
       expect(readSourceInfoSpy).toHaveBeenCalled();
-      // Session ID should be updated
       expect(logger['sessionId']).toBe('new-session-id');
     });
 
@@ -673,9 +580,7 @@ describe('QwenLogger', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const flushSpy = vi.spyOn(logger, 'flushToRum').mockResolvedValue({});
 
-      const event = new EndSessionEvent(mockConfig);
-
-      logger.logEndSessionEvent(event);
+      logger.logEndSessionEvent(new EndSessionEvent(mockConfig));
 
       expect(flushSpy).toHaveBeenCalled();
     });
@@ -686,14 +591,7 @@ describe('QwenLogger', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const flushSpy = vi.spyOn(logger, 'flushToRum');
 
-      // Add an event and try to flush immediately
-      logger.enqueueLogEvent({
-        timestamp: Date.now(),
-        event_type: 'action',
-        type: 'test',
-        name: 'test-event',
-      });
-
+      logger.enqueueLogEvent(testEvent());
       logger.flushIfNeeded();
 
       expect(flushSpy).not.toHaveBeenCalled();
@@ -703,17 +601,8 @@ describe('QwenLogger', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const flushSpy = vi.spyOn(logger, 'flushToRum').mockResolvedValue({});
 
-      // Add an event
-      logger.enqueueLogEvent({
-        timestamp: Date.now(),
-        event_type: 'action',
-        type: 'test',
-        name: 'test-event',
-      });
-
-      // Advance time beyond flush interval
+      logger.enqueueLogEvent(testEvent());
       vi.advanceTimersByTime(TEST_ONLY.FLUSH_INTERVAL_MS + 1000);
-
       logger.flushIfNeeded();
 
       expect(flushSpy).toHaveBeenCalled();
@@ -723,31 +612,16 @@ describe('QwenLogger', () => {
   describe('error handling', () => {
     it('should handle flush errors gracefully with debug mode', async () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
-
-      // Add an event first
-      logger.enqueueLogEvent({
-        timestamp: Date.now(),
-        event_type: 'action',
-        type: 'test',
-        name: 'test-event',
-      });
-
-      // Mock flushToRum to throw an error
+      logger.enqueueLogEvent(testEvent());
       const originalFlush = logger.flushToRum.bind(logger);
       logger.flushToRum = vi.fn().mockRejectedValue(new Error('Network error'));
 
-      // Advance time to trigger flush
       vi.advanceTimersByTime(TEST_ONLY.FLUSH_INTERVAL_MS + 1000);
-
       logger.flushIfNeeded();
-
-      // Wait for async operations
       await vi.runAllTimersAsync();
 
-      // Errors are now silently ignored to reduce log spam
-      // Only rate-limited error logs are emitted inside flushToRum itself
-
-      // Restore original method
+      // Passes if the rejection does not escape: errors are silently ignored
+      // to reduce log spam (only flushToRum itself emits rate-limited logs).
       logger.flushToRum = originalFlush;
     });
   });
@@ -762,8 +636,6 @@ describe('QwenLogger', () => {
 
   describe('logToolCallEvent outcomes', () => {
     it('records terminal and execution outcomes with tool identity', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = {
         function_name: 'mcp_tool',
         call_id: 'call-1',
@@ -779,23 +651,18 @@ describe('QwenLogger', () => {
         error_type: 'mcp_tool_error',
         error: 'failed',
       } as ToolCallEvent;
-
-      logger.logToolCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'tool',
-          name: 'tool_call#mcp_tool',
-          properties: expect.objectContaining({
-            call_id: 'call-1',
-            status: 'error',
-            execution_status: 'error',
-            tool_type: 'mcp',
-            success: 0,
-          }),
+      const enqueueSpy = expectLogged((l) => l.logToolCallEvent(event), {
+        event_type: 'action',
+        type: 'tool',
+        name: 'tool_call#mcp_tool',
+        properties: expect.objectContaining({
+          call_id: 'call-1',
+          status: 'error',
+          execution_status: 'error',
+          tool_type: 'mcp',
+          success: 0,
         }),
-      );
+      });
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
     });
@@ -803,9 +670,6 @@ describe('QwenLogger', () => {
 
   describe('logHookCallEvent', () => {
     it('should log a successful hook call event', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
       const event = new HookCallEvent(
         'PreToolUse',
         'command',
@@ -819,33 +683,25 @@ describe('QwenLogger', () => {
         'stderr',
         undefined,
       );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'hook',
-          name: 'hook_call#PreToolUse',
-          properties: expect.objectContaining({
-            hook_event_name: 'PreToolUse',
-            hook_type: 'command',
-            hook_name: 'check-secrets.sh',
-            duration_ms: 150,
-            success: 1,
-            exit_code: 0,
-          }),
+      expectLogged((l) => l.logHookCallEvent(event), {
+        event_type: 'action',
+        type: 'hook',
+        name: 'hook_call#PreToolUse',
+        properties: expect.objectContaining({
+          hook_event_name: 'PreToolUse',
+          hook_type: 'command',
+          hook_name: 'check-secrets.sh',
+          duration_ms: 150,
+          success: 1,
+          exit_code: 0,
         }),
-      );
+      });
     });
 
-    it('should not include submitted prompts in hook telemetry', () => {
-      const configWithLogPrompts = makeFakeConfig({
-        getTelemetryLogPromptsEnabled: () => true,
-      });
-      const logger = QwenLogger.getInstance(configWithLogPrompts)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+    const configWithLogPrompts = () =>
+      makeFakeConfig({ getTelemetryLogPromptsEnabled: () => true });
 
+    it('should not include submitted prompts in hook telemetry', () => {
       const event = new HookCallEvent(
         'UserPromptSubmit',
         'command',
@@ -861,8 +717,10 @@ describe('QwenLogger', () => {
         'sensitive hook stdout',
         'sensitive hook stderr',
       );
-
-      logger.logHookCallEvent(event);
+      const enqueueSpy = logWith(
+        (l) => l.logHookCallEvent(event),
+        configWithLogPrompts(),
+      );
 
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('hook_input');
@@ -883,12 +741,6 @@ describe('QwenLogger', () => {
     });
 
     it('should log a failed hook call event without forwarding raw error text', () => {
-      const configWithLogPrompts = makeFakeConfig({
-        getTelemetryLogPromptsEnabled: () => true,
-      });
-      const logger = QwenLogger.getInstance(configWithLogPrompts)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
       const event = new HookCallEvent(
         'PostToolUse',
         'command',
@@ -902,11 +754,9 @@ describe('QwenLogger', () => {
         'error output',
         'Command failed',
       );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
+      const enqueueSpy = expectLogged(
+        (l) => l.logHookCallEvent(event),
+        {
           event_type: 'action',
           type: 'hook',
           name: 'hook_call#PostToolUse',
@@ -918,153 +768,60 @@ describe('QwenLogger', () => {
             success: 0,
             exit_code: 1,
           }),
-        }),
+        },
+        configWithLogPrompts(),
       );
-
-      // Hook error text is dropped fail-closed: the failure is already
-      // signalled by `success` / `exit_code`, so no raw `error` property
-      // is forwarded to the sink even when telemetry log prompts are on.
+      // Hook error text is dropped fail-closed: `success` / `exit_code`
+      // already signal the failure, so no raw `error` property reaches the
+      // sink even when telemetry log prompts are on.
       const callArgs = enqueueSpy.mock.calls[0][0];
       expect(callArgs.properties).not.toHaveProperty('error');
     });
 
-    it('should sanitize hook name to remove sensitive information', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      // Hook name with full path and sensitive arguments
-      const event = new HookCallEvent(
-        'PreToolUse',
-        'command',
-        '/home/user/.qwen/hooks/check-secrets.sh --api-key=secret123',
-        { tool_name: 'read_file' },
-        100,
-        true,
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            // Should be sanitized to just the basename without arguments
-            hook_name: 'check-secrets.sh',
-          }),
-        }),
-      );
-    });
-
-    it('should sanitize hook name with Windows path', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new HookCallEvent(
-        'Stop',
-        'command',
-        'C:\\Users\\user\\hooks\\cleanup.bat --token=xyz',
-        {},
-        50,
-        true,
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            hook_name: 'cleanup.bat',
-          }),
-        }),
-      );
-    });
-
-    it('should handle empty hook name', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new HookCallEvent(
-        'SessionStart',
-        'command',
-        '',
-        {},
-        10,
-        true,
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            hook_name: 'unknown-command',
-          }),
-        }),
-      );
-    });
-
-    it('should handle hook name with only whitespace', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new HookCallEvent(
-        'SessionEnd',
-        'command',
-        '   ',
-        {},
-        10,
-        true,
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            hook_name: 'unknown-command',
-          }),
-        }),
-      );
-    });
-
-    it('should handle hook name that is just a command without path', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new HookCallEvent(
-        'Notification',
-        'command',
-        'python --arg=value',
-        {},
-        100,
-        true,
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            // Should be sanitized to just the command name
-            hook_name: 'python',
-          }),
-        }),
-      );
+    it.each<[string, Parameters<typeof shortHook>, string]>([
+      // Full path and sensitive arguments reduce to the basename.
+      [
+        'should sanitize hook name to remove sensitive information',
+        [
+          'PreToolUse',
+          '/home/user/.qwen/hooks/check-secrets.sh --api-key=secret123',
+          { tool_name: 'read_file' },
+        ],
+        'check-secrets.sh',
+      ],
+      [
+        'should sanitize hook name with Windows path',
+        ['Stop', 'C:\\Users\\user\\hooks\\cleanup.bat --token=xyz', {}, 50],
+        'cleanup.bat',
+      ],
+      [
+        'should handle empty hook name',
+        ['SessionStart', '', {}, 10],
+        'unknown-command',
+      ],
+      [
+        'should handle hook name with only whitespace',
+        ['SessionEnd', '   ', {}, 10],
+        'unknown-command',
+      ],
+      // A bare command reduces to the command name.
+      [
+        'should handle hook name that is just a command without path',
+        ['Notification', 'python --arg=value'],
+        'python',
+      ],
+    ])('%s', (_title, hookArgs, expected) => {
+      const event = shortHook(...hookArgs);
+      expectLogged((l) => l.logHookCallEvent(event), {
+        properties: expect.objectContaining({ hook_name: expected }),
+      });
     });
 
     it('should call flushIfNeeded after logging', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const flushSpy = vi.spyOn(logger, 'flushIfNeeded');
 
-      const event = new HookCallEvent(
-        'PreToolUse',
-        'command',
-        'test-hook.sh',
-        {},
-        100,
-        true,
-      );
-
-      logger.logHookCallEvent(event);
+      logger.logHookCallEvent(shortHook('PreToolUse'));
 
       expect(flushSpy).toHaveBeenCalled();
     });
@@ -1073,7 +830,7 @@ describe('QwenLogger', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
 
-      const eventTypes = [
+      for (const eventType of [
         'PreToolUse',
         'PostToolUse',
         'PostToolUseFailure',
@@ -1086,28 +843,15 @@ describe('QwenLogger', () => {
         'SubagentStop',
         'PreCompact',
         'PermissionRequest',
-      ];
-
-      for (const eventType of eventTypes) {
+      ]) {
         enqueueSpy.mockClear();
 
-        const event = new HookCallEvent(
-          eventType,
-          'command',
-          'test-hook.sh',
-          {},
-          100,
-          true,
-        );
-
-        logger.logHookCallEvent(event);
+        logger.logHookCallEvent(shortHook(eventType));
 
         expect(enqueueSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             name: `hook_call#${eventType}`,
-            properties: expect.objectContaining({
-              hook_event_name: eventType,
-            }),
+            properties: expect.objectContaining({ hook_event_name: eventType }),
           }),
         );
       }
@@ -1116,51 +860,33 @@ describe('QwenLogger', () => {
 
   describe('logSkillLaunchEvent', () => {
     it('writes skill_name, success and prompt_id into RUM event properties', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
       const event = new SkillLaunchEvent('code-review', true, 'prompt-xyz');
-
-      logger.logSkillLaunchEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'misc',
-          name: 'skill_launch',
-          properties: expect.objectContaining({
-            skill_name: 'code-review',
-            success: 1,
-            prompt_id: 'prompt-xyz',
-          }),
+      expectLogged((l) => l.logSkillLaunchEvent(event), {
+        event_type: 'action',
+        type: 'misc',
+        name: 'skill_launch',
+        properties: expect.objectContaining({
+          skill_name: 'code-review',
+          success: 1,
+          prompt_id: 'prompt-xyz',
         }),
-      );
+      });
     });
 
     it('encodes failed launches with success=0 and still carries prompt_id', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
       const event = new SkillLaunchEvent('missing-skill', false, 'prompt-fail');
-
-      logger.logSkillLaunchEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            skill_name: 'missing-skill',
-            success: 0,
-            prompt_id: 'prompt-fail',
-          }),
+      expectLogged((l) => l.logSkillLaunchEvent(event), {
+        properties: expect.objectContaining({
+          skill_name: 'missing-skill',
+          success: 0,
+          prompt_id: 'prompt-fail',
         }),
-      );
+      });
     });
   });
 
   describe('logToolCallEvent privacy', () => {
     it('records terminal status without forwarding MCP server metadata or function arguments', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
       const event = {
         'event.name': 'tool_call',
         'event.timestamp': '2025-01-01T12:00:00.000Z',
@@ -1175,23 +901,18 @@ describe('QwenLogger', () => {
         tool_type: 'mcp',
         mcp_server_name: 'private-server',
       } as ToolCallEvent;
-
-      logger.logToolCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          name: 'tool_call#remote_tool',
-          properties: expect.objectContaining({
-            tool_name: 'remote_tool',
-            status: 'error',
-            tool_type: 'mcp',
-            success: 0,
-            duration_ms: 42,
-            error_type: 'unknown',
-            error_message: '***REDACTED***',
-          }),
+      const enqueueSpy = expectLogged((l) => l.logToolCallEvent(event), {
+        name: 'tool_call#remote_tool',
+        properties: expect.objectContaining({
+          tool_name: 'remote_tool',
+          status: 'error',
+          tool_type: 'mcp',
+          success: 0,
+          duration_ms: 42,
+          error_type: 'unknown',
+          error_message: '***REDACTED***',
         }),
-      );
+      });
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('function_args');
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');

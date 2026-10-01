@@ -20,6 +20,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
     public static final String ATTRIBUTE = TenantContext.class.getName();
     private static final String MANAGED_SESSION_STORE_PREFIX =
             "/internal/managed-session-store/v1/";
+    private static final String TOOL_PUBLICATION_PREFIX =
+            "/internal/managed-tool-publications/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -33,7 +35,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         return !path.startsWith("/v1/agents/")
                 && !path.startsWith("/api/agent/web-shell/v1/")
-                && !path.startsWith(MANAGED_SESSION_STORE_PREFIX);
+                && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
+                && !path.startsWith(TOOL_PUBLICATION_PREFIX);
     }
 
     @Override
@@ -42,6 +45,7 @@ public class TenantContextFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         if (request.getRequestURI()
                 .startsWith(MANAGED_SESSION_STORE_PREFIX)
+                || request.getRequestURI().startsWith(TOOL_PUBLICATION_PREFIX)
                 || request.getRequestURI().startsWith("/v1/agents/workspaces")
                 || request.getRequestURI().startsWith(
                         "/api/agent/web-shell/v1/workspaces/")) {

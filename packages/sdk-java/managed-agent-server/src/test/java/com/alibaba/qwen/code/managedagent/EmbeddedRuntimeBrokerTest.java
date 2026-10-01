@@ -22,6 +22,19 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class EmbeddedRuntimeBrokerTest {
+    @Test
+    void stepCallBackstopExceedsEveryShippedCalleeWait() {
+        // The never-answering step backstop is twice the operation lease; it
+        // must stay above the provisioner and transport declared waits, or a
+        // slow-but-healthy runtime is cut mid-wait and never converges.
+        long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
+    }
+
+
     private static final String SESSION_ID =
             "550e8400-e29b-41d4-a716-446655440000";
 
@@ -30,6 +43,21 @@ class EmbeddedRuntimeBrokerTest {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
         assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isFalse();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rebootRecoveryRequiresDurableLocalProvisioning(boolean local) throws Exception {
+        var properties = properties();
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(true);
+        properties.getRuntimeBroker().setDurableLocalProcess(!local);
+        if (local) {
+            properties.getRuntimeBroker().setProvisioner("local-process");
+            properties.getRuntimeBroker().setWorkspaceId("");
+        }
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("requires durable local-process");
     }
 
     @org.junit.jupiter.params.ParameterizedTest

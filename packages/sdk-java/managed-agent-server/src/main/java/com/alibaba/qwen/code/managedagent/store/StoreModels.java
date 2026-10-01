@@ -84,7 +84,8 @@ public final class StoreModels {
     public enum OperationKind {
         CLOSE,
         ARCHIVE,
-        DELETE
+        DELETE,
+        ACTION_RESPONSE
     }
 
     /**
