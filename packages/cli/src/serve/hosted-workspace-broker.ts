@@ -477,6 +477,42 @@ export class HostedWorkspaceBroker {
       throw new Error('Original Tool v3 ACK was not confirmed.');
   }
 
+  /**
+   * Read-only execution state for recovery reports. A definitive not-found or
+   * a definitive unknown/abandoned answer resolves to undefined; anything else
+   * fails the caller — a recovery report must never read "unknown" from a
+   * transient error.
+   */
+  async status(id: string): Promise<{ state: string } | undefined> {
+    let response: Record<string, unknown>;
+    try {
+      response = await this.request(`/executions/${encodeURIComponent(id)}`);
+    } catch (cause) {
+      if (
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        ((cause.status === 404 &&
+          cause.code === 'runtime_execution_not_found') ||
+          // The Broker answers UNKNOWN/ABANDONED records with this definitive
+          // terminal state, which the recovery report carries as outcome
+          // 'unknown' — that is a state to report, not a read failure.
+          (cause.status === 409 &&
+            cause.code === 'runtime_broker_execution_unknown'))
+      )
+        return undefined;
+      throw cause;
+    }
+    if (response['executionCallId'] !== id)
+      throw new Error('Runtime execution identity changed.');
+    const status = object(response['status']);
+    const state = status['state'];
+    if (
+      typeof state !== 'string' ||
+      !['prepared', 'executing', 'cancel_requested', 'settled'].includes(state)
+    )
+      throw new Error('Runtime execution outcome is unknown.');
+    return { state };
+  }
+
   async acknowledge(id: string, receipt: LocalShellReceipt): Promise<void> {
     const response = await this.request(
       `/executions/${encodeURIComponent(id)}:acknowledge`,

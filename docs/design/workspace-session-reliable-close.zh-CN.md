@@ -16,6 +16,8 @@ D4 持久接纳生命周期操作，但拒绝 Workspace 绑定。Embedded Broker
 
 新增可选能力 `session_close` / `sessionClose`，缺省 false。绑定 close 仅对支持持久 local-process 停机证明的 files/1 开放；`session_lifecycle` 保持 false。完成时将 CLOSING 改为 CLOSED，发出既有 close 事件并确认 operation。已接纳的清理使用保存的身份，权限或挂载变化不影响继续处理。
 
+Harness prompt 和既有 Runtime 恢复准入路由在本地 close 开始后拒绝新请求，包括等待归还接管 Runtime 租约期间。恢复路由在异步授权后重新核对原 attachment 和 closing 状态；已 detach 或被替换的 attachment 不能接纳迟到的继续或取消请求。这保留上游 Turn 恢复边界，不为 close 增加恢复编排。
+
 能力位表示部署支持，不代表 actor 已获授权；创建者和读权限在接纳时检查。不支持关闭的实例接管已接纳的绑定 close 时，返回 recovery_blocked 和 workspace_close_identity_unverified，并保留 CLOSING，等待能够核对原停机证明的实例继续处理。
 
 ## Broker 栅栏与释放

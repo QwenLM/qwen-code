@@ -16,6 +16,8 @@ Existing close routes return 202 and the original actor-scoped idempotent operat
 
 Optional `session_close` / `sessionClose` capabilities default false. Bound close is available only for files/1 with durable local-process stop support; `session_lifecycle` remains false. Completion changes CLOSING to CLOSED, emits the existing close event, and confirms the operation. Accepted cleanup uses saved identities even after access or mounts change.
 
+Harness prompt and existing Runtime recovery admission routes reject requests once local close begins, including while returning a recovered Runtime lease. Recovery rechecks the original attachment and closing state after asynchronous authorization; a detached or replaced attachment cannot admit a delayed continuation or cancellation. This preserves the upstream Turn recovery boundary without adding recovery to close.
+
 The capability describes deployment support, not actor authorization. Creator/read authorization is checked at admission. If an unsupported instance takes over an accepted bound close, it reports recovery_blocked with workspace_close_identity_unverified and preserves CLOSING until an instance can verify the original stop.
 
 ## Broker fence and release
