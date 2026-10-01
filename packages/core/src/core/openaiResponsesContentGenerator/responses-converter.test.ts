@@ -32,7 +32,12 @@ import type {
 } from './types.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
-import { content, fnCall, userText } from '../../test-utils/model-fixtures.js';
+import {
+  content,
+  fnCall,
+  fnResponse,
+  userText,
+} from '../../test-utils/model-fixtures.js';
 
 type Resp = GenerateContentResponse | null;
 
@@ -239,6 +244,39 @@ text(r);`;
       new ResponsesStreamState(),
     );
     expect(result?.functionCalls?.[0]?.args).toEqual({ source });
+  });
+
+  it('preserves unknown custom calls for scheduler validation and replay', () => {
+    const result = conv('response.output_item.done', {
+      output_index: 0,
+      item: { ...call, name: 'unknown_tool' },
+    });
+    expect(result?.functionCalls).toEqual([
+      { id: call.call_id, name: 'unknown_tool', args: { source } },
+    ]);
+
+    const error =
+      'Tool "unknown_tool" is unavailable on this CodeModeOnly call surface.';
+    const { input } = convertGeminiContentsToResponsesInput(
+      {
+        model: request.model,
+        contents: [
+          content('model', ...partsOf(result)!),
+          content('user', fnResponse('unknown_tool', { error }, call.call_id)),
+        ],
+      },
+      true,
+    );
+    expect(input).toEqual([
+      {
+        type: 'function_call',
+        call_id: call.call_id,
+        name: 'unknown_tool',
+        arguments: JSON.stringify({ source }),
+      },
+      { type: 'function_call_output', call_id: call.call_id, output: error },
+    ]);
+    expect(cleanOrphanedFunctionCalls(input)).toEqual(input);
   });
 
   it('replays raw source and matching output while preserving ordinary calls', () => {

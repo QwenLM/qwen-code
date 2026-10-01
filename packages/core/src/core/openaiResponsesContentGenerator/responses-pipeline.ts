@@ -405,8 +405,7 @@ export class ResponsesPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): ResponsesApiRequest {
-    const freeformExec =
-      this.cliConfig.getCodeModeOnly() && this.cliConfig.getFreeform();
+    const freeformExec = this.cliConfig.getFreeform();
     const { instructions, input } = convertGeminiContentsToResponsesInput(
       request,
       freeformExec,

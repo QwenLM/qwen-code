@@ -282,7 +282,6 @@ export function convertResponsesEventToGemini(
         return null;
       }
       if (data.item.type === 'custom_tool_call') {
-        if (data.item.name !== ToolNames.EXEC) return null;
         return makeChunkResponse(model, state, [
           {
             functionCall: {

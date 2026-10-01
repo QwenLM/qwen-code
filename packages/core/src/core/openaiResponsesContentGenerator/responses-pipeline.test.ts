@@ -137,7 +137,6 @@ function makeCliConfig(
   proxy?: string,
   sessionId: string | (() => string) = '',
   allowDynamicHeaderValues = false,
-  codeModeOnly = true,
   freeform = false,
 ): Config {
   // getSessionId() is typed `string` and never returns undefined, so neither
@@ -149,7 +148,6 @@ function makeCliConfig(
     getSessionId: typeof sessionId === 'function' ? sessionId : () => sessionId,
     getCliVersion: () => '9.9.9-test',
     getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
-    getCodeModeOnly: () => codeModeOnly,
     getFreeform: () => freeform,
   } as unknown as Config;
 }
@@ -327,268 +325,29 @@ describe('ResponsesPipeline', () => {
   }
 
   it.each([
-    { codeModeOnly: false, freeform: true, expected: 'function' },
-    { codeModeOnly: true, freeform: false, expected: 'function' },
-    { codeModeOnly: true, freeform: true, expected: 'custom' },
+    { freeform: false, tool: 'function', call: 'function_call' },
+    { freeform: true, tool: 'custom', call: 'custom_tool_call' },
   ])(
-    'wires Freeform only for Code Mode Only Responses requests',
-    async ({ codeModeOnly, freeform, expected }) => {
-      const source = String.raw`text("one\ntwo");`;
-      const custom = {
-        type: 'custom_tool_call',
-        id: 'ctc_1',
-        call_id: 'c1',
-        name: 'exec',
-        input: source,
-      };
-      const fn = {
-        type: 'function_call',
-        id: 'fc_1',
-        call_id: 'c1',
-        name: 'exec',
-        arguments: JSON.stringify({ source }),
-      };
-      mockResponse([
-        ...sseEvent('response.output_item.done', {
-          output_index: 0,
-          item: expected === 'custom' ? custom : fn,
-        }),
-        ...sseEvent('response.completed', {
-          response: { id: 'r1', status: 'completed' },
-        }),
-      ]);
-      const pipeline = new ResponsesPipeline(
-        makeGeneratorConfig(),
-        makeCliConfig(undefined, '', false, codeModeOnly, freeform),
-      );
-      const request: GenerateContentParameters = {
-        model: 'gpt-6-astra',
-        contents: [{ role: 'user', parts: [{ text: 'Run exec' }] }],
-        config: {
-          tools: [
-            {
-              functionDeclarations: [
-                {
-                  name: 'exec',
-                  parametersJsonSchema: {
-                    type: 'object',
-                    properties: { source: { type: 'string' } },
-                  },
-                },
-              ],
-            },
-          ],
-        },
-      };
-      const response = await pipeline.execute(request, 'prompt-1');
-      expect(response.functionCalls).toEqual([
-        { id: 'c1', name: 'exec', args: { source } },
-      ]);
-      const sent = JSON.parse(
-        fetchMock.mock.calls[0]![1].body,
-      ) as ResponsesApiRequest;
-      expect(sent.tools?.[0]?.type).toBe(expected);
-      mockResponse([
-        ...sseEvent('response.output_text.delta', { delta: 'done' }),
-        ...sseEvent('response.completed', {
-          response: { id: 'r2', status: 'completed' },
-        }),
-      ]);
-      await pipeline.execute(
+    'uses $tool tools and matching history when Freeform=$freeform',
+    async ({ freeform, tool, call }) => {
+      const body = await sendBody(
+        pipe(undefined, makeCliConfig(undefined, '', false, freeform)),
         {
-          ...request,
-          config: undefined,
+          model: 'gpt-6-astra',
           contents: [
-            {
-              role: 'model',
-              parts: [{ functionCall: response.functionCalls![0] }],
-            },
-            {
-              role: 'user',
-              parts: [
-                {
-                  functionResponse: {
-                    id: 'c1',
-                    name: 'exec',
-                    response: { output: 'one\ntwo' },
-                  },
-                },
-              ],
-            },
+            content('model', fnCall('exec', { source: 'text(1);' }, 'c1')),
+            content('user', fnResponse('exec', { output: '1' }, 'c1')),
           ],
+          config: { tools: [{ functionDeclarations: [{ name: 'exec' }] }] },
         },
-        'prompt-2',
       );
-      const replay = JSON.parse(
-        fetchMock.mock.calls[1]![1].body,
-      ) as ResponsesApiRequest;
-      expect(replay.input.map((i) => i.type)).toEqual(
-        expected === 'custom'
-          ? ['custom_tool_call', 'custom_tool_call_output']
-          : ['function_call', 'function_call_output'],
-      );
-      if (expected === 'custom')
-        expect(replay.input[0]).toMatchObject({ input: source });
+      expect(body.tools?.[0]?.type).toBe(tool);
+      expect(body.input.map((item) => item.type)).toEqual([
+        call,
+        `${call}_output`,
+      ]);
     },
   );
-
-  it('re-encodes the same internal history when Freeform changes', async () => {
-    const source = String.raw`text("one\\ntwo");`;
-    const request: GenerateContentParameters = {
-      model: 'gpt-6-astra',
-      contents: [
-        {
-          role: 'model',
-          parts: [
-            { functionCall: { id: 'c1', name: 'exec', args: { source } } },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'c1',
-                name: 'exec',
-                response: { output: 'done' },
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const normal = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(undefined, '', false, true, false),
-    );
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'normal' }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    await normal.execute(request, 'normal');
-    const normalBody = JSON.parse(
-      fetchMock.mock.calls[0]![1].body,
-    ) as ResponsesApiRequest;
-    expect(normalBody.input.map((item) => item.type)).toEqual([
-      'function_call',
-      'function_call_output',
-    ]);
-
-    const freeform = new ResponsesPipeline(
-      makeGeneratorConfig(),
-      makeCliConfig(undefined, '', false, true, true),
-    );
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'freeform' }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    await freeform.execute(request, 'freeform');
-    const freeformBody = JSON.parse(
-      fetchMock.mock.calls[1]![1].body,
-    ) as ResponsesApiRequest;
-    expect(freeformBody.input.map((item) => item.type)).toEqual([
-      'custom_tool_call',
-      'custom_tool_call_output',
-    ]);
-    expect(freeformBody.input[0]).toMatchObject({
-      call_id: 'c1',
-      input: source,
-    });
-    expect(freeformBody.input[1]).toMatchObject({ call_id: 'c1' });
-  });
-
-  it('preserves a completed call while switching Responses formats', async () => {
-    const source = String.raw`text("switch\\nme");`;
-    const firstRequest: GenerateContentParameters = {
-      model: 'responses-freeform',
-      contents: [{ role: 'user', parts: [{ text: 'run it' }] }],
-      config: {
-        tools: [
-          {
-            functionDeclarations: [{ name: 'exec' }],
-          },
-        ],
-      },
-    };
-    const freeformPipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ model: 'responses-freeform' }),
-      makeCliConfig(undefined, '', false, true, true),
-    );
-    mockResponse([
-      ...sseEvent('response.output_item.done', {
-        output_index: 0,
-        item: {
-          type: 'custom_tool_call',
-          id: 'ctc_switch',
-          call_id: 'call_switch',
-          name: 'exec',
-          input: source,
-        },
-      }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    const first = await freeformPipeline.execute(firstRequest, 'switch-1');
-    const history: Content[] = [
-      { role: 'model', parts: [{ functionCall: first.functionCalls![0] }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call_switch',
-              name: 'exec',
-              response: { output: 'ok' },
-            },
-          },
-        ],
-      },
-    ];
-
-    const functionPipeline = new ResponsesPipeline(
-      makeGeneratorConfig({ model: 'responses-function' }),
-      makeCliConfig(undefined, '', false, true, false),
-    );
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'function' }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    await functionPipeline.execute(
-      { model: 'responses-function', contents: history },
-      'switch-2',
-    );
-    const functionBody = JSON.parse(
-      fetchMock.mock.calls[1]![1].body,
-    ) as ResponsesApiRequest;
-    expect(functionBody.input.map((item) => item.type)).toEqual([
-      'function_call',
-      'function_call_output',
-    ]);
-    expect(functionBody.input[0]).toMatchObject({ call_id: 'call_switch' });
-
-    const freeformAgain = new ResponsesPipeline(
-      makeGeneratorConfig({ model: 'responses-freeform-again' }),
-      makeCliConfig(undefined, '', false, true, true),
-    );
-    mockResponse([
-      ...sseEvent('response.output_text.delta', { delta: 'custom' }),
-      ...sseEvent('response.completed', { response: { status: 'completed' } }),
-    ]);
-    await freeformAgain.execute(
-      { model: 'responses-freeform-again', contents: history },
-      'switch-3',
-    );
-    const customBody = JSON.parse(
-      fetchMock.mock.calls[2]![1].body,
-    ) as ResponsesApiRequest;
-    expect(customBody.input.map((item) => item.type)).toEqual([
-      'custom_tool_call',
-      'custom_tool_call_output',
-    ]);
-    expect(customBody.input[0]).toMatchObject({
-      call_id: 'call_switch',
-      input: source,
-    });
-  });
 
   it('POSTs to <baseUrl>/v1/responses with the converted request body', async () => {
     mockResponse([...deltaEvent('hi'), ...DONE_R1]);

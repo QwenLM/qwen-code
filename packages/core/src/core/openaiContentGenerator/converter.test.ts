@@ -275,37 +275,10 @@ describe('OpenAIContentConverter', () => {
 
   it('re-encodes Freeform exec history as Chat function messages', () => {
     const source = String.raw`text("one\\ntwo");`;
-    const messages = converter.convertLlmRequestToOpenAI(
-      {
-        model: 'test-model',
-        contents: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  id: 'call_exec',
-                  name: 'exec',
-                  args: { source },
-                },
-              },
-            ],
-          },
-          {
-            role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  id: 'call_exec',
-                  name: 'exec',
-                  response: { output: 'done' },
-                },
-              },
-            ],
-          },
-        ],
-      },
-      requestContext,
+    const messages = toMessages(
+      ...exchange('call_exec', 'exec', { output: 'done' }, undefined, {
+        source,
+      }),
     );
 
     expect(messages).toEqual([

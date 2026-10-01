@@ -4263,18 +4263,19 @@ describe('mergeExcludeTools', () => {
   });
 
   it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly in %s mode',
+    'should disable CodeModeOnly and Freeform in %s mode',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } },
+        { tools: { codeModeOnly: true, freeform: true } },
         argv,
         undefined,
         [],
       );
 
       expect(config.getCodeModeOnly()).toBe(false);
+      expect(config.getFreeform()).toBe(false);
     },
   );
 
