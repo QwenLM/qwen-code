@@ -289,6 +289,7 @@ const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_MCP_RESOURCE,
   ToolNames.ENTER_PLAN_MODE,
   ToolNames.SEARCH_MEMORY,
+  ToolNames.TOOL_SEARCH,
 ]);
 
 // The tri-state persistedOutputFiles mapping every truncation pass reports

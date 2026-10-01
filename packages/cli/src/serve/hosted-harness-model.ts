@@ -21,6 +21,12 @@ export interface HostedHarnessModelResult {
   model: string;
 }
 
+export interface HostedHarnessTextDeltas {
+  delta(text: string): Promise<void>;
+  /** Whether the current model message already published durable text. */
+  published(): boolean;
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
@@ -33,6 +39,7 @@ export async function runHostedHarnessTextTurn(input: {
     HostedWorkspaceToolTurn,
     'execute' | 'consumeResults' | 'declarations'
   >;
+  textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
@@ -145,12 +152,26 @@ export async function runHostedHarnessTextTurn(input: {
               : SendMessageType.ToolResult,
         },
       )) {
-        if (event.type === LlmEventType.Content) text += event.value;
-        else if (event.type === LlmEventType.Finished) finished = true;
+        if (event.type === LlmEventType.Content) {
+          text += event.value;
+          await input.textDeltas?.delta(event.value);
+        } else if (event.type === LlmEventType.Finished) finished = true;
         else if (event.type === LlmEventType.Retry) {
           calls = [];
-          if (!event.isContinuation) text = '';
+          if (!event.isContinuation) {
+            if (input.textDeltas?.published()) {
+              throw new Error(
+                'Hosted Harness cannot retract a published model attempt.',
+              );
+            }
+            text = '';
+          }
         } else if (event.type === LlmEventType.ModelFallback) {
+          if (input.textDeltas?.published()) {
+            throw new Error(
+              'Hosted Harness cannot retract a published model attempt.',
+            );
+          }
           calls = [];
           text = '';
         } else if (
