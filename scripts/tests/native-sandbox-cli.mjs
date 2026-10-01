@@ -416,13 +416,18 @@ if (mode === '--smoke') {
     item.run = await run(f, ['sandbox', '--verify']);
     assert.equal(item.run.code, 1);
     assert.equal(item.run.timedOut, false);
-    assert(item.run.stdout.includes('Backend probe: passed'));
+    assert(!item.run.stdout.includes('Backend probe: passed'));
     assert(
       item.run.stderr.includes(
         'Cannot create verification fixture in host temporary directory',
       ),
     );
     assert(item.run.stderr.includes('Check TMPDIR and its permissions'));
+    assert(
+      item.run.stderr.includes(
+        'this failure does not test the sandbox boundary',
+      ),
+    );
     assert(!item.run.stdout.includes('Confinement verified'));
   });
   await record('linked-worktree-common-metadata-read-only', async (item) => {

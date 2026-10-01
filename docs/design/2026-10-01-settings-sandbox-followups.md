@@ -30,6 +30,8 @@ Use isolated global-CLI baseline cases and repeat against the built CLI for inte
 
 Native CI also runs the public CLI verification matrix and ordinary shell tool calls under the runner's own UID. A local fake model endpoint drives the real agent/tool loop; it does not establish authenticated provider or full-session viability. Run native Windows publication tests independently so unrelated full-suite failures cannot hide their result.
 
+Create the host verification fixture before probing the backend, so an unusable TMPDIR reports the original host path and repair action without implying that the sandbox boundary was tested. Clean up that fixture after admission or verification failures. Inspection and explicit command execution do not create a verification fixture.
+
 ## Release communication
 
 Document that malformed SystemDefaults, User and System settings block startup rather than silently resetting. The generated changelog is not edited by hand; include this behavior in the fix's release description and user documentation. Keep #12417 open until the tracking acceptance matrix, including native platform evidence, is complete.

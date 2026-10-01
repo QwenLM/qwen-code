@@ -6,6 +6,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   minimal: vi.fn(),
@@ -108,6 +111,26 @@ describe('qwen sandbox tool boundary', () => {
     await run({ '--': ['touch', '/outside'] });
     expect(process.exitCode).toBe(1);
     expect(mocks.execute).not.toHaveBeenCalled();
+  });
+  it('reports an unusable host TMPDIR before attempting the backend probe', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-tmpdir-'));
+    const temporaryRoot = path.join(root, 'not-a-directory');
+    fs.writeFileSync(temporaryRoot, 'ordinary file');
+    for (const key of ['TMPDIR', 'TEMP', 'TMP']) vi.stubEnv(key, temporaryRoot);
+    try {
+      await run({ verify: true });
+      expect(process.exitCode).toBe(1);
+      expect(mocks.stderr.mock.calls.flat().join('\n')).toContain(
+        `host temporary directory ${temporaryRoot}`,
+      );
+      expect(mocks.stderr.mock.calls.flat().join('\n')).toContain(
+        'Check TMPDIR and its permissions',
+      );
+      expect(mocks.probe).not.toHaveBeenCalled();
+      expect(mocks.execute).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
   it.each(['SANDBOX', 'QWEN_SANDBOX'])(
     'migrates legacy %s without probing or launching',

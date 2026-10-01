@@ -29,6 +29,7 @@ interface RelayReport {
   content: string;
   isDirectory: boolean;
   isFile: boolean;
+  isFIFO: boolean;
   chmod: string;
   reopen: string;
 }
@@ -67,9 +68,14 @@ try {
 } catch (error) {
   chmod = errorCode(error);
 }
-let reopen = 'allowed';
+let reopen;
 try {
-  closeSync(openSync('/proc/self/fd/0', 'r+'));
+  const reopened = openSync('/proc/self/fd/0', 'r+');
+  try {
+    reopen = fstatSync(reopened).isFIFO() ? 'pipe' : 'host-backed';
+  } finally {
+    closeSync(reopened);
+  }
 } catch (error) {
   reopen = errorCode(error);
 }
@@ -79,6 +85,7 @@ writeFileSync(
     content: readFileSync(0, 'utf8'),
     isDirectory: input.isDirectory(),
     isFile: input.isFile(),
+    isFIFO: input.isFIFO(),
     chmod,
     reopen,
   }),
@@ -145,12 +152,14 @@ writeSync(3, JSON.stringify({ 'exit-code': 0 }) + '\\n');
         content: 'regular-file-input',
         isDirectory: false,
         isFile: false,
-        reopen: expect.not.stringMatching('allowed'),
+        isFIFO: true,
+        reopen: 'pipe',
       });
     } finally {
       closeSync(input);
     }
     expect(statSync(inputPath).mode & 0o777).toBe(0o644);
+    expect(readFileSync(inputPath, 'utf8')).toBe('regular-file-input');
   });
 
   it('keeps anonymous pipe input streaming', async () => {
@@ -171,7 +180,8 @@ writeSync(3, JSON.stringify({ 'exit-code': 0 }) + '\\n');
         content: '',
         isDirectory: false,
         isFile: false,
-        reopen: expect.not.stringMatching('allowed'),
+        isFIFO: true,
+        reopen: 'pipe',
       });
     } finally {
       closeSync(input);

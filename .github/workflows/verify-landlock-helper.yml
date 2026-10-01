@@ -54,6 +54,9 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile
           npm run bundle
+      - name: 'Verify stdin transport ownership'
+        working-directory: 'packages/core'
+        run: 'npx vitest run src/sandbox/bwrap-relay.test.ts'
       - name: 'Verify public CLI and ordinary agent tool boundaries'
         run: 'node --import tsx/esm scripts/tests/native-sandbox-cli.mjs --linux'
       - name: 'Upload native CLI evidence'

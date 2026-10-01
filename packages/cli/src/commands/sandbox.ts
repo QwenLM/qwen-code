@@ -115,92 +115,94 @@ export const sandboxCommand: CommandModule = {
         Storage.getRuntimeBaseDir(),
         Storage.getGlobalQwenDir(),
       )!;
-      const policy = await probeShellSandbox(admitted, controller.signal);
-      report(
-        `Boundary: tools; backend: ${policy.requestedBackend} → ${policy.effectiveBackend} (${policy.enforcement}${policy.landlockAbi ? `, ABI ${policy.landlockAbi}` : ''})`,
-      );
-      report(
-        `Filesystem: ${policy.filesystem}; workspace: ${policy.workspace}`,
-      );
-      report(`Command network: ${policy.network}`);
-      report('Model, authentication and session traffic stay on the host.');
-      report('Host reads and pathname Unix sockets remain accessible.');
-      report(
-        'Backend probe: passed (admission only; full-session viability is not tested).',
-      );
-      const env = Object.fromEntries(
-        Object.entries(sanitizeChildEnv(process.env)).filter(
-          (entry): entry is [string, string] => typeof entry[1] === 'string',
-        ),
-      );
-      if (command.length) {
-        let outputError: NodeJS.ErrnoException | undefined;
-        const handleOutputError = (error: NodeJS.ErrnoException) => {
-          if (outputError || controller.signal.aborted) return;
-          outputError = error;
-          cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
-          controller.abort();
-        };
-        process.stdout.on('error', handleOutputError);
-        process.stderr.on('error', handleOutputError);
+      let fixture = '';
+      if (args.verify && !command.length) {
         try {
-          // env resolves PATH inside confinement and receives literal argv.
-          const handle = await executeSandbox(
-            policy,
-            {
-              executable: '/usr/bin/env',
-              args: ['--', ...command],
-              cwd: policy.workspace,
-              env,
-              inheritStdin: !process.stdin.isTTY,
-            },
-            (event) => {
-              if (event.type === 'raw_data') {
-                const stream =
-                  event.stream === 'stderr' ? process.stderr : process.stdout;
-                stream.write(event.chunk);
-              }
-            },
-            controller.signal,
-            false,
-            {},
-            { streamStdout: true, streamRawOutput: true },
+          fixture = fs.mkdtempSync(
+            path.join(os.tmpdir(), 'qwen-sandbox-verify-'),
           );
-          const result = await handle.result;
-          await Promise.all([
-            flushOutput(process.stdout, controller.signal),
-            flushOutput(process.stderr, controller.signal),
-          ]);
-          if (outputError && outputError.code !== 'EPIPE') throw outputError;
-          if (result.error && !result.aborted) throw result.error;
-          process.exitCode =
-            result.aborted || controller.signal.aborted
-              ? cancellationExitCode
-              : (result.exitCode ?? 1);
-          return;
-        } finally {
-          process.stdout.removeListener('error', handleOutputError);
-          process.stderr.removeListener('error', handleOutputError);
+        } catch (error) {
+          throw new Error(
+            `Cannot create verification fixture in host temporary directory ${os.tmpdir()}: ${error instanceof Error ? error.message : String(error)}. Check TMPDIR and its permissions; this failure does not test the sandbox boundary.`,
+          );
         }
       }
-      if (!args.verify) return;
-      let fixture: string;
       try {
-        fixture = fs.mkdtempSync(
-          path.join(os.tmpdir(), 'qwen-sandbox-verify-'),
+        const policy = await probeShellSandbox(admitted, controller.signal);
+        report(
+          `Boundary: tools; backend: ${policy.requestedBackend} → ${policy.effectiveBackend} (${policy.enforcement}${policy.landlockAbi ? `, ABI ${policy.landlockAbi}` : ''})`,
         );
-      } catch (error) {
-        throw new Error(
-          `Cannot create verification fixture in host temporary directory ${os.tmpdir()}: ${error instanceof Error ? error.message : String(error)}. Check TMPDIR and its permissions; this failure does not test the sandbox boundary.`,
+        report(
+          `Filesystem: ${policy.filesystem}; workspace: ${policy.workspace}`,
         );
-      }
-      const outside = path.join(fixture, 'host-writable');
-      const inside = path.join(
-        policy.workspace,
-        `.qwen-sandbox-probe-${randomUUID()}`,
-      );
-      fs.writeFileSync(outside, 'unchanged', { flag: 'wx' });
-      try {
+        report(`Command network: ${policy.network}`);
+        report('Model, authentication and session traffic stay on the host.');
+        report('Host reads and pathname Unix sockets remain accessible.');
+        report(
+          'Backend probe: passed (admission only; full-session viability is not tested).',
+        );
+        const env = Object.fromEntries(
+          Object.entries(sanitizeChildEnv(process.env)).filter(
+            (entry): entry is [string, string] => typeof entry[1] === 'string',
+          ),
+        );
+        if (command.length) {
+          let outputError: NodeJS.ErrnoException | undefined;
+          const handleOutputError = (error: NodeJS.ErrnoException) => {
+            if (outputError || controller.signal.aborted) return;
+            outputError = error;
+            cancellationExitCode = error.code === 'EPIPE' ? 141 : 1;
+            controller.abort();
+          };
+          process.stdout.on('error', handleOutputError);
+          process.stderr.on('error', handleOutputError);
+          try {
+            // env resolves PATH inside confinement and receives literal argv.
+            const handle = await executeSandbox(
+              policy,
+              {
+                executable: '/usr/bin/env',
+                args: ['--', ...command],
+                cwd: policy.workspace,
+                env,
+                inheritStdin: !process.stdin.isTTY,
+              },
+              (event) => {
+                if (event.type === 'raw_data') {
+                  const stream =
+                    event.stream === 'stderr' ? process.stderr : process.stdout;
+                  stream.write(event.chunk);
+                }
+              },
+              controller.signal,
+              false,
+              {},
+              { streamStdout: true, streamRawOutput: true },
+            );
+            const result = await handle.result;
+            await Promise.all([
+              flushOutput(process.stdout, controller.signal),
+              flushOutput(process.stderr, controller.signal),
+            ]);
+            if (outputError && outputError.code !== 'EPIPE') throw outputError;
+            if (result.error && !result.aborted) throw result.error;
+            process.exitCode =
+              result.aborted || controller.signal.aborted
+                ? cancellationExitCode
+                : (result.exitCode ?? 1);
+            return;
+          } finally {
+            process.stdout.removeListener('error', handleOutputError);
+            process.stderr.removeListener('error', handleOutputError);
+          }
+        }
+        if (!args.verify) return;
+        const outside = path.join(fixture, 'host-writable');
+        const inside = path.join(
+          policy.workspace,
+          `.qwen-sandbox-probe-${randomUUID()}`,
+        );
+        fs.writeFileSync(outside, 'unchanged', { flag: 'wx' });
         const hostPid = fs.readlinkSync('/proc/self/ns/pid');
         const hostNet = fs.readlinkSync('/proc/self/ns/net');
         const program = `
@@ -267,7 +269,7 @@ export const sandboxCommand: CommandModule = {
           throw new Error('Confinement verification failed.');
         report(`Confinement verified (${checks.length} checks).`);
       } finally {
-        fs.rmSync(fixture, { recursive: true, force: true });
+        if (fixture) fs.rmSync(fixture, { recursive: true, force: true });
       }
     } catch (error) {
       const { FatalError } = await import(
