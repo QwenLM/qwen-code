@@ -240,7 +240,10 @@ class ManagedAgentApiContractTest {
                     .header(TENANT, "contract-tenant").principal(actor("other-tenant"));
             exchange(drift, operation.operationId(), 403, request, null);
         }
-        assertThat(drift).isEmpty();
+        assertThat(drift)
+                .as("Actor-scope drift is not deferrable; fix it instead of recording a gap in %s",
+                        KNOWN_GAPS)
+                .isEmpty();
     }
 
     @Test
@@ -1351,15 +1354,18 @@ class ManagedAgentApiContractTest {
                 .getResponse();
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
-        if (expectedStatus == 403) {
-            assertThat(json(content).path("error").path("code").asText())
-                    .as("%s actor-scope error code", operationId)
-                    .isEqualTo("actor_scope_mismatch");
-        }
         if (status != expectedStatus) {
             drift.put("response %s: expected %d, got %d%s".formatted(
                     operationId, expectedStatus, status, errorCode(content)),
                     content);
+        }
+        if (status == 403 && expectedStatus == 403) {
+            String code = content.isEmpty() ? ""
+                    : json(content).path("error").path("code").asText();
+            if (!"actor_scope_mismatch".equals(code)) {
+                drift.put("code %s: expected actor_scope_mismatch, got %s"
+                        .formatted(operationId, code), content);
+            }
         }
         String label = "response " + operationId + " " + status;
         checkRequestId(drift, label, body, content, response);
@@ -1369,8 +1375,12 @@ class ManagedAgentApiContractTest {
         }
         String schema = declared + "/content/application~1json/schema";
         if (!CONTRACT.node(schema).isMissingNode()) {
-            collect(drift, label, CONTRACT.validate(schema,
-                    objectMapper.readTree(content)));
+            if (content.isEmpty()) {
+                drift.put(label + ": empty response body", "");
+            } else {
+                collect(drift, label, CONTRACT.validate(schema,
+                        objectMapper.readTree(content)));
+            }
         }
         CONTRACT.node(declared).path("headers").fieldNames()
                 .forEachRemaining(header -> {
@@ -1634,8 +1644,8 @@ class ManagedAgentApiContractTest {
         }
         fail("""
                 The Managed Agent API drifted from %s.
-                Fix new drift. Record a line in %s only for a gap that a \
-                later slice closes.
+                Fix new drift. Actor-scope code drift is not deferrable.
+                Record eligible gaps in %s only if a later slice closes them.
                 %s
                 Remove resolved gaps from %s:
                 %s""".formatted(OpenApiContract.RESOURCE, KNOWN_GAPS,
@@ -1644,6 +1654,9 @@ class ManagedAgentApiContractTest {
     }
 
     private static List<String> knownGaps() {
+        assertThat(GAP_CATEGORIES)
+                .as("actor-scope code drift must stay unwaivable")
+                .doesNotContain("code");
         try (InputStream input = ManagedAgentApiContractTest.class
                 .getClassLoader().getResourceAsStream(KNOWN_GAPS)) {
             List<String> gaps = new String(input.readAllBytes(),
