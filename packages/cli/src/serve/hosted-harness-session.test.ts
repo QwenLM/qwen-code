@@ -1608,6 +1608,56 @@ describe('Hosted Harness no-tool session', () => {
     expect((await closed).status).toBe(204);
   });
 
+  it('refuses a prompt with an MCP diagnostic while an MCP configuration runs', async () => {
+    const { server, authorize } = await mcpApp();
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        serverId: 'demo',
+        request: { kind: 'resource_read', uri: 'memory://note' },
+      })
+      .expect(202);
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const original = control.getMockImplementation()!;
+    let dispatched!: () => void;
+    const started = new Promise<void>((resolve) => (dispatched = resolve));
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => (finish = resolve));
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      if (operation.kind === 'mcp-configure') {
+        dispatched();
+        await held;
+      }
+      return original.call(this, operation);
+    });
+    const running = authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/configurations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        expectedRevision: 1,
+        server: {
+          serverId: 'demo',
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        },
+      })
+      .then((response) => response);
+    await started;
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({});
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_mcp_operation_active');
+    finish();
+    expect((await running).status).toBe(202);
+  });
+
   it.each(['invoke', 'close'])(
     'restores the owner before %s after an idle Broker restart',
     async (next) => {

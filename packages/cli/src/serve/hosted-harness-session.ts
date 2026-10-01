@@ -1701,10 +1701,14 @@ export function registerHostedHarnessSessionRoutes(
     void runHostedLifecycleHook(session, event, operationId, input)
       .then(
         (output) => res.json({ operationId, output: output ?? null }),
-        (cause) =>
-          cause instanceof HostedHookInputConflictError
-            ? error(res, 409, 'hosted_hook_operation_conflict')
-            : error(res, 503, 'hosted_hook_operation_failed'),
+        (cause) => {
+          if (cause instanceof HostedHookInputConflictError)
+            return error(res, 409, 'hosted_hook_operation_conflict');
+          writeStderrLineSafe(
+            `qwen serve: Hosted Hook operation ${operationId} failed: ${String(cause)}`,
+          );
+          error(res, 503, 'hosted_hook_operation_failed');
+        },
       )
       .finally(() => {
         session.hooksBusy = false;
