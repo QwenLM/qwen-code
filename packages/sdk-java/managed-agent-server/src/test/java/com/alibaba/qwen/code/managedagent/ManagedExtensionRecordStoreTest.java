@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskP
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
@@ -448,6 +449,66 @@ class ManagedExtensionRecordStoreTest {
         assertThatThrownBy(() -> tasks.getPublicTask(TENANT, null, sessionId,
                 "task_" + "0".repeat(64)))
                 .hasFieldOrPropertyWithValue("code", "task_not_found");
+    }
+
+    @Test
+    void materializesMcpWithoutTasksAndRequiresItsResourceClosure() throws Exception {
+        String sessionId = agents.createSession(TENANT, "mcp-" + UUID.randomUUID(),
+                "qwen-code", null, "mcp", Map.of(), List.of()).sessionId();
+        ExtensionRecordJournal journal = journal(sessionId);
+        JsonNode fixtures = ManagedMcpRecordContractTest.fixtures();
+        JsonNode configuration = fixtures.get("templates").get("mcp_configuration");
+        commitMcp(journal, "configure-1", "mcp_configuration", configuration, List.of());
+        JsonNode dispatched = ManagedMcpRecordContractTest.merge(configuration,
+                fixtures.get("successors").get(0).get("after"));
+        commitMcp(journal, "configure-dispatch", "mcp_configuration", dispatched, List.of());
+        ObjectNode configured = (ObjectNode) ManagedMcpRecordContractTest.merge(configuration,
+                fixtures.get("cases").get(3).get("patch"));
+        CommitResource data = new CommitResource("mcp-data", "mcp-data", 1,
+                2, ExtensionRecordJournal.sha256("{}"), "e30=");
+        ObjectNode ref = configured.withObject("/catalogRef");
+        ref.put("resourceId", data.resourceId()).put("kind", data.kind())
+                .put("digest", data.digest());
+        CommitTransactionRequest missing = journal.requestDomain("configure-result",
+                "mcp_configuration", configured, List.of(), 1000);
+        assertThatThrownBy(() -> journal.commit(missing)).isInstanceOf(ApiException.class);
+        assertThat(revisions(sessionId)).isEqualTo(2);
+        commitMcp(journal, "configure-result", "mcp_configuration", configured, List.of(data));
+        assertThat(records.listRecords(TENANT, sessionId, "mcp_configuration"))
+                .containsExactly(configured);
+        assertThat(records.readRecordResource(TENANT, sessionId, ref).isEmpty()).isTrue();
+        assertThat(records.listRecords("other-tenant", sessionId, "mcp_configuration")).isEmpty();
+        assertThatThrownBy(() -> records.readRecordResource("other-tenant", sessionId, ref))
+                .isInstanceOf(ApiException.class);
+        ObjectNode conflictingPin = configuration.deepCopy();
+        conflictingPin.put("configurationId", "configure-2");
+        conflictingPin.withObject("/run").put("effectId", "configure-2");
+        conflictingPin.withObject("/run/definition").put("definitionDigest", "c".repeat(64));
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("configure-2",
+                "mcp_configuration", conflictingPin, List.of(), 1000)))
+                .hasMessageContaining("two definition digests");
+        ObjectNode operation = fixtures.get("templates").get("mcp_operation").deepCopy();
+        operation.set("argsRef", ref);
+        ObjectNode wrong = operation.deepCopy();
+        wrong.put("catalogRevision", 2);
+        assertThatThrownBy(() -> journal.commit(journal.requestDomain("wrong-binding",
+                "mcp_operation", wrong, List.of(), 1000))).hasMessageContaining("active committed configuration");
+        commitMcp(journal, "operation-1", "mcp_operation", operation, List.of());
+        assertThat(records.listTasks(TENANT, sessionId, null, null, 10).tasks()).isEmpty();
+        String fakeTask = ManagedExtensionProjection.taskId(ManagedExtensionProjection.recordKey(
+                sessionId, "mcp_operation", "operation-1"));
+        assertThat(records.findTask(TENANT, sessionId, fakeTask)).isEmpty();
+        assertThat(state.findEvents(TENANT, sessionId, 0, 100)).extracting(EventRecord::type)
+                .doesNotContain("task.updated");
+        assertThat(new ManagedExtensionRecordStore(jdbc, state)
+                .listRecords(TENANT, sessionId, "mcp_operation")).containsExactly(operation);
+    }
+
+    private static void commitMcp(ExtensionRecordJournal journal, String commandId,
+            String domain, JsonNode record, List<CommitResource> resources) {
+        CommitTransactionRequest request = journal.requestDomain(commandId, domain, record, resources, 1000);
+        journal.commit(request);
+        journal.committed(request);
     }
 
     private ExtensionRecordJournal journal(String sessionId) {

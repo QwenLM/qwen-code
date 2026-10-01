@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
@@ -54,6 +55,7 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
  */
 
 export class HookSystem {
+  readonly runtimeId: string = randomUUID();
   private readonly hookRegistry: HookRegistry;
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
@@ -79,6 +81,8 @@ export class HookSystem {
       this.hookRunner,
       this.hookAggregator,
       this.sessionHooksManager,
+      undefined,
+      this.runtimeId,
     );
   }
 

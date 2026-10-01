@@ -25,22 +25,17 @@ const neverCalledFactory: ToolFactory = async () => {
 };
 
 /**
- * A real `Config` + real `PermissionManager` + real `ToolRegistry`, wired the
- * way `Config.initialize()` wires them (permission manager first, then the
- * registry), without running the rest of `initialize()` (skills, memory,
- * telemetry) which is irrelevant here. `promptRegistry` / `resourceRegistry`
- * are created by `initializeInternal`, so tests drive the MCP discovery pass
- * through the client manager directly instead of `discoverAllTools()`.
+ * A real `Config` + `PermissionManager` + `ToolRegistry`, wired the way
+ * `Config.initialize()` wires them (permission manager first), without the
+ * irrelevant rest of `initialize()` (skills, memory, telemetry). The prompt and
+ * resource registries come from `initializeInternal`, so tests drive MCP
+ * discovery through the client manager instead of `discoverAllTools()`.
  */
 function makeSession(opts: {
   eagerTools: string[];
   registered?: string[];
   mcpServers?: Record<string, { command: string; args?: string[] }>;
-}): {
-  config: Config;
-  permissionManager: PermissionManager;
-  registry: ToolRegistry;
-} {
+}) {
   const config = makeFakeConfig({
     eagerTools: opts.eagerTools,
     trustedFolder: true,
@@ -57,20 +52,20 @@ function makeSession(opts: {
   return { config, permissionManager, registry };
 }
 
-/** Runs a real MCP discovery pass to its COMPLETED boundary. */
+/**
+ * Runs a real MCP discovery pass to its COMPLETED boundary: incremental is the
+ * default startup path (`Config.startMcpDiscoveryInBackground()`), bulk the
+ * legacy blocking path behind `ToolRegistry.discoverAllTools()`.
+ */
 async function runDiscoveryPass(
   registry: ToolRegistry,
   config: Config,
   mode: 'incremental' | 'bulk' = 'incremental',
 ): Promise<void> {
   const manager = registry.getMcpClientManager();
-  if (mode === 'incremental') {
-    // The default startup path: `Config.startMcpDiscoveryInBackground()`.
-    await manager.discoverAllMcpToolsIncremental(config);
-  } else {
-    // The legacy blocking path behind `ToolRegistry.discoverAllTools()`.
-    await manager.discoverAllMcpTools(config);
-  }
+  await (mode === 'incremental'
+    ? manager.discoverAllMcpToolsIncremental(config)
+    : manager.discoverAllMcpTools(config));
 }
 
 describe('tools.eager entries that match no discovered tool (#12435)', () => {
@@ -89,10 +84,31 @@ describe('tools.eager entries that match no discovered tool (#12435)', () => {
     vi.restoreAllMocks();
   });
 
-  function eagerWarnings(): string[] {
+  function eagerWarnings(marker = 'tools.eager'): string[] {
     return warnSpy.mock.calls
       .map((call) => String(call[0]))
-      .filter((message) => message.includes('tools.eager'));
+      .filter((message) => message.includes(marker));
+  }
+
+  /** Builds a session, runs one discovery pass, returns the eager warnings. */
+  async function warningsAfterPass(
+    opts: Parameters<typeof makeSession>[0],
+    mode?: 'incremental' | 'bulk',
+  ): Promise<string[]> {
+    const { config, registry } = makeSession(opts);
+    await runDiscoveryPass(registry, config, mode);
+    return eagerWarnings();
+  }
+
+  /** Direct calls, so the server-status branch runs without spawning a server. */
+  async function check(
+    session: ReturnType<typeof makeSession>,
+  ): Promise<string[]> {
+    const { warnOnUnmatchedEagerToolEntries } = await import(
+      './eager-allowlist-coverage.js'
+    );
+    warnOnUnmatchedEagerToolEntries(session.config);
+    return eagerWarnings();
   }
 
   function setStatus(server: string, status: MCPServerStatus): void {
@@ -101,10 +117,9 @@ describe('tools.eager entries that match no discovered tool (#12435)', () => {
   }
 
   it('keeps a shape-valid dynamic typo silent about existence: the allowlist activates and defers built-ins', async () => {
-    // The bug being reported: `mcp__githb__create_issue` parses fine (no
-    // unbalanced parenthesis), so `initialize()` keeps it and does NOT count
-    // it among the dropped entries it already warns about. Nothing else looks
-    // at whether it names a real tool.
+    // The reported bug: `mcp__githb__create_issue` parses fine, so
+    // `initialize()` keeps it and does NOT count it among the dropped entries
+    // it warns about; nothing else checked whether it names a real tool.
     const { config, permissionManager, registry } = makeSession({
       eagerTools: ['mcp__githb__create_issue'],
       registered: ['read_file', 'run_shell_command'],
@@ -122,51 +137,41 @@ describe('tools.eager entries that match no discovered tool (#12435)', () => {
     await runDiscoveryPass(registry, config);
 
     // It was not dropped (that path has its own warning) ...
-    expect(
-      warnSpy.mock.calls
-        .map((call) => String(call[0]))
-        .filter((message) => message.includes('unusable entr')),
-    ).toEqual([]);
+    expect(eagerWarnings('unusable entr')).toEqual([]);
     // ... and discovery completion adds the existence warning.
     expect(eagerWarnings()).toHaveLength(1);
     expect(eagerWarnings()[0]).toContain('mcp__githb__create_issue');
   });
 
   it('warns once when a dynamic entry matches no discovered tool', async () => {
-    const { config, registry } = makeSession({
+    const warnings = await warningsAfterPass({
       eagerTools: ['mcp__githb__create_issue'],
       registered: ['read_file'],
     });
 
-    await runDiscoveryPass(registry, config);
-
-    expect(eagerWarnings()).toHaveLength(1);
-    expect(eagerWarnings()[0]).toContain('mcp__githb__create_issue');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('mcp__githb__create_issue');
   });
 
   it('warns on the legacy blocking discovery pass too', async () => {
-    const { config, registry } = makeSession({
-      eagerTools: ['mcp__githb__create_issue'],
-      registered: ['read_file'],
-    });
+    const warnings = await warningsAfterPass(
+      { eagerTools: ['mcp__githb__create_issue'], registered: ['read_file'] },
+      'bulk',
+    );
 
-    await runDiscoveryPass(registry, config, 'bulk');
-
-    expect(eagerWarnings()).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
   });
 
   it('warns about a misspelt built-in entry as well', async () => {
     // Same registry-aware check, no `mcp__`-specific branch: a built-in typo
     // is silent on main for the same reason.
-    const { config, registry } = makeSession({
+    const warnings = await warningsAfterPass({
       eagerTools: ['read_flie'],
       registered: ['read_file', 'run_shell_command'],
     });
 
-    await runDiscoveryPass(registry, config);
-
-    expect(eagerWarnings()).toHaveLength(1);
-    expect(eagerWarnings()[0]).toContain('read_flie');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('read_flie');
   });
 
   it('stays quiet when every entry names a registered tool', async () => {
@@ -184,17 +189,14 @@ describe('tools.eager entries that match no discovered tool (#12435)', () => {
   it('stays quiet for meta-category and alias entries', async () => {
     // `Read` / `Bash` normalise to `read_file` / `run_shell_command` in
     // `initialize()`, and `toolMatchesRuleToolName` expands them over their
-    // whole family — `Read` covers `grep_search` even when `read_file` itself
-    // is not registered, and `Bash` covers `monitor`. Matching on name
-    // equality (a Set of registered names) would report all three as typos.
-    const { config, registry } = makeSession({
+    // family (`Read` covers `grep_search` even without `read_file`, `Bash`
+    // covers `monitor`). Name equality would report all three as typos.
+    const warnings = await warningsAfterPass({
       eagerTools: ['Read', 'Bash', 'ListFiles'],
       registered: ['grep_search', 'monitor', 'list_directory'],
     });
 
-    await runDiscoveryPass(registry, config);
-
-    expect(eagerWarnings()).toEqual([]);
+    expect(warnings).toEqual([]);
   });
 
   it('matches a tool that is only a lazy factory (not warmed yet)', async () => {
@@ -231,43 +233,27 @@ describe('tools.eager entries that match no discovered tool (#12435)', () => {
   });
 
   it('does not re-report entries initialize() already dropped', async () => {
-    const { config, registry } = makeSession({
+    const warnings = await warningsAfterPass({
       eagerTools: ['Bash(unbalanced', ''],
       registered: ['read_file'],
     });
 
-    await runDiscoveryPass(registry, config);
-
     // The dropped-entry warning is the only `tools.eager` output.
-    expect(eagerWarnings()).toHaveLength(1);
-    expect(eagerWarnings()[0]).toContain('unusable entr');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('unusable entr');
   });
 
   it('says nothing when no eager allowlist is active', async () => {
-    const { config, registry } = makeSession({
+    // An explicitly empty list IS active but names nothing, so there is
+    // nothing to be unmatched.
+    const warnings = await warningsAfterPass({
       eagerTools: [],
       registered: ['read_file'],
     });
-    // An explicitly empty list IS active and names nothing, but every entry
-    // list is empty so there is nothing to be unmatched.
-    await runDiscoveryPass(registry, config);
-    expect(eagerWarnings()).toEqual([]);
+    expect(warnings).toEqual([]);
   });
 
   describe('entries whose MCP server never connected', () => {
-    /** Direct calls, so the server-status branch is exercised without spawning a server. */
-    async function check(
-      session: ReturnType<typeof makeSession>,
-    ): Promise<string[]> {
-      const { warnOnUnmatchedEagerToolEntries } = await import(
-        './eager-allowlist-coverage.js'
-      );
-      warnOnUnmatchedEagerToolEntries(session.config);
-      return warnSpy.mock.calls
-        .map((call) => String(call[0]))
-        .filter((message) => message.includes('tools.eager'));
-    }
-
     it('does not blame the operator for a correctly spelled tool on an unconnected server', async () => {
       const session = makeSession({
         eagerTools: ['mcp__github__create_issue'],
@@ -335,21 +321,12 @@ describe('tools.eager entries that match no discovered tool (#12435)', () => {
 
   describe('computer_use__* entries', () => {
     it('are left alone: their registration does not share the MCP discovery boundary', async () => {
-      const { warnOnUnmatchedEagerToolEntries } = await import(
-        './eager-allowlist-coverage.js'
-      );
       const session = makeSession({
         eagerTools: ['computer_use__screenshot'],
         registered: ['read_file'],
       });
 
-      warnOnUnmatchedEagerToolEntries(session.config);
-
-      expect(
-        warnSpy.mock.calls
-          .map((call) => String(call[0]))
-          .filter((message) => message.includes('tools.eager')),
-      ).toEqual([]);
+      expect(await check(session)).toEqual([]);
     });
   });
 });
