@@ -455,6 +455,40 @@ it('rejects symlinks, traversal, foreign owners and mutation without preparation
   expect(await readFile(path.join(root, 'outside'), 'utf8')).toBe('decoy');
 });
 
+it('rejects a relative file path that resolves outside the workspace', async () => {
+  const runtime = randomUUID();
+  const tools = createManagedToolSet(workspace, runtime);
+  const executor = new ManagedToolExecutor(async () => tools);
+  const reference = {
+    sessionId: runtime,
+    promptId: randomUUID(),
+    callId: randomUUID(),
+    argsDigest: 'digest',
+  };
+  expect(
+    await executor.execute(reference, 'write_file', {
+      file_path: '../escape',
+      content: 'x',
+    }),
+  ).toMatchObject({
+    executionStatus: 'error',
+    error: {
+      message: expect.stringContaining(
+        'not within any of the registered workspace directories',
+      ),
+    },
+  });
+  expect(await stat(path.join(root, 'escape')).catch(() => null)).toBeNull();
+  expect(
+    await executor.execute(
+      { ...reference, callId: randomUUID() },
+      'write_file',
+      { file_path: 'inside', content: 'x' },
+    ),
+  ).toMatchObject({ executionStatus: 'success' });
+  expect(await readFile(path.join(workspace, 'inside'), 'utf8')).toBe('x');
+});
+
 it('wires history to the real raw executor and preserves its original invocation', async () => {
   const runtime = randomUUID();
   const tools = createManagedToolSet(workspace, runtime);

@@ -175,6 +175,35 @@ describe('Managed transcript projection', () => {
     expect(new Set(messages.map((message) => message.id)).size).toBe(4);
   });
 
+  it('appends a strictly-newer tail while preserving existing event identity', () => {
+    const base = [
+      event(1, 'accepted'),
+      event(2, 'assistant_delta'),
+      event(3, 'assistant_delta'),
+    ];
+    const merged = mergeManagedEvents(base, [
+      event(4, 'assistant_delta'),
+      event(5, 'completed'),
+    ]);
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(
+      merged.slice(0, 3).every((item, index) => item === base[index]),
+    ).toBe(true);
+  });
+
+  it('still reorders and deduplicates an overlapping or disordered tail', () => {
+    const merged = mergeManagedEvents(
+      [event(1, 'accepted'), event(3, 'assistant_delta')],
+      [
+        event(3, 'assistant_delta', { text: 'newer' }),
+        event(2, 'assistant_delta'),
+        event(4, 'completed'),
+      ],
+    );
+    expect(merged.map((item) => item.id)).toEqual([1, 2, 3, 4]);
+    expect(merged[2]?.data).toEqual({ text: 'newer' });
+  });
+
   it('keeps approval updates out of the Turn being streamed', () => {
     const messages = managedEventsToMessages(
       [

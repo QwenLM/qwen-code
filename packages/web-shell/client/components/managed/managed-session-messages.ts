@@ -6,11 +6,25 @@ export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
 ): ManagedAgentSessionEvent[] {
+  if (incoming.length === 0) return [...current];
+  if (
+    strictlyAscendingIds(incoming) &&
+    (current.length === 0 || current[current.length - 1]!.id < incoming[0]!.id)
+  )
+    return [...current, ...incoming];
   return [
     ...new Map(
       [...current, ...incoming].map((event) => [event.id, event]),
     ).values(),
   ].sort((a, b) => a.id - b.id);
+}
+
+function strictlyAscendingIds(
+  events: readonly ManagedAgentSessionEvent[],
+): boolean {
+  for (let index = 1; index < events.length; index++)
+    if (events[index - 1]!.id >= events[index]!.id) return false;
+  return true;
 }
 
 function record(value: unknown): Record<string, unknown> {

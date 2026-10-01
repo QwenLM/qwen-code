@@ -4,7 +4,19 @@ import type {
   ManagedAgentSessionEvent,
   ManagedAgentSessionSummary,
 } from './managed-agent-provider';
+import { isNonRetryableClientError } from './managed-request-error';
 import { mergeManagedEvents } from './managed-session-messages';
+
+const BASE_RETRY_DELAY_MS = 3_000;
+const MAX_RETRY_DELAY_MS = 30_000;
+
+export function failureRetryDelayMs(failures: number): number {
+  const cap = Math.min(MAX_RETRY_DELAY_MS, BASE_RETRY_DELAY_MS * 2 ** failures);
+  return (
+    BASE_RETRY_DELAY_MS +
+    Math.floor(Math.random() * (cap - BASE_RETRY_DELAY_MS))
+  );
+}
 
 function pause(signal: AbortSignal, ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -77,18 +89,21 @@ export function useManagedSession(
     };
     void (async () => {
       let lastEventId: number | undefined;
+      let failures = 0;
       while (!abort.signal.aborted && lastEventId === undefined) {
         try {
           lastEventId = await snapshot();
+          failures = 0;
         } catch (error) {
           fail(error);
-          await pause(abort.signal, 3000);
+          if (isNonRetryableClientError(error)) return;
+          await pause(abort.signal, failureRetryDelayMs(failures++));
         }
       }
       if (lastEventId === undefined || abort.signal.aborted) return;
       while (!abort.signal.aborted) {
         let gap = false;
-        let retryDelayMs = 3000;
+        let delayMs = 0;
         try {
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
@@ -109,25 +124,36 @@ export function useManagedSession(
           }
           if (gap) {
             lastEventId = await snapshot();
-            retryDelayMs = 0;
-          } else if (!abort.signal.aborted)
+          } else if (!abort.signal.aborted) {
             update({
               summary: await provider.getSession(sessionId, opts),
             });
+            delayMs = BASE_RETRY_DELAY_MS;
+          }
+          failures = 0;
         } catch (error) {
           fail(error);
+          if (isNonRetryableClientError(error)) return;
+          delayMs = failureRetryDelayMs(failures++);
         }
-        await pause(abort.signal, retryDelayMs);
+        await pause(abort.signal, delayMs);
       }
     })();
     void (async () => {
+      let failures = 0;
       while (!abort.signal.aborted) {
-        await pause(abort.signal, 3000);
+        await pause(
+          abort.signal,
+          failures === 0 ? BASE_RETRY_DELAY_MS : failureRetryDelayMs(failures),
+        );
         if (abort.signal.aborted) return;
         try {
           update({ summary: await provider.getSession(sessionId, opts) });
+          failures = 0;
         } catch (error) {
           fail(error);
+          if (isNonRetryableClientError(error)) return;
+          failures++;
         }
       }
     })();

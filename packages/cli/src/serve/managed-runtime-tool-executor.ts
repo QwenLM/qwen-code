@@ -773,10 +773,13 @@ export class ManagedToolExecutor {
         typeof params['file_path'] === 'string' &&
         !path.isAbsolute(params['file_path'].trim())
       ) {
-        params['file_path'] = path.resolve(
-          directory,
-          params['file_path'].trim(),
-        );
+        const resolved = path.resolve(directory, params['file_path'].trim());
+        if (!tools.admitsDirectory(resolved)) {
+          throw new Error(
+            `Path '${params['file_path']}' is not within any of the registered workspace directories.`,
+          );
+        }
+        params['file_path'] = resolved;
       }
       if (
         entry.toolName === ShellTool.Name &&
