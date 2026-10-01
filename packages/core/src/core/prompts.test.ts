@@ -1457,58 +1457,87 @@ describe('resident tool gating (#12032)', () => {
   });
 
   it('never names an undeclared tool inside the gated sections', () => {
-    const [guidance, examples] = gatedParts(promptFor(NARROW_TOOLS));
-    expect(guidance).not.toBe('');
-    expect(examples).not.toBe('');
-    const gated = `${guidance}\n${examples}`;
+    // Extracted so the bridge-reachable arm below reads the gated text, the
+    // declared set and the regex exactly as this one does.
+    const leakedNames = (
+      declaredTools: ReadonlySet<string>,
+      agentReachable?: boolean,
+    ) => {
+      const [guidance, examples] = gatedParts(
+        corePrompt({ model: 'gpt-4', declaredTools, agentReachable }),
+      );
+      expect(guidance).not.toBe('');
+      expect(examples).not.toBe('');
+      const gated = `${guidance}\n${examples}`;
 
-    // Mechanical sweep rather than hand-picked assertions: it catches
-    // under-gating (a line that survived and should not have) and, read the
-    // other way with a full set, over-gating.
-    const leaked = Object.values(ToolNames).filter(
-      (name) =>
-        name !== ToolNames.TOOL_CALL &&
-        !NARROW_TOOLS.has(name) &&
-        new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
-    );
+      // Mechanical sweep rather than hand-picked assertions: it catches
+      // under-gating (a line that survived and should not have) and, read the
+      // other way with a full set, over-gating.
+      return Object.values(ToolNames).filter(
+        (name) =>
+          name !== ToolNames.TOOL_CALL &&
+          !declaredTools.has(name) &&
+          new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
+      );
+    };
 
-    expect(leaked).toEqual([]);
+    expect(leakedNames(NARROW_TOOLS)).toEqual([]);
+
+    // The one configuration in which the gated sections may legitimately name
+    // an undeclared tool: a session that withholds `agent` but keeps it
+    // bridge-reachable retains the two Agent bullets (§4.6). Pinned exactly —
+    // a second name leaking through that branch, here or in a future one,
+    // fails this arm instead of shipping.
+    expect(leakedNames(NARROW_TOOLS, true)).toEqual([ToolNames.AGENT]);
   });
 
   it('gates every tool name the gated sections can mention, on every example set', () => {
     const everyTool = new Set<string>(Object.values(ToolNames));
-    const leaked: string[] = [];
 
-    // Withhold one tool at a time, against each model's example set: the
-    // config-independent version of the invariant above, and the check that
-    // would have caught the example notations going ungated.
-    for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
-      for (const tool of everyTool) {
-        // `ask_user_question` is exempt from `tools.eager`, so it is declared
-        // in practice, and the interaction-mode bullet naming it also carries
-        // the policy for not asking questions — gating that bullet would drop
-        // real guidance. Recorded as residue in the design's §6. `tool_call`
-        // is also the literal protocol marker in every example notation, so a
-        // text scan cannot distinguish that syntax from the bridge tool name.
-        if (
-          tool === ToolNames.ASK_USER_QUESTION ||
-          tool === ToolNames.TOOL_CALL
-        ) {
-          continue;
-        }
-        const declaredTools = new Set(everyTool);
-        declaredTools.delete(tool);
-        const [guidance, examples] = gatedParts(
-          corePrompt({ model, declaredTools }),
-        );
-        const gated = `${guidance}\n${examples}`;
-        if (new RegExp(`(?<![a-z_])${tool}(?![a-z_])`).test(gated)) {
-          leaked.push(`${model}: ${tool}`);
+    // Both arms: with `agentReachable` unset nothing withheld may survive,
+    // and with it set the exception is exactly one name wide. Sweeping only
+    // the unset arm would leave the one configuration where the sections may
+    // legitimately name an undeclared tool — the one the new exception branch
+    // creates — outside the invariant the design's §7 item 3 calls the
+    // config-independent guard.
+    for (const agentReachable of [undefined, true]) {
+      const leaked: string[] = [];
+
+      // Withhold one tool at a time, against each model's example set: the
+      // config-independent version of the invariant above, and the check that
+      // would have caught the example notations going ungated.
+      for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
+        for (const tool of everyTool) {
+          // `ask_user_question` is exempt from `tools.eager`, so it is declared
+          // in practice, and the interaction-mode bullet naming it also carries
+          // the policy for not asking questions — gating that bullet would drop
+          // real guidance. Recorded as residue in the design's §6. `tool_call`
+          // is also the literal protocol marker in every example notation, so a
+          // text scan cannot distinguish that syntax from the bridge tool name.
+          if (
+            tool === ToolNames.ASK_USER_QUESTION ||
+            tool === ToolNames.TOOL_CALL
+          ) {
+            continue;
+          }
+          const declaredTools = new Set(everyTool);
+          declaredTools.delete(tool);
+          const [guidance, examples] = gatedParts(
+            corePrompt({ model, declaredTools, agentReachable }),
+          );
+          const gated = `${guidance}\n${examples}`;
+          if (new RegExp(`(?<![a-z_])${tool}(?![a-z_])`).test(gated)) {
+            leaked.push(`${model}: ${tool}`);
+          }
         }
       }
-    }
 
-    expect(leaked).toEqual([]);
+      // Distinct names, not occurrences: under the reachable arm the surviving
+      // Agent bullet names `agent` on every model's set, and nothing else may.
+      expect([...new Set(leaked.map((entry) => entry.split(': ')[1]))]).toEqual(
+        agentReachable ? [ToolNames.AGENT] : [],
+      );
+    }
   });
 
   it('leaves CodeModeOnly guidance untouched by the declared set', () => {
