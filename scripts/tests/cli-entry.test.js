@@ -275,6 +275,8 @@ describe('scripts/cli-entry.js production entry', () => {
       const output = stderrSpy.mock.calls.map(([chunk]) => chunk).join('');
       expect(output).toContain('EACCES');
       expect(output).toContain('-4092');
+      // The message already carries the code and syscall: not repeated.
+      expect(output.match(/EACCES/g)).toHaveLength(1);
       expect(output).toContain('spawnSync node.exe');
       expect(output).toContain(process.execPath);
       expect(output).toContain('cli.js');
@@ -282,10 +284,7 @@ describe('scripts/cli-entry.js production entry', () => {
       const exitCode = exitSpy.mock.calls[0][0];
       // Distinguishable from a CLI that itself exits 1, and from the
       // managed-update code 44 that triggers a relaunch.
-      expect(exitCode).toEqual(expect.any(Number));
-      expect(exitCode).not.toBe(0);
-      expect(exitCode).not.toBe(1);
-      expect(exitCode).not.toBe(44);
+      expect(exitCode).toBe(126);
     } finally {
       stderrSpy.mockRestore();
       spawnSyncMock.mockImplementation(spawnImpl);
@@ -325,9 +324,7 @@ describe('scripts/cli-entry.js production entry', () => {
       expect(output).toContain(launcher);
       expect(exitSpy).toHaveBeenCalledTimes(1);
       const exitCode = exitSpy.mock.calls[0][0];
-      expect(exitCode).toEqual(expect.any(Number));
-      expect(exitCode).not.toBe(0);
-      expect(exitCode).not.toBe(1);
+      expect(exitCode).toBe(126);
     } finally {
       stderrSpy.mockRestore();
       spawnSyncMock.mockImplementation(spawnImpl);

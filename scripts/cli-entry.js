@@ -311,8 +311,12 @@ if (isInProcessFastPath()) {
   // { status: null, signal: null, error }; say why instead of exiting silently.
   const SPAWN_FAILURE_EXIT_CODE = 126;
   const exitOnSpawnError = (command, error) => {
+    // Node's message already reads "<syscall> <path> <code>"; add only what it
+    // does not say.
     const detail = [error.code, error.errno, error.syscall]
-      .filter((part) => part !== undefined)
+      .filter(
+        (part) => part !== undefined && !error.message.includes(String(part)),
+      )
       .join(' ');
     process.stderr.write(
       `Failed to start ${command}: ${error.message}${detail ? ` (${detail})` : ''}\n`,
