@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -509,6 +510,8 @@ public final class WorkspaceRecoveryStore {
                 (result, index) -> {
                     var value = new ColumnMapRowMapper().mapRow(result, index);
                     value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));
+                    LocalDateTime lease = result.getObject("writer_lease_until", LocalDateTime.class);
+                    value.put("writer_lease_fingerprint", lease == null ? null : lease.toString());
                     return value;
                 }, tenant, session);
         check(heads.size() <= 1, "source_drift");
@@ -525,7 +528,7 @@ public final class WorkspaceRecoveryStore {
             ObjectNode value = source.putObject("head");
             fields(value, head, "tenantId", "tenant_id", "workspaceId", "workspace_id", "sessionId", "session_id",
                     "state", "state", "storageVersion", "storage_version", "writerId", "writer_id",
-                    "writerGeneration", "writer_generation", "writerLeaseUntil", "writer_lease_until",
+                    "writerGeneration", "writer_generation", "writerLeaseUntil", "writer_lease_fingerprint",
                     "journalRevision", "journal_revision", "committedSequence", "committed_sequence",
                     "lastCommitDigest", "last_commit_digest", "activationEpoch", "activation_epoch",
                     "latestCheckpointResourceId", "latest_checkpoint_resource_id", "compactedThroughRevision", "compacted_through_revision",

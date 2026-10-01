@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,8 +40,7 @@ class WorkspaceRecoveryStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:w1b-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        var source = recoveryDataSource();
         Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
         jdbc = new JdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -69,6 +69,40 @@ class WorkspaceRecoveryStoreTest {
                 .put("fenceOperationId", fence).put("mountRevision", 1).put("sourceRoot", root.toString())
                 .put("bundleRoot", bundle.toString()).put("fileHistoryRoot", temporary.resolve("history").toString())
                 .put("nodeExecutable", "/test/node").put("cliEntry", "/test/cli.js");
+    }
+
+    DataSource recoveryDataSource() {
+        return new DriverManagerDataSource("jdbc:h2:mem:w1b-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+    }
+
+    DataSource recoveryDataSource(String connectionTimeZone) {
+        return jdbc.getDataSource();
+    }
+
+    @Test
+    void leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones() {
+        String session = session("workspace-a");
+        head(session);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'ACTIVE',"
+                + " writer_lease_until = '2000-01-01 00:00:00.123456'");
+        var capture = capture();
+        JsonNode source = call(capture, "sessions").path("sessions").get(0).path("source");
+        assertThat(source.path("head").path("writerLeaseUntil").asText())
+                .isEqualTo("2000-01-01T00:00:00.123456");
+        ObjectNode done = object().put("sessionId", session);
+        done.set("summary", object());
+        for (String zone : List.of("LOCAL", "UTC", "+08:00", "Asia/Shanghai")) {
+            DataSource dataSource = recoveryDataSource(zone);
+            var resumed = new WorkspaceRecoveryStore(new JdbcTemplate(dataSource),
+                    new DataSourceTransactionManager(dataSource), guard, null, "capture",
+                    request.toString().getBytes(StandardCharsets.UTF_8));
+            assertThat(resumed.call("sessionComplete", done).path("complete").asBoolean()).isTrue();
+            assertThat(call(resumed, "sessions").path("sessions").get(0).path("source")).isEqualTo(source);
+        }
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = '2000-01-01 00:00:00.123457'");
+        assertThatThrownBy(() -> capture.call("sessionComplete", done)).hasMessageContaining("source_drift");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
     }
 
     @Test

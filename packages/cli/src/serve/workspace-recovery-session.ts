@@ -82,7 +82,7 @@ export interface RecoverySessionSource {
     readonly storageVersion: number;
     readonly writerId: string;
     readonly writerGeneration: number;
-    readonly writerLeaseUntil: number | null;
+    readonly writerLeaseUntil: string | null;
     readonly journalRevision: number;
     readonly committedSequence: number;
     readonly lastCommitDigest: string | null;

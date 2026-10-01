@@ -527,7 +527,7 @@ describe('verifyRecoverySession', () => {
     f.source.head = {
       ...f.source.head,
       state: 'ACTIVE',
-      writerLeaseUntil: 1,
+      writerLeaseUntil: '2000-01-01T00:00:00',
       journalRevision: 0,
       committedSequence: 0,
       lastCommitDigest: null,

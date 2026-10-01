@@ -70,6 +70,15 @@ and source digest before sealing or recording compatibility. New Sessions,
 model-only commits, changed bindings, renewed writers and new admitted work
 invalidate the old cut. No retry silently advances its watermarks.
 
+The private head's lease fingerprint preserves the stored DATETIME(6) wall-clock
+value as an ISO local date-time string, including fractional seconds. It does
+not reinterpret that value as an epoch using the maintenance process timezone.
+Actual lease expiry is still checked against database time on the same
+connection. The earlier pre-release epoch-millisecond representation is not
+silently rewritten: its sealed content can still be checked, but current
+authority comparison cannot certify a head using that old fingerprint. Start
+a new capture after upgrading all maintenance binaries.
+
 ## 3. Persistent workflow and private entry
 
 Three additive tables hold recovery operations, pinned Session sources, and
@@ -197,8 +206,19 @@ completed tree marker. A lost original file, Workspace root or Session backup
 directory invalidates the old capture instead of accepting replacement bytes.
 Replacing a pinned Workspace or backup root with a symlink or non-directory
 also invalidates it; invalid roots without captured evidence still refuse.
-Source loss during the first forward/reverse inventory pass likewise
-invalidates capture; candidate-side damage retains its separate refusal.
+Observed source loss during the first forward/reverse inventory pass likewise
+invalidates capture. Missing candidate entries and unpinned candidate-only
+entries return `snapshot_source_mismatch`, preserving the same operation for a
+corrected copy. Before a complete inventory exists, an unobserved source path
+with no candidate proves a mismatch, not when the path was created. Persisted
+entries and completed tree membership are still rechecked for drift.
+
+Capture initialization removes interrupted metadata publications only for the
+three exact final metadata names followed by `.partial-<current operation ID>`.
+Each must be a regular file with one link. Foreign operation IDs, unknown
+names, links and special entries remain refused by strict enumeration.
+Verification never removes these files; final files with conflicting bytes
+are never overwritten.
 
 Private exports preserve exact journal transaction bytes and source digests.
 Validate genesis identity, revision/sequence continuity, commit markers and

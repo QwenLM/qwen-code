@@ -112,11 +112,52 @@ describe('local offline recovery bundle', () => {
         await writeFile(join(f.candidate, 'workspace', 'file'), 'changed');
       if (difference === 'mode')
         await chmod(join(f.candidate, 'workspace', 'file'), 0o700);
-      await expect(
-        f.bundle.compareTree(f.source, 'workspace'),
-      ).rejects.toThrow();
+      await expect(f.bundle.compareTree(f.source, 'workspace')).rejects.toThrow(
+        'snapshot_source_mismatch',
+      );
+      expect(await readFile(join(f.source, 'file'), 'utf8')).toBe('original');
+      await rm(join(f.candidate, 'workspace'), { recursive: true });
+      await cp(f.source, join(f.candidate, 'workspace'), { recursive: true });
+      await f.bundle.compareTree(f.source, 'workspace');
+      await f.bundle.census();
     },
   );
+
+  it.each(['removed', 'added'])(
+    'refuses a %s source entry after the complete tree was pinned',
+    async (change) => {
+      const f = await fixture();
+      await writeFile(join(f.source, 'file'), 'original');
+      await cp(f.source, join(f.candidate, 'workspace'), { recursive: true });
+      await f.bundle.compareTree(f.source, 'workspace');
+      if (change === 'removed') await rm(join(f.source, 'file'));
+      else await writeFile(join(f.source, 'new'), 'new');
+      await expect(f.bundle.compareTree(f.source, 'workspace')).rejects.toThrow(
+        'source_drift',
+      );
+    },
+  );
+
+  it('refuses a pinned original removed between forward and reverse inventory', async () => {
+    const f = await fixture();
+    await writeFile(join(f.source, 'file'), 'original');
+    await cp(f.source, join(f.candidate, 'workspace'), { recursive: true });
+    const bundle = new LocalRecoveryBundle(
+      f.candidate,
+      f.bundle.operationId,
+      'capture',
+      async (method, params) => {
+        const result = await f.rpc(method, params);
+        const value = params as { metadata?: { path?: string } };
+        if (method === 'asset' && value.metadata?.path === 'workspace/file')
+          await rm(join(f.source, 'file'));
+        return result;
+      },
+    );
+    await expect(bundle.compareTree(f.source, 'workspace')).rejects.toThrow(
+      'source_drift',
+    );
+  });
 
   it.each([
     'absolute',
@@ -183,6 +224,85 @@ describe('local offline recovery bundle', () => {
     expect((await readFile(join(f.candidate, name))).toString()).toBe(
       'corrupt',
     );
+  });
+
+  it.each(['sessions.ndjson', 'assets.ndjson', 'manifest.json'])(
+    'resumes capture after an interrupted %s publication',
+    async (name) => {
+      const f = await fixture();
+      await f.bundle.compareTree(f.source, 'workspace');
+      const partial = join(
+        f.candidate,
+        '.w1-recovery',
+        `${name}.partial-${f.bundle.operationId}`,
+      );
+      await writeFile(partial, 'interrupted');
+      await f.bundle.initialize(f.source, f.history);
+      await expect(readFile(partial)).rejects.toMatchObject({ code: 'ENOENT' });
+      await f.bundle.census();
+    },
+  );
+
+  it.each(['foreign-operation', 'unknown-name'])(
+    'preserves and refuses a %s metadata temporary',
+    async (kind) => {
+      const f = await fixture();
+      await f.bundle.compareTree(f.source, 'workspace');
+      const partial = join(
+        f.candidate,
+        '.w1-recovery',
+        kind === 'foreign-operation'
+          ? 'assets.ndjson.partial-00000000-0000-4000-8000-000000000002'
+          : `unknown.partial-${f.bundle.operationId}`,
+      );
+      await writeFile(partial, 'foreign');
+      await f.bundle.initialize(f.source, f.history);
+      await expect(f.bundle.census()).rejects.toThrow(
+        'undeclared_bundle_entry',
+      );
+      expect(await readFile(partial, 'utf8')).toBe('foreign');
+    },
+  );
+
+  it.each(['symlink', 'hardlink', 'directory'])(
+    'refuses an owned %s temporary without touching its target',
+    async (kind) => {
+      const f = await fixture();
+      const original = join(f.source, 'original');
+      await writeFile(original, 'original');
+      const partial = join(
+        f.candidate,
+        '.w1-recovery',
+        `manifest.json.partial-${f.bundle.operationId}`,
+      );
+      if (kind === 'symlink') await symlink(original, partial);
+      else if (kind === 'hardlink') await link(original, partial);
+      else await mkdir(partial);
+      await expect(f.bundle.initialize(f.source, f.history)).rejects.toThrow(
+        'invalid_temporary_file',
+      );
+      expect(await readFile(original, 'utf8')).toBe('original');
+    },
+  );
+
+  it('does not remove metadata temporaries during verification', async () => {
+    const f = await fixture();
+    await f.bundle.compareTree(f.source, 'workspace');
+    const partial = join(
+      f.candidate,
+      '.w1-recovery',
+      `assets.ndjson.partial-${f.bundle.operationId}`,
+    );
+    await writeFile(partial, 'interrupted');
+    const verifier = new LocalRecoveryBundle(
+      f.candidate,
+      f.bundle.operationId,
+      'verify',
+      f.rpc,
+    );
+    await verifier.initialize(f.source, f.history);
+    await expect(verifier.census()).rejects.toThrow('undeclared_bundle_entry');
+    expect(await readFile(partial, 'utf8')).toBe('interrupted');
   });
 
   it('verifies sealed files after source loss and rejects any undeclared artifact', async () => {

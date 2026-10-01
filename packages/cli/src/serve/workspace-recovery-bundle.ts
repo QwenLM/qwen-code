@@ -327,6 +327,23 @@ export class LocalRecoveryBundle {
       }
       for (const path of ['file-history', 'authority', 'authority/objects'])
         await this.recordEntry(await entry(this.root, path));
+      for (const name of [
+        'sessions.ndjson',
+        'assets.ndjson',
+        'manifest.json',
+      ]) {
+        const temporary = join(
+          this.root,
+          '.w1-recovery',
+          `${name}.partial-${this.operationId}`,
+        );
+        if (await exists(temporary)) {
+          const stat = await lstat(temporary);
+          if (!stat.isFile() || stat.nlink !== 1)
+            throw new Error('invalid_temporary_file');
+          await unlink(temporary);
+        }
+      }
     } else {
       for (const path of [
         'workspace',
@@ -434,7 +451,18 @@ export class LocalRecoveryBundle {
         recoveryJson(saved) !== recoveryJson({ ...original, path: name })
       )
         throw new Error('source_drift');
-      const copy = await entry(this.root, name, candidateRoot);
+      let copy: BundleEntry;
+      try {
+        copy = await entry(this.root, name, candidateRoot);
+      } catch (error) {
+        if (
+          ['ENOENT', 'ENOTDIR'].includes(
+            (error as NodeJS.ErrnoException).code ?? '',
+          )
+        )
+          throw new Error('snapshot_source_mismatch');
+        throw error;
+      }
       if (recoveryJson({ ...original, path: name }) !== recoveryJson(copy))
         throw new Error('snapshot_source_mismatch');
       await this.recordEntry(copy);
@@ -451,7 +479,14 @@ export class LocalRecoveryBundle {
           sourceRoot,
         );
       } catch (error) {
-        if (sourceReadDrift(error)) throw new Error('source_drift');
+        if (sourceReadDrift(error)) {
+          const pinned = await this.rpc('assetLookup', {
+            key: recoveryAssetKey('entry', copy.path),
+          });
+          throw new Error(
+            pinned === null ? 'snapshot_source_mismatch' : 'source_drift',
+          );
+        }
         throw error;
       }
       if (recoveryJson({ ...original, path: copy.path }) !== recoveryJson(copy))
