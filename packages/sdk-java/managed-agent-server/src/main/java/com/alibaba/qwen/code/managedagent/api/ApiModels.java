@@ -84,9 +84,10 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellSessionCapabilities(boolean tasks, boolean actions, boolean sessionClose) {
-        public WebShellSessionCapabilities(boolean tasks, boolean actions) {
-            this(tasks, actions, false);
+    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
+            boolean sessionClose) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions) {
+            this(tasks, artifacts, actions, false);
         }
     }
 
@@ -367,6 +368,21 @@ public final class ApiModels {
             List<JsonNode> data,
             @JsonProperty("has_more") boolean hasMore,
             @JsonProperty("next_cursor") String nextCursor) {}
+
+    public record ArtifactAccess(@JsonProperty("can_read_content") boolean canReadContent) { }
+
+    public record ToolResultResponse(JsonNode result, ArtifactAccess access) { }
+
+    public record ArtifactResponse(JsonNode artifact, ArtifactAccess access) { }
+
+    public record WebShellToolResultRequest(@NotBlank String sessionId,
+            @NotBlank String itemId) { }
+
+    public record WebShellArtifactRequest(@NotBlank String sessionId,
+            @NotBlank String artifactId) { }
+
+    public record WebShellArtifactQueryRequest(@NotBlank String sessionId,
+            String cursor, Integer limit) { }
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {

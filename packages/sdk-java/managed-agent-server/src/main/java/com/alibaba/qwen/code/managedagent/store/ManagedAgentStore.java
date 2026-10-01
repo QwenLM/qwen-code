@@ -1053,7 +1053,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " sequence_id <= ? AND event_type NOT IN"
                         + " ('turn.accepted', 'item.output_text.delta',"
                         + " 'item.reasoning.delta',"
-                        + " 'item.tool_call.updated') ORDER BY sequence_id"
+                        + " 'item.tool_call.updated', 'item.tool_result.updated') ORDER BY sequence_id"
                         + " ASC",
                 eventMapper, tenantId, sessionId, throughSequence);
     }
@@ -1756,7 +1756,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     "output_text");
             case "item.reasoning.delta" -> materializeText(event,
                     "reasoning");
-            case "item.tool_call.updated" -> materializeTool(event);
+            case "item.tool_call.updated", "item.tool_result.updated" -> materializeTool(event);
             case "turn.completed", "turn.failed", "turn.cancelled" ->
                     settleTurnItems(event);
             default -> {
@@ -1826,10 +1826,20 @@ public class ManagedAgentStore implements AgentStateStore {
             default -> "in_progress";
         };
         Map<String, Object> attributes = existingAttributes(event, itemId);
+        if (attributes.get("result") instanceof Map<?, ?> previous) {
+            if (!(event.data().get("result") instanceof Map<?, ?> next)
+                    || number(next.get("projection_revision")) <= number(previous.get("projection_revision"))) {
+                return;
+            }
+        }
         attributes.putAll(event.data());
         attributes.remove("itemId");
         upsertItem(event, itemId, "tool_call", "assistant", status,
                 Map.copyOf(attributes));
+    }
+
+    private static long number(Object value) {
+        return value instanceof Number numeric ? numeric.longValue() : 0;
     }
 
     private Map<String, Object> existingAttributes(EventRecord event,

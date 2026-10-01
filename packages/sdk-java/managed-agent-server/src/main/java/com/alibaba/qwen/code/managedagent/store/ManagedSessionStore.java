@@ -62,6 +62,7 @@ public class ManagedSessionStore {
             "BLOCKED_EXECUTION");
     private final JdbcTemplate jdbc;
     private ToolPublicationObjectStore publicationObjects;
+    private ManagedToolResultStore toolResults;
     private final ManagedExtensionRecordStore extensionRecords;
     private final ManagedActionStore actions;
     private final RowMapper<HeadRow> headMapper = (result, row) ->
@@ -124,6 +125,11 @@ public class ManagedSessionStore {
         this.publicationObjects = publicationObjects;
     }
 
+    @Autowired(required = false)
+    public void setToolResults(ManagedToolResultStore toolResults) {
+        this.toolResults = toolResults;
+    }
+
     record PublicationWriter(long now, long leaseUntil, long journalRevision,
             long committedSequence, long activationEpoch, String checkpointId, String recoveryStatus) {
     }
@@ -166,11 +172,11 @@ public class ManagedSessionStore {
                             + " lease_token_hash, journal_revision,"
                             + " committed_sequence, activation_epoch,"
                             + " compacted_through_revision, recovery_status,"
-                            + " created_at, updated_at) VALUES (?, ?, ?, ?,"
+                            + " o3_backfill_through, o3_backfill_pending, created_at, updated_at) VALUES (?, ?, ?, ?,"
                             + " 'ACTIVE', 1, ?, TIMESTAMPADD(MICROSECOND, ?,"
                             + " CAST(? AS DATETIME(6))),"
                             + " ?, 0, 0, 0, 0, 'READY',"
-                            + " ?, ?)",
+                            + " 0, FALSE, ?, ?)",
                     tenantId, request.workspaceId(), sessionId,
                     STORAGE_VERSION, request.writerId(),
                     initialLeaseUntil.getNanos() / 1_000,
@@ -345,7 +351,7 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
-        extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
+        var receiptEvents = extensionRecords.apply(tenantId, request.workspaceId(), sessionId,
                 request.firstSequence(), request.eventCount(),
                 validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
@@ -402,6 +408,9 @@ public class ManagedSessionStore {
                 request.activationEpoch(),
                 request.latestCheckpointResourceId(), now, tenantId,
                 sessionId);
+        if (toolResults != null) {
+            toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
+        }
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),
                 request.firstSequence(), request.lastSequence(),

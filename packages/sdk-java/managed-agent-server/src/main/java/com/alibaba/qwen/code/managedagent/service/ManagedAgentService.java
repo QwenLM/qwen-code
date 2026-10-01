@@ -23,7 +23,9 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSessionCapabilities;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
@@ -48,11 +50,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Autowired;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
@@ -102,6 +105,19 @@ public class ManagedAgentService {
         return session.workspace() != null
                 && actions != null
                 && !"yolo".equals(actions.approvalMode(session.tenantId(), session.sessionId()));
+    }
+
+    private BooleanSupplier artifactReadsEnabled = () -> false;
+
+    @Autowired
+    void configureArtifacts(ManagedAgentProperties properties,
+            ManagedArtifactReader reader) {
+        artifactReadsEnabled = () -> properties.getArtifacts().isEnabled() && reader.supported();
+    }
+
+    private boolean hasArtifacts(SessionRecord session) {
+        return session.workspace() != null && !"DELETING".equals(session.status())
+                && artifactReadsEnabled.getAsBoolean();
     }
 
     public ManagedAgentService(AgentStateStore store,
@@ -506,7 +522,7 @@ public class ManagedAgentService {
                 new SessionCapabilities(
                         true,
                         true,
-                        false,
+                        hasArtifacts(session),
                         true,
                         session.workspace() == null,
                         true,
@@ -532,7 +548,8 @@ public class ManagedAgentService {
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true, hasActions(session), supportsClose(session)));
+                new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
+                        supportsClose(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
