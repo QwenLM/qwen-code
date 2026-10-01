@@ -3,6 +3,26 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## Managed 工具结果
+
+`ManagedAgentWebShell` 与 `createJavaManagedAgentProvider` 支持 Java O3 工具结果。
+只有 Session 返回 `capabilities.artifacts: true` 时才提供输出入口；它不启用
+Shell 执行。卡片区分执行、捕获与交付状态，面板按固定版本分页读取原始 bytes，
+当前账号的内容读取权由 metadata 响应独立决定。此路径不使用 daemon 文件 API。
+
+宿主应提供包含租户及账号身份的 `productScope`，身份切换时同步更新它；刷新同一
+账号的短期 token 则继续使用动态 `getHeaders`。所有 metadata、range 和下载请求
+都经过注入的 `fetch`、`getHeaders` 与 `credentials`。跨源 gateway 需要允许带
+`Range`/`If-Match` 的鉴权 GET，并向浏览器暴露 `ETag`、`Content-Range` 和
+`Content-Length`；不要对 bytes 响应重新压缩或变换。
+
+支持 `showSaveFilePicker` 的浏览器默认把下载流直接写入用户选择的文件。其他宿主
+可提供 `saveArtifact(artifact, { signal, openStream })` 回调，在用户操作中取得
+可写目标后调用 `openStream()`，再用带 `signal` 的 `pipeTo` 保存。导出的
+`ManagedArtifactSave` 定义这一接口。回调必须传播取消和失败，并保持背压；不要用
+`blob()`/`arrayBuffer()` 聚合完整下载，也不要把 token 放进 URL。没有流式保存能力
+时只提供有界读取，并明确显示下载不可用。
+
 ## 更新
 
 支持更新的服务会在后台检查并下载新版本，准备好后才在侧栏左下角版本号旁显示

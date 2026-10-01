@@ -22,6 +22,19 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class EmbeddedRuntimeBrokerTest {
+    @Test
+    void stepCallBackstopExceedsEveryShippedCalleeWait() {
+        // The never-answering step backstop is twice the operation lease; it
+        // must stay above the provisioner and transport declared waits, or a
+        // slow-but-healthy runtime is cut mid-wait and never converges.
+        long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+        assertThat(stepCallTimeoutMillis)
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
+    }
+
+
     private static final String SESSION_ID =
             "550e8400-e29b-41d4-a716-446655440000";
 

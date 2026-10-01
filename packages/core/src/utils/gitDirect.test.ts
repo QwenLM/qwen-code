@@ -30,17 +30,20 @@ const watchMock = fs.watch as unknown as Mock;
 
 const tmpRoots: string[] = [];
 
-async function makeRepo(
-  headContent: string,
-  opts: { withReflog?: boolean } = {},
-): Promise<string> {
-  const { withReflog = true } = opts;
+// A real git dir carries an object store; isRealGitDir requires objects/ + refs/.
+async function writeGitDir(gitDir: string, head: string): Promise<void> {
+  await fsp.mkdir(path.join(gitDir, 'objects'), { recursive: true });
+  await fsp.mkdir(path.join(gitDir, 'refs'), { recursive: true });
+  await fsp.writeFile(path.join(gitDir, 'HEAD'), head);
+}
+
+async function makeRepo({
+  head = 'ref: refs/heads/main\n',
+  withReflog = true,
+}: { head?: string; withReflog?: boolean } = {}): Promise<string> {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-gitdirect-'));
   tmpRoots.push(dir);
-  // A real git dir carries an object store; isRealGitDir requires objects/ + refs/.
-  await fsp.mkdir(path.join(dir, '.git', 'objects'), { recursive: true });
-  await fsp.mkdir(path.join(dir, '.git', 'refs'), { recursive: true });
-  await fsp.writeFile(path.join(dir, '.git', 'HEAD'), headContent);
+  await writeGitDir(path.join(dir, '.git'), head);
   if (withReflog) {
     await fsp.mkdir(path.join(dir, '.git', 'logs'), { recursive: true });
     await fsp.writeFile(path.join(dir, '.git', 'logs', 'HEAD'), 'reflog\n');
@@ -51,6 +54,13 @@ async function makeRepo(
 async function makeBareDir(): Promise<string> {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-nogit-'));
   tmpRoots.push(dir);
+  return dir;
+}
+
+// A bare dir whose `.git` is a FILE pointing at `gitDir`.
+async function makeGitdirPointer(gitDir: string): Promise<string> {
+  const dir = await makeBareDir();
+  await fsp.writeFile(path.join(dir, '.git'), `gitdir: ${gitDir}\n`);
   return dir;
 }
 
@@ -123,53 +133,41 @@ describe('isValidGitSha', () => {
 });
 
 describe('readGitHead', () => {
+  const headOf = async (head: string) =>
+    readGitHead(path.join(await makeRepo({ head }), '.git'));
+  const branch = (name: string) => ({ type: 'branch', name });
+
   it('parses a branch', async () => {
-    const repo = await makeRepo('ref: refs/heads/main\n');
-    expect(await readGitHead(path.join(repo, '.git'))).toEqual({
-      type: 'branch',
-      name: 'main',
-    });
+    expect(await headOf('ref: refs/heads/main\n')).toEqual(branch('main'));
   });
 
   it('bounds the read and parses only the first line of a huge HEAD', async () => {
-    const repo = await makeRepo(`ref: refs/heads/main\n${'x'.repeat(100_000)}`);
+    const head = `ref: refs/heads/main\n${'x'.repeat(100_000)}`;
     // The 100 KB tail is never loaded; only the first line is parsed.
-    expect(await readGitHead(path.join(repo, '.git'))).toEqual({
-      type: 'branch',
-      name: 'main',
-    });
+    expect(await headOf(head)).toEqual(branch('main'));
   });
 
   it('preserves nested branch names', async () => {
-    const repo = await makeRepo('ref: refs/heads/feature/foo\n');
-    expect(await readGitHead(path.join(repo, '.git'))).toEqual({
-      type: 'branch',
-      name: 'feature/foo',
-    });
+    expect(await headOf('ref: refs/heads/feature/foo\n')).toEqual(
+      branch('feature/foo'),
+    );
   });
 
   it('returns the full sha when detached', async () => {
     const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
-    const repo = await makeRepo(`${sha}\n`);
-    expect(await readGitHead(path.join(repo, '.git'))).toEqual({
-      type: 'detached',
-      name: sha,
-    });
+    expect(await headOf(`${sha}\n`)).toEqual({ type: 'detached', name: sha });
   });
 
   it('rejects HEAD pointing outside refs/heads', async () => {
-    const repo = await makeRepo('ref: refs/remotes/origin/main\n');
-    expect(await readGitHead(path.join(repo, '.git'))).toBeNull();
+    expect(await headOf('ref: refs/remotes/origin/main\n')).toBeNull();
   });
 
   it('rejects an invalid ref name (path traversal)', async () => {
-    const repo = await makeRepo('ref: refs/heads/../../evil\n');
-    expect(await readGitHead(path.join(repo, '.git'))).toBeNull();
+    expect(await headOf('ref: refs/heads/../../evil\n')).toBeNull();
   });
 
   it('returns null for garbage HEAD content', async () => {
-    const repo = await makeRepo('not-a-valid-head\n');
-    expect(await readGitHead(path.join(repo, '.git'))).toBeNull();
+    expect(await headOf('not-a-valid-head\n')).toBeNull();
   });
 
   it('returns null when HEAD is missing', async () => {
@@ -181,7 +179,7 @@ describe('readGitHead', () => {
   it.skipIf(process.platform === 'win32')(
     'refuses a symlinked HEAD (would follow out of the repo)',
     async () => {
-      const repo = await makeRepo('ref: refs/heads/main\n');
+      const repo = await makeRepo();
       const secret = path.join(await makeBareDir(), 'secret');
       await fsp.writeFile(secret, 'ref: refs/heads/leaked\n');
       const headPath = path.join(repo, '.git', 'HEAD');
@@ -194,58 +192,49 @@ describe('readGitHead', () => {
 
 describe('resolveBranchName', () => {
   it('returns the branch name', async () => {
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     expect(await resolveBranchName(repo)).toBe('main');
   });
 
   it('walks up from a subdirectory to the repo root', async () => {
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     const sub = path.join(repo, 'a', 'b', 'c');
     await fsp.mkdir(sub, { recursive: true });
     expect(await resolveBranchName(sub)).toBe('main');
   });
 
+  // A linked worktree's gitdir (on `feature`) inside a fresh main repo.
+  async function makeWorktreeGitDir(): Promise<string> {
+    const gitDir = path.join(await makeRepo(), '.git', 'worktrees', 'wt1');
+    await fsp.mkdir(gitDir, { recursive: true });
+    await fsp.writeFile(path.join(gitDir, 'HEAD'), 'ref: refs/heads/feature\n');
+    return gitDir;
+  }
+
   it('reads through a worktree gitdir pointer file', async () => {
-    const main = await makeRepo('ref: refs/heads/main\n');
-    const realGitDir = path.join(main, '.git', 'worktrees', 'wt1');
-    await fsp.mkdir(realGitDir, { recursive: true });
-    await fsp.writeFile(
-      path.join(realGitDir, 'HEAD'),
-      'ref: refs/heads/feature\n',
-    );
+    const realGitDir = await makeWorktreeGitDir();
     // A real worktree gitdir has no objects/ of its own; commondir points at
     // the main gitdir (which has objects/ + refs/).
     await fsp.writeFile(path.join(realGitDir, 'commondir'), '../..\n');
-    const worktree = await makeBareDir();
-    await fsp.writeFile(path.join(worktree, '.git'), `gitdir: ${realGitDir}\n`);
+    const worktree = await makeGitdirPointer(realGitDir);
     expect(await resolveBranchName(worktree)).toBe('feature');
   });
 
   it.skipIf(process.platform === 'win32')(
     'refuses a symlinked commondir',
     async () => {
-      const main = await makeRepo('ref: refs/heads/main\n');
-      const realGitDir = path.join(main, '.git', 'worktrees', 'wt1');
-      await fsp.mkdir(realGitDir, { recursive: true });
-      await fsp.writeFile(
-        path.join(realGitDir, 'HEAD'),
-        'ref: refs/heads/feature\n',
-      );
+      const realGitDir = await makeWorktreeGitDir();
       // commondir is a symlink, not a regular file → O_NOFOLLOW refuses it, so
       // the gitdir can't be validated and no branch is surfaced.
       await fsp.symlink('../..', path.join(realGitDir, 'commondir'));
-      const worktree = await makeBareDir();
-      await fsp.writeFile(
-        path.join(worktree, '.git'),
-        `gitdir: ${realGitDir}\n`,
-      );
+      const worktree = await makeGitdirPointer(realGitDir);
       expect(await resolveBranchName(worktree)).toBeUndefined();
     },
   );
 
   it('returns a 7-char short hash when detached', async () => {
     const sha = 'abcdef1234567890abcdef1234567890abcdef12';
-    const repo = await makeRepo(`${sha}\n`);
+    const repo = await makeRepo({ head: `${sha}\n` });
     expect(await resolveBranchName(repo)).toBe('abcdef1');
   });
 
@@ -260,25 +249,18 @@ describe('resolveBranchName', () => {
 
     // The directory becomes a real repo mid-session. The earlier miss must not
     // have been cached, so the branch resolves without clearing anything.
-    await fsp.mkdir(path.join(dir, '.git', 'objects'), { recursive: true });
-    await fsp.mkdir(path.join(dir, '.git', 'refs'), { recursive: true });
-    await fsp.writeFile(
-      path.join(dir, '.git', 'HEAD'),
-      'ref: refs/heads/main\n',
-    );
+    await writeGitDir(path.join(dir, '.git'), 'ref: refs/heads/main\n');
     expect(await resolveBranchName(dir)).toBe('main');
   });
 
   it('caches a successful resolution; clearGitDirCache forces re-resolution', async () => {
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     expect(await resolveBranchName(repo)).toBe('main');
 
     // Remove the object store. The cached gitDir is still used (only HEAD is
     // re-read), so the branch still resolves...
-    await fsp.rm(path.join(repo, '.git', 'objects'), {
-      recursive: true,
-      force: true,
-    });
+    const objects = path.join(repo, '.git', 'objects');
+    await fsp.rm(objects, { recursive: true, force: true });
     expect(await resolveBranchName(repo)).toBe('main');
 
     // ...until the cache is cleared and re-resolution rejects the storeless dir.
@@ -291,20 +273,16 @@ describe('resolveBranchName', () => {
     // no object store.
     const decoy = await makeBareDir();
     await fsp.writeFile(path.join(decoy, 'HEAD'), 'ref: refs/heads/pwned\n');
-    const project = await makeBareDir();
-    await fsp.writeFile(path.join(project, '.git'), `gitdir: ${decoy}\n`);
+    const project = await makeGitdirPointer(decoy);
     // Without the object-store check this would surface 'pwned'.
     expect(await resolveBranchName(project)).toBeUndefined();
   });
 
   it('accepts a submodule gitdir with its own object store', async () => {
-    const main = await makeRepo('ref: refs/heads/main\n');
+    const main = await makeRepo();
     const modDir = path.join(main, '.git', 'modules', 'sub');
-    await fsp.mkdir(path.join(modDir, 'objects'), { recursive: true });
-    await fsp.mkdir(path.join(modDir, 'refs'), { recursive: true });
-    await fsp.writeFile(path.join(modDir, 'HEAD'), 'ref: refs/heads/submod\n');
-    const sub = await makeBareDir();
-    await fsp.writeFile(path.join(sub, '.git'), `gitdir: ${modDir}\n`);
+    await writeGitDir(modDir, 'ref: refs/heads/submod\n');
+    const sub = await makeGitdirPointer(modDir);
     expect(await resolveBranchName(sub)).toBe('submod');
   });
 
@@ -315,8 +293,7 @@ describe('resolveBranchName', () => {
     const fake = path.join(other, '.git', 'worktrees', 'fake');
     await fsp.mkdir(fake, { recursive: true });
     await fsp.writeFile(path.join(fake, 'HEAD'), 'ref: refs/heads/pwned\n');
-    const project = await makeBareDir();
-    await fsp.writeFile(path.join(project, '.git'), `gitdir: ${fake}\n`);
+    const project = await makeGitdirPointer(fake);
     expect(await resolveBranchName(project)).toBeUndefined();
   });
 
@@ -359,7 +336,7 @@ describe('watchRepoBranch', () => {
 
   it('shares one watcher across subscribers and tears down on last unsubscribe', async () => {
     const w = installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     const s1 = vi.fn();
     const s2 = vi.fn();
     const dispose1 = await watchRepoBranch(repo, s1);
@@ -387,7 +364,7 @@ describe('watchRepoBranch', () => {
 
   it('isolates a throwing subscriber from the others', async () => {
     const w = installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     const bad = vi.fn(() => {
       throw new Error('subscriber boom');
     });
@@ -406,7 +383,7 @@ describe('watchRepoBranch', () => {
 
   it('refreshes on rename events but ignores unknown ones', async () => {
     const w = installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     const sub = vi.fn();
     const dispose = await watchRepoBranch(repo, sub);
 
@@ -419,7 +396,7 @@ describe('watchRepoBranch', () => {
 
   it("tears down the watch on an FSWatcher 'error' instead of crashing", async () => {
     const w = installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     const sub = vi.fn();
     const dispose = await watchRepoBranch(repo, sub);
 
@@ -436,9 +413,7 @@ describe('watchRepoBranch', () => {
 
   it('does not watch without a reflog, but watches once it appears', async () => {
     installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n', {
-      withReflog: false,
-    });
+    const repo = await makeRepo({ withReflog: false });
     const dispose1 = await watchRepoBranch(repo, vi.fn());
     expect(watchMock).not.toHaveBeenCalled();
     expect(() => dispose1()).not.toThrow();
@@ -454,7 +429,7 @@ describe('watchRepoBranch', () => {
 
   it('dedupes concurrent subscribers into a single watcher', async () => {
     installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     // Both calls race through getCachedGitDir + access() before either registers
     // the entry, exercising the post-await re-check path.
     const [dispose1, dispose2] = await Promise.all([
@@ -476,7 +451,7 @@ describe('watchRepoBranch', () => {
 
   it('clearGitDirCache tears down active watchers (no fd leak)', async () => {
     const w = installWatchMock();
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     const dispose = await watchRepoBranch(repo, vi.fn());
     expect(watchMock).toHaveBeenCalledTimes(1);
 
@@ -495,7 +470,7 @@ describe('watchRepoBranch', () => {
       // TOCTOU: logs/HEAD vanished after access(), or a platform watch limit.
       throw new Error('ENOENT');
     });
-    const repo = await makeRepo('ref: refs/heads/main\n');
+    const repo = await makeRepo();
     // Must resolve to a disposer, not reject (which would surface as unhandled).
     const dispose = await watchRepoBranch(repo, vi.fn());
     expect(() => dispose()).not.toThrow();
@@ -505,9 +480,7 @@ describe('watchRepoBranch', () => {
     'refuses a symlinked reflog (no out-of-repo watch)',
     async () => {
       installWatchMock();
-      const repo = await makeRepo('ref: refs/heads/main\n', {
-        withReflog: false,
-      });
+      const repo = await makeRepo({ withReflog: false });
       const target = path.join(await makeBareDir(), 'evil-log');
       await fsp.writeFile(target, 'x\n');
       await fsp.mkdir(path.join(repo, '.git', 'logs'), { recursive: true });
