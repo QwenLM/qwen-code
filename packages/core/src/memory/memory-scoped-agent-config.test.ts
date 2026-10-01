@@ -360,15 +360,7 @@ describe('createMemoryScopedAgentConfig', () => {
 
     it('isToolEnabled forwards the alias channel to the base PM', async () => {
       const isToolEnabled = vi.fn().mockResolvedValue(false);
-      const delegated = permissionManager(
-        createMemoryScopedAgentConfig(
-          {
-            getPermissionManager: () =>
-              ({ isToolEnabled }) as unknown as PermissionManager,
-          } as Config,
-          projectRoot,
-        ),
-      );
+      const delegated = scopedPm(undefined, { isToolEnabled });
       await expect(
         delegated.isToolEnabled('mcp__foo_bar__a_b_1aofxjh', [
           'mcp__foo:bar__a.b',
