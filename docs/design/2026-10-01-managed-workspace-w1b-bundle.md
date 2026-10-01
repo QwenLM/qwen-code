@@ -2,7 +2,8 @@
 
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
-Status: implementation in progress. Based on main `937ed13a1` and the original
+Status: implemented; local validation passed, deployment acceptance pending.
+Integrated with main `310f4ba3a` and the original
 file-history dependency [#13110](https://github.com/QwenLM/qwen-code/pull/13110)
 at `fee8f8763`. Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 Completes the W1b slice of the [W1 recovery design](2026-09-29-managed-workspace-w1-recovery.md),
@@ -59,7 +60,8 @@ state, and the real private Session Store key. Its workspace ID must not be
 replaced with the product Workspace ID. Pin the private writer identity/state,
 journal revision, committed sequence, last commit digest, activation epoch,
 checkpoint, compaction and recovery state. Missing heads are uninitialized,
-not permission to create history. Active work, pending lifecycle operations,
+not permission to create history. Existing heads without committed genesis
+refuse capture. Active work, pending lifecycle operations,
 live writer leases, unsupported compaction and blocked recovery refuse capture.
 
 Recheck a Session before each derived commit and recheck the complete membership
@@ -119,7 +121,8 @@ worker backup directory to exist; a referenced missing backup always fails.
 Implementation consumers are the private Java main/store/reader and the matching
 CLI worker, local provider and Session validator. The only shared production
 changes are pure Session Store parser exports and a typed read-only W1a guard
-query. Existing HTTP Session readers, writers, Hosted turn routes and Runtime
+query, plus exact private-flag dispatch in the npm entry and bundled CLI bootstrap
+before normal CLI/model or inherited update startup. Existing HTTP Session readers, writers, Hosted turn routes and Runtime
 worker dispatch remain on their established paths. The additive V26 work queue
 indexes support asset-key paging and Session/state reference selection.
 
@@ -240,3 +243,18 @@ persistence gates. H2/macOS results are separate evidence, not Linux acceptance.
 Complete two consecutive clean self-audit passes and independent review; attach
 the measured E2E report to the single PR. There are no open provider/scope
 choices; remaining acceptance evidence is recorded as pending until measured.
+
+Measured on 2026-10-01: build/typecheck/bundle, the 41 W1b unit tests, CLI
+bootstrap tests, relevant core/history tests, and focused Java tests/Checkstyle
+passed. An independent maintenance-process fallback used the actual packaged
+CLI child, packaged Java classes, MySQL 8.4.11 and a synthetic storage identity
+reader on macOS. It captured 35 Sessions across two Workspaces, 106 assets and
+56 filesystem entries; same-ID completion replay preserved the receipt and all
+artifact digests. Fresh verification separated compatible content from
+content-only verification after source loss. Interrupted and mid-run source
+drift remained `INVALIDATED/source_drift`, without sealing or authority writes.
+Original O2 protocol fixtures also passed on real MySQL with an in-memory object
+store. These fixtures do not prove live Harness/Worker/Broker or external OSS
+deployment acceptance. Real Linux identity, full deployed O2 capture, exhaustive
+physical interruption boundaries and stress-scale evidence remain pending,
+along with #13110's main-branch merge.

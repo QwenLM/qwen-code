@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -54,7 +55,8 @@ public final class WorkspaceRecoveryStore {
         if ("inspect".equals(mode)) {
             return;
         }
-        check(!id.equals(uuid(request, "fenceOperationId")) && request.path("mountRevision").canConvertToLong()
+        check(!id.equals(uuid(request, "fenceOperationId")) && request.path("mountRevision").isIntegralNumber()
+                && request.path("mountRevision").canConvertToLong()
                 && request.path("mountRevision").asLong() > 0
                 && request.path("mountRevision").asLong() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER, "invalid_request");
         for (String field : List.of("sourceRoot", "bundleRoot", "fileHistoryRoot", "nodeExecutable", "cliEntry")) {
@@ -138,12 +140,14 @@ public final class WorkspaceRecoveryStore {
                 case "sessionComplete" -> sessionComplete(params);
                 case "finish" -> finish(params);
                 case "failure" -> {
-                    mutable();
+                    check(Set.of("CAPTURING", "VERIFYING", "INVALIDATED").contains(ownedOperation().get("state")),
+                            "operation_not_writable");
                     recordFailure(text(params, "code"));
                     yield JSON.createObjectNode().put("recorded", true);
                 }
                 case "invalidate" -> {
-                    requireCapture();
+                    check("capture".equals(mode), "source_read_not_allowed");
+                    check(Set.of("CAPTURING", "INVALIDATED").contains(ownedOperation().get("state")), "operation_not_writable");
                     check("source_drift".equals(text(params, "code")), "invalid_request");
                     invalidate();
                     yield JSON.createObjectNode().put("state", "INVALIDATED");
@@ -167,7 +171,7 @@ public final class WorkspaceRecoveryStore {
     private void recordFailure(String code) {
         check(code.matches("[a-z0-9_]{1,64}"), "invalid_error_code");
         jdbc.update("UPDATE managed_workspace_recovery_operation SET last_error_code = ?, updated_at = CURRENT_TIMESTAMP(6)"
-                + " WHERE operation_id = ? AND state IN ('CAPTURING', 'VERIFYING', 'INVALIDATED')", code, id);
+                + " WHERE operation_id = ? AND state IN ('CAPTURING', 'VERIFYING')", code, id);
     }
 
     void workerFailed() {
@@ -498,8 +502,12 @@ public final class WorkspaceRecoveryStore {
                 .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "created_at");
-        var heads = jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
-                tenant, session);
+        var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                (result, index) -> {
+                    var value = new ColumnMapRowMapper().mapRow(result, index);
+                    value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));
+                    return value;
+                }, tenant, session);
         check(heads.size() <= 1, "source_drift");
         if (heads.isEmpty()) {
             source.putNull("head");

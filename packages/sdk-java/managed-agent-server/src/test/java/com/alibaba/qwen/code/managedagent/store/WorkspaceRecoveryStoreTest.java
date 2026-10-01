@@ -75,6 +75,8 @@ class WorkspaceRecoveryStoreTest {
         assertThatThrownBy(this::capture).hasMessageContaining("invalid_request");
         request.put("version", 1).put("mountRevision", ManagedSessionStoreModels.MAX_SAFE_COUNTER + 1);
         assertThatThrownBy(this::capture).hasMessageContaining("invalid_request");
+        request.put("mountRevision", 1.5);
+        assertThatThrownBy(this::capture).hasMessageContaining("invalid_request");
         ObjectNode ref = object().put("resourceId", "id").put("kind", "managed-definition")
                 .put("schemaVersion", 4294967297L).put("byteLength", 0).put("digest", "a".repeat(64));
         assertThatThrownBy(() -> WorkspaceRecoveryReader.validateRef(ref)).hasMessageContaining("invalid_resource_reference");
@@ -124,6 +126,9 @@ class WorkspaceRecoveryStoreTest {
         assertThatThrownBy(() -> capture.call("sessionComplete", object().put("sessionId", session).set("summary", object())))
                 .hasMessageContaining("source_drift");
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
+        capture.call("invalidate", object().put("code", "source_drift"));
+        capture.call("failure", object().put("code", "bundle_io_failed"));
         assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
         assertThat(jdbc.queryForObject("SELECT state FROM managed_workspace_recovery_session WHERE session_id = ?",
                 String.class, session)).isEqualTo("PENDING");

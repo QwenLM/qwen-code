@@ -182,6 +182,37 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
+  it.each(['entry', 'session'])(
+    'invalidates a changed source on retry after an interrupted %s commit',
+    async (boundary) => {
+      const f = await fixture();
+      let interrupted = false;
+      if (boundary === 'session') f.interrupt();
+      const rpc: RecoveryRpc = async (method, params) => {
+        if (method === 'invalidate') {
+          f.calls.push(method);
+          return { state: 'INVALIDATED' };
+        }
+        const result = await f.rpc(method, params);
+        if (boundary === 'entry' && method === 'asset' && !interrupted) {
+          const metadata = (params as { metadata: { path?: string } }).metadata;
+          if (metadata.path === 'workspace/file') {
+            interrupted = true;
+            throw new Error('injected_io_failure');
+          }
+        }
+        return result;
+      };
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'injected_io_failure',
+      );
+      await writeFile(join(f.context.request.sourceRoot, 'file'), 'changed');
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow('source_drift');
+      expect(f.calls).toContain('invalidate');
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
   it('invalidates a file source changed after its initial inventory', async () => {
     const f = await fixture();
     let changed = false;

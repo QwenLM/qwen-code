@@ -257,6 +257,12 @@ export class LocalRecoveryBundle {
     const candidateRoot = join(this.root, candidate);
     if (!(await lstat(candidateRoot)).isDirectory())
       throw new Error('missing_bundle_tree');
+    if (
+      (await this.rpc('assetLookup', {
+        key: recoveryAssetKey('tree', candidate),
+      })) !== null
+    )
+      await this.recheckTree(sourceRoot, candidate);
     let count = 0;
     // Symlink resolution is relative to the complete tree, not to each parent.
     for await (const original of tree(
@@ -265,6 +271,14 @@ export class LocalRecoveryBundle {
     )) {
       const suffix = original.path.slice(basename(sourceRoot).length);
       const name = `${candidate}${suffix}`;
+      const saved = await this.rpc('assetLookup', {
+        key: recoveryAssetKey('entry', name),
+      });
+      if (
+        saved !== null &&
+        recoveryJson(saved) !== recoveryJson({ ...original, path: name })
+      )
+        throw new Error('source_drift');
       const copy = await entry(this.root, name, candidateRoot);
       if (recoveryJson({ ...original, path: name }) !== recoveryJson(copy))
         throw new Error('snapshot_source_mismatch');

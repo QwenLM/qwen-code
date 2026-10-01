@@ -314,78 +314,80 @@ function sessionIO(
 }
 
 export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
-  const context = (await rpc('context', {})) as RecoveryContext;
-  if (
-    context.protocol !== 'workspace-recovery/1' ||
-    !['capture', 'verify'].includes(context.mode) ||
-    !/^[0-9a-f-]{36}$/.test(context.request.operationId)
-  )
-    throw new Error('invalid_recovery_context');
-  const bundle = new LocalRecoveryBundle(
-    context.request.bundleRoot,
-    context.request.operationId,
-    context.mode,
-    rpc,
-  );
-  await bundle.initialize(
-    context.request.sourceRoot,
-    context.request.fileHistoryRoot,
-  );
-  let manifest: Record<string, unknown> | undefined;
-  if (context.mode === 'verify') {
-    if (!context.capture) throw new Error('capture_not_sealed');
-    manifest = await bundle.readManifest(context.capture.manifestDigest);
+  let capturing = false;
+  try {
+    const context = (await rpc('context', {})) as RecoveryContext;
+    capturing = context.mode === 'capture';
     if (
-      manifest['provider'] !== 'local-workspace-bundle/1' ||
-      manifest['captureOperationId'] !== context.capture.operationId ||
-      manifest['sourceDigest'] !== context.sourceDigest ||
-      recoveryJson(manifest['registration']) !==
-        recoveryJson(context.registration)
+      context.protocol !== 'workspace-recovery/1' ||
+      !['capture', 'verify'].includes(context.mode) ||
+      !/^[0-9a-f-]{36}$/.test(context.request.operationId)
     )
-      throw new Error('bundle_manifest_mismatch');
-  } else await bundle.compareTree(context.request.sourceRoot, 'workspace');
-  const sourceHash = createHash('sha256');
-  let sessionCount = 0;
-  const sessionChunks = async function* () {
-    for await (const row of sources(rpc)) {
-      if (context.mode === 'capture')
-        await bundle.history(row.sessionId, context.request.fileHistoryRoot);
-      const summary = await verifyRecoverySession(
-        row.source,
-        sessionIO(row, bundle, rpc),
-      );
-      await rpc('sessionComplete', { sessionId: row.sessionId, summary });
-      const bytes = Buffer.from(`${row.sourceJson}\n`);
-      sourceHash.update(bytes);
-      sessionCount++;
-      yield bytes;
-    }
-  };
-  let sessionsIndex: BundleIndex;
-  if (context.mode === 'capture')
-    sessionsIndex = await bundle.publish(
-      '.w1-recovery/sessions.ndjson',
-      sessionChunks(),
+      throw new Error('invalid_recovery_context');
+    const bundle = new LocalRecoveryBundle(
+      context.request.bundleRoot,
+      context.request.operationId,
+      context.mode,
+      rpc,
     );
-  else {
-    let byteLength = 0;
-    for await (const bytes of sessionChunks()) byteLength += bytes.length;
-    sessionsIndex = manifest!['sessions'] as BundleIndex;
+    await bundle.initialize(
+      context.request.sourceRoot,
+      context.request.fileHistoryRoot,
+    );
+    let manifest: Record<string, unknown> | undefined;
+    if (context.mode === 'verify') {
+      if (!context.capture) throw new Error('capture_not_sealed');
+      manifest = await bundle.readManifest(context.capture.manifestDigest);
+      if (
+        manifest['provider'] !== 'local-workspace-bundle/1' ||
+        manifest['captureOperationId'] !== context.capture.operationId ||
+        manifest['sourceDigest'] !== context.sourceDigest ||
+        recoveryJson(manifest['registration']) !==
+          recoveryJson(context.registration)
+      )
+        throw new Error('bundle_manifest_mismatch');
+    } else await bundle.compareTree(context.request.sourceRoot, 'workspace');
+    const sourceHash = createHash('sha256');
+    let sessionCount = 0;
+    const sessionChunks = async function* () {
+      for await (const row of sources(rpc)) {
+        if (context.mode === 'capture')
+          await bundle.history(row.sessionId, context.request.fileHistoryRoot);
+        const summary = await verifyRecoverySession(
+          row.source,
+          sessionIO(row, bundle, rpc),
+        );
+        await rpc('sessionComplete', { sessionId: row.sessionId, summary });
+        const bytes = Buffer.from(`${row.sourceJson}\n`);
+        sourceHash.update(bytes);
+        sessionCount++;
+        yield bytes;
+      }
+    };
+    let sessionsIndex: BundleIndex;
+    if (context.mode === 'capture')
+      sessionsIndex = await bundle.publish(
+        '.w1-recovery/sessions.ndjson',
+        sessionChunks(),
+      );
+    else {
+      let byteLength = 0;
+      for await (const bytes of sessionChunks()) byteLength += bytes.length;
+      sessionsIndex = manifest!['sessions'] as BundleIndex;
+      if (
+        sessionsIndex.byteLength !== byteLength ||
+        sessionsIndex.count !== sessionCount
+      )
+        throw new Error('bundle_index_mismatch');
+      await bundle.checkIndex(sessionsIndex);
+    }
     if (
-      sessionsIndex.byteLength !== byteLength ||
-      sessionsIndex.count !== sessionCount
+      sourceHash.digest('hex') !== context.sourceDigest ||
+      sessionCount !== context.sessionCount ||
+      sessionsIndex.digest !== context.sourceDigest
     )
-      throw new Error('bundle_index_mismatch');
-    await bundle.checkIndex(sessionsIndex);
-  }
-  if (
-    sourceHash.digest('hex') !== context.sourceDigest ||
-    sessionCount !== context.sessionCount ||
-    sessionsIndex.digest !== context.sourceDigest
-  )
-    throw new Error('source_set_mismatch');
-  if (context.mode === 'capture') {
-    try {
+      throw new Error('source_set_mismatch');
+    if (context.mode === 'capture') {
       await bundle.recheckTree(context.request.sourceRoot, 'workspace');
       for await (const row of sources(rpc)) {
         await bundle.recheckHistory(
@@ -393,91 +395,89 @@ export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
           context.request.fileHistoryRoot,
         );
       }
-    } catch (error) {
-      if (error instanceof Error && error.message === 'source_drift') {
-        await rpc('invalidate', { code: 'source_drift' });
-        throw new Error('source_drift');
-      }
-      throw error;
     }
-  }
-  const entries = await bundle.census();
-  const assetChunks = async function* () {
-    let afterKey: string | null = null;
-    do {
-      const page = (await rpc('assetPage', { afterKey })) as {
-        assets: Array<{ key: string; metadata: unknown }>;
-        nextKey: string | null;
-      };
-      for (const asset of page.assets) {
-        if (context.mode === 'verify') await rpc('asset', asset);
-        yield Buffer.from(`${recoveryJson({ version: 1, ...asset })}\n`);
-      }
-      afterKey = page.nextKey;
-    } while (afterKey !== null);
-  };
-  let assetsIndex: BundleIndex;
-  if (context.mode === 'capture')
-    assetsIndex = await bundle.publish(
-      '.w1-recovery/assets.ndjson',
-      assetChunks(),
-    );
-  else {
-    const hash = createHash('sha256');
-    let byteLength = 0;
-    let count = 0;
-    for await (const bytes of assetChunks()) {
-      hash.update(bytes);
-      byteLength += bytes.length;
-      count++;
-    }
-    assetsIndex = manifest!['assets'] as BundleIndex;
-    if (
-      assetsIndex.digest !== hash.digest('hex') ||
-      assetsIndex.byteLength !== byteLength ||
-      assetsIndex.count !== count
-    )
-      throw new Error('bundle_index_mismatch');
-    await bundle.checkIndex(assetsIndex);
-  }
-  let manifestDigest: string;
-  if (context.mode === 'capture') {
-    manifest = {
-      version: 1,
-      provider: 'local-workspace-bundle/1',
-      tenantId: context.request.tenantId,
-      storageId: context.request.storageId,
-      captureOperationId: context.request.operationId,
-      registration: context.registration,
-      fenceOperationId: context.request.fenceOperationId,
-      mountRevision: context.request.mountRevision,
-      sourceDigest: context.sourceDigest,
-      sessionCount,
-      sessions: sessionsIndex,
-      assets: assetsIndex,
-      activation: false,
+    const entries = await bundle.census();
+    const assetChunks = async function* () {
+      let afterKey: string | null = null;
+      do {
+        const page = (await rpc('assetPage', { afterKey })) as {
+          assets: Array<{ key: string; metadata: unknown }>;
+          nextKey: string | null;
+        };
+        for (const asset of page.assets) {
+          if (context.mode === 'verify') await rpc('asset', asset);
+          yield Buffer.from(`${recoveryJson({ version: 1, ...asset })}\n`);
+        }
+        afterKey = page.nextKey;
+      } while (afterKey !== null);
     };
-    manifestDigest = (
-      await bundle.publish(
-        '.w1-recovery/manifest.json',
-        (async function* () {
-          yield Buffer.from(`${recoveryJson(manifest)}\n`);
-        })(),
+    let assetsIndex: BundleIndex;
+    if (context.mode === 'capture')
+      assetsIndex = await bundle.publish(
+        '.w1-recovery/assets.ndjson',
+        assetChunks(),
+      );
+    else {
+      const hash = createHash('sha256');
+      let byteLength = 0;
+      let count = 0;
+      for await (const bytes of assetChunks()) {
+        hash.update(bytes);
+        byteLength += bytes.length;
+        count++;
+      }
+      assetsIndex = manifest!['assets'] as BundleIndex;
+      if (
+        assetsIndex.digest !== hash.digest('hex') ||
+        assetsIndex.byteLength !== byteLength ||
+        assetsIndex.count !== count
       )
-    ).digest;
-  } else manifestDigest = context.capture!.manifestDigest;
-  await bundle.census();
-  return rpc('finish', {
-    manifestDigest,
-    result: {
-      contentVerified: true,
-      activation: false,
-      sessionCount,
-      entries,
-      assets: assetsIndex.count,
-      provider: 'local-workspace-bundle/1',
-    },
-  });
+        throw new Error('bundle_index_mismatch');
+      await bundle.checkIndex(assetsIndex);
+    }
+    let manifestDigest: string;
+    if (context.mode === 'capture') {
+      manifest = {
+        version: 1,
+        provider: 'local-workspace-bundle/1',
+        tenantId: context.request.tenantId,
+        storageId: context.request.storageId,
+        captureOperationId: context.request.operationId,
+        registration: context.registration,
+        fenceOperationId: context.request.fenceOperationId,
+        mountRevision: context.request.mountRevision,
+        sourceDigest: context.sourceDigest,
+        sessionCount,
+        sessions: sessionsIndex,
+        assets: assetsIndex,
+        activation: false,
+      };
+      manifestDigest = (
+        await bundle.publish(
+          '.w1-recovery/manifest.json',
+          (async function* () {
+            yield Buffer.from(`${recoveryJson(manifest)}\n`);
+          })(),
+        )
+      ).digest;
+    } else manifestDigest = context.capture!.manifestDigest;
+    await bundle.census();
+    return await rpc('finish', {
+      manifestDigest,
+      result: {
+        contentVerified: true,
+        activation: false,
+        sessionCount,
+        entries,
+        assets: assetsIndex.count,
+        provider: 'local-workspace-bundle/1',
+      },
+    });
+  } catch (error) {
+    if (capturing && error instanceof Error && error.message === 'source_drift')
+      await rpc('invalidate', { code: 'source_drift' });
+    throw error;
+  }
 }
 
 export async function runWorkspaceRecoveryWorker(): Promise<void> {
