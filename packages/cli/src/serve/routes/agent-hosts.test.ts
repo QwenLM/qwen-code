@@ -248,6 +248,20 @@ it('answers a store failure on the pickup poll with a fixed message', async () =
   expect(JSON.stringify(response.body)).not.toContain('/private');
 });
 
+it('answers a busy store on the pickup poll as retryable 503', async () => {
+  // Lock contention is transient; a 409 would tell the client the refusal is
+  // permanent and it would stop re-polling.
+  pickup.mockRejectedValue(
+    Object.assign(new Error('locked'), { code: 'ELOCKED' }),
+  );
+
+  const response = await setup().poll();
+
+  expect(response.status).toBe(503);
+  expect(response.body).toEqual({ error: 'Agent Host store busy.' });
+  expect(JSON.stringify(response.body)).not.toContain('/private');
+});
+
 it('answers a store failure on result with a fixed message', async () => {
   applyResult.mockRejectedValue(
     new Error('Malformed Agent Host registry in /private/project'),
@@ -263,5 +277,26 @@ it('answers a store failure on result with a fixed message', async () => {
 
   expect(response.status).toBe(409);
   expect(response.body).toEqual({ error: 'Agent Host result refused.' });
+  expect(JSON.stringify(response.body)).not.toContain('/private');
+});
+
+it('answers a busy store on result as retryable 503', async () => {
+  // A 409 here is read as permanent by the client: it would rewrite a
+  // finished answer as failed, or give up and let the still-held lease hand
+  // the run to the next pickup, silently re-running it.
+  applyResult.mockRejectedValue(
+    Object.assign(new Error('locked'), { code: 'ELOCKED' }),
+  );
+
+  const response = await setup().result({
+    threadId: 'thread',
+    runId: 'run',
+    leaseId: 'lease',
+    attempt: 1,
+    status: 'completed',
+  });
+
+  expect(response.status).toBe(503);
+  expect(response.body).toEqual({ error: 'Agent Host store busy.' });
   expect(JSON.stringify(response.body)).not.toContain('/private');
 });

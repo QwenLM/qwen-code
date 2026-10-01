@@ -31,6 +31,11 @@ function body(req: Request): Record<string, unknown> {
   return typeof req.body === 'object' && req.body !== null ? req.body : {};
 }
 
+/** proper-lockfile's lock contention: transient busy, never a refusal. */
+function isStoreBusy(error: unknown): boolean {
+  return (error as { code?: string }).code === 'ELOCKED';
+}
+
 function runtimeFor(registry: WorkspaceRegistry, workspaceId: string) {
   return registry.list().find((runtime) => runtime.workspaceId === workspaceId);
 }
@@ -466,6 +471,11 @@ export function registerAgentHostTransportRoutes(
         // The store's message can name coordinator-side paths, so it stays
         // off the wire, same as the fixed answers enroll and heartbeat give.
         debugLogger.warn('Agent Host pickup failed:', error);
+        if (isStoreBusy(error)) {
+          // 409 reads as permanent to the client; a busy store is transient.
+          res.status(503).json({ error: 'Agent Host store busy.' });
+          return;
+        }
         res.status(409).json({ error: 'Agent Host pickup refused.' });
       }
     },
@@ -505,6 +515,13 @@ export function registerAgentHostTransportRoutes(
         // The store's message can name coordinator-side paths, so it stays
         // off the wire, same as the fixed answers enroll and heartbeat give.
         debugLogger.warn('Agent Host result failed:', error);
+        if (isStoreBusy(error)) {
+          // 409 reads as permanent to the client: it would rewrite a
+          // finished answer as failed — or give up and let the still-held
+          // lease hand the run to the next pickup, silently re-running it.
+          res.status(503).json({ error: 'Agent Host store busy.' });
+          return;
+        }
         res.status(409).json({ error: 'Agent Host result refused.' });
       }
     },

@@ -156,6 +156,23 @@ function isPermanentRejection(error: unknown): boolean {
   );
 }
 
+/**
+ * True only for the agent-host route's own credential rejection. A bare 401
+ * can also come from the coordinator's bearer gate while the runtime is
+ * still starting, or while collaboration is off and the routes are
+ * unmounted — neither says anything about this Host's credential, and
+ * treating them as revocation deletes the credential and strands the Host
+ * until an operator re-joins it by hand. The string is the route's pinned
+ * answer (`routes/agent-hosts.ts`).
+ */
+export function isRevocation(error: unknown): boolean {
+  return (
+    (error as { status?: number } | null | undefined)?.status === 401 &&
+    (error as Error | null | undefined)?.message ===
+      'Invalid Agent Host credential.'
+  );
+}
+
 async function pickup(
   credential: AgentHostCredential,
   waitMs = 25_000,
@@ -305,7 +322,7 @@ async function executeAssignment(
   } = {
     sequence: 1,
     stage: 'starting',
-    detail: '执行器已接单，正在启动',
+    detail: 'Assignment accepted; starting the executor',
     outputText: '',
     thoughtText: '',
   };
@@ -452,7 +469,7 @@ async function executeAssignment(
         return total === undefined ? undefined : Math.max(0, total - baseline);
       };
     }
-    report('waiting', 'Qwen Code 已接单，等待模型回复');
+    report('waiting', 'Qwen Code accepted the task; waiting for the model.');
     await options.bridge.sendPrompt(
       sessionId,
       {
@@ -471,7 +488,15 @@ async function executeAssignment(
       );
       if (turn?.promptId === promptId) {
         if (turn.state === 'error' || turn.state === 'cancelled') {
-          throw new Error(turn.error?.message ?? 'Managed Agent cancelled.');
+          const message = turn.error?.message;
+          // A provider failure can arrive as the JSON-RPC error object
+          // itself; stringifying the field keeps the real cause on the wire
+          // instead of "[object Object]".
+          throw new Error(
+            typeof message === 'string' && message
+              ? message
+              : (JSON.stringify(turn.error) ?? 'Managed Agent cancelled.'),
+          );
         }
         if (turn.state === 'completed') {
           summary = turn.resultText?.trim();
@@ -735,11 +760,15 @@ async function connectAgentHost(
       offline = false;
       return true;
     } catch (error) {
-      const unauthorized = (error as { status?: number }).status === 401;
-      if (unauthorized) {
+      // Only the route's own credential rejection is a revocation; a bare
+      // 401 also comes from the coordinator's bearer gate while the runtime
+      // is still starting (or when collaboration is off), and deleting the
+      // credential then strands the Host until someone re-joins it by hand.
+      if (isRevocation(error)) {
         await fs.rm(filePath, { force: true }).catch(() => undefined);
+        stop.abort(error);
       }
-      if (unauthorized || options.generationGuard?.closed) {
+      if (options.generationGuard?.closed) {
         stop.abort(error);
       }
       if (stop.signal.aborted) return false;
@@ -809,15 +838,12 @@ async function connectAgentHost(
             stop.signal,
           );
         } catch (error) {
-          if (
-            options.generationGuard?.closed ||
-            stop.signal.aborted ||
-            (error as { status?: number }).status === 401
-          ) {
-            if ((error as { status?: number }).status === 401) {
-              await fs.rm(filePath, { force: true }).catch(() => undefined);
-              stop.abort(error);
-            }
+          if (isRevocation(error)) {
+            await fs.rm(filePath, { force: true }).catch(() => undefined);
+            stop.abort(error);
+            return;
+          }
+          if (options.generationGuard?.closed || stop.signal.aborted) {
             return;
           }
           writeStderrLine(

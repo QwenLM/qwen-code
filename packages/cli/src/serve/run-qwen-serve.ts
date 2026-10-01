@@ -8787,12 +8787,20 @@ async function runQwenServeImpl(
       // through (and start the runtime) exactly like the warm app would.
       // Dynamic import keeps web-shell-static out of the serve fast-path
       // static closure (see the import-boundary guards in fast-path.test.ts).
-      isPreAuthRequest: webShellMounted
-        ? (req) =>
-            import('./web-shell-static.js').then((webShellStatic) =>
-              webShellStatic.isPreAuthWebShellRequest(req),
-            )
-        : undefined,
+      // Agent Host transport routes authenticate with their own scoped
+      // credential on the mounted route; during a coordinator restart the
+      // bearer gate would answer a 401 the Host could misread as revocation,
+      // so those requests instead wait for the runtime like the warm path.
+      isPreAuthRequest: async (req) => {
+        if (req.path.startsWith('/agent-hosts/')) {
+          return true;
+        }
+        if (!webShellMounted) {
+          return false;
+        }
+        const webShellStatic = await import('./web-shell-static.js');
+        return webShellStatic.isPreAuthWebShellRequest(req);
+      },
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
