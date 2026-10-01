@@ -1668,20 +1668,6 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('startChat — deferred tools', () => {
-    // Pulls the registry mock used by the surrounding suite so each test
-    // can stub the deferred-summary + bridge availability per case.
-    function getRegistryMock() {
-      return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
-        getFunctionDeclarations: ReturnType<typeof vi.fn>;
-        getDeferredToolSummary: ReturnType<typeof vi.fn>;
-        getTool: ReturnType<typeof vi.fn>;
-        isDeferredToolRevealed: ReturnType<typeof vi.fn>;
-        isPermissionDeferred: ReturnType<typeof vi.fn>;
-        revealDeferredTool: ReturnType<typeof vi.fn>;
-        preloadDeferredToolsWithinBudget: ReturnType<typeof vi.fn>;
-      };
-    }
-
     const systemInstruction = () =>
       client.getChat()['generationConfig'].systemInstruction as string;
     /** Starts a chat over a deferred-tool registry; returns its preload spy. */
@@ -1694,19 +1680,14 @@ describe('Gemini Client (client.ts)', () => {
       `\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\n${context}\n</qwen:session-start-context>`;
 
     it('records bridge-reachable Agent for prompt guidance', async () => {
-      const reg = getRegistryMock();
+      const reg = deferredToolRegistry(bridgeOnly, [
+        ToolNames.AGENT,
+        'delegate work',
+      ]);
       reg.getFunctionDeclarations.mockReturnValue([
         { name: ToolNames.TOOL_SEARCH },
         { name: ToolNames.TOOL_CALL },
       ]);
-      reg.getDeferredToolSummary.mockReturnValue([
-        { name: ToolNames.AGENT, description: 'delegate work' },
-      ]);
-      reg.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
-          ? ({} as never)
-          : null,
-      );
       const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
       setReachable.mockClear();
 
@@ -1793,10 +1774,9 @@ describe('Gemini Client (client.ts)', () => {
       // declared nor bridge-reachable and gates the Agent (and, via the
       // shared conjunct, Codebase Search) guidance out of the system prompt
       // for a session that declares agent to the model.
-      const reg = getRegistryMock();
-      reg.getTool.mockReturnValue(null); // Both bridge tools absent.
-      reg.getDeferredToolSummary.mockReturnValue([
-        { name: ToolNames.AGENT, description: 'delegate work' },
+      const reg = deferredToolRegistry(() => null, [
+        ToolNames.AGENT,
+        'delegate work',
       ]);
       reg.isPermissionDeferred.mockReturnValue(false);
       // The declaration list picks agent up only once the eager reveal fires.
@@ -1822,17 +1802,12 @@ describe('Gemini Client (client.ts)', () => {
       // tools.disabled: ['agent'] removes the tool entirely — not declared,
       // not in the deferred summary — so no path reaches it and the prompt
       // must gate the Agent guidance away.
-      const reg = getRegistryMock();
+      const reg = deferredToolRegistry(bridgeOnly);
       reg.getFunctionDeclarations.mockReturnValue([
         { name: ToolNames.TOOL_SEARCH },
         { name: ToolNames.TOOL_CALL },
       ]);
       reg.getDeferredToolSummary.mockReturnValue([]);
-      reg.getTool.mockImplementation((name: string) =>
-        name === ToolNames.TOOL_SEARCH || name === ToolNames.TOOL_CALL
-          ? ({} as never)
-          : null,
-      );
       const setReachable = vi.mocked(mockConfig.setPromptAgentReachable);
       setReachable.mockClear();
 
@@ -1845,12 +1820,11 @@ describe('Gemini Client (client.ts)', () => {
       // The incomplete-bridge fallback deliberately withholds permission-
       // deferred tools from the eager reveal, so this session can neither
       // declare agent nor reach it through the (absent) bridge.
-      const reg = getRegistryMock();
-      reg.getTool.mockReturnValue(null); // Both bridge tools absent.
-      reg.getFunctionDeclarations.mockReturnValue([]);
-      reg.getDeferredToolSummary.mockReturnValue([
-        { name: ToolNames.AGENT, description: 'delegate work' },
+      const reg = deferredToolRegistry(() => null, [
+        ToolNames.AGENT,
+        'delegate work',
       ]);
+      reg.getFunctionDeclarations.mockReturnValue([]);
       reg.isPermissionDeferred.mockImplementation(
         (name: string) => name === ToolNames.AGENT,
       );

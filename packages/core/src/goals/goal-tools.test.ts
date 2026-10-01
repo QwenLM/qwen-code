@@ -577,13 +577,31 @@ describe('UpdateGoalTool', () => {
   });
 
   it('carries the blocker rules into the code-mode declaration', () => {
+    // The predicate is production's `isDeferredAndHidden`, true for this tool.
+    // With `tool_search` unavailable the exec declaration is the model's only
+    // surface, so the signature and its blocker rules have to survive there.
     const plan = planCodeModeBindings(
       [new UpdateGoalTool(makeConfig({}))],
-      () => false,
+      () => true,
     );
     const declaration = buildExecDescription(plan);
     expect(declaration).toContain('three consecutive Goal turns');
     expect(declaration).toContain('never for difficulty');
+  });
+
+  it('routes the deferred Goal tool to the bridge in a default code-mode session', () => {
+    // The other corner, and the one production defaults to: the tool is
+    // deferred and `tool_search` is available, so the exec declaration drops
+    // its signature and points at the discovery path instead.
+    const plan = planCodeModeBindings(
+      [new UpdateGoalTool(makeConfig({}))],
+      () => true,
+    );
+    const declaration = buildExecDescription(plan, true);
+    expect(declaration).toContain(
+      'Deferred tool signatures and descriptions are omitted below',
+    );
+    expect(declaration).not.toContain('three consecutive Goal turns');
   });
 
   it('repairs a mistyped value on the object the invocation executes with, deprecated key or not', async () => {
@@ -1119,13 +1137,19 @@ describe('ProposeGoalTool', () => {
     ]) {
       expect(tool.description).toContain(fragment);
     }
-    const declaration = buildExecDescription(
-      planCodeModeBindings([tool], () => false),
-    );
+    const plan = planCodeModeBindings([tool], () => true);
+    const declaration = buildExecDescription(plan);
     expect(declaration).toContain('Done when');
     expect(declaration).toContain(
       String(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS),
     );
+    // A default code-mode session has the bridge, so the signature moves out
+    // of the exec declaration and the discovery path is announced instead.
+    const bridged = buildExecDescription(plan, true);
+    expect(bridged).toContain(
+      'Deferred tool signatures and descriptions are omitted below',
+    );
+    expect(bridged).not.toContain('Done when');
   });
 
   it('validates the objective', () => {
@@ -1155,13 +1179,17 @@ describe('ProposeGoalTool', () => {
   it('keeps what the Goal tools cost every request inside a budget', () => {
     // get_goal and update_goal are registered in every session, Goal or not.
     // Since this change they are natively deferred, so their schemas ride
-    // along with a model request only once they are revealed — `tools.eager`,
-    // `tools.visible`, or the incomplete-bridge fallback. The figure is what
-    // the three tools cost today plus room for a sentence; growing past it
-    // should be a decision, not drift. (5 860 before the descriptions were
-    // trimmed; the deferred discovery catalog renders
-    // `description.split('\n')[0]` only, so each description keeps one short
-    // self-contained first line and the body opens without restating it.)
+    // along with a model request only once they are revealed or declared —
+    // an explicit reveal, `tools.visible`, the incomplete-bridge eager
+    // fallback, or the `tools.toolSearch.threshold` preload (which does cover
+    // natively deferred tools). Listing one in `tools.eager` does NOT force it
+    // resident: that allowlist only clears the permission-deferred flag, and
+    // these tools defer natively. The figure is what the three tools cost
+    // today plus room for a sentence; growing past it should be a decision, not
+    // drift. (5 860 before the descriptions were trimmed; the deferred
+    // discovery catalog renders `description.split('\n')[0]` only, so each
+    // description keeps one short self-contained first line and the body opens
+    // without restating it.)
     const tools = [
       new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
       new UpdateGoalTool(makeConfig({})),
