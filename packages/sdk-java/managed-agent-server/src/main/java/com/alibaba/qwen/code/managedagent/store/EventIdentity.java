@@ -32,7 +32,7 @@ public final class EventIdentity {
                     itemId(data, StoreModels.inputItemId(turnId)), null);
             case "item.output_text.delta", "item.reasoning.delta" ->
                     textIdentity(type, turnId, sequence, data, previous);
-            case "item.tool_call.updated" -> new Identity(type,
+            case "item.tool_call.updated", "item.tool_result.updated" -> new Identity(type,
                     toolItemId(turnId, sequence, data), null);
             default -> new Identity(type, null, null);
         };

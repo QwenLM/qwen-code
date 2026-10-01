@@ -164,6 +164,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-context-worker.ts',
+    {
+      reason:
+        'Managed Runtime startup selects its deployment-owned MCP manifest from the process environment; server definitions are then scoped by tenant and workspace.',
+      accesses: { 'key:QWEN_MANAGED_MCP_CONFIG': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-mcp-runtime.ts',
+    {
+      reason:
+        'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
+      accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
@@ -295,6 +311,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_CLI': 1,
         'key:QWEN_CODE_MANAGED_NPM_PIN': 1,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
+    {
+      reason:
+        'A daemon-wide ambient usage-statistics opt-out is a process-scoped ' +
+        'operator decision that must close the gate for every hosted ' +
+        'workspace; an ambient opt-in belongs to another hosted repository.',
+      accesses: { 'key:QWEN_USAGE_STATISTICS_ENABLED': 2 },
     },
   ],
   [

@@ -21,6 +21,7 @@ import {
   type AgentLiveEvent,
   type AgentStreamState,
 } from './agent-events';
+import type { AgentShare, AgentShareSummary } from './share-agent-dialog';
 
 interface CreateThreadResult {
   id: string;
@@ -31,6 +32,9 @@ export interface ThreadsApi {
     agents: WorkspaceAgentSummaryView[];
     capabilities?: AgentCapabilitiesView;
   }>;
+  createShare?(agentId: string): Promise<AgentShare>;
+  listShares?(agentId: string): Promise<{ shares: AgentShareSummary[] }>;
+  revokeShare?(agentId: string, callerId: string): Promise<unknown>;
   listThreads(): Promise<{ threads: ThreadSummaryView[] }>;
   getThread(id: string): Promise<ThreadDetailView>;
   createAgent(input: NewWorkspaceAgent): Promise<unknown>;
@@ -93,6 +97,15 @@ export function createThreadsHttpApi(
 
   return {
     listAgents: () => request('/agents'),
+    createShare: (agentId) =>
+      post(`/agents/${encodeURIComponent(agentId)}/shares`, {}),
+    listShares: (agentId) =>
+      request(`/agents/${encodeURIComponent(agentId)}/shares`),
+    revokeShare: (agentId, callerId) =>
+      request(
+        `/agents/${encodeURIComponent(agentId)}/shares/${encodeURIComponent(callerId)}`,
+        { method: 'DELETE' },
+      ),
     listThreads: () => request('/threads'),
     getThread: (id) => request(`/threads/${encodeURIComponent(id)}`),
     createAgent: (input) => post('/agents', input),

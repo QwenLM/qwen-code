@@ -180,7 +180,10 @@ unknown, can be read through its persisted owner, and cannot be replayed.
 Broker HTTP start, read and cancel ask the original worker about a provider
 execution left UNKNOWN, as they do for a tool v3 one, so its retained result
 settles the execution without a second dispatch, and a cancellation reaches the
-invocation the worker is still running. Existing immediate Tool v2 behavior
+invocation the worker is still running. The ask is best-effort: when the
+original Runtime cannot be asked or cannot answer, whatever the reason, the
+record keeps its own `runtime_broker_execution_unknown` answer rather than the
+error of the attempt. Existing immediate Tool v2 behavior
 stays available independently.
 
 The raw reserve/start path from #12831 remains available on the same Broker

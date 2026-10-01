@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -26,6 +27,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
@@ -91,6 +93,52 @@ class RuntimeBrokerServiceTest {
             assertEquals(1, fixture.transport.acquireCalls.get());
             acquire.complete(null);
             assertSame(join(first), join(second));
+        }
+    }
+
+    @Test
+    void failedAdoptedReleaseLeavesReclamationReachable() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            assertEquals(RuntimeSessionRecord.State.ACQUIRING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.provisioner.usable = false;
+            RuntimeBrokerException releaseFailure = failure(fixture.service.release("blocked", "blocked"));
+            assertEquals("runtime_reconciliation_required", releaseFailure.getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST, fixture.bindingRepository.findById("binding-1").getState());
+            fixture.provisioner.usable = true;
+            fixture.transport.acquireResult = CompletableFuture.completedFuture(null);
+            RuntimeBrokerException acquireFailure = failure(fixture.service.acquire("blocked", "blocked", "bootstrap"));
+            assertEquals("runtime_broker_runtime_lost", acquireFailure.getCode(),
+                    "missing durable stop proof must fail at reclamation, not a stale session admission guard");
+            assertEquals(1, fixture.provisioner.calls.get(), "without writer-stop proof no new Runtime may be provisioned");
+        }
+    }
+
+    @Test
+    void releasesAnIncompleteAcquisitionOnlyAfterOriginalTransportConfirmation() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap"));
+            fixture.transport.acquireResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_busy", "busy", false));
+            assertEquals("workspace_busy", failure(fixture.service.acquire("blocked", "blocked", "bootstrap")).getCode());
+            fixture.transport.releaseResult = CompletableFuture.failedFuture(new IllegalStateException("lost release"));
+            assertEquals("runtime_session_release_failed", failure(fixture.service.release("blocked", "blocked")).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            fixture.transport.releaseResult = CompletableFuture.completedFuture(true);
+            assertTrue(join(fixture.service.release("blocked", "blocked")));
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "blocked").getState());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            assertEquals("blocked", fixture.transport.lastSession.getRuntimeSessionId());
+            assertEquals(2, fixture.transport.acquireCalls.get());
+            assertEquals(2, fixture.transport.releaseCalls.get());
+            assertEquals(1, fixture.provisioner.calls.get());
         }
     }
 
@@ -943,6 +991,138 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void inFlightDeferredV3AcknowledgementBlocksRelease() {
+        Map<String, Object> manifest = Map.of("resourceId", "manifest", "kind",
+                "managed-tool-result-manifest", "schemaVersion", 1,
+                "byteLength", 1, "digest", "a".repeat(64));
+        Map<String, Object> receipt = Map.of("executionCallId", "durable-v3",
+                "manifest", manifest, "deliveryStatus", "committed",
+                "historyRevision", 1);
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                throw new AssertionError("No dispatch expected");
+            }
+
+            @Override
+            public Map<String, Object> receipt(ToolExecutionRecord execution) {
+                return receipt;
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            ToolExecutionRecord prepared = fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("durable-v3", "v3-key",
+                            session.getBindingId(), session.getRuntimeGeneration(),
+                            "harness", "runtime", "prompt", "call", "digest",
+                            Map.of("sessionId", "runtime", "promptId", "prompt",
+                                    "callId", "call", "argsDigest", "canonical",
+                                    "payloadDigest", "digest", "dispatchMode", "deferred_v3",
+                                    "publicationId", "pub-1")));
+            ToolExecutionRecord claimed = fixture.executionRepository.claimDispatch(
+                    "durable-v3", "other-broker", Duration.ofMinutes(1));
+            fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withResult(Map.of("executionStatus", "success"), 1, START),
+                    "other-broker", claimed.getDispatchGeneration());
+            Map<String, Object> conflicting = new HashMap<>(receipt);
+            conflicting.put("deliveryStatus", "blocked");
+            assertEquals("runtime_execution_conflict", failure(
+                    fixture.service.acknowledgeExecution("harness", "runtime",
+                            prepared.getExecutionCallId(), conflicting)).getCode());
+            CompletableFuture<Map<String, Object>> acknowledgement = new CompletableFuture<>();
+            fixture.transport.acknowledgeV3Result = acknowledgement;
+
+            CompletionStage<Map<String, Object>> pending = fixture.service.acknowledgeExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), receipt);
+            assertEquals("runtime_session_busy", failure(
+                    fixture.service.release("harness", "runtime")).getCode());
+            acknowledgement.complete(Map.of("state", "settled"));
+            assertEquals("settled", join(pending).get("state"));
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+        }
+    }
+
+    @Test
+    void deferredV3SettlesOnlyAnExplicitNotStartedAnswer() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\"}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                return new RuntimePublicationGrant(publicationId, token, "https://publisher.test",
+                        Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "managed"),
+                                "turnId", "prompt", "executionCallId", execution.getExecutionCallId(),
+                                "bindingGeneration", "1"));
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            Map<String, Object> notStarted = new java.util.LinkedHashMap<>();
+            notStarted.put("executionStatus", "not_started");
+            notStarted.put("capture", null);
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(Map.of(
+                    "state", "settled", "result", notStarted));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "key", reference, digest, "pub-1"));
+
+            join(fixture.service.startExecution("harness", "runtime",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+
+            ToolExecutionRecord settled = awaitExecution(fixture.executionRepository,
+                    prepared.getExecutionCallId(), ToolExecutionRecord.State.SETTLED);
+            assertEquals("not_started", settled.getExecutionStatus());
+            assertTrue(settled.getResult().containsKey("capture"));
+            assertNull(settled.getResult().get("capture"));
+            assertEquals(1, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.statusV3Calls.get());
+
+            fixture.transport.executeV3Result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "workspace_unavailable", "remote refusal", false));
+            ToolExecutionRecord next = join(fixture.service.prepareExecution(
+                    "harness", "runtime", "next-key", reference, digest, "pub-2"));
+            join(fixture.service.startExecution("harness", "runtime",
+                    next.getExecutionCallId(), payload, "pub-2", "token"));
+            assertEquals(ToolExecutionRecord.State.UNKNOWN, awaitExecution(fixture.executionRepository,
+                    next.getExecutionCallId(), ToolExecutionRecord.State.UNKNOWN).getState());
+            assertEquals(2, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.statusV3Calls.get());
+        }
+    }
+
+    @Test
+    void cancelUnknownDeferredV3CallsTheOriginalRuntime() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            ToolExecutionRecord prepared = fixture.executionRepository.findOrCreate(
+                    ToolExecutionRecord.prepared("durable-v3", "v3-key",
+                            session.getBindingId(), session.getRuntimeGeneration(),
+                            "harness", "runtime", "prompt", "call", "digest",
+                            Map.of("sessionId", "runtime", "promptId", "prompt",
+                                    "callId", "call", "argsDigest", "canonical",
+                                    "payloadDigest", "digest", "dispatchMode", "deferred_v3",
+                                    "publicationId", "pub-1")));
+            ToolExecutionRecord claimed = fixture.executionRepository.claimDispatch(
+                    "durable-v3", "other-broker", Duration.ofMinutes(1));
+            ToolExecutionRecord executing = fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                    "other-broker", claimed.getDispatchGeneration());
+            fixture.executionRepository.compareAndSet(executing, executing.withUnknown(),
+                    "other-broker", executing.getDispatchGeneration());
+
+            join(fixture.service.cancelExecution("harness", "runtime",
+                    prepared.getExecutionCallId()));
+            assertEquals(1, fixture.transport.cancelV3Calls.get());
+        }
+    }
+
+    @Test
     void controlUsesTheExistingPrivateOperationAllowlist() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime",
@@ -959,6 +1139,74 @@ class RuntimeBrokerServiceTest {
                             Map.of("kind", "status")));
             assertEquals("runtime_control_operation_invalid",
                     error.getCode());
+        }
+    }
+
+    @Test
+    void mcpControlsStayWithTheAcquiredSessionAndNeverProvisionForLookup() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String kind : List.of("mcp-configure", "mcp-discover", "mcp-status", "mcp-cancel", "mcp-release")) {
+                Map<String, Object> operation = Map.of("kind", kind, "operationId", "operation",
+                        "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+                assertEquals("ok", join(fixture.service.control("harness", "runtime", operation)));
+                assertEquals(operation, fixture.transport.lastControl);
+            }
+            Map<String, Object> foreign = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "foreign", "sessionId", "harness"));
+            assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
+            assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+        }
+    }
+
+    @Test
+    void refusesIllFormedMcpStringsBeforeForwarding() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String surrogate : List.of("\uD800", "\uDC00")) {
+                for (Map<String, Object> request : List.of(
+                        Map.<String, Object>of("kind", "resource_read", "uri", "a" + surrogate + "b"),
+                        Map.<String, Object>of("kind", "prompt_get", "name", "prompt",
+                                "arguments", Map.of("a" + surrogate + "b", "value")))) {
+                    Map<String, Object> operation = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                            "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                            "request", request);
+                    RuntimeBrokerException error = failure(fixture.service.control("harness", "runtime", operation));
+                    assertEquals(400, error.getStatusCode());
+                    assertEquals("runtime_control_operation_invalid", error.getCode());
+                    assertFalse(error.isRetryable());
+                    assertNull(fixture.transport.lastControl);
+                }
+            }
+            Map<String, Object> valid = Map.of("kind", "mcp-invoke", "operationId", "operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"),
+                    "request", Map.of("kind", "resource_read", "uri", "a\uD83D\uDE00b"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", valid)));
+            assertEquals(valid, fixture.transport.lastControl);
+        }
+    }
+
+    @Test
+    void observesTheOriginalOwnerAfterNewAdmissionIsRevoked() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.resolver.result = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(403, "workspace_access_denied", "Access revoked", false));
+            assertEquals(original, join(fixture.service.acquire("harness", "runtime", "bootstrap")));
+            Map<String, Object> lookup = Map.of("kind", "mcp-status", "operationId", "lookup",
+                    "targetOperationId", "original-operation",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", lookup)));
+            assertEquals("workspace_access_denied", failure(fixture.service.acquire("harness", "new-runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("other", "runtime", "bootstrap")).getCode());
+            assertEquals("runtime_session_conflict", failure(fixture.service.acquire("harness", "runtime", "continuation")).getCode());
+            RuntimeBindingRecord binding = fixture.bindingRepository.findById(original.getBindingId());
+            fixture.bindingRepository.compareAndSet(binding, binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), START));
+            assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "runtime", "bootstrap")).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(1, fixture.transport.acquireCalls.get());
         }
     }
 
@@ -1096,6 +1344,612 @@ class RuntimeBrokerServiceTest {
             assertEquals(first.getBindingId(),
                     join(joined.get()).getBindingId());
             assertEquals(1, provisioner.calls.get());
+        }
+    }
+
+    @Test
+    void reclaimRenewsItsClaimThroughSlowLostCleanup() {
+        MutableClock clock = new MutableClock(START);
+        SlowRecoveryBindingRepository bindings =
+                new SlowRecoveryBindingRepository(clock,
+                        Duration.ofMillis(1200));
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "slow-cleanup");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {};
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            // Each recoverLost burns 1.2s of the 2s claim, like the slow
+            // JDBC transactions of a loaded CI runner; only the inline
+            // renewal between cleanup steps keeps the claim live, so this
+            // answered runtime_provision_fenced before (#13017).
+            assertEquals("runtime_broker_runtime_lost",
+                    failure(service.warm("slow-cleanup-harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void reclaimStillFencesWhenTheClaimGenuinelyLapses() {
+        MutableClock clock = new MutableClock(START);
+        StaleBindingRepository bindings = new StaleBindingRepository(clock);
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "lapsed-cleanup");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // A single step that outlasts the whole operation lease
+                // must still fence rather than march on with a dead claim.
+                clock.advance(Duration.ofSeconds(3));
+                return super.reconcile(request, seed,
+                        handle, lease);
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            assertEquals("runtime_provision_fenced",
+                    failure(service.warm("lapsed-cleanup-harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void reclaimRenewsItsClaimBeforeASlowReconcile() {
+        MutableClock clock = new MutableClock(START);
+        SlowRecoveryBindingRepository bindings =
+                new SlowRecoveryBindingRepository(clock,
+                        Duration.ofMillis(1200));
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "slow-reconcile");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                clock.advance(Duration.ofMillis(1200));
+                return super.reconcile(request, seed,
+                        handle, lease);
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            // recoverLost burns 1.2s and the reconcile another 1.2s of the
+            // 2s claim; without the stretch renew before the provisioner
+            // call the post-step renewal at 2.4s meets a claim that lapsed
+            // at 2s and this answers runtime_provision_fenced.
+            assertEquals("runtime_broker_runtime_lost",
+                    failure(service.warm("slow-reconcile-harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void reclaimReleasesAnObservationAtThreeQuartersOfTheLease()
+            throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "three-quarters");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // 3000ms of a 4s lease (0.75L) — the latency band the
+                // shipped callees' declared waits live in. The step's own
+                // renewal keeps the claim alive through it, so the chain
+                // must finish RELEASED rather than cut the observation and
+                // pin the binding LOST on every attempt. The future must
+                // complete asynchronously: a synchronous sleep inside the
+                // supplier only delays arming orTimeout instead of tripping
+                // it, and MutableClock cannot move the delayer.
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.notFound(
+                                lost.getLossEvidence(),
+                                RuntimeRecoveryContract.evidence(lost,
+                                        RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
+                        CompletableFuture.delayedExecutor(3000,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(4),
+                Duration.ofSeconds(4), Clock.systemUTC(), () -> "execution")) {
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration())
+                    .toCompletableFuture().get(15, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(0, sessions.countActiveByBinding(
+                    recovered.getBindingId(), recovered.getGeneration()));
+        }
+    }
+
+    @Test
+    void reclaimKeepsItsClaimAliveAcrossAPastLeaseObservation()
+            throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "past-lease");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // 3.5s of a 3s lease: without the step's own renewal ticks
+                // the claim lapses mid-wait and the post-step renewal
+                // fences; with them the chain finishes RELEASED.
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.notFound(
+                                lost.getLossEvidence(),
+                                RuntimeRecoveryContract.evidence(lost,
+                                        RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
+                        CompletableFuture.delayedExecutor(3500,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Clock.systemUTC(), () -> "execution")) {
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration())
+                    .toCompletableFuture().get(15, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(0, sessions.countActiveByBinding(
+                    recovered.getBindingId(), recovered.getGeneration()));
+        }
+    }
+
+    @Test
+    void reclaimNamesAStepItCutShort() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "cut-step");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), Clock.systemUTC(), () -> "execution")) {
+            // The reconcile never answers; when the step bound cuts it the
+            // caller must hear a named, retryable timeout rather than a raw
+            // TimeoutException or a silent "no observation".
+            assertEquals("runtime_broker_reconcile_timeout",
+                    failure(service.recoverBinding(lost.getBindingId(),
+                            lost.getGeneration())).getCode());
+            assertEquals(RuntimeBindingRecord.State.LOST,
+                    bindings.findById(lost.getBindingId()).getState());
+        }
+    }
+
+    @Test
+    void recoverBindingSettlesAStalledObservation() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "stalled-observation");
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery",
+                fixture.binding.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        fixture.binding.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), Clock.systemUTC(), () -> "execution")) {
+            // The observation hangs; the step backstop (2x the 2s lease)
+            // must settle the maintenance call with a named timeout well
+            // before the 4x-lease outer backstop would.
+            RuntimeBrokerException timeout = assertTimeoutPreemptively(
+                    Duration.ofMillis(5200),
+                    () -> failure(service.recoverBinding(
+                            fixture.binding.getBindingId(),
+                            fixture.binding.getGeneration())));
+            assertEquals("runtime_broker_reconcile_timeout",
+                    timeout.getCode());
+        }
+    }
+
+    @Test
+    void reclaimRenewsItsClaimBeforeRecoveringResources() {
+        MutableClock clock = new MutableClock(START);
+        SlowRecoveryBindingRepository bindings =
+                new SlowRecoveryBindingRepository(clock,
+                        Duration.ofMillis(1200));
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository(clock);
+        RuntimeBindingRecord lost = managedStoppedLostBinding(bindings,
+                sessions, clock);
+        AtomicInteger recoverResourcesCalls = new AtomicInteger();
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<Void> recoverResources(
+                    RuntimeBindingRecord binding) {
+                recoverResourcesCalls.incrementAndGet();
+                // The stores match the cleanup against record_version, so
+                // the provisioner must see the version-current record, not
+                // a pre-renewal snapshot.
+                assertEquals(
+                        bindings.findById(binding.getBindingId())
+                                .getVersion(),
+                        binding.getVersion(),
+                        "recoverResources must receive the version-current record");
+                clock.advance(Duration.ofMillis(900));
+                return CompletableFuture.completedFuture(null);
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), clock, () -> "execution")) {
+            // The managed-context cleanup is the only path that reaches
+            // recoverResources: recoverLost twice burns 2.4s and the
+            // resource recovery another 0.9s of the 2s claim, so without
+            // the renew handed to the provisioner the final renewal meets
+            // a lapsed claim and fences AFTER the destructive step ran.
+            RuntimeBindingRecord recovered = join(service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration()));
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(1, recoverResourcesCalls.get());
+            assertEquals(0, sessions.countActiveByBinding(
+                    lost.getBindingId(), lost.getGeneration()));
+        }
+    }
+
+    @Test
+    void recoverBindingOutlivesOneLeaseAcrossSlowRepositorySteps()
+            throws Exception {
+        var bindings = new SlowWallRecoveryBindings(
+                new InMemoryRuntimeBindingRepository(), 1800);
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "slow-wall");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // Asynchronous so the chain suspends: only then is the
+                // outer backstop armed early enough to fire mid-chain.
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.notFound(
+                                lost.getLossEvidence(),
+                                RuntimeRecoveryContract.evidence(lost,
+                                        RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
+                        CompletableFuture.delayedExecutor(1700,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Clock.systemUTC(), () -> "execution")) {
+            // The chain's wall time (~5.3s: 1.8s recoverLost + 1.7s
+            // observation + 1.8s recoverLost) spans more than one 3s
+            // lease. Every step is renewed and individually bounded, so
+            // the 4x-lease outer backstop lets it finish RELEASED; the old
+            // whole-lease outer bound would cut it mid-chain with a raw
+            // TimeoutException.
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration())
+                    .toCompletableFuture().get(12, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(0, sessions.countActiveByBinding(
+                    lost.getBindingId(), lost.getGeneration()));
+        }
+    }
+
+    @Test
+    void recoverBindingNamesAHungAttestation() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "hung-attest");
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery",
+                fixture.binding.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return CompletableFuture.completedFuture(
+                        RuntimeObservation.ready(handle,
+                                URI.create("http://127.0.0.1:4190"),
+                                seed.getProvisionalRuntimeId(),
+                                seed.getLeaseId(), seed.getEpoch()));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        RuntimeTransport hangingAttest = (RuntimeTransport) Proxy.newProxyInstance(
+                RuntimeTransport.class.getClassLoader(),
+                new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
+                    if ("attest".equals(method.getName())) {
+                        return new CompletableFuture<>();
+                    }
+                    throw new AssertionError("Unexpected transport: " + method);
+                });
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        fixture.binding.getRequest().getScope()),
+                provisioner, hangingAttest, bindings, sessions, executions,
+                "restarted", Duration.ofSeconds(6), Duration.ofSeconds(6),
+                Clock.systemUTC(), () -> "execution")) {
+            // The runtime accepts the attest connection and never answers;
+            // the step bound (2/3 of the 6s lease) must cut it with a named
+            // timeout well before the 4x-lease backstop.
+            RuntimeBrokerException timeout = assertTimeoutPreemptively(
+                    Duration.ofMillis(5200),
+                    () -> failure(service.recoverBinding(
+                            fixture.binding.getBindingId(),
+                            fixture.binding.getGeneration())));
+            assertEquals("runtime_broker_reconcile_timeout",
+                    timeout.getCode());
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    bindings.findById(fixture.binding.getBindingId())
+                            .getState());
+        }
+    }
+
+    @Test
+    void resourceRecoveryPastOneLeaseKeepsItsClaimAlive() throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        RuntimeBindingRecord lost = managedStoppedLostBinding(bindings,
+                sessions, Clock.systemUTC());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<Void> recoverResources(
+                    RuntimeBindingRecord binding) {
+                // 2.4s of a 1.5s lease: the destructive step outlasts the
+                // claim it started with; only the step's own renewal keeps
+                // it live for the finishLostRecovery that follows.
+                return CompletableFuture.runAsync(() -> { },
+                        CompletableFuture.delayedExecutor(2400,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofMillis(1500),
+                Duration.ofMillis(1500), Clock.systemUTC(),
+                () -> "execution")) {
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration())
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+        }
+    }
+
+    /** Holds the evidence CAS until a renewal-thread tick lands (bounded). */
+    private static final class TickWindowRepository
+            extends DelegatingBindingRepository {
+        final AtomicInteger ticks = new AtomicInteger();
+        final AtomicBoolean held = new AtomicBoolean();
+
+        TickWindowRepository() {
+            super(new InMemoryRuntimeBindingRepository());
+        }
+
+        @Override
+        public RuntimeBindingRecord renewOperation(String bindingId,
+                String owner, long operationGeneration,
+                Duration leaseDuration) {
+            if (Thread.currentThread().getName()
+                    .equals("qwen-runtime-broker-lease-renewal")) {
+                ticks.incrementAndGet();
+            }
+            return delegate.renewOperation(bindingId, owner,
+                    operationGeneration, leaseDuration);
+        }
+
+        @Override
+        public RuntimeBindingRecord compareAndSet(
+                RuntimeBindingRecord expected,
+                RuntimeBindingRecord replacement) {
+            if (expected.getLossEvidence() == null
+                    && replacement.getLossEvidence() != null
+                    && held.compareAndSet(false, true)) {
+                int baseline = ticks.get();
+                long deadline = System.nanoTime()
+                        + Duration.ofMillis(1500).toNanos();
+                try {
+                    while (ticks.get() == baseline
+                            && System.nanoTime() < deadline) {
+                        Thread.sleep(10);
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return delegate.compareAndSet(expected, replacement);
+        }
+    }
+
+    @Test
+    void settledStepStopsItsRenewal() throws Exception {
+        var bindings = new TickWindowRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "settled-step");
+        RuntimeBindingRecord ready = fixture.binding;
+        bindings.releaseOperation(ready.getBindingId(), "recovery",
+                ready.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.notFound(
+                                RuntimeRecoveryContract.evidence(ready,
+                                        RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                                RuntimeRecoveryContract.evidence(ready,
+                                        RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
+                        CompletableFuture.delayedExecutor(100,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        ready.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Clock.systemUTC(), () -> "execution")) {
+            // The reconcile leg settles fast; if its step renewal kept
+            // ticking, a tick would land in the held evidence-CAS window
+            // and the version bump would fence the write.
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    ready.getBindingId(), ready.getGeneration())
+                    .toCompletableFuture().get(10, TimeUnit.SECONDS);
+            assertTrue(bindings.held.get());
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
         }
     }
 
@@ -2672,6 +3526,49 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void finishedV3PublicationAnswersStatusWithoutAWorkerStatusQuery() {
+        RuntimePublicationVerifier verifier = new RuntimePublicationVerifier() {
+            @Override
+            public RuntimePublicationGrant verify(ToolExecutionRecord execution,
+                    String publicationId, String token) {
+                throw new AssertionError("Reconciliation cannot install another grant");
+            }
+
+            @Override
+            public Map<String, Object> finished(ToolExecutionRecord execution) {
+                assertEquals("durable-v3", execution.getExecutionCallId());
+                return Map.of("executionStatus", "success", "responseParts", java.util.List.of());
+            }
+        };
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, verifier)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            var prepared = fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared(
+                    "durable-v3", "v3-key", session.getBindingId(), session.getRuntimeGeneration(),
+                    "harness", "runtime", "prompt",
+                    "call", "digest", Map.of("sessionId", "runtime", "promptId", "prompt",
+                            "callId", "call", "argsDigest", "canonical", "payloadDigest", "digest",
+                            "dispatchMode", "deferred_v3",
+                            "publicationId", "pub-1")));
+            var claimed = fixture.executionRepository.claimDispatch("durable-v3", "other-broker",
+                    Duration.ofMinutes(1));
+            var executing = fixture.executionRepository.compareAndSet(claimed,
+                    claimed.withState(ToolExecutionRecord.State.EXECUTING, false),
+                    "other-broker", claimed.getDispatchGeneration());
+            assertEquals(prepared.getExecutionCallId(), executing.getExecutionCallId());
+            fixture.executionRepository.compareAndSet(executing, executing.withUnknown(),
+                    "other-broker", executing.getDispatchGeneration());
+
+            var settled = join(fixture.service.getExecution("harness", "runtime", "durable-v3"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals(ExecutionReconciliation.Outcome.ALREADY_SETTLED,
+                    join(fixture.service.reconcileExecution("harness", "runtime", "durable-v3"))
+                            .getOutcome());
+            assertEquals(0, fixture.transport.statusCalls.get());
+        }
+    }
+
+    @Test
     void nonTerminalLookupKeepsTheExecutionUnknown() {
         for (String state : List.of("prepared", "executing",
                 "cancel_requested", "unknown")) {
@@ -3575,6 +4472,11 @@ class RuntimeBrokerServiceTest {
             this(scope, new MutableClock(START), Duration.ofMinutes(1));
         }
 
+        Fixture(RuntimeScope scope, RuntimePublicationVerifier verifier) {
+            this(scope, new MutableClock(START), Duration.ofMinutes(1),
+                    Duration.ofMinutes(1), verifier);
+        }
+
         Fixture(RuntimeScope scope, Clock clock,
                 Duration dispatchLeaseDuration) {
             this(scope, clock, Duration.ofMinutes(1),
@@ -3584,18 +4486,28 @@ class RuntimeBrokerServiceTest {
         Fixture(RuntimeScope scope, Clock clock,
                 Duration operationLeaseDuration,
                 Duration dispatchLeaseDuration) {
+            this(scope, clock, operationLeaseDuration, dispatchLeaseDuration, null);
+        }
+
+        private Fixture(RuntimeScope scope, Clock clock,
+                Duration operationLeaseDuration,
+                Duration dispatchLeaseDuration,
+                RuntimePublicationVerifier verifier) {
             bindingRepository = new InMemoryRuntimeBindingRepository(clock,
                     () -> "binding-" + bindingIds.incrementAndGet());
             executionRepository =
                     new InMemoryToolExecutionRepository(clock);
             resolver = new FakeResolver(scope);
             transport.executionRepository = executionRepository;
-            service = new RuntimeBrokerService(
-                    resolver,
-                    provisioner, transport, bindingRepository,
-                    sessionRepository, executionRepository, "broker",
-                    operationLeaseDuration, dispatchLeaseDuration, clock,
-                    () -> "execution-" + executionIds.incrementAndGet());
+            service = verifier == null
+                    ? new RuntimeBrokerService(resolver, provisioner, transport,
+                            bindingRepository, sessionRepository, executionRepository,
+                            "broker", operationLeaseDuration, dispatchLeaseDuration,
+                            clock, () -> "execution-" + executionIds.incrementAndGet())
+                    : new RuntimeBrokerService(resolver, provisioner, transport,
+                            bindingRepository, sessionRepository, executionRepository,
+                            "broker", operationLeaseDuration, dispatchLeaseDuration,
+                            verifier);
         }
 
         @Override
@@ -3681,6 +4593,9 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger acquireCalls = new AtomicInteger();
         final AtomicInteger executeCalls = new AtomicInteger();
         final AtomicInteger cancelCalls = new AtomicInteger();
+        final AtomicInteger cancelV3Calls = new AtomicInteger();
+        final AtomicInteger executeV3Calls = new AtomicInteger();
+        final AtomicInteger statusV3Calls = new AtomicInteger();
         final AtomicInteger releaseCalls = new AtomicInteger();
         final AtomicInteger statusCalls = new AtomicInteger();
         volatile long lastAfterSequence = -1;
@@ -3705,9 +4620,12 @@ class RuntimeBrokerServiceTest {
         volatile CompletableFuture<Map<String, Object>> executeResult =
                 CompletableFuture.completedFuture(
                         Map.of("executionStatus", "success"));
+        volatile CompletableFuture<Map<String, Object>> executeV3Result;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
                         Map.of("state", "cancel_requested"));
+        volatile CompletableFuture<Map<String, Object>> acknowledgeV3Result =
+                CompletableFuture.completedFuture(Map.of("state", "settled"));
         volatile CompletableFuture<Boolean> releaseResult =
                 CompletableFuture.completedFuture(true);
 
@@ -3756,6 +4674,29 @@ class RuntimeBrokerServiceTest {
         }
 
         @Override
+        public CompletionStage<Void> installPublication(RuntimeLease lease,
+                RuntimeSession session, RuntimePublicationGrant grant) {
+            return executeV3Result == null ? RuntimeTransport.super.installPublication(lease, session, grant)
+                    : CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> payload, Map<String, Object> capture) {
+            executeV3Calls.incrementAndGet();
+            return executeV3Result == null ? RuntimeTransport.super.executeV3(lease, session,
+                    reference, payload, capture) : executeV3Result;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference, long afterSequence) {
+            statusV3Calls.incrementAndGet();
+            return RuntimeTransport.super.statusV3(lease, session, reference, afterSequence);
+        }
+
+        @Override
         public CompletionStage<Map<String, Object>> cancel(
                 RuntimeLease lease,
                 RuntimeSession session, Map<String, Object> reference) {
@@ -3769,6 +4710,20 @@ class RuntimeBrokerServiceTest {
                         .findByExecutionCallId(observedExecutionId);
             }
             return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference) {
+            cancelV3Calls.incrementAndGet();
+            return cancelResult;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                Map<String, Object> receipt) {
+            return acknowledgeV3Result;
         }
 
         @Override
@@ -4042,50 +4997,14 @@ class RuntimeBrokerServiceTest {
         }
     }
 
-    private static final class StaleBindingRepository
-            implements RuntimeBindingRepository {
-        private final InMemoryRuntimeBindingRepository delegate;
+    private static class StaleBindingRepository
+            extends DelegatingBindingRepository {
         volatile RuntimeBindingRecord nextRead;
         volatile Runnable afterReady;
 
         StaleBindingRepository(Clock clock) {
-            delegate = new InMemoryRuntimeBindingRepository(clock,
-                    () -> "binding");
-        }
-
-        @Override
-        public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
-                RuntimeSessionRecord expected) {
-            return delegate.completeSessionRelease(sessions, expected);
-        }
-
-        @Override
-        public java.util.List<RuntimeBindingRecord> findRecoveryCandidates(String kind, String after, int limit) {
-            return delegate.findRecoveryCandidates(kind, after, limit);
-        }
-
-        @Override
-        public RuntimeBindingRecord finishLostRecovery(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
-            return delegate.finishLostRecovery(sessions, executions, expected);
-        }
-
-        @Override
-        public RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, RuntimeBindingRecord expected) {
-            return delegate.recoverLost(sessions, executions, expected);
-        }
-
-        @Override
-        public RuntimeSessionRecord admitSession(RuntimeSessionRepository sessions,
-                RuntimeSessionRecord candidate) {
-            return delegate.admitSession(sessions, candidate);
-        }
-
-        @Override
-        public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
-                ToolExecutionRepository executions, ToolExecutionRecord candidate) {
-            return delegate.admitExecution(sessions, executions, candidate);
+            super(new InMemoryRuntimeBindingRepository(clock,
+                    () -> "binding"));
         }
 
         @Override
@@ -4094,23 +5013,6 @@ class RuntimeBrokerServiceTest {
             RuntimeBindingRecord stale = nextRead;
             nextRead = null;
             return stale == null ? delegate.findOrCreate(request) : stale;
-        }
-
-        @Override
-        public RuntimeBindingRecord findActive(
-                RuntimeProvisionRequest request) {
-            return delegate.findActive(request);
-        }
-
-        @Override
-        public List<RuntimeBindingRecord> findActiveByIsolationKey(
-                RuntimeScope scope, String isolationKey) {
-            return delegate.findActiveByIsolationKey(scope, isolationKey);
-        }
-
-        @Override
-        public RuntimeBindingRecord findById(String bindingId) {
-            return delegate.findById(bindingId);
         }
 
         @Override
@@ -4128,26 +5030,140 @@ class RuntimeBrokerServiceTest {
             }
             return updated;
         }
+    }
 
+    /**
+     * A managed-context binding lost with full stop evidence and one READY
+     * session — the fixture shape that drives cleanupLost all the way to
+     * the recoverResources leg. The "recovery" claim is released here, so a
+     * service can claim it immediately against the returned record.
+     */
+    private static RuntimeBindingRecord managedStoppedLostBinding(
+            RuntimeBindingRepository bindings,
+            InMemoryRuntimeSessionRepository sessions, Clock clock) {
+        RuntimeScope scope = new RuntimeScope("tenant-m", "workspace-m", "1",
+                "/workspace", WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                "session");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
+                "harness-1", "test-supervisor", "storage-a");
+        RuntimeBindingRecord created = bindings.findOrCreate(request);
+        RuntimeBindingRecord claimed = bindings.claimOperation(
+                created.getBindingId(), "recovery", Duration.ofMinutes(5));
+        RuntimeProvisionSeed seed = claimed.getProvisionSeed();
+        RuntimeBindingRecord ready = bindings.compareAndSet(claimed,
+                claimed.withAttestation(
+                        new RuntimeLease(seed.getProvisionalRuntimeId(),
+                                URI.create("http://127.0.0.1:4190"),
+                                seed.getToken(), seed.getLeaseId(),
+                                seed.getEpoch()),
+                        new RuntimeResourceHandle("test-supervisor", 1,
+                                Map.of("resource", "m")),
+                        clock.instant(), clock.instant()));
+        RuntimeSessionRecord acquiring = bindings.admitSession(sessions,
+                new RuntimeSessionRecord(
+                        new RuntimeSession("harness-1", "runtime-1",
+                                "bootstrap", scope),
+                        ready.getBindingId(), ready.getGeneration(),
+                        RuntimeSessionRecord.State.ACQUIRING, 0,
+                        clock.instant()));
+        sessions.compareAndSet(acquiring, acquiring.withState(
+                RuntimeSessionRecord.State.READY, clock.instant()));
+        RuntimeBindingRecord lost = bindings.compareAndSet(ready,
+                ready.withRecoveryEvidence(
+                        RuntimeRecoveryContract.evidence(ready,
+                                RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                        RuntimeRecoveryContract.evidence(ready,
+                                RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED),
+                        clock.instant()));
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        return lost;
+    }
+
+    /**
+     * The guard every lost/ready-binding reclaim test shares: the writer
+     * domain must never be re-provisioned, and the kind matches what the
+     * fixtures bake into their requests.
+     */
+    private abstract static class LostDomainProvisioner
+            implements RuntimeProvisioner {
         @Override
-        public RuntimeBindingRecord claimOperation(String bindingId,
-                String owner, Duration leaseDuration) {
-            return delegate.claimOperation(bindingId, owner, leaseDuration);
+        public String kind() {
+            return "test-supervisor";
         }
 
         @Override
-        public RuntimeBindingRecord renewOperation(String bindingId,
-                String owner, long operationGeneration,
-                Duration leaseDuration) {
-            return delegate.renewOperation(bindingId, owner,
-                    operationGeneration, leaseDuration);
+        public CompletionStage<RuntimeLease> provision(
+                RuntimeProvisionRequest request) {
+            throw new AssertionError(
+                    "Lost writer domain must not be reprovisioned");
+        }
+    }
+
+    /**
+     * A binding repository whose recovery transactions sleep real wall-clock
+     * time: the only clocks the outer backstops and step bounds obey.
+     */
+    private static final class SlowWallRecoveryBindings
+            extends DelegatingBindingRepository {
+        private final long millis;
+
+        SlowWallRecoveryBindings(RuntimeBindingRepository delegate,
+                long millis) {
+            super(delegate);
+            this.millis = millis;
         }
 
         @Override
-        public RuntimeBindingRecord releaseOperation(String bindingId,
-                String owner, long operationGeneration) {
-            return delegate.releaseOperation(bindingId, owner,
-                    operationGeneration);
+        public RuntimeBindingRecord recoverLost(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            sleep();
+            return delegate.recoverLost(sessions, executions, expected);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            sleep();
+            return delegate.finishLostRecovery(sessions, executions,
+                    expected);
+        }
+
+        private void sleep() {
+            try {
+                Thread.sleep(millis);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * A binding repository whose {@code recoverLost} advances the clock
+     * first, simulating the slow recovery transactions of a loaded runner.
+     */
+    private static final class SlowRecoveryBindingRepository
+            extends StaleBindingRepository {
+        private final MutableClock clock;
+        private final Duration advance;
+
+        SlowRecoveryBindingRepository(MutableClock clock, Duration advance) {
+            super(clock);
+            this.clock = clock;
+            this.advance = advance;
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            clock.advance(advance);
+            return super.recoverLost(sessions, executions, expected);
         }
     }
 

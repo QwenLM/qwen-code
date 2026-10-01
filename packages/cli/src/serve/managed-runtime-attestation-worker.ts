@@ -30,6 +30,8 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
+import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   ManagedShellPublisherRegistry,
   MANAGED_SHELL_PUBLISHER_ROUTE,
@@ -180,11 +182,17 @@ export async function startManagedRuntimeAttestationWorker(
     ownedManagedRuntimeRouteGate(
       app,
       boot.version === 2
-        ? capturePublisher || remotePublishers
+        ? capturePublisher ||
+          remotePublishers ||
+          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
           ? [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
               ...MANAGED_TOOL_RESULT_ROUTES,
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
+              ...(!capturePublisher &&
+              boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+                ? [PUBLICATION_INSTALL_ROUTE]
+                : []),
             ]
           : MANAGED_CONTEXT_WORKER_ROUTES
         : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
@@ -248,7 +256,9 @@ export async function runManagedRuntimeAttestationWorker(): Promise<void> {
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
     undefined,
-    boot.version === 2 ? new ManagedShellPublisherRegistry() : undefined,
+    boot.version === 2 && boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+      ? new ManagedShellPublisherRegistry()
+      : undefined,
   );
 
   await new Promise<void>((resolve, reject) => {

@@ -523,6 +523,7 @@ describe('Session', () => {
   let mockChatRecordingService: {
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
+    recordCronPrompt: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordGoalTurnEnd: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
@@ -905,6 +906,7 @@ describe('Session', () => {
     mockChatRecordingService = {
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
+      recordCronPrompt: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
       recordGoalTurnEnd: vi.fn().mockResolvedValue(undefined),
       recordMidTurnUserMessage: vi.fn(),
@@ -1216,6 +1218,34 @@ describe('Session', () => {
         isError: true,
       });
       expect(callTool).not.toHaveBeenCalled();
+    });
+
+    it('keeps PreToolUse context out of the App error result', async () => {
+      const { callTool } = installAppTool();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockImplementation(async () => ({
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'deny',
+              permissionDecisionReason: 'blocked by probe',
+              additionalContext: 'APP_HOOK_MARKER',
+            },
+          },
+        })),
+      });
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(25_000);
+
+      expect(await session.callMcpAppTool('mcp-app-hook', request)).toEqual({
+        isError: true,
+        content: [{ type: 'text', text: 'blocked by probe' }],
+      });
+      expect(callTool).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
     it('honors explicit permission deny before YOLO and rejects unknown origins and targets', async () => {
@@ -8068,6 +8098,75 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(session.getRewindableUserTurnCount()).toBe(1);
+    });
+
+    it('does not count a delivered task-notification turn as a rewindable user turn', () => {
+      // #9608: a daemon session that ran a background-notification turn
+      // carries the turn's `[...systemReminders, ...notificationParts]` user
+      // entry in API history. That entry never produced a file-history
+      // snapshot (`makeSnapshot` runs on the real prompt path only), so
+      // counting it inflates the rewindable count and shifts every rewind
+      // cut point after it onto the wrong entry.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+            {
+              text: '<task-notification>\n<task-id>agent-1</task-id>\n<kind>agent</kind>\n<status>completed</status>\n</task-notification>',
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'notification reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+      // Rewinding to the second real turn must cut at 'second' (index 5);
+      // counting the notification entry lands the cut on it (index 3) and
+      // drops 'second' plus the notification reply.
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 5,
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(5);
+    });
+
+    it('still counts a real prompt that carries a merged notification part', () => {
+      // A mid-turn drain merges queued notification parts into the genuine
+      // user message (#takeCurrentTurnBackgroundParts). The mixed entry is a
+      // real user turn and must keep its rewind ordinal.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        {
+          role: 'user',
+          parts: [
+            { text: 'second' },
+            {
+              text: '<task-notification>\n<task-id>shell-1</task-id>\n<kind>shell</kind>\n<status>completed</status>\n</task-notification>',
+            },
+          ],
+        },
+      ];
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
     });
 
     it('rejects unreachable user turns', () => {
@@ -26192,6 +26291,23 @@ describe('Session', () => {
                 'Loop tick — tasks from project loop.md',
           ).length;
           expect(labelledEchoes).toBe(2);
+          await vi.waitFor(() =>
+            expect(
+              mockChatRecordingService.recordCronPrompt,
+            ).toHaveBeenCalledTimes(2),
+          );
+          expect(
+            mockChatRecordingService.recordCronPrompt.mock.calls[1],
+          ).toEqual([
+            [
+              {
+                text: expect.stringContaining(
+                  'Work the tasks from the loop.md contents established earlier',
+                ),
+              },
+            ],
+            'Loop tick — tasks from project loop.md',
+          ]);
         } finally {
           await fs.rm(tmpDir, { recursive: true, force: true });
         }
@@ -27542,6 +27658,18 @@ describe('Session', () => {
               },
             });
           });
+          await vi.waitFor(() => {
+            expect(
+              mockChatRecordingService.recordCronPrompt,
+            ).toHaveBeenCalledWith(
+              [
+                {
+                  text: expect.stringContaining('# Autonomous loop check'),
+                },
+              ],
+              'Autonomous loop tick',
+            );
+          });
         } finally {
           restoreHome();
           await fs.rm(tmpDir, { recursive: true, force: true });
@@ -27549,7 +27677,7 @@ describe('Session', () => {
         }
       });
 
-      it('leaves a non-sentinel cron prompt untouched (no loop.md expansion)', async () => {
+      it('persists a non-sentinel cron prompt and keeps the session interactive', async () => {
         const scheduler = {
           size: 1,
           hasPendingWork: true,
@@ -27570,6 +27698,7 @@ describe('Session', () => {
         mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
         mockChat.sendMessageStream = vi
           .fn()
+          .mockResolvedValueOnce(createEmptyStream())
           .mockResolvedValueOnce(createEmptyStream())
           .mockResolvedValueOnce(createEmptyStream());
 
@@ -27598,6 +27727,37 @@ describe('Session', () => {
           expect(sentToModel()).toContain('do the normal cron thing');
         });
         expect(sentToModel()).not.toContain('# /loop tick');
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'do the normal cron thing' }],
+          'do the normal cron thing',
+        );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalledWith('do the normal cron thing');
+        await vi.waitFor(() =>
+          expect(
+            (session as unknown as { cronProcessing: boolean }).cronProcessing,
+          ).toBe(false),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'follow-up' }],
+        });
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'follow-up',
+          undefined,
+          undefined,
+          expect.stringContaining('test-session-id########'),
+          undefined,
+        );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
       });
 
       it('re-expands the full loop.md block after an auto-compaction resets the resolver cache', async () => {
@@ -27736,6 +27896,9 @@ describe('Session', () => {
           expect.any(AbortSignal),
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.recordCronPrompt,
+        ).not.toHaveBeenCalled();
         expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
           sessionId: 'test-session-id',
           update: {
@@ -27790,6 +27953,77 @@ describe('Session', () => {
 
         expect(mockLlmClient.tryCompressChat).toHaveBeenCalledTimes(2);
         expect(tokenLimitDiagnosticCount()).toBe(diagnosticCountBefore);
+      });
+
+      it('persists a cron prompt preserved after send preparation is cancelled', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: 'scheduled prompt',
+                cronExpr: '0 * * * *',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        let cronCompressionStarted!: () => void;
+        const cronCompressionStartedPromise = new Promise<void>((resolve) => {
+          cronCompressionStarted = resolve;
+        });
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockImplementationOnce(
+            async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+              new Promise((_, reject) => {
+                cronCompressionStarted();
+                signal.addEventListener('abort', () => {
+                  const abortError = new Error('aborted');
+                  abortError.name = 'AbortError';
+                  reject(abortError);
+                });
+              }),
+          );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await cronCompressionStartedPromise;
+        vi.mocked(mockChat.addHistory).mockClear();
+
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() =>
+          expect(
+            mockChatRecordingService.recordCronPrompt,
+          ).toHaveBeenCalledTimes(1),
+        );
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([{ text: 'scheduled prompt' }]),
+        });
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'scheduled prompt' }],
+          'scheduled prompt',
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       it('does not auto-compress slash commands handled without a model send', async () => {
@@ -32535,6 +32769,143 @@ describe('Session', () => {
         });
       });
 
+      it('records a tool-using cron fire only once', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        registerAllowedTool('read_file', execute);
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cron',
+                      name: 'read_file',
+                      args: { file_path: 'a.sql' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start cron' }],
+        });
+
+        await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+      });
+
+      it('does not record a tool-using cron fire again when turn two is cancelled', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        registerAllowedTool('read_file', execute);
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: 'scheduled work', cronExpr: '* * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        const noCompression = {
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        };
+        let turnTwoCompressionStarted!: () => void;
+        const turnTwoCompressionStartedPromise = new Promise<void>(
+          (resolve) => {
+            turnTwoCompressionStarted = resolve;
+          },
+        );
+        mockLlmClient.tryCompressChat
+          .mockResolvedValueOnce(noCompression)
+          .mockResolvedValueOnce(noCompression)
+          .mockImplementationOnce(
+            async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+              new Promise((_, reject) => {
+                turnTwoCompressionStarted();
+                signal.addEventListener('abort', () => {
+                  const abortError = new Error('aborted');
+                  abortError.name = 'AbortError';
+                  reject(abortError);
+                });
+              }),
+          );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cron-cancel',
+                      name: 'read_file',
+                      args: { file_path: 'a.sql' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start cron' }],
+        });
+        await turnTwoCompressionStartedPromise;
+        vi.mocked(mockChat.addHistory).mockClear();
+
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() => expect(mockChat.addHistory).toHaveBeenCalled());
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+      });
+
       it('tracks unresolved preparation in a background notification stream', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -35321,7 +35692,9 @@ describe('Session', () => {
         const cronGate = new Promise<void>((resolve) => {
           releaseCron = resolve;
         });
+        const cronStreamStarted = vi.fn();
         async function* cronStream() {
+          cronStreamStarted();
           yield {
             type: core.StreamEventType.CHUNK,
             value: {
@@ -35361,11 +35734,25 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
         );
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
+        ).toBeGreaterThan(
+          vi.mocked(mockChat.sendMessageStream).mock.invocationCallOrder[1]!,
+        );
+        expect(
+          mockChatRecordingService.recordCronPrompt.mock.invocationCallOrder[0],
+        ).toBeLessThan(cronStreamStarted.mock.invocationCallOrder[0]!);
 
         await session.cancelPendingPrompt();
         releaseCron!();
 
         expect(scheduler.stop).toHaveBeenCalled();
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledTimes(
+          1,
+        );
         const finals = messageBus.request.mock.calls.filter(
           ([request]) =>
             request.eventName === 'MessageDisplay' && request.input.is_final,
@@ -36934,6 +37321,389 @@ describe('Session', () => {
               ],
             }),
           );
+        });
+      });
+
+      describe('hook additionalContext delivery', () => {
+        function contextBus(outputs: Record<string, unknown>) {
+          return {
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => ({
+                success: true,
+                output: outputs[request.eventName] ?? {},
+              })),
+          };
+        }
+
+        async function runReadFile(
+          messageBus: ReturnType<typeof contextBus>,
+          execute: ReturnType<typeof vi.fn>,
+          truncateThreshold = 25_000,
+          expectedModelRequests = 2,
+        ) {
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getTruncateToolOutputThreshold = vi
+            .fn()
+            .mockReturnValue(truncateThreshold);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute,
+            }),
+          });
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-ctx',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(
+            expectedModelRequests,
+          );
+          const message = (vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1]?.[1].message ?? []) as Part[];
+          const response = message.find(
+            (part) => part.functionResponse?.id === 'call-ctx',
+          )?.functionResponse?.response;
+          return { message, response };
+        }
+
+        function count(value: unknown, needle: string): number {
+          return JSON.stringify(value).split(needle).length - 1;
+        }
+
+        function uiUpdates(): string {
+          return JSON.stringify(
+            vi
+              .mocked(mockClient.sessionUpdate)
+              .mock.calls.map(([params]) => params.update),
+          );
+        }
+
+        const preContext = (extra: Record<string, unknown> = {}) => ({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            additionalContext: 'P02A_PRE <x>',
+            ...extra,
+          },
+        });
+        const failureContext = {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolUseFailure',
+            additionalContext: 'P02A_FAIL',
+          },
+        };
+
+        it('delivers PreToolUse context with a successful tool result', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const { message, response } = await runReadFile(
+            contextBus({ PreToolUse: preContext() }),
+            execute,
+          );
+
+          expect(execute).toHaveBeenCalledOnce();
+          expect(response).toEqual({
+            output: 'file contents\n\nP02A_PRE &lt;x&gt;',
+          });
+          expect(count(message, 'P02A_PRE')).toBe(1);
+          expect(uiUpdates()).not.toContain('P02A_PRE');
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  response: { output: 'file contents\n\nP02A_PRE &lt;x&gt;' },
+                }),
+              }),
+            ]),
+            expect.objectContaining({ callId: 'call-ctx', status: 'success' }),
+          );
+        });
+
+        it('delivers PreToolUse context on a denied result without executing', async () => {
+          const execute = vi.fn();
+          const { response } = await runReadFile(
+            contextBus({
+              PreToolUse: preContext({
+                permissionDecision: 'deny',
+                permissionDecisionReason: 'no reads',
+              }),
+            }),
+            execute,
+          );
+
+          expect(execute).not.toHaveBeenCalled();
+          expect(response).toEqual({
+            error: 'no reads\n\nP02A_PRE &lt;x&gt;',
+          });
+          expect(uiUpdates()).not.toContain('P02A_PRE');
+        });
+
+        it('delivers Pre and failure context when the tool returns an error', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'Error: disk gone',
+            returnDisplay: 'disk gone',
+            error: {
+              message: 'disk gone',
+              type: core.ToolErrorType.EXECUTION_FAILED,
+            },
+          });
+          const { message, response } = await runReadFile(
+            contextBus({
+              PreToolUse: preContext(),
+              PostToolUseFailure: failureContext,
+            }),
+            execute,
+          );
+
+          expect(count(message, 'P02A_PRE')).toBe(1);
+          expect(count(message, 'P02A_FAIL')).toBe(1);
+          const text = JSON.stringify(response);
+          expect(text.indexOf('P02A_PRE')).toBeLessThan(
+            text.indexOf('P02A_FAIL'),
+          );
+          expect(uiUpdates()).not.toContain('P02A_FAIL');
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-ctx',
+              status: 'error',
+              error: new Error('disk gone'),
+            }),
+          );
+        });
+
+        it('delivers Pre and failure context when the tool throws', async () => {
+          const execute = vi.fn().mockRejectedValue(new Error('Tool failed'));
+          const { message, response } = await runReadFile(
+            contextBus({
+              PreToolUse: preContext(),
+              PostToolUseFailure: failureContext,
+            }),
+            execute,
+          );
+
+          expect(response).toEqual({
+            error: 'Tool failed\n\nP02A_PRE &lt;x&gt;\n\nP02A_FAIL',
+          });
+          expect(count(message, 'P02A_FAIL')).toBe(1);
+          expect(uiUpdates()).not.toContain('P02A_FAIL');
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-ctx',
+              status: 'error',
+              errorType: core.ToolErrorType.UNHANDLED_EXCEPTION,
+              error: new Error('Tool failed'),
+            }),
+          );
+        });
+
+        it('bounds the delivered context by the truncation threshold', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const { response } = await runReadFile(
+            contextBus({
+              PreToolUse: {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse',
+                  additionalContext: 'P'.repeat(200),
+                },
+              },
+            }),
+            execute,
+            60,
+          );
+
+          const output = response?.['output'] as string;
+          const delivered = output.slice('file contents\n\n'.length);
+          expect(output.startsWith('file contents\n\nPPP')).toBe(true);
+          expect(delivered).toHaveLength(60);
+          expect(delivered).toContain('[hook additional context truncated]');
+        });
+
+        it('drops PreToolUse context when the call is cancelled', async () => {
+          const execute = vi.fn();
+          let cancel: Promise<void> | undefined;
+          const messageBus = {
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => {
+                if (request.eventName === 'PreToolUse') {
+                  cancel = session.cancelPendingPrompt();
+                  return { success: true, output: preContext() };
+                }
+                return { success: true, output: {} };
+              }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getTruncateToolOutputThreshold = vi
+            .fn()
+            .mockReturnValue(25_000);
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute,
+            }),
+          });
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-cancel',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+          await cancel;
+
+          expect(execute).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              callId: 'call-cancel',
+              status: 'cancelled',
+            }),
+          );
+          expect(
+            JSON.stringify(
+              mockChatRecordingService.recordToolResult.mock.calls,
+            ),
+          ).not.toContain('P02A_PRE');
+          expect(
+            JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls),
+          ).not.toContain('P02A_PRE');
+        });
+
+        it.each([
+          ['a completed result', {}, 'completed', 'success'],
+          [
+            'a denied result',
+            { permissionDecision: 'deny', permissionDecisionReason: 'no' },
+            'failed',
+            'error',
+          ],
+        ] as const)(
+          'drops PreToolUse context when the turn is cancelled while notifying %s',
+          async (_label, decision, updateStatus, recordedStatus) => {
+            const execute = vi.fn().mockResolvedValue({
+              llmContent: 'done',
+              returnDisplay: 'done',
+            });
+            let cancel: Promise<void> | undefined;
+            vi.mocked(mockClient.sessionUpdate).mockImplementation(
+              async (params) => {
+                const update = params.update as {
+                  sessionUpdate?: string;
+                  status?: string;
+                };
+                if (
+                  !cancel &&
+                  update.sessionUpdate === 'tool_call_update' &&
+                  update.status === updateStatus
+                ) {
+                  cancel = session.cancelPendingPrompt();
+                }
+              },
+            );
+            mockChat.addHistory = vi.fn();
+
+            // The cancelled turn sends no follow-up model request.
+            await runReadFile(
+              contextBus({ PreToolUse: preContext(decision) }),
+              execute,
+              25_000,
+              1,
+            );
+            await cancel;
+
+            expect(cancel).toBeDefined();
+            expect(execute).toHaveBeenCalledTimes(
+              recordedStatus === 'success' ? 1 : 0,
+            );
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).toHaveBeenCalledWith(
+              expect.anything(),
+              expect.objectContaining({
+                callId: 'call-ctx',
+                status: recordedStatus,
+              }),
+            );
+            expect(
+              JSON.stringify(
+                mockChatRecordingService.recordToolResult.mock.calls,
+              ),
+            ).not.toContain('P02A_PRE');
+            expect(
+              JSON.stringify(vi.mocked(mockChat.addHistory).mock.calls),
+            ).not.toContain('P02A_PRE');
+            expect(
+              JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls),
+            ).not.toContain('P02A_PRE');
+          },
+        );
+
+        it('leaves results unchanged when hooks return no context', async () => {
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const { response } = await runReadFile(contextBus({}), execute);
+          expect(response).toEqual({ output: 'file contents' });
         });
       });
 
@@ -39122,6 +39892,198 @@ describe('Session', () => {
         };
       }>;
     };
+
+    it('delivers nested PreToolUse context with the exec result, not the script value', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi
+          .fn()
+          .mockImplementation(
+            async (request: {
+              eventName: string;
+              input?: { tool_name?: string; tool_call_id?: string };
+            }) => ({
+              success: true,
+              output:
+                request.eventName === 'PreToolUse' &&
+                request.input?.tool_name === 'read_file'
+                  ? {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        additionalContext: `NESTED_CTX_${request.input.tool_call_id}`,
+                      },
+                    }
+                  : {},
+            }),
+          ),
+      });
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(25_000);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/example.txt' },
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'NESTED_RAW',
+            returnDisplay: 'NESTED_RAW',
+          }),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      let scriptValue: string | undefined;
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            const nested = await core
+              .getToolCallRuntime()!
+              .dispatch('read_file', { path: '/tmp/example.txt' }, signal);
+            // The script consumes the value without printing it.
+            scriptValue = nested.output;
+            return { llmContent: 'done', returnDisplay: 'done' };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-nested-ctx', [
+        {
+          id: 'exec-ctx',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(scriptValue).toBe('NESTED_RAW');
+      expect(result.parts).toHaveLength(1);
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'done\n\nNESTED_CTX_exec-ctx:code:1',
+      });
+    });
+
+    it('delivers nested PostToolUseFailure context with the exec result, not the script error', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi
+          .fn()
+          .mockImplementation(
+            async (request: {
+              eventName: string;
+              input?: { tool_name?: string; tool_call_id?: string };
+            }) => ({
+              success: true,
+              output:
+                request.eventName === 'PostToolUseFailure' &&
+                request.input?.tool_name === 'read_file'
+                  ? {
+                      hookSpecificOutput: {
+                        hookEventName: 'PostToolUseFailure',
+                        additionalContext: `NESTED_FAIL_${request.input.tool_call_id}`,
+                      },
+                    }
+                  : {},
+            }),
+          ),
+      });
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(25_000);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getToolMode = vi
+        .fn()
+        .mockReturnValue(core.ToolMode.CodeModeOnly);
+      const nestedTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/missing.txt' },
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'missing',
+            returnDisplay: 'missing',
+            error: {
+              message: 'missing',
+              type: core.ToolErrorType.EXECUTION_FAILED,
+            },
+          }),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      let scriptError: string | undefined;
+      const outerTool = {
+        name: core.ToolNames.EXEC,
+        kind: core.Kind.Other,
+        displayName: 'Exec',
+        description: 'Exec',
+        build: vi.fn().mockReturnValue({
+          params: { source: 'probe' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Exec'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockImplementation(async (signal: AbortSignal) => {
+            try {
+              await core
+                .getToolCallRuntime()!
+                .dispatch('read_file', { path: '/tmp/missing.txt' }, signal);
+            } catch (error) {
+              // The script swallows the error without printing it.
+              scriptError = (error as Error).message;
+            }
+            return { llmContent: 'done', returnDisplay: 'done' };
+          }),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.EXEC ? outerTool : nestedTool,
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-nested-fail', [
+        {
+          id: 'exec-fail',
+          name: core.ToolNames.EXEC,
+          args: { source: 'probe' },
+        },
+      ]);
+
+      expect(scriptError).toBe('missing');
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'done\n\nNESTED_FAIL_exec-fail:code:1',
+      });
+    });
 
     it('allows top-level discovery then re-enters the ACP tool chain with native result metadata', async () => {
       const onResult = vi.fn();
