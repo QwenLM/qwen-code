@@ -3527,7 +3527,7 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it.each(['read_mcp_resource', 'search_memory'])(
+  it.each(['read_mcp_resource', 'search_memory', 'tool_search'])(
     'exempts %s from the persistence spill gate',
     async (toolName) => {
       // The name-keyed spill gate (≈28k: 25k + 3k headroom) must not stub a

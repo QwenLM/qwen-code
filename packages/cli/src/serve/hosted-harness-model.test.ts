@@ -5,6 +5,7 @@
  */
 
 import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
@@ -252,5 +253,166 @@ describe('Hosted Harness model boundary', () => {
     expect(toolTurn.execute).toHaveBeenCalledOnce();
     expect(hooks.setUserMemory).toHaveBeenCalledWith('project rules');
     expect(order).toEqual(['request', 'inject', 'request']);
+  });
+});
+
+describe('Hosted Harness resume and retraction', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function configWithTools(
+    events: Array<{
+      type: LlmEventType;
+      value?: unknown;
+      isContinuation?: boolean;
+    }>,
+    modelParts: unknown[],
+  ) {
+    const tools = new Set(['run_shell_command']);
+    const requests: unknown[] = [];
+    const types: unknown[] = [];
+    state.config = {
+      initialize: vi.fn(async () => undefined),
+      getModelsConfig: () => ({ getCurrentAuthType: () => 'test-auth' }),
+      refreshAuth: vi.fn(async () => undefined),
+      getToolRegistry: () => ({
+        warmAll: vi.fn(async () => undefined),
+        getAllTools: () => [...tools].map((name) => ({ name })),
+        unregisterTool: vi.fn((name: string) => tools.delete(name)),
+        getFunctionDeclarations: () => [...tools],
+      }),
+      getLlmClient: () => ({
+        setTools: vi.fn(async () => undefined),
+        getChat: () => ({
+          setHistory: vi.fn(),
+          setTools: vi.fn(async () => undefined),
+        }),
+        getHistory: () => [{ role: 'model', parts: modelParts }],
+        async *sendMessageStream(
+          request: unknown,
+          _signal: unknown,
+          _promptId: unknown,
+          options: unknown,
+        ) {
+          requests.push(request);
+          types.push(options);
+          for (const event of events) yield event;
+        },
+      }),
+      getModel: () => 'test-model',
+      shutdown: vi.fn(async () => undefined),
+    };
+    return { requests, types };
+  }
+
+  it('resumes from journaled tool results as a tool-result request', async () => {
+    const resumeParts = [
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'write_file',
+          response: { ok: true },
+        },
+      },
+    ];
+    const { requests, types } = configWithTools(
+      [
+        { type: LlmEventType.Content, value: 'recovered' },
+        { type: LlmEventType.Finished },
+      ],
+      [{ text: 'recovered' }],
+    );
+    const toolTurn = {
+      execute: vi.fn(),
+      consumeResults: vi.fn(async () => undefined),
+      declarations: async () => [],
+    };
+    const result = await runHostedHarnessTextTurn({
+      ...input,
+      toolTurn,
+      resumeFromToolResults: resumeParts,
+    });
+    expect(result.text).toBe('recovered');
+    expect(requests[0]).toStrictEqual(resumeParts);
+    expect(types[0]).toMatchObject({
+      type: SendMessageType.ToolResult,
+    });
+    expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+    expect(toolTurn.execute).not.toHaveBeenCalled();
+  });
+
+  it('fails the turn rather than retracting a published model attempt', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'leaked prefix' },
+      { type: LlmEventType.Retry, isContinuation: false },
+      { type: LlmEventType.Content, value: 'second attempt' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => true,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).rejects.toThrow('cannot retract a published model attempt');
+  });
+
+  it('fails the turn rather than retracting a published model fallback', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'leaked prefix' },
+      { type: LlmEventType.ModelFallback },
+      { type: LlmEventType.Content, value: 'second attempt' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => true,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).rejects.toThrow('cannot retract a published model attempt');
+  });
+
+  it('still discards an unpublished abandoned attempt', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'first attempt' },
+      { type: LlmEventType.Retry, isContinuation: false },
+      { type: LlmEventType.Content, value: 'final answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => false,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).resolves.toMatchObject({ text: 'final answer' });
+  });
+
+  it('commits every Content chunk through the delta stream as it arrives', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'chunk one' },
+      { type: LlmEventType.Content, value: ' and two' },
+      { type: LlmEventType.Finished },
+    ]);
+    // Track the durable-prefix contract the way the real stream does: a
+    // chunk is published the moment delta() commits it.
+    let prefix = '';
+    const textDeltas = {
+      delta: vi.fn(async (text: string) => {
+        prefix += text;
+      }),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => prefix.length > 0,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).resolves.toMatchObject({ text: 'chunk one and two' });
+    expect(textDeltas.delta.mock.calls.map((call) => call[0])).toEqual([
+      'chunk one',
+      ' and two',
+    ]);
   });
 });
