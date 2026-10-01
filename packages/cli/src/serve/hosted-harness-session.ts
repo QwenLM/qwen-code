@@ -9,7 +9,9 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { Application, Request, Response } from 'express';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
+import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
   ManagedSessionAlreadyExistsError,
   ManagedSessionNotFoundError,
@@ -23,12 +25,21 @@ import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  MANAGED_TOOL_RESULT_LIMITS,
+  parseToolResultEnvelope,
+  parseToolResultManifestBytes,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import {
+  ResourceToolResultSegmentStore,
+  type DurableToolResultResourceStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionEvent,
+  ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
@@ -46,6 +57,15 @@ import {
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import type { HostedHarnessContract } from './hosted-harness-contract.js';
+import {
+  HOSTED_MCP_PROFILE,
+  HostedMcpSession,
+  HostedMcpRecoveryRequiredError,
+  HostedMcpConflictError,
+  HostedMcpConnectionQuotaError,
+  parseHostedMcpServers,
+  type HostedMcpServerPin,
+} from './hosted-mcp-session.js';
 import {
   HostedApprovalWaiters,
   hostedApprovalDefinition,
@@ -68,9 +88,13 @@ interface HostedSession {
   active?: { promptId: string; digest: string; abort: AbortController };
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
-  toolProfile?: HostedWorkspaceToolProfile;
+  toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
   shell?: HostedShellTurnOptions;
+  mcp?: HostedMcpSession;
+  mcpBusy?: boolean;
+  mcpClosing?: boolean;
+  mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
 }
@@ -131,13 +155,13 @@ function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
     );
 }
 
-function hasUnsettledInput(session: HostedSession): boolean {
+function hasUnsettledInput(
+  session: HostedSession,
+  throughSequence: number,
+): boolean {
   const accepted = new Set<string>();
   const authority = session.managed.authority;
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
+  for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
     if (event.kind === 'input.accepted')
       accepted.add(event.payload['turnId'] as string);
     if (event.kind === 'turn.settled')
@@ -146,15 +170,240 @@ function hasUnsettledInput(session: HostedSession): boolean {
   return accepted.size > 0;
 }
 
+async function readShellReceipt(
+  session: HostedSession,
+  receipt: ManagedSessionEvent,
+) {
+  const executionCallId = receipt.payload['executionCallId'];
+  if (typeof executionCallId !== 'string')
+    throw new Error('Original Shell receipt has no execution identity.');
+  const ref = assertManagedSessionDurableRef(
+    receipt.payload['toolOutcomeRef'],
+    'original Shell outcome',
+  );
+  const outcome = object(
+    JSON.parse((await session.managed.resources.read(ref)).toString('utf8')),
+  );
+  const history = object(outcome?.['history']);
+  const envelope = parseToolResultEnvelope(outcome?.['envelope']);
+  const manifest = envelope.capture?.manifest ?? null;
+  const decision: 'committed' | 'blocked' =
+    envelope.capture?.captureStatus === 'complete' ? 'committed' : 'blocked';
+  if (
+    ref.kind !== 'managed-tool-outcome' ||
+    outcome?.['schemaVersion'] !== 1 ||
+    outcome['decision'] !== decision ||
+    !isDeepStrictEqual(outcome['manifestRef'], manifest) ||
+    !isDeepStrictEqual(
+      receipt.payload['resultRef'],
+      decision === 'committed' ? manifest : null,
+    ) ||
+    !isDeepStrictEqual(
+      receipt.payload['resources'],
+      manifest ? [manifest] : [],
+    ) ||
+    receipt.payload['historyRevision'] !== receipt.sequence ||
+    typeof history?.['messageId'] !== 'string' ||
+    !UUID.test(history['messageId']) ||
+    typeof history['timestamp'] !== 'string' ||
+    typeof history['model'] !== 'string' ||
+    !Array.isArray(history['parts'])
+  )
+    throw new Error('Original Shell receipt or history conflicts.');
+  return {
+    executionCallId,
+    ref,
+    envelope,
+    manifest,
+    decision,
+    history: {
+      messageId: history['messageId'],
+      timestamp: history['timestamp'],
+      model: history['model'],
+      parts: history['parts'],
+    },
+  };
+}
+
+async function verifyWorkspaceRestore(
+  session: HostedSession,
+  toolResults: DurableToolResultResourceStore,
+  throughSequence: number,
+): Promise<boolean> {
+  const { authority, resources, sink } = session.managed;
+  const segmentStore = new ResourceToolResultSegmentStore(toolResults);
+  const manifests = new Map<string, ManagedSessionDurableRef>();
+  const verified = new Map<string, ManagedSessionDurableRef>();
+  const publicationManifests = new Set<string>();
+  let incomplete = false;
+  async function readRef(ref: ManagedSessionDurableRef): Promise<void> {
+    const previous = verified.get(ref.resourceId);
+    if (previous) {
+      if (
+        previous.kind !== ref.kind ||
+        previous.schemaVersion !== ref.schemaVersion ||
+        previous.byteLength !== ref.byteLength ||
+        previous.digest !== ref.digest
+      )
+        throw new Error('Hosted resource references conflict.');
+      return;
+    }
+    const bytes = await resources.read(ref);
+    verified.set(ref.resourceId, ref);
+    if (ref.kind === 'managed-tool-result-manifest')
+      manifests.set(ref.resourceId, ref);
+    if (ref.kind === 'managed-session_metadata') {
+      const metadata = object(JSON.parse(bytes.toString('utf8')));
+      if (!metadata || typeof metadata['title'] !== 'string')
+        throw new Error('Hosted recovery layout is unsupported.');
+      if (metadata['previousRecordRef'])
+        await readRef(
+          metadata['previousRecordRef'] as unknown as ManagedSessionDurableRef,
+        );
+    }
+    if (ref.kind === 'managed-tool-outcome') {
+      const outcome = object(JSON.parse(bytes.toString('utf8')));
+      if (outcome?.['manifestRef'])
+        await readRef(
+          assertManagedSessionDurableRef(
+            outcome['manifestRef'] as ManagedSessionJsonValue,
+            'outcome manifest',
+          ),
+        );
+    }
+    if (ref.kind === 'managed-checkpoint') {
+      const checkpoint = parseHarnessCheckpointV1(bytes);
+      if (
+        checkpoint.resume.fileHistoryRef ||
+        checkpoint.output.mediaRefs.length
+      )
+        throw new Error('Hosted recovery layout is unsupported.');
+      const refs = [
+        checkpoint.resume.apiHistoryRef,
+        checkpoint.resume.artifactRef,
+        checkpoint.resume.goalRecordsRef,
+        checkpoint.resume.goalCheckpointWindowRef,
+        checkpoint.resume.tokenCountsRef,
+        checkpoint.resume.uiTelemetryRef,
+        checkpoint.resume.attributionRef,
+        checkpoint.attempt?.routeRef,
+        checkpoint.attempt?.capabilityRef,
+        checkpoint.attempt?.samplingRef,
+        checkpoint.attempt?.usageRef,
+        ...(checkpoint.tools?.items.map((item) => item.outcomeRef) ?? []),
+        checkpoint.approval?.optionsRef,
+        checkpoint.approval?.decisionRef,
+        checkpoint.approval?.invocationRef,
+        checkpoint.output.llmContentRef,
+        checkpoint.output.hookResultRef,
+      ];
+      for (const nested of refs) {
+        if (nested) await readRef(nested);
+      }
+    }
+  }
+  const header = authority.sessionHeader;
+  await readRef(header.definitionRef);
+  await readRef(header.rootSnapshotRef);
+  if (header.baseTranscriptProof) await readRef(header.baseTranscriptProof);
+  for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
+    if (
+      event.kind === 'domain.committed' &&
+      event.payload['domain'] !== 'session_metadata'
+    )
+      throw new Error('Hosted recovery domain is unsupported.');
+    for (const [field, value] of Object.entries(event.payload)) {
+      if (field.endsWith('Ref') && value !== null && value !== undefined) {
+        const ref = value as unknown as ManagedSessionDurableRef;
+        await readRef(ref);
+      } else if (field === 'resources' && Array.isArray(value)) {
+        for (const ref of value) {
+          const resource = ref as unknown as ManagedSessionDurableRef;
+          await readRef(resource);
+        }
+      }
+    }
+  }
+  if (session.publication) {
+    for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
+      if (event.kind !== 'tool.receipt') continue;
+      const { executionCallId, ref, envelope, manifest } =
+        await readShellReceipt(session, event);
+      if (
+        envelope.executionStatus === 'not_started' &&
+        envelope.capture === null
+      )
+        continue;
+      const receipt = object(
+        await session.publication.owner.request('/receipts/verify', {
+          executionCallId,
+          toolOutcomeRef: ref,
+          manifestRef: manifest,
+          historyRevision: event.sequence,
+        }),
+      );
+      if (
+        !isDeepStrictEqual(receipt?.['toolOutcomeRef'], ref) ||
+        !isDeepStrictEqual(receipt?.['manifestRef'], manifest) ||
+        receipt?.['historyRevision'] !== event.sequence
+      )
+        throw new Error('Original publication verification conflicts.');
+      if (manifest) publicationManifests.add(manifest.resourceId);
+      if (envelope.capture?.captureStatus !== 'complete') incomplete = true;
+    }
+  }
+  for (const ref of manifests.values()) {
+    const manifest = parseToolResultManifestBytes(await toolResults.read(ref));
+    if (session.publication) {
+      if (!publicationManifests.has(ref.resourceId))
+        throw new Error('Hosted publication has no verified receipt.');
+      continue;
+    }
+    if (manifest.captureStatus !== 'complete')
+      throw new Error('Hosted tool result capture is incomplete.');
+    for (const content of manifest.contents) {
+      if ('ref' in content.body) {
+        const bytes = await toolResults.read(content.body.ref);
+        if (createHash('sha256').update(bytes).digest('hex') !== content.digest)
+          throw new Error('Hosted tool result content is incomplete.');
+      } else {
+        const hash = createHash('sha256');
+        for (
+          let offset = 0;
+          offset < content.byteLength ||
+          (content.byteLength === 0 && offset === 0);
+          offset += MANAGED_TOOL_RESULT_LIMITS.maxSegmentBytes
+        ) {
+          const read = await segmentStore.readRange({
+            manifestRef: ref,
+            expectedIdentity: manifest,
+            streamId: content.streamId,
+            offset,
+            length: Math.min(
+              MANAGED_TOOL_RESULT_LIMITS.maxSegmentBytes,
+              content.byteLength - offset,
+            ),
+          });
+          if (read.status !== 'ok')
+            throw new Error('Hosted tool result content is incomplete.');
+          hash.update(read.result);
+        }
+        if (hash.digest('hex') !== content.digest)
+          throw new Error('Hosted tool result content is incomplete.');
+      }
+    }
+  }
+  await sink.project(throughSequence);
+  return incomplete;
+}
+
 async function recoverShellReceipts(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
+  throughSequence: number,
 ): Promise<string | null> {
   const authority = session.managed.authority;
-  const events = authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  );
+  const events = authority.eventsInSequenceRange(1, throughSequence);
   const pending = new Set<string>();
   const receipts: Array<{ promptId: string; event: ManagedSessionEvent }> = [];
   let currentPrompt: string | null = null;
@@ -179,40 +428,13 @@ async function recoverShellReceipts(
   }
   const promptId = pending.size === 1 ? [...pending][0] : null;
   const harness = createManagedHarnessHandle(session.managed);
-  const projected = receipts.length ? await session.managed.sink.project() : [];
+  const projected = receipts.length
+    ? await session.managed.sink.project(throughSequence)
+    : [];
   const projectedIds = new Set(projected.map((item) => item.uuid));
   for (const { promptId: receiptPromptId, event: receipt } of receipts) {
-    const executionCallId = receipt.payload['executionCallId'];
-    if (typeof executionCallId !== 'string')
-      throw new Error('Original Shell receipt has no execution identity.');
-    const ref = assertManagedSessionDurableRef(
-      receipt.payload['toolOutcomeRef'],
-      'original Shell outcome',
-    );
-    const outcome = object(
-      JSON.parse((await session.managed.resources.read(ref)).toString('utf8')),
-    );
-    const history = object(outcome?.['history']);
-    const envelope = parseToolResultEnvelope(outcome?.['envelope']);
-    const manifest = envelope.capture?.manifest ?? null;
-    const decision =
-      envelope.capture?.captureStatus === 'complete' ? 'committed' : 'blocked';
-    if (
-      outcome?.['schemaVersion'] !== 1 ||
-      outcome['decision'] !== decision ||
-      !isDeepStrictEqual(outcome['manifestRef'], manifest) ||
-      !isDeepStrictEqual(
-        receipt.payload['resultRef'],
-        decision === 'committed' ? manifest : null,
-      ) ||
-      receipt.payload['historyRevision'] !== receipt.sequence ||
-      typeof history?.['messageId'] !== 'string' ||
-      !UUID.test(history['messageId']) ||
-      typeof history['timestamp'] !== 'string' ||
-      typeof history['model'] !== 'string' ||
-      !Array.isArray(history['parts'])
-    )
-      throw new Error('Original Shell receipt or history conflicts.');
+    const { executionCallId, ref, history, envelope, manifest, decision } =
+      await readShellReceipt(session, receipt);
     if (!projectedIds.has(history['messageId'])) {
       if (receiptPromptId !== promptId)
         throw new Error('Settled Shell history is missing.');
@@ -455,6 +677,7 @@ async function executeHostedTurn(
               settings: session.approval,
               waiters: session.waiters,
             },
+            session.mcp,
           )
         : undefined;
     if (resumeFromToolResults) {
@@ -487,7 +710,11 @@ async function executeHostedTurn(
         result.model,
       );
     } catch (cause) {
-      if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
+      if (
+        cause instanceof HostedToolRecoveryRequiredError ||
+        cause instanceof HostedMcpRecoveryRequiredError
+      )
+        throw cause;
       state = abort.signal.aborted ? 'cancelled' : 'error';
       stopReason = state;
       if (state === 'error') {
@@ -536,15 +763,32 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const body = object(req.body);
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
-    const toolProfile = body?.['toolProfile'];
-    const captureBytes = body?.['captureBytes'];
+    let toolProfile = body?.['toolProfile'];
+    let captureBytes = body?.['captureBytes'];
     if (
       toolProfile !== undefined &&
       ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
-        toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE) ||
+        toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+        toolProfile !== HOSTED_MCP_PROFILE) ||
         !brokerOptions)
     ) {
       error(res, 400, 'hosted_tool_profile_unavailable');
+      return;
+    }
+    let mcpServers: readonly HostedMcpServerPin[] | undefined;
+    try {
+      if (toolProfile === HOSTED_MCP_PROFILE)
+        mcpServers = parseHostedMcpServers(body?.['mcpServers']);
+      else if (body?.['mcpServers'] !== undefined)
+        throw new Error('MCP requires its explicit profile.');
+      if (
+        create &&
+        mcpServers &&
+        mcpServers.length > MANAGED_MCP_MAX_CONNECTIONS
+      )
+        throw new Error('MCP server definitions exceed Runtime capacity.');
+    } catch {
+      error(res, 400, 'invalid_hosted_mcp_servers');
       return;
     }
     // The mode is pinned at creation, so a deployment's later mode affects
@@ -616,6 +860,7 @@ export function registerHostedHarnessSessionRoutes(
                   engine: 'managed',
                   sessionId,
                   ...(toolProfile ? { toolProfile } : {}),
+                  ...(mcpServers ? { mcpServers } : {}),
                   ...(toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE
                     ? { captureBytes }
                     : {}),
@@ -643,6 +888,54 @@ export function registerHostedHarnessSessionRoutes(
         resourceStore: stores.resourceStore,
         ...(refs ? { create: refs, requireNew: true } : {}),
       });
+      const definition = object(
+        JSON.parse(
+          (
+            await managed.resources.read(
+              managed.authority.sessionHeader.definitionRef,
+            )
+          ).toString('utf8'),
+        ),
+      );
+      const savedProfile = definition?.['toolProfile'];
+      if (
+        !create &&
+        toolProfile === undefined &&
+        (savedProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+          savedProfile === HOSTED_WORKSPACE_SHELL_PROFILE)
+      )
+        toolProfile = savedProfile;
+      if (
+        !create &&
+        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        captureBytes === undefined
+      )
+        captureBytes = definition?.['captureBytes'];
+      const workspaceProfile =
+        toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE;
+      if (
+        toolProfile !== undefined &&
+        ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          toolProfile !== HOSTED_WORKSPACE_SHELL_PROFILE &&
+          toolProfile !== HOSTED_MCP_PROFILE) ||
+          !brokerOptions)
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (
+        toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
+        captureBytes !== undefined &&
+        (!Number.isSafeInteger(captureBytes) ||
+          (captureBytes as number) < 1 ||
+          (captureBytes as number) > 2 ** 41)
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
       const session: HostedSession = {
         managed,
         clientId: randomUUID(),
@@ -671,20 +964,13 @@ export function registerHostedHarnessSessionRoutes(
             }
           : {}),
       };
-      const definition = object(
-        JSON.parse(
-          (
-            await managed.resources.read(
-              managed.authority.sessionHeader.definitionRef,
-            )
-          ).toString('utf8'),
-        ),
-      );
       const pinned = toolProfile
         ? readHostedApprovalDefinition(definition)
         : undefined;
       if (
         definition?.['toolProfile'] !== toolProfile ||
+        JSON.stringify(definition?.['mcpServers']) !==
+          JSON.stringify(mcpServers) ||
         (toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE &&
           definition?.['captureBytes'] !== captureBytes) ||
         (toolProfile && !pinned)
@@ -693,8 +979,30 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
+      if (mcpServers && brokerOptions)
+        session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
       if (pinned) session.approval = pinned;
       const restore = await managed.authority.restoreBundle();
+      if (restore.recoveryStatus !== 'ok') {
+        await managed.close();
+        error(res, 409, 'hosted_turn_recovery_required');
+        return;
+      }
+      let incompletePublication = false;
+      if (!create && workspaceProfile) {
+        try {
+          incompletePublication = await verifyWorkspaceRestore(
+            session,
+            stores.toolResultResources,
+            restore.throughSequence,
+          );
+          await stores.assertWritable();
+        } catch {
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
+      }
       let resume: { promptId: string; text: string; parts: Part[] } | undefined;
       let settlePromptId: string | undefined;
       if (
@@ -702,7 +1010,11 @@ export function registerHostedHarnessSessionRoutes(
         session.publication &&
         brokerOptions
       ) {
-        const promptId = await recoverShellReceipts(session, brokerOptions);
+        const promptId = await recoverShellReceipts(
+          session,
+          brokerOptions,
+          restore.throughSequence,
+        );
         const authorization = await managed.authority.harnessRunAuthorization();
         const projected = await managed.sink.project();
         const current = projected.filter(
@@ -751,12 +1063,28 @@ export function registerHostedHarnessSessionRoutes(
           settlePromptId = promptId;
       }
       if (
-        restore.recoveryStatus !== 'ok' ||
-        (hasUnsettledInput(session) && !resume && !settlePromptId)
+        incompletePublication ||
+        (hasUnsettledInput(
+          session,
+          workspaceProfile
+            ? restore.throughSequence
+            : managed.authority.committedSequence,
+        ) &&
+          !resume &&
+          !settlePromptId)
       ) {
         await managed.close();
         error(res, 409, 'hosted_turn_recovery_required');
         return;
+      }
+      if (!create && workspaceProfile) {
+        try {
+          await stores.assertWritable();
+        } catch {
+          await managed.close();
+          error(res, 409, 'hosted_turn_recovery_required');
+          return;
+        }
       }
       if (resume) {
         const abort = new AbortController();
@@ -873,6 +1201,8 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
     const prompt = body?.['prompt'];
@@ -929,7 +1259,7 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (session.blocked)
+    if (session.blocked || session.mcp?.hasPendingOperations())
       return error(res, 409, 'hosted_turn_recovery_required');
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
@@ -956,6 +1286,8 @@ export function registerHostedHarnessSessionRoutes(
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
         });
       try {
+        await session.mcp?.ensureReady(abort.signal);
+        abort.signal.throwIfAborted();
         const authority = session.managed.authority;
         const contentRef = await session.managed.resources.publish(
           'managed-input',
@@ -965,6 +1297,7 @@ export function registerHostedHarnessSessionRoutes(
           'managed-admission',
           Buffer.from(JSON.stringify({ promptId, digest })),
         );
+        abort.signal.throwIfAborted();
         await authority.submitInput(
           {
             operation: 'submitInput',
@@ -1001,8 +1334,13 @@ export function registerHostedHarnessSessionRoutes(
         );
         settled = true;
       } catch (cause) {
-        if (cause instanceof HostedToolRecoveryRequiredError) {
-          session.blocked = true;
+        if (
+          cause instanceof HostedToolRecoveryRequiredError ||
+          cause instanceof HostedMcpRecoveryRequiredError
+        ) {
+          if (admitted) session.blocked = true;
+          else if (!res.headersSent)
+            error(res, 503, 'hosted_mcp_recovery_required');
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
           );
@@ -1024,12 +1362,185 @@ export function registerHostedHarnessSessionRoutes(
             );
           }
         }
-        if (!res.headersSent) error(res, 503, 'hosted_prompt_admission_failed');
+        if (!res.headersSent)
+          error(
+            res,
+            cause instanceof HostedMcpConnectionQuotaError ? 409 : 503,
+            cause instanceof HostedMcpConnectionQuotaError
+              ? cause.message
+              : 'hosted_prompt_admission_failed',
+          );
       } finally {
         if (timer) clearTimeout(timer);
         session.active = undefined;
       }
     })();
+  });
+
+  app.get('/session/:id/mcp-catalog', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    res.json({ catalogs: session.mcp.getCatalogs() });
+  });
+
+  app.post('/session/:id/mcp/configurations', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    if (session.mcpBusy || session.mcpRecovering || session.blocked)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const expectedRevision = body?.['expectedRevision'];
+    let pin: HostedMcpServerPin;
+    try {
+      if (
+        typeof operationId !== 'string' ||
+        !UUID.test(operationId) ||
+        !Number.isSafeInteger(expectedRevision) ||
+        Number(expectedRevision) < 1
+      )
+        throw new Error('Invalid configuration command.');
+      [pin] = parseHostedMcpServers([body?.['server']]);
+    } catch {
+      return error(res, 400, 'invalid_mcp_configuration');
+    }
+    session.mcpBusy = true;
+    void session.mcp
+      .configure(operationId as string, pin, Number(expectedRevision))
+      .then(
+        () => res.status(202).json({ operationId, state: 'settled' }),
+        (cause: unknown) => {
+          if (cause instanceof HostedMcpRecoveryRequiredError) {
+            error(res, 503, 'hosted_mcp_recovery_required');
+            return;
+          }
+          error(
+            res,
+            409,
+            cause instanceof HostedMcpConnectionQuotaError
+              ? cause.message
+              : 'hosted_mcp_configuration_failed',
+          );
+        },
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.post('/session/:id/mcp/operations', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    if (session.active || session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const serverId = body?.['serverId'];
+    const request = object(body?.['request']);
+    if (
+      typeof operationId !== 'string' ||
+      !UUID.test(operationId) ||
+      typeof serverId !== 'string' ||
+      !request
+    )
+      return error(res, 400, 'invalid_mcp_operation');
+    let invocation: Parameters<HostedMcpSession['invoke']>[2];
+    if (
+      request['kind'] === 'resource_read' &&
+      Object.keys(request).sort().join(',') === 'kind,uri' &&
+      typeof request['uri'] === 'string' &&
+      request['uri'].trim().length > 0
+    ) {
+      invocation = { kind: 'resource_read', uri: request['uri'] };
+    } else if (
+      request['kind'] === 'prompt_get' &&
+      Object.keys(request).sort().join(',') === 'arguments,kind,name' &&
+      typeof request['name'] === 'string' &&
+      request['name'].trim().length > 0 &&
+      object(request['arguments']) &&
+      Object.values(request['arguments'] as object).every(
+        (value) => typeof value === 'string',
+      )
+    ) {
+      invocation = {
+        kind: 'prompt_get',
+        name: request['name'],
+        arguments: request['arguments'] as Record<string, string>,
+      };
+    } else return error(res, 400, 'invalid_mcp_operation');
+    const strings =
+      invocation.kind === 'resource_read'
+        ? [invocation.uri]
+        : [invocation.name, ...Object.entries(invocation.arguments).flat()];
+    if (strings.some((value) => /\p{Cs}/u.test(value)))
+      return error(res, 400, 'invalid_mcp_operation');
+    if (
+      (session.blocked || session.mcp.hasPendingOperations()) &&
+      !session.managed.authority.extensionRecord('mcp_operation', operationId)
+    )
+      return error(res, 409, 'hosted_turn_recovery_required');
+    session.mcpBusy = true;
+    void session.mcp
+      .invoke(operationId, serverId, invocation)
+      .then(
+        (response) => {
+          res.status(202).json(response);
+        },
+        (cause: unknown) => {
+          error(
+            res,
+            cause instanceof HostedMcpConflictError ||
+              cause instanceof HostedMcpConnectionQuotaError
+              ? 409
+              : 503,
+            cause instanceof HostedMcpConnectionQuotaError
+              ? cause.message
+              : 'hosted_mcp_operation_failed',
+          );
+        },
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.post('/session/:id/mcp/operations/:operationId/cancel', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    if (session.mcpClosing || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    session.mcpRecovering = true;
+    void session.mcp
+      .cancel(req.params['operationId'])
+      .then(
+        (response) => res.status(202).json(response),
+        () => error(res, 503, 'hosted_mcp_cancel_failed'),
+      )
+      .finally(() => {
+        session.mcpRecovering = false;
+      });
+  });
+
+  app.get('/session/:id/mcp/operations/:operationId', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.mcp) return error(res, 409, 'hosted_mcp_unavailable');
+    if (session.mcpClosing || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    session.mcpRecovering = true;
+    void session.mcp
+      .status(req.params['operationId'])
+      .then(
+        (response) => res.json(response),
+        () => error(res, 503, 'hosted_mcp_status_failed'),
+      )
+      .finally(() => {
+        session.mcpRecovering = false;
+      });
   });
 
   app.get('/session/:id/events', (req, res) => {
@@ -1104,7 +1615,8 @@ export function registerHostedHarnessSessionRoutes(
     res.json({
       sessionId: req.params['id'],
       hasActivePrompt: !!session.active,
-      recoveryBlocked: session.blocked,
+      recoveryBlocked:
+        session.blocked || (session.mcp?.recoveryBlocked ?? false),
     });
   });
   app.get('/session/:id/transcript', (req, res) => {
@@ -1208,14 +1720,21 @@ export function registerHostedHarnessSessionRoutes(
   ): Promise<void> => {
     const session = identity(req, sessions, allowMissingClientId);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.active) return error(res, 409, 'hosted_turn_active');
+    if (session.active || session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_turn_active');
+    session.mcpBusy = true;
+    session.mcpClosing = true;
     try {
+      await session.mcp?.close();
       await session.managed.close();
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);
     } catch {
       error(res, 503, 'managed_session_close_failed');
+    } finally {
+      session.mcpClosing = false;
+      session.mcpBusy = false;
     }
   };
   app.post('/session/:id/detach', (req, res) => {

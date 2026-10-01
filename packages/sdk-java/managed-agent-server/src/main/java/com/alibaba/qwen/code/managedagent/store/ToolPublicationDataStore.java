@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -39,10 +40,11 @@ public final class ToolPublicationDataStore {
     private final ToolPublicationObjectStore objects;
     private final Duration operationTimeout;
     private final Duration claimTimeout;
+    private final VerificationBudget verificationBudget;
 
     public ToolPublicationDataStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ToolPublicationStore grants, ManagedSessionStore sessions, ToolPublicationObjectStore objects,
-            Duration operationTimeout, Duration claimTimeout) {
+            Duration operationTimeout, Duration claimTimeout, VerificationBudget verificationBudget) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(Objects.requireNonNull(manager));
         this.grants = Objects.requireNonNull(grants);
@@ -50,10 +52,29 @@ public final class ToolPublicationDataStore {
         this.objects = Objects.requireNonNull(objects);
         this.operationTimeout = Objects.requireNonNull(operationTimeout);
         this.claimTimeout = Objects.requireNonNull(claimTimeout);
+        this.verificationBudget = Objects.requireNonNull(verificationBudget);
         require(!operationTimeout.isNegative() && !operationTimeout.isZero()
                 && !claimTimeout.isNegative() && !claimTimeout.isZero()
                 && claimTimeout.compareTo(operationTimeout) < 0,
                 "Invalid publication operation deadlines");
+        verificationBudget.timeout(operationTimeout, 0);
+    }
+
+    public record VerificationBudget(long bytesPerSecond, Duration maximumTimeout) {
+        public VerificationBudget {
+            require(bytesPerSecond > 0 && maximumTimeout != null && !maximumTimeout.isNegative()
+                    && !maximumTimeout.isZero() && maximumTimeout.compareTo(Duration.ofMinutes(25)) <= 0,
+                    "Invalid publication verification budget");
+        }
+
+        public Duration timeout(Duration base, long bytes) {
+            require(bytes >= 0, "Invalid publication verification size");
+            long seconds = bytes / bytesPerSecond + (bytes % bytesPerSecond == 0 ? 0 : 1);
+            Duration window = base.plusSeconds(seconds);
+            require(window.compareTo(maximumTimeout) <= 0,
+                    "Publication verification exceeds its configured budget");
+            return window;
+        }
     }
 
     public JsonNode publishSegment(JsonNode key, String publicationId, String token,
@@ -262,11 +283,13 @@ public final class ToolPublicationDataStore {
             // A recovery starts a new bounded verification attempt. It does
             // not extend the original deadline, change bytes or release quota.
             String active = availableActive(scope, publicationId, operationId, current);
-            require(active == null || operationId.equals(active), "Publication is busy");
+            requireContract(active == null || operationId.equals(active), HttpStatus.CONFLICT,
+                    "managed_tool_publication_busy", "Publication is busy");
             jdbc.update("UPDATE qwen_tool_publication_operation SET recovery_deadline = ?,"
                             + " claim_epoch = claim_epoch + 1, claim_owner = NULL, claim_until = NULL"
                             + " WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
-                    new Timestamp(current.getTime() + operationTimeout.toMillis()), scope, publicationId, operationId);
+                    new Timestamp(current.getTime() + verificationWindow(scope, publicationId,
+                            row.slot()).toMillis()), scope, publicationId, operationId);
             if (!"terminal".equals(row.slot())) {
                 jdbc.update("UPDATE qwen_tool_publication SET active_operation_id = ?"
                         + " WHERE scope_key = ? AND publication_id = ?", operationId, scope, publicationId);
@@ -279,6 +302,12 @@ public final class ToolPublicationDataStore {
         sessions.restore(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerToken);
         return finishedInternal(key, publicationId);
+    }
+
+    JsonNode verifyFinished(JsonNode key, String publicationId, String writerToken) {
+        JsonNode finished = finished(key, publicationId, writerToken);
+        validateFinished(key, publicationId, finished.path("binding"), finished.path("result"), () -> {});
+        return finished;
     }
 
     /** Broker-only lookup of the immutable terminal envelope after FINISHED. */
@@ -538,8 +567,8 @@ public final class ToolPublicationDataStore {
         try {
             if (claim.predecessor() != null) {
                 List<Operation> previous = operation(scope, publicationId, claim.predecessor(), false);
-                require(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
-                        "Finish predecessor has not completed");
+                requireContract(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
+                        HttpStatus.CONFLICT, "managed_tool_publication_busy", "Finish predecessor has not completed");
             }
             validateFinished(key, publicationId, claim.binding(), result,
                     heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
@@ -598,8 +627,8 @@ public final class ToolPublicationDataStore {
                     && digest.equals(row.get("finish_digest")) && prior.size() == 1
                     && requestDigest.equals(prior.get(0).digest()), "Finish replay conflicts");
             requireUnexpired(prior.get(0).deadline(), now);
-            require(prior.get(0).claimUntil() == null || !prior.get(0).claimUntil().after(now),
-                    "Finish operation is busy");
+            requireContract(prior.get(0).claimUntil() == null || !prior.get(0).claimUntil().after(now),
+                    HttpStatus.CONFLICT, "managed_tool_publication_busy", "Finish operation is busy");
         } else {
             require(prior.isEmpty(), "Finish operation ID conflicts");
             long used = ((Number) row.get("producer_used_bytes")).longValue();
@@ -624,7 +653,7 @@ public final class ToolPublicationDataStore {
                             + " claim_until, deadline, created_at) VALUES (?, ?, ?, ?, 'terminal', 'PENDING',"
                             + " ?, ?, ?, ?, ?)", scope, publicationId, operationId, requestDigest,
                     UUID.randomUUID().toString(), epoch, until,
-                    new Timestamp(now.getTime() + operationTimeout.toMillis()), now);
+                    new Timestamp(now.getTime() + verificationWindow(scope, publicationId, "terminal").toMillis()), now);
         } else {
             jdbc.update("UPDATE qwen_tool_publication_operation SET claim_owner = ?, claim_epoch = ?,"
                             + " claim_until = ? WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
@@ -638,6 +667,8 @@ public final class ToolPublicationDataStore {
     private JsonNode installFinish(JsonNode key, String scope, String publicationId, String token,
             String operationId, FinishClaim claim, byte[] bytes, String digest) {
         authorize(key, scope, publicationId, token);
+        List<Operation> current = operation(scope, publicationId, operationId, true);
+        requireOperationClaim(current, claim.epoch(), now());
         Map<String, Object> publication = jdbc.queryForMap("SELECT producer_phase,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined, finish_operation_id,"
                 + " finish_predecessor_id, finish_digest, active_operation_id, capture_used_bytes,"
@@ -651,13 +682,9 @@ public final class ToolPublicationDataStore {
                 "Finish barrier changed");
         if (claim.predecessor() != null) {
             List<Operation> previous = operation(scope, publicationId, claim.predecessor(), true);
-            require(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
-                    "Finish predecessor has not completed");
+            requireContract(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
+                    HttpStatus.CONFLICT, "managed_tool_publication_busy", "Finish predecessor has not completed");
         }
-        List<Operation> current = operation(scope, publicationId, operationId, true);
-        require(current.size() == 1 && current.get(0).epoch() == claim.epoch()
-                && current.get(0).claimUntil().after(now()) && current.get(0).deadline().after(now()),
-                "Finish claim expired");
         Stored terminal = stored(scope, publicationId, "terminal").get(0);
         require("CANDIDATE".equals(terminal.state()) && terminal.length() == bytes.length
                 && digest.equals(terminal.digest()), "Terminal candidate changed");
@@ -805,10 +832,12 @@ public final class ToolPublicationDataStore {
             requireUnexpired(row.deadline(), now);
         }
         String active = availableActive(scope, publicationId, operationId, now);
-        require(active == null || active.equals(operationId), "Publication is busy");
+        requireContract(active == null || active.equals(operationId), HttpStatus.CONFLICT,
+                "managed_tool_publication_busy", "Publication is busy");
         if (active != null) {
-            require(!prior.isEmpty() && (prior.get(0).claimUntil() == null
-                    || !prior.get(0).claimUntil().after(now)), "Publication operation is busy");
+            requireContract(!prior.isEmpty() && (prior.get(0).claimUntil() == null
+                    || !prior.get(0).claimUntil().after(now)), HttpStatus.CONFLICT,
+                    "managed_tool_publication_busy", "Publication operation is busy");
         }
         long epoch = prior.isEmpty() ? 1 : prior.get(0).epoch() + 1;
         Timestamp claimUntil = new Timestamp(now.getTime() + claimTimeout.toMillis());
@@ -817,7 +846,8 @@ public final class ToolPublicationDataStore {
                             + " request_digest, slot_key, state, claim_owner, claim_epoch, claim_until, deadline,"
                             + " created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)",
                     scope, publicationId, operationId, requestDigest, slot, UUID.randomUUID().toString(),
-                    epoch, claimUntil, new Timestamp(now.getTime() + operationTimeout.toMillis()), now);
+                    epoch, claimUntil,
+                    new Timestamp(now.getTime() + verificationWindow(scope, publicationId, slot).toMillis()), now);
         } else {
             jdbc.update("UPDATE qwen_tool_publication_operation SET claim_owner = ?, claim_epoch = ?,"
                             + " claim_until = ? WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
@@ -832,9 +862,9 @@ public final class ToolPublicationDataStore {
         String active = jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication"
                 + " WHERE scope_key = ? AND publication_id = ?", String.class, scope, publicationId);
         List<Operation> rows = operation(scope, publicationId, operationId, true);
-        require(operationId.equals(active) && rows.size() == 1 && rows.get(0).epoch() == epoch
-                && "PENDING".equals(rows.get(0).state()) && rows.get(0).claimUntil().after(now())
-                && rows.get(0).deadline().after(now()), "Publication operation claim expired");
+        requireOperationClaim(rows, epoch, now());
+        requireContract(operationId.equals(active), HttpStatus.CONFLICT,
+                "managed_tool_publication_claim_lost", "Publication operation lost its claim");
     }
 
     private String availableActive(String scope, String publicationId, String operationId, Timestamp current) {
@@ -945,11 +975,7 @@ public final class ToolPublicationDataStore {
                     authorize(key, scope, publicationId, token);
                     List<Operation> rows = operation(scope, publicationId, operationId, true);
                     Timestamp current = now();
-                    require(rows.size() == 1 && "PENDING".equals(rows.get(0).state())
-                            && rows.get(0).epoch() == epoch
-                            && rows.get(0).claimUntil().after(current)
-                            && rows.get(0).deadline().after(current),
-                            "Publication operation claim expired");
+                    requireOperationClaim(rows, epoch, current);
                     long until = Math.min(rows.get(0).deadline().getTime(),
                             current.getTime() + claimTimeout.toMillis());
                     jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?"
@@ -1076,7 +1102,8 @@ public final class ToolPublicationDataStore {
             requireUnexpired(row.deadline(), now);
         }
         String active = availableActive(scope, publicationId, operationId, now);
-        require(active == null || active.equals(operationId), "Publication is busy");
+        requireContract(active == null || active.equals(operationId), HttpStatus.CONFLICT,
+                "managed_tool_publication_busy", "Publication is busy");
         String resourceId = kind == null ? null : "result-" + hash(scope + ":" + publicationId + ":" + slot).substring(0, 32);
         String objectKey = (kind != null && length <= 64 * 1024) ? null
                 : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash(slot);
@@ -1104,8 +1131,8 @@ public final class ToolPublicationDataStore {
                     scope, publicationId, operationId, requestDigest, slot, owner, epoch,
                     claimUntil, new Timestamp(now.getTime() + operationTimeout.toMillis()), now);
         } else {
-            require(prior.get(0).claimUntil() == null || !prior.get(0).claimUntil().after(now),
-                    "Publication operation is busy");
+            requireContract(prior.get(0).claimUntil() == null || !prior.get(0).claimUntil().after(now),
+                    HttpStatus.CONFLICT, "managed_tool_publication_busy", "Publication operation is busy");
             jdbc.update("UPDATE qwen_tool_publication_operation SET claim_owner = ?, claim_epoch = ?,"
                             + " claim_until = ? WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
                     owner, epoch, claimUntil, scope, publicationId, operationId);
@@ -1120,11 +1147,10 @@ public final class ToolPublicationDataStore {
         JsonNode binding = authorize(key, scope, publicationId, token);
         String active = jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication"
                 + " WHERE scope_key = ? AND publication_id = ?", String.class, scope, publicationId);
-        require(operationId.equals(active), "Publication operation lost its claim");
         List<Operation> rows = operation(scope, publicationId, operationId, true);
-        require(rows.size() == 1 && rows.get(0).epoch() == candidate.epoch()
-                && rows.get(0).claimUntil().after(now()) && rows.get(0).deadline().after(now())
-                && "PENDING".equals(rows.get(0).state()), "Publication operation claim expired");
+        requireOperationClaim(rows, candidate.epoch(), now());
+        requireContract(operationId.equals(active), HttpStatus.CONFLICT,
+                "managed_tool_publication_claim_lost", "Publication operation lost its claim");
         Stored row = stored(scope, publicationId, rows.get(0).slot()).get(0);
         require("CANDIDATE".equals(row.state()) && digest.equals(row.digest())
                 && row.length() == bytes.length, "Publication candidate changed");
@@ -1261,8 +1287,63 @@ public final class ToolPublicationDataStore {
     private byte[] readRangeInternal(JsonNode key, String publicationId,
             JsonNode manifestRef, JsonNode expectedIdentity, String streamId,
             long offset, int length, boolean requireFinished, Runnable heartbeat) {
-        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT,
-                "Invalid publication range");
+        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT, "Invalid publication range");
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity,
+                streamId, requireFinished, heartbeat).readRange(offset, length, heartbeat);
+    }
+
+    VerifiedStream openReferencedStream(JsonNode key, String publicationId,
+            JsonNode outcomeRef, JsonNode manifestRef, JsonNode expectedIdentity,
+            String streamId, long revision, long sequence) {
+        requireReferenced(key, publicationId, outcomeRef, revision, sequence);
+        JsonNode outcome = ToolPublicationContract.readJson(referencedResource(key,
+                publicationId, outcomeRef, "managed-tool-outcome", MAX_TERMINAL));
+        require("committed".equals(text(outcome, "decision"))
+                && manifestRef.equals(outcome.path("manifestRef")),
+                "Publication did not commit this representation");
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, () -> {});
+    }
+
+    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
+            long revision, long sequence) {
+        require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
+                outcomeRef, revision, sequence), "Publication receipt is unavailable");
+    }
+
+    Map<String, Map<String, Object>> referencedPublications(JsonNode key, List<String> ids) {
+        Map<String, Map<String, Object>> result = new java.util.HashMap<>();
+        if (ids.isEmpty()) {
+            return result;
+        }
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(scope(key));
+        arguments.add(text(key, "tenantId"));
+        arguments.add(text(key, "workspaceId"));
+        arguments.add(text(key, "sessionId"));
+        arguments.addAll(ids);
+        var rows = jdbc.queryForList("SELECT publication_id, producer_phase, admission_resource_id,"
+                + " receipt_revision, receipt_sequence, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " FROM qwen_tool_publication WHERE scope_key = ?"
+                + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND publication_id IN ("
+                + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", arguments.toArray());
+        for (var row : rows) {
+            result.put((String) row.get("publication_id"), row);
+        }
+        return result;
+    }
+
+    static boolean referenced(Map<String, Object> row, JsonNode outcomeRef, long revision, long sequence) {
+        return row != null && "REFERENCED".equals(row.get("producer_phase"))
+                && row.get("quarantined") instanceof Number mark && mark.intValue() == 0
+                && outcomeRef != null && outcomeRef.path("resourceId").isTextual()
+                && outcomeRef.path("resourceId").asText().equals(row.get("admission_resource_id"))
+                && row.get("receipt_revision") instanceof Number r && r.longValue() == revision
+                && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
+    }
+
+    private VerifiedStream verifiedStream(JsonNode key, String publicationId,
+            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished,
+            Runnable heartbeat) {
         String scope = scope(key);
         var publication = jdbc.queryForMap("SELECT binding_json, producer_phase,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM qwen_tool_publication"
@@ -1306,22 +1387,23 @@ public final class ToolPublicationDataStore {
         require(selected != null && selected.path("byteLength").canConvertToLong(),
                 "Publication stream is missing");
         long size = selected.path("byteLength").longValue();
-        require(size >= 0 && offset <= size && length <= size - offset,
-                "Publication range exceeds stream");
-        byte[] result = new byte[length];
+        require(size >= 0, "Publication stream length is invalid");
+        var parts = new ArrayList<StreamPart>();
         JsonNode body = selected.path("body");
         if (body.has("ref")) {
             JsonNode ref = body.path("ref");
             Resource content = catalogResource(key, publicationId, text(ref, "resourceId"));
             require(refMatches(content, ref, "managed-tool-result-content")
-                    && content.length() == size, "Publication content reference conflicts");
-            copyVerified(content, scope, publicationId, offset, result, 0, length, heartbeat);
-            return result;
+                    && content.length() == size && size <= MAX_SEGMENT,
+                    "Publication content reference conflicts");
+            parts.add(new StreamPart(0, content));
+            return new VerifiedStream(scope, publicationId, size, parts);
         }
         require(body.path("pages").isArray(), "Publication stream has no pages");
         long expectedOffset = 0;
         int expectedOrdinal = 0;
         for (JsonNode pageReference : body.path("pages")) {
+            heartbeat.run();
             JsonNode page = ToolPublicationContract.parseToolResult("page", referencedResource(key, publicationId,
                     pageReference.path("ref"), "managed-tool-result-page", MAX_PAGE), MAX_PAGE);
             require("managed-tool-result/1".equals(text(page, "toolResult"))
@@ -1334,6 +1416,7 @@ public final class ToolPublicationDataStore {
             int segmentCount = 0;
             long pageLength = 0;
             for (JsonNode segment : page.path("segments")) {
+                heartbeat.run();
                 long segmentLength = segment.path("byteLength").asLong(-1);
                 require(segmentLength > 0 && segmentLength <= MAX_SEGMENT && expectedOrdinal < 65536,
                         "Publication page segment is invalid");
@@ -1343,15 +1426,9 @@ public final class ToolPublicationDataStore {
                         && rows.get(0).digest().equals(text(segment, "digest")),
                         "Publication page segment conflicts");
                 long position = expectedOffset + pageLength;
-                long overlapStart = Math.max(position, offset);
-                long overlapEnd = Math.min(position + segmentLength, offset + length);
-                if (overlapEnd > overlapStart) {
-                    Resource bytes = new Resource(rows.get(0).slot(), null, segmentLength,
-                            rows.get(0).digest(), rows.get(0).objectKey(), null, rows.get(0).state());
-                    copyVerified(bytes, scope, publicationId, overlapStart - position, result,
-                            Math.toIntExact(overlapStart - offset), Math.toIntExact(overlapEnd - overlapStart),
-                            heartbeat);
-                }
+                parts.add(new StreamPart(position, new Resource(rows.get(0).slot(), null,
+                        segmentLength, rows.get(0).digest(), rows.get(0).objectKey(), null,
+                        rows.get(0).state())));
                 pageLength += segmentLength;
                 segmentCount++;
                 expectedOrdinal++;
@@ -1362,7 +1439,98 @@ public final class ToolPublicationDataStore {
             expectedOffset += pageLength;
         }
         require(expectedOffset == size, "Publication stream page length conflicts");
-        return result;
+        return new VerifiedStream(scope, publicationId, size, parts);
+    }
+
+    private record StreamPart(long offset, Resource resource) {}
+
+    final class VerifiedStream {
+        private final String scope;
+        private final String publicationId;
+        private final long size;
+        private final List<StreamPart> parts;
+
+        private VerifiedStream(String scope, String publicationId, long size,
+                List<StreamPart> parts) {
+            this.scope = scope;
+            this.publicationId = publicationId;
+            this.size = size;
+            this.parts = List.copyOf(parts);
+        }
+
+        long size() { return size; }
+
+        long rangeVerificationBytes(long offset, int length) {
+            return parts.stream().filter(part -> part.offset() < offset + length
+                            && part.offset() + part.resource().length() > offset)
+                    .mapToLong(part -> part.resource().length()).sum();
+        }
+
+        InputStream open(Runnable guard) {
+            return new InputStream() {
+                private int partIndex;
+                private byte[] verified;
+                private int position;
+                private boolean closed;
+
+                @Override
+                public int read() throws IOException {
+                    byte[] one = new byte[1];
+                    return read(one, 0, 1) < 0 ? -1 : one[0] & 255;
+                }
+
+                @Override
+                public int read(byte[] target, int offset, int length) throws IOException {
+                    Objects.checkFromIndexSize(offset, length, target.length);
+                    if (closed) {
+                        throw new IOException("Artifact stream is closed");
+                    }
+                    if (length == 0) {
+                        return 0;
+                    }
+                    guard.run();
+                    while (verified == null || position == verified.length) {
+                        if (partIndex == parts.size()) {
+                            return -1;
+                        }
+                        var part = parts.get(partIndex);
+                        byte[] candidate = new byte[Math.toIntExact(part.resource().length())];
+                        copyVerified(part.resource(), scope, publicationId, 0,
+                                candidate, 0, candidate.length, guard);
+                        verified = candidate;
+                        position = 0;
+                        partIndex++;
+                    }
+                    int count = Math.min(Math.min(length, 64 * 1024), verified.length - position);
+                    guard.run();
+                    System.arraycopy(verified, position, target, offset, count);
+                    position += count;
+                    return count;
+                }
+
+                @Override
+                public void close() {
+                    closed = true;
+                    verified = null;
+                }
+            };
+        }
+
+        byte[] readRange(long offset, int length, Runnable guard) {
+            require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT
+                    && offset <= size && length <= size - offset, "Invalid publication range");
+            byte[] result = new byte[length];
+            for (var part : parts) {
+                long start = Math.max(offset, part.offset());
+                long end = Math.min(offset + length, part.offset() + part.resource().length());
+                if (end > start) {
+                    copyVerified(part.resource(), scope, publicationId, start - part.offset(),
+                            result, Math.toIntExact(start - offset), Math.toIntExact(end - start), guard);
+                }
+            }
+            guard.run();
+            return result;
+        }
     }
 
     private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
@@ -1430,7 +1598,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private static String scope(JsonNode key) {
+    static String scope(JsonNode key) {
         require(key != null && key.isObject(), "Invalid publication scope");
         return hash(JSON.createArrayNode().add(text(key, "tenantId"))
                 .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
@@ -1455,6 +1623,34 @@ public final class ToolPublicationDataStore {
     private static void requireUnexpired(Timestamp deadline, Timestamp current) {
         requireContract(deadline.after(current), HttpStatus.CONFLICT,
                 "managed_tool_publication_operation_expired", "Publication operation expired");
+    }
+
+    private static void requireOperationClaim(List<Operation> rows, long epoch, Timestamp current) {
+        requireContract(rows.size() == 1 && "PENDING".equals(rows.get(0).state())
+                && rows.get(0).epoch() == epoch, HttpStatus.CONFLICT,
+                "managed_tool_publication_claim_lost", "Publication operation lost its claim");
+        Operation row = rows.get(0);
+        requireUnexpired(row.deadline(), current);
+        requireContract(row.claimUntil() != null && row.claimUntil().after(current), HttpStatus.CONFLICT,
+                "managed_tool_publication_claim_expired", "Publication operation claim expired");
+    }
+
+    private Duration verificationWindow(String scope, String publicationId, String slot) {
+        if (!"terminal".equals(slot) && !slot.startsWith("seal:") && !slot.startsWith("prefix:")) {
+            return operationTimeout;
+        }
+        Long bytes;
+        if ("terminal".equals(slot)) {
+            bytes = jdbc.queryForObject("SELECT COALESCE(SUM(byte_length), 0) FROM qwen_tool_publication_object"
+                    + " WHERE scope_key = ? AND publication_id = ? AND slot_key <> 'admission'",
+                    Long.class, scope, publicationId);
+        } else {
+            String stream = slot.substring(slot.indexOf(':') + 1);
+            bytes = jdbc.queryForObject("SELECT COALESCE(SUM(byte_length), 0) FROM qwen_tool_publication_object"
+                    + " WHERE scope_key = ? AND publication_id = ? AND state = 'VERIFIED'"
+                    + " AND slot_key LIKE ?", Long.class, scope, publicationId, "segment:" + stream + ":%");
+        }
+        return verificationBudget.timeout(operationTimeout, bytes);
     }
 
     private static void requireContract(boolean valid, HttpStatus status,

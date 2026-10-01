@@ -666,7 +666,7 @@ class ManagedSessionStoreHttpClient {
   ): Promise<unknown> {
     await this.ensureWriter();
     if (
-      !/^\/(?:grants|publications\/[a-z0-9_-]{1,128}\/(?:finished|admissions\/prepare|receipts\/commit))$/u.test(
+      !/^\/(?:grants|receipts\/verify|publications\/[a-z0-9_-]{1,128}\/(?:finished|admissions\/prepare|receipts\/commit))$/u.test(
         path,
       )
     )

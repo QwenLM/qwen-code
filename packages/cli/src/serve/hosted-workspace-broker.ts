@@ -15,6 +15,10 @@ import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtim
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import type {
+  ManagedMcpControl,
+  ManagedMcpOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
@@ -31,6 +35,7 @@ export class HostedWorkspaceBrokerRejection extends Error {
   constructor(
     readonly status: number,
     readonly code: unknown,
+    readonly details?: Record<string, unknown>,
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
@@ -42,6 +47,15 @@ export class HostedWorkspaceBroker {
     harnessSessionId: string;
     runtimeSessionId: string;
   };
+  runtime?: {
+    bindingId: string;
+    generation: string;
+    workspaceGeneration: string;
+  };
+
+  get runtimeSessionId(): string {
+    return this.identity.runtimeSessionId;
+  }
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -70,6 +84,23 @@ export class HostedWorkspaceBroker {
       throw new Error(
         'Hosted Workspace Broker scope does not match the saved Session.',
       );
+    const runtime = response['runtime'];
+    if (runtime !== undefined) {
+      const binding = object(runtime);
+      const generation = String(binding['generation']);
+      const workspaceGeneration = String(scope['workspaceGeneration']);
+      if (
+        typeof binding['bindingId'] !== 'string' ||
+        !/^[1-9][0-9]{0,18}$/u.test(generation) ||
+        !/^[1-9][0-9]{0,18}$/u.test(workspaceGeneration)
+      )
+        throw new Error('Runtime Broker binding is invalid.');
+      this.runtime = {
+        bindingId: binding['bindingId'],
+        generation,
+        workspaceGeneration,
+      };
+    }
   }
 
   async registerPublisher(publisher: {
@@ -96,15 +127,16 @@ export class HostedWorkspaceBroker {
     callId: string,
     digest: string,
     inputDigest?: string,
+    turnId = this.identity.runtimeSessionId,
   ): Promise<string> {
     const reservation = {
       idempotencyKey: `${this.identity.runtimeSessionId}:${callId}`,
-      turnId: this.identity.runtimeSessionId,
+      turnId,
       toolCallId: callId,
       requestDigest: digest,
       reference: {
         sessionId: this.identity.runtimeSessionId,
-        promptId: this.identity.runtimeSessionId,
+        promptId: turnId,
         callId,
         argsDigest: digest,
         ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
@@ -263,6 +295,7 @@ export class HostedWorkspaceBroker {
     payloadJson: string,
     signal: AbortSignal,
     observationMs = 120_000,
+    waitForUnknown = false,
   ): Promise<
     ManagedToolResultPayload & { capture?: ToolResultCapture | null }
   > {
@@ -285,11 +318,35 @@ export class HostedWorkspaceBroker {
     }
     const end = Date.now() + observationMs;
     while (Date.now() < end) {
-      if (signal.aborted && !cancellationSent) {
-        cancellationSent = true;
-        response = await this.request(`${path}:cancel`, {});
+      const cancelling = signal.aborted && !cancellationSent;
+      try {
+        if (cancelling) {
+          cancellationSent = true;
+          response = await this.request(`${path}:cancel`, {});
+        }
+        response ??= await this.request(
+          waitForUnknown ? `${path}?reconcile=true` : path,
+        );
+      } catch (cause) {
+        const transportFailed =
+          cause instanceof TypeError ||
+          (cause instanceof DOMException && cause.name === 'TimeoutError');
+        if (cancelling && transportFailed) cancellationSent = false;
+        if (
+          !waitForUnknown ||
+          !(
+            (cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 409 &&
+              cause.code === 'runtime_broker_execution_unknown' &&
+              cause.details?.['terminal'] !== true) ||
+            transportFailed
+          )
+        )
+          throw cause;
+        response = undefined;
+        await delay(250);
+        continue;
       }
-      response ??= await this.request(path);
       if (response['executionCallId'] !== id)
         throw new Error('Runtime execution identity changed.');
       const status = object(response['status']);
@@ -311,13 +368,14 @@ export class HostedWorkspaceBroker {
         } as unknown as ManagedToolResultPayload;
       }
       if (
+        !(waitForUnknown && status['state'] === 'unknown') &&
         !['prepared', 'executing', 'cancel_requested'].includes(
           String(status['state']),
         )
       )
         throw new Error('Runtime execution outcome is unknown.');
       response = undefined;
-      await delay(50);
+      await delay(waitForUnknown ? 250 : 50);
     }
     throw new Error(
       'Runtime execution did not settle within its observation window.',
@@ -326,6 +384,27 @@ export class HostedWorkspaceBroker {
 
   async cancel(id: string): Promise<void> {
     await this.request(`/executions/${encodeURIComponent(id)}:cancel`, {});
+  }
+
+  async control(
+    operation: ManagedMcpControl,
+  ): Promise<ManagedMcpOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'mcp-status' || operation.kind === 'mcp-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime MCP response identity is invalid.');
+    return result as unknown as ManagedMcpOperationView;
   }
 
   async acknowledgeV3(
@@ -423,8 +502,16 @@ export class HostedWorkspaceBroker {
       reader.releaseLock();
     }
     const parsed = object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-    if (!response.ok)
-      throw new HostedWorkspaceBrokerRejection(response.status, parsed['code']);
+    if (!response.ok) {
+      const details = parsed['details'];
+      throw new HostedWorkspaceBrokerRejection(
+        response.status,
+        parsed['code'],
+        details && typeof details === 'object' && !Array.isArray(details)
+          ? (details as Record<string, unknown>)
+          : undefined,
+      );
+    }
     if (
       parsed['protocolVersion'] !== 1 ||
       parsed['harnessSessionId'] !== this.key.sessionId ||

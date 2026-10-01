@@ -140,7 +140,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                             runtimeSessionId, "acquired", true));
                     RuntimeScope scope = record.getSession().getScope();
                     response.put("scope", Map.of("tenantId", scope.getTenantId(),
-                            "workspaceId", scope.getWorkspaceId(), "capabilityDigest", scope.getCapabilityDigest()));
+                            "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                            "capabilityDigest", scope.getCapabilityDigest()));
+                    response.put("runtime", Map.of("bindingId", record.getBindingId(),
+                            "generation", Long.toString(record.getRuntimeGeneration())));
                     return response;
                 });
     }
@@ -304,7 +307,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                                     body.get("publicationToken") instanceof String publicationToken
                                             ? publicationToken : null)
                             : service.startExecution(harnessSessionId, runtimeSessionId, executionCallId))
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -321,7 +324,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String runtimeSessionId = JsonCodec.requiredString(body,
                     "runtimeSessionId", "cancel request");
             complete(exchange, service.cancelExecution(harnessSessionId, runtimeSessionId, executionCallId)
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -339,8 +342,14 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (query.containsKey("afterSeq")) {
                 parseSequence(query.get("afterSeq"));
             }
+            String reconcile = query.getOrDefault("reconcile", "false");
+            if (!"true".equals(reconcile) && !"false".equals(reconcile)) {
+                throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
+                        "reconcile must be true or false.", false);
+            }
             complete(exchange, service.getExecution(harnessSessionId, runtimeSessionId, executionCallId)
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record,
+                            Boolean.parseBoolean(reconcile))),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -348,29 +357,33 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
-            String runtimeSessionId, ToolExecutionRecord record) {
+            String runtimeSessionId, ToolExecutionRecord record, boolean reconcile) {
         // A lost dispatch is asked of the original Runtime when it can answer;
-        // a tool v2 reference keeps its UNKNOWN.
+        // a tool v2 reference keeps its UNKNOWN unless reconciliation is requested.
         if (record.getState() != ToolExecutionRecord.State.UNKNOWN
-                || !record.observableAfterLoss()) {
+                || (!reconcile && !record.observableAfterLoss())) {
             return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
                     ExecutionReconciliation.Outcome.IN_FLIGHT, null));
         }
-        // The ask is best-effort: when the original Runtime cannot be asked
+        CompletionStage<ExecutionReconciliation> observation = service.reconcileExecution(
+                harnessSessionId, runtimeSessionId, record.getExecutionCallId());
+        if (reconcile) {
+            return observation;
+        }
+        // The automatic ask is best-effort: when the original Runtime cannot be asked
         // or cannot answer, whatever the reason, the record's own UNKNOWN
         // stands rather than the error of the attempt.
-        return service.reconcileExecution(harnessSessionId, runtimeSessionId,
-                record.getExecutionCallId()).handle((reconciled, error) -> {
-                    if (error == null) {
-                        return reconciled;
-                    }
-                    Throwable cause = unwrap(error);
-                    if (cause instanceof Error) {
-                        throw new CompletionException(cause);
-                    }
-                    return new ExecutionReconciliation(record,
-                            ExecutionReconciliation.Outcome.IN_FLIGHT, null);
-                });
+        return observation.handle((reconciled, error) -> {
+            if (error == null) {
+                return reconciled;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof Error) {
+                throw new CompletionException(cause);
+            }
+            return new ExecutionReconciliation(record,
+                    ExecutionReconciliation.Outcome.IN_FLIGHT, null);
+        });
     }
 
     private static Map<String, Object> observedExecutionEnvelope(String harnessSessionId,
