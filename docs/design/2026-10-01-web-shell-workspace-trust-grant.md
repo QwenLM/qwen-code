@@ -84,6 +84,13 @@ daemon evaluates.
 | Generation closed mid-request                           | generation-closed response, as elsewhere |
 | Already trusted                                         | 200, idempotent                          |
 
+That trust-file row is narrower than it reads. A dangling symlink reads as no
+file at all, so the grant replaces it with a regular file holding only the new
+rule and answers 200. Corruption the write itself discovers answers 500
+`internal_error`, not `trusted_folders_invalid`. And the malformed/unreadable
+verdict comes from a cached load that nothing clears in production, so a file
+repaired afterwards keeps answering 500 until the daemon restarts.
+
 Writing the exact workspace path at the deepest matching depth also overrides
 a shallower `DO_NOT_TRUST` parent rule, and re-keying the same path replaces an
 equal-depth rule, so the grant recovers a workspace that was explicitly
