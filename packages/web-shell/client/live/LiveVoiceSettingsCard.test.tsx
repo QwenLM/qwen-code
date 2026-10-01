@@ -687,6 +687,84 @@ describe('LiveVoiceSettingsCard', () => {
       expect(removeKeyButton(container)).toBeUndefined();
     });
 
+    it('still offers no key removal after a model edit leaves the route', async () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: true,
+          storedKey: false,
+          enabled: false,
+          model: 'route-model',
+          models: [{ id: 'route-model', provider: 'openai' }],
+        }),
+      );
+      // Editing the model onto a non-route id moves the key off the route for
+      // the candidate, but nothing is stored, so there is still nothing to
+      // remove.
+      await act(async () =>
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+      );
+      await act(async () =>
+        click(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ).find((el) =>
+            el.textContent?.includes('settings.liveSetup.modelCustom'),
+          )!,
+        ),
+      );
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('[data-live-model-input]')!,
+          'custom-model',
+        ),
+      );
+      expect(removeKeyButton(container)).toBeUndefined();
+    });
+
+    it('does not mark the key required for a stored key when a model edit leaves the route', async () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: true,
+          storedKey: true,
+          enabled: false,
+          model: 'route-model',
+          models: [{ id: 'route-model', provider: 'openai' }],
+        }),
+      );
+      await act(async () =>
+        click(container.querySelector<HTMLElement>('#live-realtime-model')!),
+      );
+      await act(async () =>
+        click(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[role="option"]'),
+          ).find((el) =>
+            el.textContent?.includes('settings.liveSetup.modelCustom'),
+          )!,
+        ),
+      );
+      act(() =>
+        setInputValue(
+          container.querySelector<HTMLInputElement>('[data-live-model-input]')!,
+          'custom-model',
+        ),
+      );
+      // The stored key still applies to the candidate model, so the field is
+      // optional: a new key is required only when nothing usable is stored.
+      const key =
+        container.querySelector<HTMLInputElement>('#live-realtime-key')!;
+      expect(key.getAttribute('aria-required')).not.toBe('true');
+      expect(
+        container.querySelector(
+          'label[for="live-realtime-key"] .text-destructive',
+        ),
+      ).toBeNull();
+    });
+
     it('keeps a stored key revocable while the model does not resolve', async () => {
       const setup = setupResult({
         enabled: false,

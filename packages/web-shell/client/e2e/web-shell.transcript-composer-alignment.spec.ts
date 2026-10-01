@@ -223,7 +223,9 @@ for (const navigation of [true, false]) {
       await expect(preview).toHaveCount(0);
     }
     await test.step('docked environment panel preserves composer alignment', async () => {
-      await page.setViewportSize({ width: 1600, height: 900 });
+      // 1440 is the most common laptop width; the dock budget excludes the
+      // rail's 56px so the panel still docks here.
+      await page.setViewportSize({ width: 1440, height: 900 });
       const toggle = page.locator('[data-web-shell-environment-toggle]');
       const panel = page.getByTestId('environment-panel');
       await toggle.click();

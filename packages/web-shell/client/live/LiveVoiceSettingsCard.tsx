@@ -117,7 +117,9 @@ export function LiveVoiceSettingsCard({
   const keyCleared = draft.apiKey?.operation === 'clear';
   const keyRequired =
     keyEditable &&
-    (!status?.keyConfigured || keyCleared || status.keySource === 'route');
+    (!status?.keyConfigured ||
+      keyCleared ||
+      (status.keySource === 'route' && status.storedKey !== true));
   const nativeHost = status?.nativeHost !== false;
   const shortcut = draft.shortcut ?? status?.shortcut ?? 'Command+E';
 
@@ -380,7 +382,8 @@ export function LiveVoiceSettingsCard({
                 </>
               ) : !enabled &&
                 (status?.storedKey === true ||
-                  (status?.keyConfigured === true && !keyFromRoute)) ? (
+                  (status?.keyConfigured === true &&
+                    status?.keySource !== 'route')) ? (
                 <Button
                   type="button"
                   size="xs"

@@ -327,6 +327,7 @@ import {
 import {
   WebShellSidebar,
   DEFAULT_SESSION_ACTION_ITEMS,
+  SIDEBAR_RAIL_WIDTH,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarWorkspaceOverviewOptions,
@@ -9430,6 +9431,14 @@ export function App({
     sidebarOptions.enabled &&
     sidebarRailEnabled &&
     (sidebarLayoutWidth ?? window.innerWidth) > 760;
+  // The collapsed value the sidebar actually renders: the split-view
+  // auto-fold and the mobile drawer override the persisted preference.
+  // Keyboard toggles and dock breakpoints must read this expression, not the
+  // raw state, or they silently invert the stored preference while the
+  // auto-fold owns the screen.
+  const sidebarCollapsedEffective =
+    (sidebarCollapsed || (mainView === 'split' && !splitSidebarHasRoom)) &&
+    !mobileDrawerOpen;
   // One compact-chrome signal for the whole shell: the sidebar drawer chrome
   // and the empty-chat welcome layout both key off it, so they cannot split
   // when an embedded container disagrees with the viewport.
@@ -9530,8 +9539,9 @@ export function App({
       // the sidebar while the editor is focused), but other editable targets
       // — sidebar search, session rename, settings inputs — must not have
       // the sidebar yanked around while the user is typing, matching the
-      // codebase's isEditableTarget convention.
-      const target = e.target as HTMLElement | null;
+      // codebase's isEditableTarget convention. Shadow-DOM portal hosts
+      // retarget the event to the host element, so resolve the real target.
+      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
       if (
         isEditableTarget(target) &&
         !target?.closest('[data-web-shell-composer-editor]')
@@ -9558,7 +9568,7 @@ export function App({
         }
         return;
       }
-      handleSidebarCollapsedChange(!sidebarCollapsed);
+      handleSidebarCollapsedChange(!sidebarCollapsedEffective);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -9566,7 +9576,7 @@ export function App({
     sidebarOptions.enabled,
     mobileDrawerOpen,
     forceMobileDrawer,
-    sidebarCollapsed,
+    sidebarCollapsedEffective,
     sidebarLayoutWidth,
     handleSidebarCollapsedChange,
   ]);
@@ -18972,9 +18982,17 @@ export function App({
           selectedWorkspaceGitStatus?.branch ??
           undefined)
         : (selectedWorkspaceGitStatus?.branch ?? undefined);
+  // The rail adds 56px of persistent navigation chrome beside the Home
+  // column. Exclude it from the dock budget so the environment panel keeps
+  // docking at the same window widths hosts had before the rail (1440px
+  // laptops included): the message area yields those 56px rather than the
+  // panel losing its dock.
   const environmentPanelCanDock =
     contextBodyWidth === null ||
-    contextBodyWidth >=
+    contextBodyWidth +
+      (navigationRailVisible && !sidebarCollapsedEffective
+        ? SIDEBAR_RAIL_WIDTH
+        : 0) >=
       MIN_DOCKED_MESSAGE_AREA_WIDTH + DOCKED_ENVIRONMENT_PANEL_WIDTH;
   const environmentPanelFits =
     chatWidthMode !== 'wide' && environmentPanelCanDock;
@@ -20076,11 +20094,7 @@ export function App({
                     setMainView('chat');
                     closePanel();
                   }}
-                  collapsed={
-                    (sidebarCollapsed ||
-                      (mainView === 'split' && !splitSidebarHasRoom)) &&
-                    !mobileDrawerOpen
-                  }
+                  collapsed={sidebarCollapsedEffective}
                   layout={sidebarRailEnabled ? 'rail' : 'single'}
                   containerWidth={sidebarLayoutWidth}
                   activePage={sidebarPage}

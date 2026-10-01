@@ -202,6 +202,8 @@ function renderSidebar(
     footer?: false;
     sessionActions?: WebShellSidebarSessionActionsOptions;
     strict?: boolean;
+    showLive?: boolean;
+    onOpenLive?: () => void;
   } = {},
 ) {
   const sidebar = (
@@ -211,6 +213,8 @@ function renderSidebar(
       activePage={props.activePage}
       containerWidth={props.containerWidth}
       onOpenHome={props.onOpenHome}
+      onOpenLive={props.onOpenLive}
+      showLive={props.showLive}
       onCollapsedChange={props.onCollapsedChange ?? (() => {})}
       onOpenSettings={() => {}}
       onOpenDaemonStatus={() => {}}
@@ -659,6 +663,81 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       container.querySelector(
         '[data-web-shell-collapsed-session-status="completed"]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('includes secondary workspace attention on the rail Home button while the Live section is open', async () => {
+    const multiWorkspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = multiWorkspaceCapabilities;
+    workspace.capabilities = multiWorkspaceCapabilities;
+    useSessionCatalogQueries.mockImplementation((_client, queries) => {
+      const activeQueries = queries.filter(
+        (query: { options: { group?: string } }) =>
+          query.options.group === 'all',
+      );
+      if (activeQueries.length === 0) return [];
+      return [
+        {
+          page: {
+            sessions: [
+              makeSession('secondary-approval', {
+                workspaceCwd: '/tmp/other',
+                isWaitingForPermission: true,
+              }),
+            ],
+          },
+        },
+      ];
+    });
+
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'live',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+
+    // The Live section lists no project sessions, so the rail Home button
+    // carries the attention dot and the secondary queries must load even
+    // though the sidebar is neither collapsed nor behind a full page.
+    const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
+      (call) =>
+        call[1].some(
+          (query: { options: { group?: string; archiveState?: string } }) =>
+            query.options.group === 'all' &&
+            query.options.archiveState === 'active',
+        ),
+    );
+    expect(activeQueryCalls.length).toBeGreaterThan(0);
+    for (const call of activeQueryCalls) {
+      expect(call[2]).toMatchObject({ autoLoad: true });
+    }
+    // Nothing is running, so polling must idle instead of pinning the
+    // section view to the active cadence.
+    expect(activeQueryCalls[activeQueryCalls.length - 1]![2]).toMatchObject({
+      pollIntervalMs: 30_000,
+    });
+    expect(
+      container.querySelector(
+        '[data-web-shell-collapsed-session-status="approval"]',
       ),
     ).not.toBeNull();
   });
@@ -1899,6 +1978,53 @@ describe('WebShellSidebar rail navigation', () => {
     // A functional page keeps the column hidden regardless, so the user's
     // persisted collapse preference must survive the navigation.
     expect(onCollapsedChange).not.toHaveBeenCalled();
+  });
+
+  it('resets the project search when the Live section unmounts the field', async () => {
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'home',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+
+    const searchToggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchToggle).not.toBeNull();
+    act(() => click(searchToggle!));
+    await flushSidebar();
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(input).not.toBeNull();
+
+    // The Live section unmounts the search field. The search state must be
+    // reset with it, or the Home round-trip below remounts an autoFocus
+    // input holding the stale query.
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'live',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+
+    renderSidebar(false, {
+      layout: 'rail',
+      activePage: 'home',
+      showLive: true,
+      onOpenLive: () => {},
+    });
+    await flushSidebar();
+    expect(
+      container.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    expect(document.activeElement).not.toBe(input);
   });
 
   it('restores the column from the Channels rail entry', async () => {

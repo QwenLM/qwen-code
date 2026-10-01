@@ -302,6 +302,7 @@ When the session list is visible, the following sub-areas are rendered but
 
 - Drag handle on the right edge for resizing sidebar width
 - Width is persisted in localStorage as the total sidebar width. Defaults are 300px Home-only and 356px with the rail. Restored widths are clamped to at least 220px Home-only or 276px with the rail; old values are not blindly increased by 56px. Dragging below the collapse threshold still folds the sidebar.
+- The environment panel's dock breakpoint ignores the rail's 56px (the message area yields them), so the panel keeps docking at the same window widths as a Home-only sidebar — e.g. a 1440px window.
 - Not configurable
 
 ## Runtime behavior props

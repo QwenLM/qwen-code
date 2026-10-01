@@ -167,7 +167,7 @@ import { workspaceLabelForCwd } from '../../utils/workspace';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const SIDEBAR_DEFAULT_WIDTH = 300;
-const SIDEBAR_RAIL_WIDTH = 56;
+export const SIDEBAR_RAIL_WIDTH = 56;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 420;
 const SIDEBAR_MAX_WIDTH_WINDOW_RATIO = 0.5;
@@ -1164,10 +1164,12 @@ export function WebShellSidebar({
     (collapsed || (activePage !== 'home' && !sectionView)) &&
     !mobileOpen;
   // Whenever the Home column is not the visible status surface — the collapsed
-  // strip, or the rail with a full page or section column open — the rail/collapsed
-  // icon carries the attention dot, so secondary-workspace status queries must
-  // run in both cases, not only when collapsed.
-  const statusSurfaceHidden = collapsed || (railLayout && homeHidden);
+  // strip, the rail with a full page open, or the Live section column (which
+  // lists no project sessions) — the rail/collapsed icon carries the attention
+  // dot, so secondary-workspace status queries must run in those cases, not
+  // only when collapsed. The Channels section still lists sessions with their
+  // status, so it does not count as hidden.
+  const statusSurfaceHidden = collapsed || homeHidden || liveView;
   const navigationExpanded = !collapsed;
   const [storedSessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
@@ -3066,6 +3068,14 @@ export function WebShellSidebar({
         cancelRename();
         setGroupMenu(null);
       }
+      // The Live section unmounts the search field (the !liveView gate on
+      // it). Resetting here keeps a surviving searchOpen from remounting an
+      // autoFocus input on the way back and stealing focus. The Channels
+      // section keeps the field mounted, so its search stays open.
+      if (liveView) {
+        setSearchOpen(false);
+        setSearchQuery('');
+      }
       return;
     }
     if (!collapsed) {
@@ -3088,7 +3098,14 @@ export function WebShellSidebar({
       cancelRename();
       setGroupMenu(null);
     }
-  }, [cancelRename, collapsed, collapsedSessionsOpen, railLayout, homeHidden]);
+  }, [
+    cancelRename,
+    collapsed,
+    collapsedSessionsOpen,
+    railLayout,
+    homeHidden,
+    liveView,
+  ]);
 
   useEffect(() => {
     if (projectFeaturesEnabled) return;
