@@ -8,6 +8,10 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+// The #13003 experiment flag is read through its single definition, kept in a
+// no-import leaf module so telemetry can share it with `memory/recall.ts`
+// (which owns the flag but already imports this file) without a module cycle.
+import { isSkipSelectorOnUniqueStrongHitEnabled } from '../memory/recall-experiment.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
@@ -1598,22 +1602,6 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
   });
 }
 
-/**
- * Mirrors `isSkipSelectorOnUniqueStrongHitEnabled` /
- * `RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV` in ../memory/recall.ts.
- * Duplicated here because telemetry must not import the memory feature
- * module (recall.ts already imports this file — importing back would create
- * a module cycle).
- */
-function isRecallSkipSelectorExperimentEnabled(): boolean {
-  const raw = process.env[
-    'QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT'
-  ]
-    ?.trim()
-    .toLowerCase();
-  return raw === '1' || raw === 'true';
-}
-
 export function logMemoryRecall(
   config: Config,
   event: MemoryRecallEvent,
@@ -1648,7 +1636,7 @@ export function logMemoryRecall(
     // enabled so deployments without the flag keep the pre-existing
     // attribute space on these series. The log attribute above stays
     // unconditional on purpose.
-    ...(isRecallSkipSelectorExperimentEnabled()
+    ...(isSkipSelectorOnUniqueStrongHitEnabled()
       ? { selector_skipped: event.selector_skipped }
       : {}),
   });

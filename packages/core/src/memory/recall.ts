@@ -21,6 +21,10 @@ import {
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
+import {
+  isSkipSelectorOnUniqueStrongHitEnabled,
+  RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
+} from './recall-experiment.js';
 import { AUTO_MEMORY_SCOPES } from './types.js';
 import {
   createAutoMemoryTreeSnapshot,
@@ -488,22 +492,11 @@ export interface RelevantAutoMemoryPromptResult {
   selectorSkipped?: true;
 }
 
-/**
- * Internal experiment for #13003: skip the model selector when the published
- * fast result is exactly one strong, current match. Structured recall only.
- * Off unless set to `1` or `true`; not a user setting until an ablation shows
- * recall quality is unchanged.
- */
-export const RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV =
-  'QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT';
-
-function isSkipSelectorOnUniqueStrongHitEnabled(): boolean {
-  const raw =
-    process.env[
-      RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV
-    ]?.trim().toLowerCase();
-  return raw === '1' || raw === 'true';
-}
+// The flag name and its predicate are defined in './recall-experiment.js', a
+// module with no imports, so `telemetry/loggers.ts` can read the same
+// definition without joining the memory → telemetry → memory cycle. The name
+// stays exported here because this module owns the experiment.
+export { RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV };
 
 function createRecallResult(
   treeSnapshot: AutoMemoryTreeSnapshot | undefined,
