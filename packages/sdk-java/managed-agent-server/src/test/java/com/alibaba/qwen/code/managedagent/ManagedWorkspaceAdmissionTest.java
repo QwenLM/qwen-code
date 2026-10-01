@@ -10,11 +10,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
@@ -578,8 +581,9 @@ class ManagedWorkspaceAdmissionTest {
                         + " managed_agent_turn WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 Integer.class, tenant, sessionId)).isEqualTo(1);
-        // Unarchive stays gated for bound Sessions even under the opt-in;
-        // the enabled store opens rename only.
+        // Unarchive stays gated for bound Sessions even under the opt-in.
+        // It throws before any command row is written, so the rename probe
+        // after it cannot collide with a leftover PENDING operation.
         assertThatThrownBy(() -> transaction.execute(status ->
                 gated.beginSessionMutation(tenant, "UNARCHIVE_SESSION",
                         "unarchive-1", digest, sessionId,
@@ -587,10 +591,76 @@ class ManagedWorkspaceAdmissionTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
+        // Rename is the one lifecycle-adjacent mutation the enabled store
+        // opens for a bound Session: it begins PENDING and completes with
+        // the new title.
+        var rename = transaction.execute(status ->
+                gated.beginSessionMutation(tenant, "RENAME_SESSION",
+                        "rename-1", digest, sessionId,
+                        SessionMutationKind.RENAME));
+        assertThat(rename.status()).isEqualTo("PENDING");
+        assertThat(transaction.execute(status ->
+                gated.completeSessionMutation(tenant, "RENAME_SESSION",
+                        "rename-1", sessionId, SessionMutationKind.RENAME,
+                        "renamed title", "boot")).title())
+                .isEqualTo("renamed title");
         // Cancel stays open for a bound Session under the opt-in.
         assertThat(gated.insertCancelCommand(tenant, "CANCEL", "cancel-1",
                 digest, sessionId, admission.turnId()).turnId())
                 .isEqualTo(admission.turnId());
+    }
+
+    @Test
+    void emptyBoundCreationOutsideTheProfileIsNotAdmittedForLaterTurns() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String digest = "sha256:" + "a".repeat(64);
+        // Empty bound creation skips the execution-profile validation by
+        // design, so a non qwen-code agent_id can be bound; the later-Turn
+        // admission gate is what must refuse it.
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "another-agent", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        // A Session whose snapshotted profile refs are not the frozen pair
+        // is refused too, even with the qwen-code agent.
+        register(tenant, "ws-drift", "storage-drift");
+        grant(tenant, "ws-drift", "actor-a", true);
+        String driftedId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-drift", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-drift", "."))
+                .sessionId();
+        String controlId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-control", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        UnavailableHarnessConnector enabledHarness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+                };
+        ManagedAgentService enabled = new ManagedAgentService(store,
+                new RequestDigests(), null, enabledHarness, registry);
+
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", driftedId)
+                .capabilities().workspaceTurns()).isFalse();
+        assertThatThrownBy(() -> enabled.submitTurn(tenant, "actor-a",
+                "later", sessionId,
+                List.of(new InputBlock("text", "go"))))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("workspace_unavailable"));
+        // The same shape on the frozen profile with the qwen-code agent
+        // stays admitted.
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", controlId)
+                .capabilities().workspaceTurns()).isTrue();
     }
 
     @Test

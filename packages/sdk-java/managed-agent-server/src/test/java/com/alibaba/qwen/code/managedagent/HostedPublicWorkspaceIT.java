@@ -237,6 +237,29 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
 
+            // A creator whose can_create grant is revoked keeps read access but loses
+            // admission: submit, cancel and rename all answer workspace_unavailable,
+            // nothing new executes, and no PENDING command row is left behind.
+            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "nocreate-later-" + workspace, "actor", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "nocreate-cancel-" + workspace, "actor", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "nocreate-rename-" + workspace, "actor", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 2);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
             // With the running Turn settled, revoking the creator's read grant hides the
             // bound Session from every later-Turn path: submit, cancel and rename all fall
             // through to the legacy gate and answer session_not_found.

@@ -550,9 +550,13 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
+            // Attach passively, like the cancellation-recovery path above:
+            // an abort must not depend on the physical mount still
+            // verifying, or a cancel the API already answered would be
+            // dropped with only a WARN to show for it.
             Attachment attachment = harness.createOrLoad(
                     session.tenantId(), session.sessionId(),
-                    session.harnessBootId() != null);
+                    session.harnessBootId() != null, true);
             if (store.bindHarness(tenantId, sessionId,
                     turnId, owner, attachment.bootId())) {
                 harness.cancel(session.tenantId(), session.sessionId());

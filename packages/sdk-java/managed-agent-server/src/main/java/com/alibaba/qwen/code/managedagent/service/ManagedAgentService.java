@@ -41,6 +41,8 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -264,6 +266,19 @@ public class ManagedAgentService {
                         session.harnessBootId() != null);
                 harness.rename(tenantId, sessionId, effectiveTitle);
             } catch (RuntimeException error) {
+                // A non-retryable refusal (e.g. the Workspace authority's)
+                // is permanent: answer it with its own status and code
+                // instead of a transient 503, which would invite a fresh-key
+                // retry into session_operation_active on the still-PENDING
+                // command.
+                if (error instanceof RuntimeBrokerException refusal
+                        && !refusal.isRetryable()) {
+                    HttpStatus status = HttpStatus.resolve(
+                            refusal.getStatusCode());
+                    throw new ApiException(
+                            status == null ? HttpStatus.CONFLICT : status,
+                            refusal.getCode(), refusal.getMessage());
+                }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Hosted Harness could not persist the Session title.");
             }
@@ -524,7 +539,7 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId)));
+                        maySubmitWorkspaceTurn(session, actorId, true)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -673,27 +688,60 @@ public class ManagedAgentService {
     // Workspace files enabled. Everyone else keeps the existing refusal.
     private void requireSubmitter(String tenantId, String actorId,
             String sessionId) {
-        if (!maySubmitWorkspaceTurn(store.requireSession(tenantId, sessionId),
-                actorId)) {
-            requireLegacyWorkspace(tenantId, actorId, sessionId);
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        if (!maySubmitWorkspaceTurn(session, actorId)) {
+            requireLegacyWorkspace(session, actorId);
         }
     }
 
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
-        return session.workspace() != null
-                && harness.isWorkspaceFilesAvailable()
-                && workspaces.canRead(session.tenantId(), actorId,
-                        session.workspace().getWorkspaceId())
-                && workspaces.createdSession(session.tenantId(), actorId,
-                        session.sessionId());
+        return maySubmitWorkspaceTurn(session, actorId, false);
+    }
+
+    // readGranted is true on the read paths (session get/list), where the
+    // page query or requireReadGrant already established the caller's
+    // can_read for a bound row, so the clause would re-ask a fixed true.
+    private boolean maySubmitWorkspaceTurn(SessionRecord session,
+            String actorId, boolean readGranted) {
+        if (session.workspace() == null || !harness.isWorkspaceFilesAvailable()) {
+            return false;
+        }
+        // The authority execution cites (WorkspaceExecutionStore
+        // .authorizePassiveAttachment) fixes these at creation: a Session
+        // that fails them can never execute, so admission must not certify
+        // it. Empty bound creation skips that validation by design.
+        if (!"ACTIVE".equals(session.status()) || session.deletedAt() != null
+                || !"qwen-code".equals(session.agentId())
+                || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
+                        session.workspace().getContextConfigRef())) {
+            return false;
+        }
+        if ((!readGranted && !workspaces.canRead(session.tenantId(), actorId,
+                session.workspace().getWorkspaceId()))
+                || !workspaces.createdSession(session.tenantId(), actorId,
+                        session.sessionId())) {
+            return false;
+        }
+        // The caller is the Session's creator, so this reads the creator's
+        // grant row, as the execution authority's join does: can_create on a
+        // registry whose state is ACTIVE.
+        ManagedWorkspaceRegistry.WorkspaceSummary summary =
+                workspaces.findReadable(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId());
+        return summary != null && summary.canCreateSession();
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,
             String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
+        requireLegacyWorkspace(store.requireSession(tenantId, sessionId),
+                actorId);
+    }
+
+    private void requireLegacyWorkspace(SessionRecord session,
+            String actorId) {
         if (session.workspace() != null) {
-            if (!workspaces.canRead(tenantId, actorId,
+            if (!workspaces.canRead(session.tenantId(), actorId,
                     session.workspace().getWorkspaceId())) {
                 throw new ApiException(HttpStatus.NOT_FOUND,
                         "session_not_found", "The Session was not found.");
