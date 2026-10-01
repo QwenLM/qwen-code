@@ -33,7 +33,10 @@ Cancelling only aborts work already running: the creator who can still read the
 Workspace may cancel even after the create grant is revoked, the Workspace
 starts draining or it is re-registered. A live cancel reuses the running
 Turn's attachment without re-running the execution authority, and a cancel the
-Harness did not take is re-sent while the Turn is still cancelling.
+Harness did not take is re-sent while the Turn is still cancelling. After each
+successful lease renewal, the running owner observes cancellation requested
+through any API replica and sends it on the executor, keeping network waits
+off the lease scheduler. Failed deliveries retry at the lease renewal interval.
 Close, archive, delete, unarchive and cwd operations remain gated: the Runtime
 Broker's drain only stops warming a closed Session and has no Harness-level
 teardown yet.

@@ -33,7 +33,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -62,11 +61,6 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
-    // A cancel the Harness did not take is re-sent while its Turn is still
-    // CANCELLING: the running dispatcher checks CANCELLING only once, before
-    // it starts streaming, so nothing else re-sends it.
-    private static final long CANCEL_RETRY_MILLIS = 2_000;
-    private static final int CANCEL_RETRY_LIMIT = 150;
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService renewer =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -127,7 +121,7 @@ public class HarnessCoordinator {
     public void cancel(String tenantId, String sessionId, String turnId) {
         dispatch(tenantId, sessionId, turnId);
         executor.execute(() -> cancelAdmittedTurn(tenantId, sessionId,
-                turnId, 0));
+                turnId));
     }
 
     @Scheduled(fixedDelayString =
@@ -161,6 +155,9 @@ public class HarnessCoordinator {
                         if (!store.renewTurn(tenantId, sessionId, turnId,
                                 owner, leaseDuration)) {
                             leaseLost.set(true);
+                        } else if (!leaseLost.get()) {
+                            executor.execute(() -> cancelAdmittedTurn(
+                                    tenantId, sessionId, turnId));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -538,7 +535,7 @@ public class HarnessCoordinator {
     }
 
     private void cancelAdmittedTurn(String tenantId, String sessionId,
-            String turnId, int attempt) {
+            String turnId) {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
@@ -565,27 +562,10 @@ public class HarnessCoordinator {
                 harness.cancel(session.tenantId(), session.sessionId());
             }
         } catch (RuntimeException error) {
-            LOG.warn("Managed Turn cancellation will retry tenant={}"
-                            + " session={} turn={} attempt={} failure={}",
-                    tenantId, sessionId, turnId, attempt,
+            LOG.warn("Managed Turn cancellation awaits lease renewal tenant={}"
+                            + " session={} turn={} failure={}",
+                    tenantId, sessionId, turnId,
                     error.getClass().getSimpleName());
-            retryCancellation(tenantId, sessionId, turnId, attempt + 1);
-        }
-    }
-
-    private void retryCancellation(String tenantId, String sessionId,
-            String turnId, int attempt) {
-        if (attempt > CANCEL_RETRY_LIMIT) {
-            LOG.warn("Managed Turn cancellation stopped retrying tenant={}"
-                    + " session={} turn={}", tenantId, sessionId, turnId);
-            return;
-        }
-        try {
-            renewer.schedule(() -> executor.execute(() -> cancelAdmittedTurn(
-                    tenantId, sessionId, turnId, attempt)), CANCEL_RETRY_MILLIS,
-                    TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException closed) {
-            // The coordinator is shutting down; recovery takes over.
         }
     }
 

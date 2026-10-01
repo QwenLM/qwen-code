@@ -10,7 +10,7 @@ Hosted Read/Write/Edit 已能经过生产 Broker 和 worker 执行，但目前�
 
 G0 开放随创建会话准入的一次初始文件工具轮次，使用现有公开 REST 路由及共享 service 的 WebShell 创建适配器。发现接口仍仅广播 Workspace 绑定能力，不宣称完整的 Workspace 执行支持。G0 本身无需修改 UI；后续改动唯一的 UI 变化是为创建者开放输入框与取消控件。
 
-后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。准入新工作要求创建者在 `ACTIVE` 的 Workspace 上持有创建授权，且 Workspace 的 generation 与存储与会话绑定时一致，因此重新注册后提交和改名会在写入任何命令之前被拒绝。取消只中止已在运行的工作：仍能读取该 Workspace 的创建者，即使创建授权被撤销、Workspace 进入 drain 或被重新注册，也可以取消。正常取消复用运行中 Turn 的挂接，不再执行执行授权；Harness 未接收的取消会在 Turn 仍处于取消中时重发。关闭、归档、删除、取消归档与 cwd 操作仍保持门禁：Runtime Broker 的 drain 只是停止为已关闭会话预热，尚无 Harness 级别的回收。
+后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。准入新工作要求创建者在 `ACTIVE` 的 Workspace 上持有创建授权，且 Workspace 的 generation 与存储与会话绑定时一致，因此重新注册后提交和改名会在写入任何命令之前被拒绝。取消只中止已在运行的工作：仍能读取该 Workspace 的创建者，即使创建授权被撤销、Workspace 进入 drain 或被重新注册，也可以取消。正常取消复用运行中 Turn 的挂接，不再执行执行授权；Harness 未接收的取消会在 Turn 仍处于取消中时重发。每次成功续租后，执行 owner 检查任意 API 副本受理的取消请求，并在 executor 中发送，避免网络等待阻塞续租调度器。投递失败按续租间隔重试。关闭、归档、删除、取消归档与 cwd 操作仍保持门禁：Runtime Broker 的 drain 只是停止为已关闭会话预热，尚无 Harness 级别的回收。
 
 ## 决策
 
