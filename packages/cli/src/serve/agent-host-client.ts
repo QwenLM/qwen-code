@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { extractErrorMessage } from '@qwen-code/acp-bridge/bridge';
 import type {
   HostRunAssignment,
   HostRunResult,
@@ -491,14 +492,8 @@ async function executeAssignment(
       );
       if (turn?.promptId === promptId) {
         if (turn.state === 'error' || turn.state === 'cancelled') {
-          const message = turn.error?.message;
-          // A provider failure can arrive as the JSON-RPC error object
-          // itself; stringifying the field keeps the real cause on the wire
-          // instead of "[object Object]".
           throw new Error(
-            typeof message === 'string' && message
-              ? message
-              : (JSON.stringify(turn.error) ?? 'Managed Agent cancelled.'),
+            extractErrorMessage(turn.error ?? 'Managed Agent cancelled.'),
           );
         }
         if (turn.state === 'completed') {
@@ -843,7 +838,7 @@ async function connectAgentHost(
                 error instanceof Error && error.message === 'not_leasable'
                   ? 'cancelled'
                   : 'failed',
-              error: error instanceof Error ? error.message : String(error),
+              error: extractErrorMessage(error),
             };
           }
           await returnResult(
