@@ -18,6 +18,7 @@ vi.mock('./components/managed/ManagedSessionsPage', () => ({
 }));
 
 import { ManagedAgentWebShell } from './ManagedAgentWebShell';
+import { artifact } from './components/managed/managed-tool-result.test-fixtures';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 
 describe('ManagedAgentWebShell', () => {
@@ -116,5 +117,44 @@ describe('ManagedAgentWebShell', () => {
         (render) => render.sessionId === 'new-session',
       ),
     ).toBe(true);
+  });
+  it('uses the host download sink and updates it when the host replaces the callback', async () => {
+    const first = vi.fn(async () => undefined);
+    const second = vi.fn(async () => undefined);
+    const provider = () =>
+      (captured.props as { managedAgentProvider: ManagedAgentProvider })
+        .managedAgentProvider;
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          baseUrl="https://product.example"
+          saveArtifact={first}
+        />,
+      ),
+    );
+    const before = provider();
+    expect(before.toolResults?.canDownload).toBe(true);
+    await before.toolResults!.downloadArtifact(artifact, {
+      clientId: 'client',
+    });
+    expect(first).toHaveBeenCalledWith(
+      artifact,
+      expect.objectContaining({ openStream: expect.any(Function) }),
+    );
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          baseUrl="https://product.example"
+          saveArtifact={second}
+        />,
+      ),
+    );
+    expect(provider()).not.toBe(before);
+    expect(provider().storageKey).toBe(before.storageKey);
+    await provider().toolResults!.downloadArtifact(artifact, {
+      clientId: 'client',
+    });
+    expect(second).toHaveBeenCalledOnce();
+    expect(first).toHaveBeenCalledOnce();
   });
 });

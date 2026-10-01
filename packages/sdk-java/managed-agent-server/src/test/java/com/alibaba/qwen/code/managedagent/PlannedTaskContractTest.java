@@ -243,13 +243,15 @@ class PlannedTaskContractTest {
 
     @Test
     void plannedTaskRoutesDeclareTheTenantFilterForbidden() {
-        // The API contract test probes the 403 only on mapped routes.
+        // The API contract test checks this declaration in a Spring context;
+        // this gate also checks it without starting one.
         for (String operationId : List.of("listSessionTaskEvents",
                 "queryWebShellTaskEvents", "cancelSessionTask",
                 "cancelWebShellTask")) {
             assertThat(CONTRACT.responsePointer(
                     CONTRACT.operation(operationId), 403))
-                    .as("%s declares 403", operationId).isNotNull();
+                    .as("%s declares the tenant filter refusal", operationId)
+                    .isEqualTo("/components/responses/Forbidden");
         }
     }
 
