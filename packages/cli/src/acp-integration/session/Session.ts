@@ -386,6 +386,7 @@ import {
   getPersistScopeForModelSelection,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
+import { resolveModelSelectionAuthType } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import {
   deleteNestedPropertySafe,
   settingExistsInScope,
@@ -12219,22 +12220,53 @@ export class Session implements SessionContext {
 
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
+      const scopeSettings =
+        persistScope === SettingScope.Workspace
+          ? this.settings.workspace.settings
+          : this.settings.user.settings;
+      const authChoice =
+        scopeSettings.security?.auth?.selectedType ??
+        this.settings.merged.security?.auth?.selectedType;
+      const persistedBaseUrl =
+        resolvedRoute && !resolvedRoute.isRuntime
+          ? (resolvedRoute.baseUrl ?? '')
+          : '';
+      // Preserve the credential choice when startup can recover this wire.
+      // Raw models and identical id/URL routes still need the effective type.
+      let persistedAuthType = effectiveAuthType;
+      if (
+        !isRuntime &&
+        (effectiveAuthType === AuthType.USE_OPENAI ||
+          effectiveAuthType === AuthType.USE_OPENAI_RESPONSES) &&
+        (authChoice === AuthType.USE_OPENAI ||
+          authChoice === AuthType.USE_OPENAI_RESPONSES)
+      ) {
+        try {
+          if (
+            resolveModelSelectionAuthType(
+              authChoice,
+              effectiveModelId,
+              this.settings.merged.modelProviders,
+              this.settings.merged.providerProtocol,
+              persistedBaseUrl,
+            ) === effectiveAuthType
+          ) {
+            persistedAuthType = authChoice;
+          }
+        } catch {
+          // A rejected config reload keeps the previous live registry usable.
+        }
+      }
       this.settings.setValue(
         persistScope,
         'model.name',
         resolvedRoute?.isRuntime ? resolvedRoute.modelId : effectiveModelId,
       );
-      this.settings.setValue(
-        persistScope,
-        'model.baseUrl',
-        resolvedRoute && !resolvedRoute.isRuntime
-          ? (resolvedRoute.baseUrl ?? '')
-          : '',
-      );
+      this.settings.setValue(persistScope, 'model.baseUrl', persistedBaseUrl);
       this.settings.setValue(
         persistScope,
         'security.auth.selectedType',
-        effectiveAuthType,
+        persistedAuthType,
       );
     }
 
