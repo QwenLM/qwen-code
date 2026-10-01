@@ -82,9 +82,10 @@ launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进�
 
 隔离能力不可用时（包括 macOS 和 Windows），在命令启动前返回
 `managed_hook_command_isolation_unavailable`。日志记录 `not_started_proven` 和
-`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 UserPromptSubmit，
-若准入后没有 model attempt、tool intent/receipt 或非 user 消息，且没有未决 Hook，
-显式取消还会持久化结算该已准入 turn。Load 同样修复此前已取消的记录；取消不会丢弃
+`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 SessionStart 和
+UserPromptSubmit，若准入后没有 model attempt、tool intent/receipt 或非 user 消息，
+且没有未决 Hook，显式取消还会持久化结算 Hook 持久化输入 `prompt_id` 对应的已准入
+turn。此前 SessionStart 的取消不能结算后来的 turn。Load 同样修复此前已取消的记录；取消不会丢弃
 模型或工具 continuation。单个进程组消失不能作为
 进程树排空证明。环境继承限于执行必需变量和 recipe 显式条目。Async 准入等待 Runtime
 ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn 共存；未知工作阻塞新准入

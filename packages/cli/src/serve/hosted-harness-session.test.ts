@@ -36,6 +36,7 @@ import {
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
@@ -407,6 +408,36 @@ describe('Hosted Harness no-tool session', () => {
     ],
     [
       'managed_hook_handler_unavailable',
+      HookEventName.SessionStart,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_command_isolation_unavailable',
+      HookEventName.SessionStart,
+      false,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.SessionStart,
+      true,
+      false,
+    ],
+    [
+      'managed_hook_command_isolation_unavailable',
+      HookEventName.SessionStart,
+      true,
+      false,
+    ],
+    [
+      'managed_hook_handler_unavailable',
+      HookEventName.SessionStart,
+      false,
+      true,
+    ],
+    [
+      'managed_hook_handler_unavailable',
       HookEventName.PreToolUse,
       false,
       false,
@@ -424,7 +455,7 @@ describe('Hosted Harness no-tool session', () => {
       true,
     ],
   ] as const)(
-    'settles only a cancelled pre-model prompt Hook (%s, %s)',
+    'settles only a cancelled pre-model Hook (%s, %s, reload=%s, modelStarted=%s)',
     async (code, event, reload, modelStarted) => {
       const { server, authorize, catalog, requests, definition } =
         await hookApp();
@@ -456,7 +487,14 @@ describe('Hosted Harness no-tool session', () => {
       state.model.mockImplementationOnce(
         async ({ hooks, promptId, signal, modelScope }) => {
           if (modelStarted) await modelScope!.beginMainAttempt('test-model');
-          await hooks!.fire(event, promptId!, { prompt_id: promptId }, signal);
+          await hooks!.fire(
+            event,
+            event === HookEventName.SessionStart
+              ? `session-start:${SESSION_ID}`
+              : promptId!,
+            { prompt_id: promptId },
+            signal,
+          );
           throw new Error('The refused Hook must stop this turn.');
         },
       );
@@ -524,7 +562,7 @@ describe('Hosted Harness no-tool session', () => {
       const status = await authorize(
         supertest(server).get(`/session/${SESSION_ID}/status`),
       );
-      if (event !== HookEventName.UserPromptSubmit || modelStarted) {
+      if (event === HookEventName.PreToolUse || modelStarted) {
         expect(status.body.recoveryBlocked).toBe(true);
         await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
           .send({ prompt, promptId: randomUUID(), payloadDigest })
@@ -564,6 +602,81 @@ describe('Hosted Harness no-tool session', () => {
       expect(loaded.body.recoveryRequired).toBeUndefined();
     },
   );
+
+  it('does not settle a later turn from a previously cancelled SessionStart', async () => {
+    const { server, authorize, catalog, requests, definition } =
+      await hookApp();
+    Object.assign(catalog, {
+      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.SessionStart }],
+    });
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind !== 'hook-execute') return original(operation);
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_handler_unavailable' },
+      };
+    });
+    state.model.mockImplementationOnce(async ({ hooks, promptId, signal }) => {
+      await hooks!.fire(
+        HookEventName.SessionStart,
+        `session-start:${SESSION_ID}`,
+        { prompt_id: promptId },
+        signal,
+      );
+      throw new Error('The refused Hook must stop this turn.');
+    });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const submit = (promptId: string) =>
+      authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send({
+        prompt,
+        promptId,
+        payloadDigest,
+      });
+    const expectBlocked = () =>
+      vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
+    await submit(PROMPT_ID).expect(202);
+    await expectBlocked();
+    const child = requests.find(
+      (operation) => operation.kind === 'hook-execute',
+    )!;
+    const route = `/session/${SESSION_ID}/hooks/operations/${child.operationId}`;
+    await authorize(supertest(server).post(`${route}/cancel`)).expect(200);
+
+    state.model.mockRejectedValueOnce(new HostedHookRecoveryRequiredError());
+    await submit(randomUUID()).expect(202);
+    await expectBlocked();
+    await authorize(supertest(server).get(route)).expect(200);
+    await submit(randomUUID()).expect(409);
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+    const replacement = await app(true);
+    const loaded = await headers(
+      supertest(replacement).post(`/session/${SESSION_ID}/load`),
+    )
+      .send(definition)
+      .expect(200);
+    expect(loaded.body.recoveryRequired).toBe(true);
+    expect(
+      requests.filter((operation) => operation.kind === 'hook-execute'),
+    ).toHaveLength(1);
+  });
 
   it.each([
     undefined,
@@ -891,6 +1004,20 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(2);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.input),
+    ).toEqual([
+      expect.objectContaining({
+        hook_event_name: 'SessionEnd',
+        reason: 'other',
+      }),
+      expect.objectContaining({
+        hook_event_name: 'SessionDelete',
+        deleted_session_id: SESSION_ID,
+      }),
+    ]);
   });
 
   it('pins dynamic Hook revisions and rejects unscoped operations', async () => {

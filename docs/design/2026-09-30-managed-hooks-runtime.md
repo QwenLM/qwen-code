@@ -106,9 +106,11 @@ not a sandbox against scripts deliberately modifying the cgroup control plane.
 Missing isolation, including macOS and Windows, returns
 `managed_hook_command_isolation_unavailable` before command execution. The ledger
 records `not_started_proven` with `handler_unavailable`, and cancellation can close
-the blocked occurrence. For UserPromptSubmit, explicit cancellation also settles
-its admitted turn when no model attempt, tool intent/receipt or non-user message
-has followed admission, and no Hook remains pending. This recovery is durable
+the blocked occurrence. For SessionStart and UserPromptSubmit, explicit cancellation
+also settles the admitted turn identified by the Hook's durable input `prompt_id`
+when no model attempt, tool intent/receipt or non-user message has followed
+admission, and no Hook remains pending. An earlier SessionStart cancellation cannot
+settle a later turn. This recovery is durable
 and also runs on load for previously cancelled records; cancellation never
 abandons a model/tool continuation. A process group alone is never accepted as proof.
 Environment inheritance is restricted to execution necessities and explicit
