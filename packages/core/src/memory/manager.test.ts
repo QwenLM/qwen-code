@@ -1700,6 +1700,13 @@ describe('MemoryManager', () => {
         for (let i = 0; i < 3; i++) await turn(mgr);
 
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+        // The knob-OFF half is the PR's core promise ("default sessions keep
+        // the current history.length cursor and cached-tail input"): the flag
+        // must be absent from the call, not merely falsy, so making the
+        // windowed arm unconditional reds this assertion.
+        for (const call of vi.mocked(runAutoMemoryExtract).mock.calls) {
+          expect(call[0]).not.toHaveProperty('preserveUnprocessedHistory');
+        }
       });
 
       it('skips the configured turns after a completed no-op, then runs again', async () => {

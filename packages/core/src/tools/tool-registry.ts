@@ -1057,8 +1057,29 @@ export class ToolRegistry {
             } else if (previous?.endsWith(suffix)) {
               // Old transcripts did not serialize the MCP server identity.
               reviewed.set(name, previous);
-            } else if (!(this.getTool(name) instanceof DiscoveredMCPTool)) {
-              reviewed.set(name, suffix);
+            } else {
+              // Legacy block without server provenance, and no in-memory
+              // review to re-adopt (fresh process, or a cleared map).
+              const live = this.getTool(name);
+              if (live === undefined) {
+                // Progressive MCP discovery may not have registered the tool
+                // yet: recording the bare suffix now would refuse the call as
+                // "changed since tool_search" once the real server-prefixed
+                // fingerprint exists. Leave it unreviewed — one fresh
+                // `select:` re-arms it honestly.
+                continue;
+              }
+              if (live instanceof DiscoveredMCPTool) {
+                // Re-arm from the live tool's server identity, but only when
+                // the legacy schema is still byte-identical; a genuinely
+                // changed schema must keep refusing.
+                const liveFingerprint = deferredDeclarationFingerprint(live);
+                if (liveFingerprint === `${live.serverName}${suffix}`) {
+                  reviewed.set(name, liveFingerprint);
+                }
+              } else {
+                reviewed.set(name, suffix);
+              }
             }
           } catch {
             // Truncated or malformed results do not establish a reviewed schema.

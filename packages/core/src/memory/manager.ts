@@ -186,6 +186,12 @@ export interface ScheduleExtractParams {
  * skipped facts unseen in the usual tail as processed. Default 0 keeps today's
  * once-per-turn cadence; not a user setting until a paired run shows memory
  * quality is unchanged.
+ *
+ * Coverage note: the skip half engages only where the caller supplies
+ * `isBelowCompactionWarn` (the primary-chat path). The ACP / `qwen serve`
+ * caller passes no such predicate, so with the knob set those sessions get
+ * the windowed extraction without any cooldown skips — do not read an
+ * ablation through that path.
  */
 export const EXTRACT_NOOP_COOLDOWN_TURNS_ENV =
   'QWEN_CODE_MEMORY_EXTRACT_NOOP_COOLDOWN_TURNS';

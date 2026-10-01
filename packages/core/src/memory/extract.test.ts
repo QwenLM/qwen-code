@@ -299,6 +299,62 @@ describe('auto-memory extraction', () => {
     expect(result.extractorRan).toBeUndefined();
   });
 
+  it('windowed arm: a no-progress run advances the pending window instead of freezing it', async () => {
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+      systemMessage: undefined,
+    });
+    const params = {
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      preserveUnprocessedHistory: true,
+    };
+    const history: Content[] = Array.from(
+      { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
+      (_, i): Content => ({
+        role: 'user',
+        parts: [{ text: `Pending fact ${i}.` }],
+      }),
+    );
+    const lateFact: Content = {
+      role: 'user',
+      parts: [{ text: 'Remember: the late fact stated after the cap.' }],
+    };
+    history.push(
+      lateFact,
+      { role: 'model', parts: [{ text: 'Noted.' }] },
+      { role: 'user', parts: [{ text: 'And one more newer fact.' }] },
+      { role: 'model', parts: [{ text: 'Noted too.' }] },
+    );
+
+    const first = await runAutoMemoryExtract({ ...params, history });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+      mockConfig,
+      projectRoot,
+      history.slice(0, CACHE_SAFE_HISTORY_TAIL_ENTRIES),
+    );
+    // No genuine progress, but the windowed arm must still advance: holding
+    // the cursor at startOffset recomputes a byte-identical slice next turn
+    // (endOffset is capped relative to startOffset), freezing the window for
+    // the rest of the session and never arming the no-op cooldown.
+    expect(first.cursor.processedOffset).toBe(CACHE_SAFE_HISTORY_TAIL_ENTRIES);
+
+    const second = await runAutoMemoryExtract({ ...params, history });
+    const secondWindow = vi.mocked(runAutoMemoryExtractionByAgent).mock
+      .calls[1]?.[2];
+    expect(secondWindow).toEqual(
+      history.slice(CACHE_SAFE_HISTORY_TAIL_ENTRIES),
+    );
+    expect(secondWindow).toContainEqual(lateFact);
+    // Caught up: processedOffset === history.length is the condition the
+    // no-op cooldown in MemoryManager arms on.
+    expect(second.cursor.processedOffset).toBe(history.length);
+  });
+
   it('throws when config is missing because heuristic fallback was removed', async () => {
     await expect(
       runAutoMemoryExtract({

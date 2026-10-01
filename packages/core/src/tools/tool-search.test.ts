@@ -614,6 +614,83 @@ describe('ToolSearchTool', () => {
     ).toMatchObject({ tool: hidden });
   });
 
+  /** A tool_search response whose block is the live tool's block minus serverName. */
+  const legacyHistory = (
+    name: string,
+    description: string,
+    parametersJsonSchema: unknown,
+  ): Content[] => [
+    {
+      role: 'model',
+      parts: [{ functionCall: { name: ToolNames.TOOL_SEARCH, args: {} } }],
+    },
+    {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: ToolNames.TOOL_SEARCH,
+            response: {
+              output: `<functions>\n<function>${JSON.stringify({
+                name,
+                description,
+                parametersJsonSchema,
+              })}</function>\n</functions>`,
+            },
+          },
+        },
+      ],
+    },
+    { role: 'model', parts: [{ text: 'Schema reviewed.' }] },
+  ];
+
+  it('re-arms a legacy serverName-less block from the live MCP tool identity when the schema still matches', async () => {
+    const mcpTool = new DiscoveredMCPTool(
+      {} as CallableTool,
+      'srv',
+      'danger',
+      'A discovered MCP tool.',
+      { type: 'object', properties: { target: { type: 'string' } } },
+    );
+    registry.registerTool(mcpTool);
+
+    // Pre-PR transcripts serialized no serverName. On a fresh process the
+    // map is empty, so neither the provenance arm nor the re-adopt arm can
+    // fire; the review must come from the live tool's own identity.
+    registry.syncReviewedDeclarations(
+      legacyHistory(
+        mcpTool.name,
+        mcpTool.description,
+        mcpTool.schema.parametersJsonSchema,
+      ),
+    );
+
+    expect(registry.getReviewedDeclaration(mcpTool.name)).toBe(
+      deferredDeclarationFingerprint(mcpTool),
+    );
+    await expect(
+      resolveDeferredToolCall(registry, {
+        name: mcpTool.name,
+        arguments: {},
+      }),
+    ).resolves.toMatchObject({ tool: mcpTool });
+  });
+
+  it('leaves a legacy serverName-less block unreviewed while its tool is not registered', () => {
+    // Progressive MCP discovery registers tools after a resumed chat's first
+    // sync. Recording the bare suffix here would refuse every later call as
+    // "changed since tool_search" once the real server-prefixed fingerprint
+    // exists — an unresolvable name stays unreviewed instead.
+    registry.syncReviewedDeclarations(
+      legacyHistory('mcp__srv__late', 'arrives via progressive discovery', {
+        type: 'object',
+        properties: {},
+      }),
+    );
+
+    expect(registry.getReviewedDeclaration('mcp__srv__late')).toBeUndefined();
+  });
+
   it.each(['parameters', 'server'])(
     'does not refresh a historical MCP fingerprint after a %s change',
     async (change) => {
