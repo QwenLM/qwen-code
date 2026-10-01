@@ -263,11 +263,8 @@ class HostedProcessCrashIT {
             assertThat(jdbc.queryForList("SELECT binding_state FROM qwen_runtime_binding WHERE tenant_id = ?", String.class,
                     tenant)).containsExactly("READY");
             Path proof = root.resolve("workspace/child/proof.txt");
-            if (fault.startsWith("harness-")) {
-                assertThat(Files.readString(proof)).isEqualTo(prepared ? "x" : "xx");
-            } else {
-                assertThat(((Number) Files.getAttribute(proof, "unix:mode")).intValue() & 0170000).isEqualTo(0010000);
-            }
+            assertThat(proof).isRegularFile();
+            assertThat(Files.readString(proof)).isEqualTo(settled ? "xx" : "x");
             assertThat(root.resolve("workspace/proof.txt")).doesNotExist();
             assertJournal(report, prepared);
         }
