@@ -352,6 +352,28 @@ describe('answer command parsing with the root options registered', () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it('delivers an answer with a root global between the chain words', async () => {
+    // `sessions --debug answer <id> hi`: the recognizer anchors on the
+    // command position, so the flag does not shift `answer` off its slot —
+    // an adjacent-pair scan would miss the chain and the session id would
+    // slide into the answer text.
+    const answer = mockDelivered();
+    await parse(['sessions', '--debug', 'answer', SESSION, 'hi']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'hi');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('delivers an answer with a root global between the command and the session id', async () => {
+    // `sessions answer --debug <id> hi`: the flag is a root global, not a
+    // session literally named `--debug`; the id stays in its slot.
+    const answer = mockDelivered();
+    await parse(['sessions', 'answer', '--debug', SESSION, 'hi']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'hi');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it('delivers an answer whose last token is the bare word help', async () => {
     // The root instance's help command pops a trailing bare `help`, so it
     // too must be shielded by the inserted `--`.

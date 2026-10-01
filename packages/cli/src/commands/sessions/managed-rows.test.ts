@@ -552,6 +552,11 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].sessionId).toBe('Managed-1');
+    // The placeholder name IS the sanitized id, so it follows the carried
+    // spelling too — otherwise the NAME cell renders `managed-1` while
+    // `--json` reports `Managed-1`, and the cell a user copies into
+    // `--resume` names a session the case-sensitive store cannot find.
+    expect(rows[0].name).toBe('Managed-1');
   });
 
   it('keeps the resumable spelling when it dedupes a mixed-case session', () => {
@@ -682,5 +687,32 @@ describe('mergeSessionRows', () => {
     const second = record({ pid: 2 });
     const rows = mergeSessionRows([first, second], []);
     expect(rows.map((row) => row.record)).toEqual([first, second]);
+  });
+
+  it('drops only the consumed record when two records share a managed session id', () => {
+    // The dedupe consumes the record describing the same process; a second
+    // live process holding the same id (two terminals that both resumed
+    // one session) is not a duplicate of it and stays listed — keying the
+    // filter on the id would drop both.
+    const first = record({ sessionId: 'managed-1', pid: 1 });
+    const second = record({ sessionId: 'managed-1', pid: 2 });
+    const rows = mergeSessionRows(
+      [first, second],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].managed).toBe(true);
+    expect(rows[0].pid).toBe(1);
+    expect(rows[1]).toMatchObject({ managed: false, pid: 2 });
+  });
+
+  it('keeps the deduped record on the managed row for the JSON path', () => {
+    // The human table lists the session once, but the record alone carries
+    // `ipcPath` and the registry `name` — the documented discovery routes —
+    // so the row keeps it for `--json` to emit beside the managed row.
+    const rec = record({ sessionId: 'managed-1', name: 'svc-registry-name' });
+    const rows = mergeSessionRows([rec], managedSessionRows([snapshot()], NOW));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupedRecord).toBe(rec);
   });
 });

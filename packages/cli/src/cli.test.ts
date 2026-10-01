@@ -490,6 +490,27 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('version');
   });
 
+  it('keeps the version intercept when the chain words belong to another command', () => {
+    // The chain is anchored to the command position — `sessions` as the
+    // first positional — so the same two words inside `mcp add`'s
+    // arguments never arm the answer exemption. The adjacency latch this
+    // replaces armed anywhere, and this argv then EXECUTED the mcp edit
+    // with the version request shadowed.
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'sessions', 'answer', 'node', '-v']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'remove',
+        'sessions',
+        'answer',
+        '-v',
+        'help',
+      ]),
+    ).toBe('version');
+  });
+
   it('prints the version instead of persisting version-bearing mcp add argv (base parity)', () => {
     // Base printed the version and persisted NOTHING for every probed
     // version-bearing `mcp add` shape — including the variadic tail
@@ -2145,6 +2166,39 @@ describe('bootstrap import boundaries', () => {
     );
 
     expect(output).toBe('7.7.7-test\n');
+  });
+
+  it('defers a dash-led sessions answer chain to the CLI instead of intercepting its -v', () => {
+    // The wrapper's version shortcut exits before cli.js is imported, so a
+    // `-v` inside the answer text of `qwen --debug sessions answer <id> …`
+    // used to print the version and exit 0 — the reply silently discarded
+    // with a success code. With the chain deferred, the argv reaches the
+    // real parser instead. (In this repo layout the wrapper then finds no
+    // bundled cli.js and fails; what matters is what stdout is not.)
+    let output: string;
+    try {
+      output = execFileSync(
+        process.execPath,
+        [
+          '../../scripts/cli-entry.js',
+          '--debug',
+          'sessions',
+          'answer',
+          '0f8e1c42',
+          'rerun',
+          '-v',
+          'now',
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, CLI_VERSION: '7.7.7-test' },
+        },
+      );
+    } catch (error) {
+      output = String((error as { stdout?: string }).stdout ?? '');
+    }
+
+    expect(output).not.toBe('7.7.7-test\n');
   });
 
   it('reads package.json from the npm bin wrapper version shortcut', () => {

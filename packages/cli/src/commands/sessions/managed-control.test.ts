@@ -167,6 +167,63 @@ describe('peekManagedSession', () => {
     expect(result.lines.join('\n')).toContain('no live process');
   });
 
+  it('does not call a disconnected-but-alive worker "no live process"', async () => {
+    // `live: false` is the supervisor's in-memory connection flag — a
+    // restart, a CLI upgrade or `shutdown --keepWorkers` all leave the
+    // worker running with no host attached. The State line must say what
+    // the reply actually knows; the OS-level claim is earned by the worker
+    // record's own identity probe, the one the `ps` row answers to.
+    const disconnected = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        live: false,
+        worker: {
+          schemaVersion: 1,
+          protocolVersion: 1,
+          // This test process: alive under any liveness probe.
+          workerPid: process.pid,
+          platform: process.platform,
+          recentOutputBytes: 0,
+        },
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(disconnected));
+    const text = result.lines.join('\n');
+    expect(text).not.toContain('no live process');
+    expect(text).toContain('supervisor not connected');
+  });
+
+  it('withholds the answer hint from an old supervisor reporting no live host', async () => {
+    // A supervisor that predates `answerable` carries no verdict, so the
+    // fallback reads the waiting state — but `live: false` in the same
+    // reply says no in-memory host exists, and the command the hint
+    // advertises is guaranteed to refuse.
+    const dead = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        live: false,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(dead));
+    expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
+  });
+
+  it('still offers the answer hint for an old supervisor when the host is live', async () => {
+    // The pre-`answerable` fallback stays: waiting + no live flag at all
+    // is how a session awaiting input presented before the field existed.
+    const alive = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(alive));
+    expect(result.lines.join('\n')).toContain('qwen sessions answer');
+  });
+
   it('names the session the way sessions ps does', async () => {
     // 'Waiting for approval' is one of the generic phrases deriveTitle
     // filters, so without the launch record the title would fall through

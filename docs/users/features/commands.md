@@ -774,7 +774,7 @@ qwen --bg "find out why the release job is flaky"
 # See it with: qwen sessions ps
 ```
 
-See what it is doing with `qwen sessions peek`, reply to it with `qwen sessions answer`, and end it with `qwen sessions stop`. What is still missing: attaching to a background session's terminal and reading its full transcript. Those land with the Agent View roster.
+See what it is doing with `qwen sessions peek`, reply to it with `qwen sessions answer`, and end it with `qwen sessions stop`. What is still missing: attaching to a background session's terminal, reading its full transcript, and the worker-side state reporting that makes a question visible — until that lands with the Agent View integration, a background session that stops to ask keeps showing STATE `working`, `peek` shows no `Waiting:` line, and `answer` reports the session is not waiting for input.
 
 #### `qwen sessions ps`
 
@@ -787,9 +787,11 @@ started in a terminal; it registers in the live-process registry, and
 records left behind by a killed session are swept as they are found. A
 **managed** session is an Agent View session owned by a supervisor: it
 stores richer lifecycle state in the supervisor store, which the registry
-alone cannot provide. A session present in both sources is listed once, as
-managed. Managed sessions are listed first, because one of them may be
-waiting for an answer.
+alone cannot provide. A session present in both sources is listed once in
+the table, as managed — and on the `--json` path its registry record is
+still emitted as its own `managed: false` line, so the record's `ipcPath`
+and `name` remain available to tooling. Managed sessions are listed first,
+because one of them may be waiting for an answer.
 
 Headless sessions (`qwen -p`) register nowhere and are not shown.
 
@@ -811,18 +813,30 @@ program drives. Several `serve` or `headless` rows can share one PID: a
 the daemon spawned it, `headless` when a client is driving it directly —
 and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
-session is allowed to do depends on it. A managed session has no registry
-record behind it, so nothing registered it and its KIND reads `managed`
-rather than borrowing a word some registrant wrote. See
+session is allowed to do depends on it. A managed session's KIND reads
+`managed` rather than borrowing a word some registrant wrote — even when
+the same session also registered (a `--bg` worker does): the row is the
+supervisor's, and the registry record, when one exists, still reaches
+`--json` as its own line. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
 format and for how to register a program of your own.
 
 STATE is `interactive` for a session you started yourself. For a managed
 session it is what that session is actually doing — `needs input`,
-`working`, `ready`, `stopped` or `failed`. Those are display labels; the
+`working`, `ready`, `stopped` or `failed`. A managed session whose worker
+process is gone reads `no process` instead of a live-tense label: the
+recorded pid is only printed after an identity check, and the label follows
+it. Those are display labels; the
 `--json` output carries stable tokens instead (see below). PID and AGE print `-` for a
 managed session only when their own source value is unavailable: PID when
 there is no live worker process, and AGE when the creation stamp is unusable.
+
+Today the worker-side state reporting has not landed, so the states a
+managed session can actually reach are `working` while it runs, `no
+process` when its worker is gone, and `stopped`/`failed` at the end —
+`needs input` and `ready` arrive with the Agent View integration. Note
+that until then a clean exit is recorded as `failed`, because the session
+never left `starting`.
 
 **JSON output (`--json`):**
 
@@ -837,16 +851,22 @@ schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
 qwenVersion, kind, ipcPath (when peer messaging is available), managed
 ```
 
-A managed session is emitted in the managed row shape, even when the same
-session also has a registry record:
+A managed session is emitted in the managed row shape, and when the same
+session also has a registry record, that record follows as its own
+`managed: false` line:
 
 ```
-name, pid, startedAt, cwd, taskState, sessionId, managed
+name, pid, startedAt, cwd, taskState, runtimeState, sessionId, managed
 ```
 
 `taskState` is the machine-readable form of the STATE column, and is the
 field to script against: `running`, `waiting`, `ready`, `stopped` or
-`failed`. The column's wording can change; these tokens will not.
+`failed` — with `waiting`/`ready` becoming producible when the worker-side
+state reporting lands (see the STATE note above). The column's wording can
+change; these tokens will not. `runtimeState` is the presentation layer's
+process-level read (`alive`, `hibernated`, `exited`, ...), so a script can
+tell "no live process" from "waiting" without inferring it from a missing
+`pid`.
 
 Nothing else is written to stdout — an empty listing prints nothing at
 all — so `qwen sessions ps --json | jq .` is safe to script against. If
@@ -874,7 +894,7 @@ qwen sessions ps --json | jq -r .cwd
 
 A background session started with `--bg` runs with nobody watching it. These three commands are how you catch up with one. Each takes a session id or any unique prefix of one — the full id `--bg` prints at launch is enough, and `qwen sessions ps --json` lists it as `sessionId`.
 
-`peek` shows what the session is doing, and what it has stopped to ask:
+`peek` shows what the session is doing, and what it has stopped to ask — once the worker-side state reporting lands (see the `qwen --bg` section); until then it shows the session's lifecycle state and recent activity, but no `Waiting:` line:
 
 ```bash
 $ qwen sessions peek 0f8e1c42
@@ -885,6 +905,8 @@ Waiting:   permission to write scripts/flake-report.md
 
 Answer it with: qwen sessions answer 0f8e1c42 "<your answer>"
 ```
+
+(The `Waiting:` line and the answer hint in this sample are the shape the command prints once the worker-side reporting lands; today a session in that position reads `State: working` with neither line.)
 
 `answer` replies to a session that is waiting, and `stop` ends one, leaving its transcript in place:
 

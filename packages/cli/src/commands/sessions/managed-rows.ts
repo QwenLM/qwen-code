@@ -48,6 +48,7 @@ import type {
 import {
   AGENT_VIEW_UNTITLED_TITLE,
   deriveAgentViewPresentation,
+  type AgentViewRuntimeState,
   type AgentViewTaskState,
 } from '../../agent-view/presentation.js';
 
@@ -73,6 +74,14 @@ export interface SessionRow {
    * breaks every script silently. The table maps it at the render site.
    */
   taskState?: AgentViewTaskState;
+  /**
+   * The presentation layer's process-level read (`alive`, `hibernated`,
+   * `exited`, ...), for a managed row. Carried so `--json` consumers get a
+   * liveness token directly instead of inferring one from the absence of
+   * `pid` — which proves only "no live process to print", never a
+   * lifecycle.
+   */
+  runtimeState?: AgentViewRuntimeState;
   sessionId: string;
   /** True for an Agent View session, false for a registry record. */
   managed: boolean;
@@ -84,6 +93,15 @@ export interface SessionRow {
    * drop the other. `--json` emits this verbatim for registry rows.
    */
   record?: SessionRegistryRecord;
+  /**
+   * The registry record the merge deduped this managed row against, when
+   * the same session was also registered. The human table stays one row
+   * per session, but `--json` additionally emits this record as its own
+   * `managed: false` line: `ipcPath` and the registry `name` are the
+   * discovery routes controllers and `send_message` are documented to
+   * read, and the table dedupe must not take them away.
+   */
+  dedupedRecord?: SessionRegistryRecord;
 }
 
 /**
@@ -152,6 +170,7 @@ export function managedSessionRows(
         startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
         cwd: snapshot.state.activeCwd,
         taskState: presentation.taskState,
+        runtimeState: presentation.runtimeState,
         sessionId,
         managed: true,
       };
@@ -197,8 +216,13 @@ export function managedSessionRows(
  *
  * When nothing qualifies the row prints `-`, exactly like a session that
  * never had a worker.
+ *
+ * Exported for `peek`, which holds its liveness suffix to the same
+ * standard: the supervisor's in-memory connection flag is not an OS-level
+ * probe, so the "no live process" claim is computed from the worker
+ * record instead.
  */
-function liveWorkerPid(
+export function liveWorkerPid(
   worker: AgentViewWorkerFile | undefined,
 ): number | undefined {
   if (!worker) return undefined;
@@ -286,23 +310,45 @@ function registryRow(record: SessionRegistryRecord): SessionRow {
 function carryDedupedRecord(
   row: SessionRow,
   records: readonly SessionRegistryRecord[],
+  consumed: Set<SessionRegistryRecord>,
 ): SessionRow {
   const sanitized = sanitizeSessionId(row.sessionId);
-  let sessionId = row.sessionId;
-  let pid = row.pid;
-  for (const record of records) {
-    if (sanitizeSessionId(record.sessionId) !== sanitized) continue;
-    // True only while the row reports the sanitized id; once the raw
-    // spelling is carried it no longer equals its sanitized form, so a
-    // later record cannot overwrite it.
-    if (sessionId === sanitizeSessionId(record.sessionId)) {
-      sessionId = record.sessionId;
-    }
-    pid ??= record.pid;
+  // The dedupe consumes at most one record per managed row — the one
+  // describing the same process: a pid match when the row already vouches
+  // one, else the first id match. Surplus records sharing the id stay
+  // listed as registry rows rather than vanishing with the deduped one
+  // (two live processes can hold one session id — two terminals that both
+  // resumed it, or a stale writer beside a restored transcript).
+  const candidates = records.filter(
+    (record) =>
+      !consumed.has(record) &&
+      sanitizeSessionId(record.sessionId) === sanitized,
+  );
+  const record =
+    candidates.find(
+      (candidate) => row.pid !== undefined && candidate.pid === row.pid,
+    ) ?? candidates[0];
+  if (!record) {
+    return row;
   }
-  return sessionId === row.sessionId && pid === row.pid
+  consumed.add(record);
+  // The raw spelling is carried only while the row reports the sanitized
+  // form, so a launch-file spelling keeps winning while present.
+  const sessionId =
+    row.sessionId === sanitizeSessionId(record.sessionId)
+      ? record.sessionId
+      : row.sessionId;
+  const pid = row.pid ?? record.pid;
+  // The placeholder name IS the id — an untitled row has nothing else to
+  // be acted on by — so it follows the carried spelling; a real title
+  // must not be rewritten.
+  const name = row.name === row.sessionId ? sessionId : row.name;
+  return sessionId === row.sessionId &&
+    pid === row.pid &&
+    name === row.name &&
+    row.dedupedRecord === record
     ? row
-    : { ...row, sessionId, pid };
+    : { ...row, sessionId, pid, name, dedupedRecord: record };
 }
 
 /**
@@ -325,21 +371,17 @@ export function mergeSessionRows(
   records: readonly SessionRegistryRecord[],
   managed: readonly SessionRow[],
 ): SessionRow[] {
-  // Canonicalized on both sides rather than compared raw. The two
-  // sources spell one id differently: the store reports the sanitized
-  // directory name it files the session under, while the registry keeps
-  // the raw spelling the worker registered with — adoption keeps both on
-  // purpose, because the native session store is case-sensitive. Comparing
-  // the spellings would let any managed session whose id contains an
-  // uppercase letter through this filter, and the table would list it
-  // twice: once with its real state, once as `interactive`.
-  const managedIds = new Set(
-    managed.map((row) => sanitizeSessionId(row.sessionId)),
-  );
+  // The registry half is filtered on the records the carry actually
+  // consumed, not on the managed ids: keying the filter on the id would
+  // drop every record sharing one — and N live processes can hold one id.
+  // Canonicalized on the consumption side rather than compared raw: the
+  // store reports the sanitized directory name it files the session
+  // under, while the registry keeps the raw spelling the worker
+  // registered with — adoption keeps both on purpose, because the native
+  // session store is case-sensitive.
+  const consumed = new Set<SessionRegistryRecord>();
   return [
-    ...managed.map((row) => carryDedupedRecord(row, records)),
-    ...records
-      .filter((record) => !managedIds.has(sanitizeSessionId(record.sessionId)))
-      .map(registryRow),
+    ...managed.map((row) => carryDedupedRecord(row, records, consumed)),
+    ...records.filter((record) => !consumed.has(record)).map(registryRow),
   ];
 }

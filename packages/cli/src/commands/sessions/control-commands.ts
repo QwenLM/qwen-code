@@ -16,6 +16,7 @@
 
 import type { Argv, CommandModule } from 'yargs';
 import { hideBin } from 'yargs/helpers';
+import { findSessionsAnswerChain } from '../../agent-view/entry-flags.js';
 import {
   ignoreBrokenPipe,
   writeStdoutLine,
@@ -168,19 +169,21 @@ function rawAnswerTail(argv: {
   _?: unknown[];
 }): { session: string; text: string } | undefined {
   const commands = (argv._ ?? []).map(String);
-  // `argv._` is the matched command chain, so an empty one means this argv
-  // did not come out of a parse and there is nothing to anchor on.
-  if (commands.length === 0) return undefined;
+  // `argv._` is the matched command chain, so a parse that matched nothing
+  // — or a programmatic call whose raw argv is unrelated — has nothing to
+  // anchor on and falls back to what yargs produced.
+  if (commands[0] !== 'sessions' || commands[1] !== 'answer') {
+    return undefined;
+  }
   // `config.ts` builds its yargs tree from `hideBin(process.argv)`, so this
   // is the argv the parse came from — including the entry-point token
-  // config.ts sometimes strips off the front, which anchoring on a run of
-  // command tokens instead of a fixed offset makes harmless.
+  // config.ts sometimes strips off the front, which anchoring on the
+  // command-position recognizer instead of a fixed offset makes harmless.
   const raw = hideBin(process.argv);
-  const at = findRun(raw, commands);
-  if (at === -1) return undefined;
-  const session = raw[at + commands.length];
-  if (typeof session !== 'string') return undefined;
-  const tail = raw.slice(at + commands.length + 1);
+  const chain = findSessionsAnswerChain(raw);
+  if (!chain || chain.sessionAt === -1) return undefined;
+  const session = raw[chain.sessionAt]!;
+  const tail = raw.slice(chain.sessionAt + 1);
   // Only a separator that leads the tail was entered as one, and only that
   // one is not part of the answer. Every other `--` here is answer text:
   // `insertAnswerTextSeparator` writes its separator into the copy handed to
@@ -191,16 +194,6 @@ function rawAnswerTail(argv: {
   // and npm then read `--watch` as its own flag instead of a test filter.
   if (tail[0] === '--') tail.shift();
   return { session, text: tail.join(' ') };
-}
-
-/** Index of the first adjacent run of `needle` in `haystack`, or -1. */
-function findRun(haystack: string[], needle: string[]): number {
-  for (let at = 0; at + needle.length <= haystack.length; at++) {
-    if (needle.every((token, offset) => haystack[at + offset] === token)) {
-      return at;
-    }
-  }
-  return -1;
 }
 
 /**
@@ -215,18 +208,19 @@ function findRun(haystack: string[], needle: string[]): number {
  * the answer before the handler runs, and the reply is silently dropped.
  */
 export function insertAnswerTextSeparator(argv: string[]): string[] {
-  // Anchored on the command token *run*, not on a fixed offset: this runs on
-  // the raw argv, so a root-level global in front of the subcommand
-  // (`qwen --debug sessions answer …`) shifts the chain without changing it.
+  // Anchored on the command's position in the parse
+  // (`findSessionsAnswerChain`), not on an adjacent token pair: this runs
+  // on the raw argv, so a root-level global in front of the subcommand
+  // (`qwen --debug sessions answer …`) shifts the chain without changing
+  // it, and the two words inside a prompt or another command's args
+  // (`qwen why does sessions answer refuse …`) are not a chain at all.
   // Without the separator yargs consumes a help token out of the answer and
   // the reply is dropped.
-  const at = findRun(argv, ['sessions', 'answer']);
-  if (at === -1) return argv;
-  const session = argv[at + 2];
-  // A missing session (`sessions answer --help`) or one that is itself a
-  // flag must fall through to yargs (help / demandOption), not be shielded.
-  if (session === undefined || session.startsWith('-')) return argv;
-  const tail = argv.slice(at + 3);
+  const chain = findSessionsAnswerChain(argv);
+  // No chain, or a missing session (`sessions answer --help`): fall through
+  // to yargs (help / demandOption), not shielded by a separator.
+  if (!chain || chain.sessionAt === -1) return argv;
+  const tail = argv.slice(chain.sessionAt + 1);
   // Already verbatim (`answer <id> -- ...`): do not double the separator.
   if (tail[0] === '--') return argv;
   // The documented carve-out: a bare `--help`/`-h` shows help instead of
@@ -237,7 +231,7 @@ export function insertAnswerTextSeparator(argv: string[]): string[] {
   // No answer text yet: let the empty-answer refusal happen without a
   // separator.
   if (tail.length === 0) return argv;
-  return [...argv.slice(0, at + 3), '--', ...tail];
+  return [...argv.slice(0, chain.sessionAt + 1), '--', ...tail];
 }
 
 export const peekCommand: CommandModule<unknown, SessionIdArgs> = {

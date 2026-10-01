@@ -360,6 +360,26 @@ describe('parseArguments', () => {
     expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
   });
 
+  it('leaves a prompt that merely contains the words "sessions answer" intact', async () => {
+    // The answer-chain recognizer is anchored to the command position
+    // (`sessions` as the first positional), so the two words inside a
+    // prompt sentence are not a command: no `--` is spliced in, and the
+    // query reaches the model whole.
+    process.argv = [
+      'node',
+      'script.js',
+      'why',
+      'does',
+      'sessions',
+      'answer',
+      'refuse',
+      'my',
+      'text',
+    ];
+    const args = await parseArguments();
+    expect(args.query).toBe('why does sessions answer refuse my text');
+  });
+
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
     const output: string[] = [];

@@ -458,6 +458,58 @@ describe('qwen sessions ps', () => {
     expect(rows[0]).not.toHaveProperty('state');
   });
 
+  it('keeps the registry record of a both-sources session on the JSON path', async () => {
+    // A `--bg` worker registers itself like any interactive session, so
+    // "managed AND registered" is the common case, not a corner. The human
+    // table dedupes to one row per session, but the record alone carries
+    // `ipcPath` and the registry `name` — the documented discovery routes
+    // for controllers and `send_message` — so `--json` emits it as its own
+    // `managed: false` line beside the managed row.
+    listLiveSessions.mockResolvedValue([
+      record({
+        sessionId: 'managed-1',
+        name: 'svc-registry-name',
+        ipcPath: '/run/user/1000/qwen-socks/4242.sock',
+      } as Partial<SessionRegistryRecord>),
+    ]);
+    listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
+    await run({ json: true });
+
+    const rows = stdout.map((line) => JSON.parse(line));
+    const managedRow = rows.find((row) => row.managed === true);
+    const registryRow = rows.find((row) => row.managed === false);
+    expect(managedRow?.sessionId).toBe('managed-1');
+    expect(registryRow).toMatchObject({
+      ipcPath: '/run/user/1000/qwen-socks/4242.sock',
+      name: 'svc-registry-name',
+    });
+    // The credential still never leaves the record file.
+    expect(registryRow).not.toHaveProperty('ipcToken');
+
+    // The human table still lists the session exactly once.
+    stdout.length = 0;
+    await run({ json: false });
+    expect(stdout).toHaveLength(2);
+  });
+
+  it('prints the resumable mixed-case spelling in NAME for an untitled managed row', async () => {
+    // The store files the session under the lowercased directory name; the
+    // registry keeps the raw spelling the worker registered with. The NAME
+    // cell is what a user copies into `qwen --resume`, and the native store
+    // is case-sensitive, so it must carry the raw spelling the merge
+    // recovered — not the sanitized store id the JSON sessionId used to
+    // disagree with.
+    listLiveSessions.mockResolvedValue([
+      record({ sessionId: 'Managed-1', name: 'app-ab' }),
+    ]);
+    listAgentViewSessionSnapshots.mockResolvedValue([
+      managedSnapshot({ rosterEntry: undefined }),
+    ]);
+    await run({ json: false });
+
+    expect(stdout[1].slice(0, NAME_COL)).toContain('Managed-1');
+  });
+
   it('prints a dash, not a zero, for a managed session with no process', async () => {
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockResolvedValue([
@@ -477,6 +529,15 @@ describe('qwen sessions ps', () => {
         NAME_COL + KIND_COL + PID_COL + AGE_COL,
       ),
     ).toBe('-'.padEnd(AGE_COL));
+    // The persisted state says `needs_input`, but there is no process to
+    // answer — a live-tense label beside a dead pid cell is the lie the
+    // pid probe already refused to print.
+    expect(
+      stdout[1].slice(
+        NAME_COL + KIND_COL + PID_COL + AGE_COL,
+        NAME_COL + KIND_COL + PID_COL + AGE_COL + STATE_COL,
+      ),
+    ).toBe('no process'.padEnd(STATE_COL));
   });
 
   it('does not render a managed pid that no process owns any more', async () => {
@@ -492,6 +553,16 @@ describe('qwen sessions ps', () => {
       stdout[1].slice(NAME_COL + KIND_COL, NAME_COL + KIND_COL + PID_COL),
     ).toBe('-'.padEnd(PID_COL));
     expect(stdout[1]).not.toContain('777');
+    // Same refusal in the STATE column: `needs input` would tell a user
+    // (and the documented `jq select(.taskState == "waiting")` recipe,
+    // via the row's liveness token) that a process is waiting to be
+    // answered when none exists.
+    expect(
+      stdout[1].slice(
+        NAME_COL + KIND_COL + PID_COL + AGE_COL,
+        NAME_COL + KIND_COL + PID_COL + AGE_COL + STATE_COL,
+      ),
+    ).toBe('no process'.padEnd(STATE_COL));
   });
 
   it('still lists interactive sessions when the supervisor store cannot be read', async () => {

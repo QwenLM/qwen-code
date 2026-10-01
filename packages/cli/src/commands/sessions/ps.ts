@@ -110,9 +110,21 @@ const TASK_STATE_LABEL: Record<AgentViewTaskState, string> = {
 
 /** A registry row knows only that a process is alive. */
 function stateLabel(row: SessionRow): string {
-  return row.taskState === undefined
-    ? 'interactive'
-    : TASK_STATE_LABEL[row.taskState];
+  if (row.taskState === undefined) {
+    return 'interactive';
+  }
+  // A live-tense label needs a live process behind it: the durable store
+  // is never reaped while no supervisor runs, so a crash or a reboot
+  // leaves `working`/`needs_input` standing next to a pid the identity
+  // probe already refused. pid-absence proves only "no live process to
+  // print" — never exited or dead — so the substitute says just that.
+  if (
+    row.pid === undefined &&
+    (row.taskState === 'running' || row.taskState === 'waiting')
+  ) {
+    return 'no process';
+  }
+  return TASK_STATE_LABEL[row.taskState];
 }
 
 /**
@@ -213,8 +225,8 @@ async function handlePs(argv: PsArgs): Promise<void> {
       // every field they always saw, minus the inbox token — a
       // credential, not data: tooling that really needs it can read the
       // record file, but it must not spill into logs and pipelines by
-      // default. Managed rows have no record behind them and are emitted
-      // as the row itself.
+      // default. Managed rows are emitted as the row itself, minus the
+      // deduped record, which follows on its own line.
       writeStdoutLine(
         row.record
           ? JSON.stringify({
@@ -222,8 +234,22 @@ async function handlePs(argv: PsArgs): Promise<void> {
               ipcToken: undefined,
               managed: false,
             })
-          : JSON.stringify(row),
+          : JSON.stringify({ ...row, dedupedRecord: undefined }),
       );
+      // A managed session that is also registered keeps its registry
+      // record on the JSON path: the table dedupes to one row per
+      // session, but the record alone carries `ipcPath` and the registry
+      // `name` — the documented discovery routes for controllers and
+      // `send_message`.
+      if (row.dedupedRecord) {
+        writeStdoutLine(
+          JSON.stringify({
+            ...row.dedupedRecord,
+            ipcToken: undefined,
+            managed: false,
+          }),
+        );
+      }
     }
     return;
   }

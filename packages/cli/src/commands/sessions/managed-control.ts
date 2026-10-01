@@ -12,9 +12,11 @@
  * session can be stopped — otherwise the listing reports a state the user
  * has no way to act on, and `kill <pid>` is the only exit.
  *
- * Each of these is a thin call to a supervisor operation that already
- * exists; the work here is deciding what to print and refusing to invent
- * an answer when the supervisor is not running.
+ * The commands here are the CLI half of that: they call supervisor
+ * operations that already exist. The worker half — the sideband that
+ * reports `needs_input` and drains a delivered answer — lands with the
+ * Agent View integration; until then `peek` shows lifecycle state and
+ * activity but no question, and `answer` is refused as not waiting.
  *
  * The supervisor is never *started* by these commands. Starting one to
  * ask it about sessions it cannot have would turn "nothing is running"
@@ -31,7 +33,9 @@ import type {
   AgentViewLaunchFile,
   AgentViewRosterEntry,
   AgentViewSessionStateFile,
+  AgentViewWorkerFile,
 } from '../../agent-view/protocol.js';
+import { liveWorkerPid } from './managed-rows.js';
 
 /** The supervisor calls these commands make. */
 export interface ManagedControlHandle {
@@ -89,6 +93,19 @@ interface PeekResponse {
   activity?: AgentViewActivityFile;
   rosterEntry?: AgentViewRosterEntry;
   launch?: AgentViewLaunchFile;
+  /**
+   * The worker record, when the supervisor has one on file — carried so
+   * the liveness claim below can be computed from the same identity probe
+   * `sessions ps` applies, rather than from the supervisor's in-memory
+   * connection flag.
+   */
+  worker?: AgentViewWorkerFile;
+  /**
+   * False when the supervisor holds no in-memory host for the session —
+   * which a supervisor restart, a CLI upgrade or `shutdown --keepWorkers`
+   * all produce while the worker keeps running. A connection fact, not an
+   * OS-level liveness probe.
+   */
   live?: boolean;
   /**
    * The supervisor's own verdict that `answer` would be accepted right
@@ -147,9 +164,20 @@ export async function peekManagedSession(
     activity: response.activity,
   });
   const title = clean(presentation.title, 200);
+  // `live === false` says only that the supervisor holds no in-memory
+  // host — a restart, an upgrade or `shutdown --keepWorkers` all produce
+  // that with the worker still running — so it is never rendered as an
+  // OS-level claim on its own. The "no live process" wording is earned by
+  // the same identity-checked probe the `ps` row answers to.
+  const livenessSuffix =
+    response.live === false
+      ? liveWorkerPid(response.worker) === undefined
+        ? ' (no live process)'
+        : ' (supervisor not connected)'
+      : '';
   const lines = [
     `${title}  [${shortSessionId(response.state.sessionId)}]`,
-    `State:     ${presentation.taskState}${response.live === false ? ' (no live process)' : ''}`,
+    `State:     ${presentation.taskState}${livenessSuffix}`,
     `Directory: ${clean(response.state.activeCwd, 200)}`,
   ];
 
@@ -177,11 +205,13 @@ export async function peekManagedSession(
   // a live attach elsewhere and a missing process; re-deriving from the
   // waiting state alone re-advertises a command guaranteed to fail. A
   // supervisor too old to report the field falls back to the waiting
-  // state.
+  // state, but never against a reply that reports no live host: a hint
+  // printed beside "(no live process)" certifies a command the same reply
+  // says cannot run.
   const answerable =
     typeof response.answerable === 'boolean'
       ? response.answerable
-      : presentation.taskState === 'waiting';
+      : presentation.taskState === 'waiting' && response.live !== false;
   if (answerable) {
     lines.push(
       '',

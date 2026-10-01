@@ -24,6 +24,8 @@ import {
 } from './config/top-level-options.js';
 import {
   BACKGROUND_FLAG,
+  BASE_VALUE_FLAGS,
+  findSessionsAnswerChain,
   INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
 } from './agent-view/entry-flags.js';
@@ -143,19 +145,8 @@ VALUE_FLAGS.add('--sandbox-session-id');
 // version. Skipping those slots here would drop the intercept and hand the
 // argv to the full parser (corrupted `mcp add` settings writes, swallowed
 // `-e` values, exit-1 Unknown-argument on `--proxy -v mcp remove ...`).
-const BASE_VALUE_FLAGS = new Set([
-  '--model',
-  '-m',
-  '--fallback-model',
-  '--prompt',
-  '-p',
-  '--prompt-interactive',
-  '-i',
-  '--output-format',
-  '-o',
-  '--resume',
-  '-r',
-]);
+// The set itself lives in agent-view/entry-flags.ts, the leaf every
+// pre-parse scan imports it from.
 
 // Every flag spelling the exact-token scanner is allowed to recognize: the
 // full option/alias surface from the shared top-level definitions (same
@@ -290,12 +281,16 @@ function hasFlag(
 // so a `-v`/`--version` after the two command tokens is the reply and must
 // reach the answer parser (where `forgetInheritedOptions` keeps it in the
 // text). The scan therefore stops counting once the `sessions answer` chain
-// has started: a version token before it still prints the version, and
+// has completed — the chain is anchored by `findSessionsAnswerChain`
+// (`sessions` as the first positional, `answer` the next), so a pair of
+// those words inside a prompt or another command's args never arms the
+// exemption, and a flag between the chain words no longer shifts it. A
+// version token before the chain completes still prints the version, and
 // every other command chain — `mcp remove victim -v help` in particular —
 // keeps the fail-closed intercept (demoting to the full parser EXECUTES
 // subcommands).
 function versionTokenIndex(argv: readonly string[]): number {
-  let inSessionsAnswerTail = false;
+  const answerChain = findSessionsAnswerChain(argv);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
@@ -306,18 +301,13 @@ function versionTokenIndex(argv: readonly string[]): number {
       continue;
     }
     if (!arg.startsWith('-')) {
-      // The chain is recognised by its adjacent token pair, not by an
-      // ordinal: a root global in front of the subcommand shifts it off
-      // argv[0], and a value-taking global outside BASE_VALUE_FLAGS
-      // contributes its value as a positional of its own, so an ordinal
-      // count never reached the pair and the answer's `-v` was intercepted.
-      if (arg === 'sessions' && argv[i + 1] === 'answer') {
-        inSessionsAnswerTail = true;
-      }
       continue;
     }
-    if (arg === '--version' || arg === '-v') {
-      if (!inSessionsAnswerTail) return i;
+    if (
+      (arg === '--version' || arg === '-v') &&
+      (answerChain === undefined || i < answerChain.answerAt)
+    ) {
+      return i;
     }
   }
   return -1;
