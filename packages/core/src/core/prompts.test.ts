@@ -1568,8 +1568,11 @@ describe('resident tool gating (#12032)', () => {
   // session leaves it out of `getFunctionDeclarations()` and therefore out of
   // the prompt snapshot built from it. The bullet has to follow the tool:
   // discovery of a still-deferred `monitor` is the startup reminder's job, and
-  // a policy line for a tool the session cannot call directly is exactly what
-  // #12032 gates away.
+  // usage guidance for a deferred tool is exactly what #12032 gates away.
+  // Agent is the one exception (`agentReachable`): its delegation bullets are
+  // the policy that sends the model to the bridge to discover Agent at all, so
+  // gating them whenever Agent is deferred would turn deferral into silent
+  // removal — no other deferred tool's guidance drives its own discovery.
   it('gates the monitor bullet on the session declaring monitor', () => {
     const withMonitor = new Set<string>([
       ...FILE_WORK_TOOLS,

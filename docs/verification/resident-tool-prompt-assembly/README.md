@@ -25,7 +25,7 @@
 | 只有两个被门控段落发生变化                             | `changes nothing outside the two gated sections`                        |
 | 被门控段落里不出现未声明的工具（机械扫描全部工具名）   | `never names an undeclared tool inside the gated sections`              |
 | code mode 完全不受门控影响（反向检查）                 | `leaves CodeModeOnly guidance untouched by the declared set`            |
-| 快照确实从 `Config` 传到提示词构建器                   | `takes the declared set from the Config snapshot`                       |
+| 快照确实从 `Config` 传到提示词构建器                   | `keeps Agent guidance when Agent is bridge-reachable`（#13033 重命名后同时断言 `getPromptAgentReachable()` 快照）                       |
 
 **因此这份文档只剩两类事需要真实会话：** 一是**真实请求的 token 是否真的下降**（单元测试只能量字符数，量不到 provider 的计费口径，也证明不了 `tools.eager` 在你们部署上真的被接受）；二是**召回率与其他模块在真实会话中的表现**（§5、§6）。
 
