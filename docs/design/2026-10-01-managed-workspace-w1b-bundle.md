@@ -5,7 +5,8 @@
 Status: implemented; local validation passed, deployment acceptance pending.
 Integrated with main `310f4ba3a` and the original
 file-history dependency [#13110](https://github.com/QwenLM/qwen-code/pull/13110)
-at `fee8f8763`. Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
+at `fee8f8763`, through its latest main integration `560752cad`.
+Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 Completes the W1b slice of the [W1 recovery design](2026-09-29-managed-workspace-w1-recovery.md),
 without implementing W1c placement promotion.
 

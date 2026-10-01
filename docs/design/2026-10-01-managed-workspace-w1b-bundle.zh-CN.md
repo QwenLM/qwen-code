@@ -3,7 +3,8 @@
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
 状态：已实现，本地验证通过，部署验收待完成。已整合 main `310f4ba3a`，直接整合文件历史依赖
-[#13110](https://github.com/QwenLM/qwen-code/pull/13110) 的原提交 `fee8f8763`。
+[#13110](https://github.com/QwenLM/qwen-code/pull/13110) 的原提交 `fee8f8763`，
+包含其最新主干整合 `560752cad`。
 属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。完成
 [W1 恢复设计](2026-09-29-managed-workspace-w1-recovery.zh-CN.md) 的 W1b 切片，
 不实现 W1c 挂载提升。
