@@ -129,6 +129,7 @@ const EN: Messages = {
   'managed.approval.failed':
     'The approval answer could not be confirmed. Retry the same option or refresh to check its status.',
   'managed.approval.loadFailed': 'Pending approvals could not be loaded.',
+  'managed.approval.refreshFailed': 'Pending approvals could not be refreshed.',
   'managed.approval.retry': 'Retry loading approvals',
   'managed.approval.forbidden':
     'Only the Session creator can answer this approval.',
@@ -4344,6 +4345,7 @@ const ZH: Messages = {
   'managed.approval.failed':
     '无法确认审批回答的结果。请重试同一选项，或刷新以查看状态。',
   'managed.approval.loadFailed': '待审批请求加载失败。',
+  'managed.approval.refreshFailed': '待审批请求刷新失败。',
   'managed.approval.retry': '重新读取审批',
   'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',

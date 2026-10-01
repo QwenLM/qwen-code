@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
 import { ToolApproval } from '../messages/ToolApproval';
@@ -13,6 +20,7 @@ import {
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
 import { toManagedPermissionRequest } from './managed-approval';
+import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
@@ -58,20 +66,6 @@ function persistPending(key: string, value: PendingPrompt | undefined): void {
   } catch {
     // The in-memory attempt still preserves retries when storage is disabled.
   }
-}
-
-function isNonRetryableClientError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('status' in error)) {
-    return false;
-  }
-  const status = (error as { status?: unknown }).status;
-  return (
-    typeof status === 'number' &&
-    status >= 400 &&
-    status < 500 &&
-    status !== 408 &&
-    status !== 429
-  );
 }
 
 export function ManagedSessionsPage({
@@ -163,6 +157,10 @@ function ManagedSessionsContent({
     () => managedEventsToMessages(detail.events, t('managed.truncated')),
     [detail.events, t],
   );
+  // The caveat sits beside the card rather than inside the panel, so the panel
+  // is told about it: without this the dialog describes only the tool name and
+  // a screen-reader user confirms an approval whose arguments are missing.
+  const argumentsCaveatId = useId();
   const approvals = useManagedActions(
     provider,
     enabled ? sessionId : undefined,
@@ -544,12 +542,21 @@ function ManagedSessionsContent({
                 request={pendingApproval}
                 variant="floating"
                 keyboardActive={false}
+                extraDescriptionId={
+                  pendingApproval.rawInput === undefined
+                    ? argumentsCaveatId
+                    : undefined
+                }
                 onConfirm={(actionId, optionId) =>
                   approvals.respond(actionId, optionId)
                 }
               />
               {pendingApproval.rawInput === undefined && (
-                <p role="status" className="text-sm text-muted-foreground">
+                <p
+                  id={argumentsCaveatId}
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                >
                   {t('managed.approval.argumentsUnavailable')}
                 </p>
               )}
@@ -560,7 +567,13 @@ function ManagedSessionsContent({
               role="alert"
               className="flex items-center gap-2 text-sm text-destructive"
             >
-              <span>{t('managed.approval.loadFailed')}</span>
+              <span>
+                {t(
+                  approvals.loaded
+                    ? 'managed.approval.refreshFailed'
+                    : 'managed.approval.loadFailed',
+                )}
+              </span>
               <Button variant="outline" size="sm" onClick={approvals.retry}>
                 {t('managed.approval.retry')}
               </Button>

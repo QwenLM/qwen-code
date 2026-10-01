@@ -262,6 +262,14 @@ describe('ManagedSessionsPage', () => {
     const card = container.querySelector('[data-testid="managed-approval"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('Tool arguments are unavailable');
+    // The caveat sits beside the panel, so the panel has to be told about it:
+    // the description a screen-reader user hears must reach it.
+    const dialog = card!.querySelector('[role="alertdialog"]')!;
+    const caveatId = card!
+      .querySelector('p[role="status"]')!
+      .getAttribute('id') as string;
+    expect(caveatId).toBeTruthy();
+    expect(dialog.getAttribute('aria-describedby')).toContain(caveatId);
     const allow = Array.from(card!.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Yes, allow once'),
     );
@@ -336,6 +344,17 @@ describe('ManagedSessionsPage', () => {
         expect(shownInput).toContain(value);
       }
       expect(card.textContent).not.toContain('Tool arguments are unavailable');
+      // Without the caveat there is no extra description to point at, and no
+      // ARIA IDREF is left dangling.
+      const describedBy =
+        card
+          .querySelector('[role="alertdialog"]')!
+          .getAttribute('aria-describedby') ?? '';
+      const referenced = describedBy.split(' ').filter(Boolean);
+      expect(referenced.length).toBeGreaterThan(0);
+      for (const id of referenced) {
+        expect(document.getElementById(id)).not.toBeNull();
+      }
     },
   );
 
@@ -374,6 +393,59 @@ describe('ManagedSessionsPage', () => {
     ).not.toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('names a failed background re-read as a refresh while the loaded card stays', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false, actions: true },
+      }),
+    );
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [event(1, 'Persisted answer')],
+      lastEventId: 1,
+    });
+    // The transcript reports an approval change, which re-reads the list. The
+    // report is held back until the first read has landed, so the re-read is
+    // what is being observed rather than the initial load.
+    let report: (() => void) | undefined;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield {
+        ...event(2, ''),
+        type: 'action_updated',
+        data: { actionId: 'tool_approval_1', state: 'requested' },
+      };
+    });
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pendingAction])
+      // A Session deleted while the tab is open: the re-read can never succeed.
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    provider = { ...provider, actions: { listPending, respond: vi.fn() } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      report?.();
+      await flush();
+    });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    // The approvals were loaded and one is on screen; only the refresh failed.
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    const alert = container.querySelector('[role="alert"]')?.textContent ?? '';
+    expect(alert).toContain('Pending approvals could not be refreshed');
+    expect(alert).not.toContain('could not be loaded');
   });
 
   it('explains that a reader cannot answer a creator-only approval', async () => {

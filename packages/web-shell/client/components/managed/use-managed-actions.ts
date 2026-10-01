@@ -4,6 +4,7 @@ import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
+import { isNonRetryableClientError } from './managed-request-error';
 
 // Re-reads shortly after the earliest expiry so an unanswered approval leaves
 // the page once the Harness has ended it.
@@ -17,6 +18,11 @@ export interface ManagedActionsState {
   action?: ManagedAgentPendingAction;
   /** Reading the pending approvals failed; retries run in the background. */
   loadError?: unknown;
+  /**
+   * The pending approvals have been read for this Session, so a failed read is
+   * a failed refresh of what the page already shows rather than an empty list.
+   */
+  loaded: boolean;
   /** Sending an answer failed; the approval is shown again. */
   answerError?: unknown;
   respond(actionId: string, optionId: string): Promise<void>;
@@ -26,10 +32,10 @@ export interface ManagedActionsState {
 
 /**
  * Loads a Session's pending Hosted approvals and answers them. It re-reads
- * when the stream reports an approval change or a gap, when an approval
- * expires, and after an answer. `enabled` is undefined while the Session
- * summary is unknown, for example during a reload: the shown approval stays
- * and can be answered, and reads resume once the capability is known.
+ * when the transcript reports an approval change or a reconciled gap, when an
+ * approval expires, and after an answer. `enabled` is undefined while the
+ * Session summary is unknown, for example during a reload: the shown approval
+ * stays and can be answered, and reads resume once the capability is known.
  */
 export function useManagedActions(
   provider: ManagedAgentProvider,
@@ -101,6 +107,11 @@ export function useManagedActions(
       .catch((failure: unknown) => {
         if (abort.signal.aborted) return;
         setLoadError(failure);
+        // A 4xx the service will answer the same way every time is not a
+        // hiccup: retrying it only burns requests, and the Retry button would
+        // keep offering an attempt that cannot succeed. Timeouts and rate
+        // limits still back off as before.
+        if (isNonRetryableClientError(failure)) return;
         const delay = LOAD_RETRY_DELAYS_MS[loadFailures.current];
         loadFailures.current += 1;
         if (delay !== undefined) {
@@ -132,6 +143,8 @@ export function useManagedActions(
     () => (pending.sessionId === sessionId ? pending.actions : []),
     [pending.sessionId, pending.actions, sessionId],
   );
+  // `pending.sessionId` is set by the success branch of a read only.
+  const loaded = pending.sessionId === sessionId;
   const action = actions.find((entry) => !answered.has(entry.actionId));
 
   const respond = useCallback(
@@ -168,5 +181,5 @@ export function useManagedActions(
     setRevision((value) => value + 1);
   }, []);
 
-  return { action, loadError, answerError, respond, retry };
+  return { action, loadError, loaded, answerError, respond, retry };
 }

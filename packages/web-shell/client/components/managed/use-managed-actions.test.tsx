@@ -8,6 +8,7 @@ import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
+import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { useManagedActions } from './use-managed-actions';
 
 const pending: ManagedAgentPendingAction = {
@@ -50,6 +51,7 @@ describe('useManagedActions', () => {
     initial: {
       enabled: boolean | undefined;
       events: ManagedAgentSessionEvent[];
+      sessionId?: string;
     },
   ) {
     let latest: ReturnType<typeof useManagedActions> | undefined;
@@ -57,7 +59,7 @@ describe('useManagedActions', () => {
     function Probe(current: typeof initial) {
       latest = useManagedActions(
         provider,
-        'session-1',
+        current.sessionId ?? 'session-1',
         'client-1',
         current.enabled,
         current.events,
@@ -305,6 +307,83 @@ describe('useManagedActions', () => {
       expect(hook.latest?.action).toEqual(action);
       await act(async () => vi.advanceTimersByTimeAsync(10_000));
       expect(listPending).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('reports whether the read landed so a failure can name what it broke', async () => {
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.loaded).toBe(true));
+    expect(hook.latest?.loadError).toBeUndefined();
+
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() => expect(hook.latest?.loadError).toBeDefined());
+    // The card that was loaded is still the one on screen.
+    expect(hook.latest?.loaded).toBe(true);
+    expect(hook.latest?.action).toEqual(pending);
+  });
+
+  it('does not retry a read the service answered definitively', async () => {
+    vi.useFakeTimers();
+    const listPending = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(listPending).toHaveBeenCalledTimes(1);
+    expect(hook.latest?.loadError).toBeInstanceOf(JavaManagedAgentHttpError);
+
+    for (const delay of [2_000, 5_000, 10_000, 60_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    // A deleted Session answers the same way forever, so the ladder would only
+    // spend four guaranteed-failing requests; the user's own retry is the only
+    // thing that starts another.
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      hook.latest!.retry();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(listPending).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([408, 429, 503])(
+    'still retries a %i read, which can be transient',
+    async (status) => {
+      vi.useFakeTimers();
+      const listPending = vi
+        .fn()
+        .mockRejectedValue(
+          new JavaManagedAgentHttpError(status, 'unavailable', 'Busy'),
+        );
+      const provider = {
+        actions: { listPending, respond: vi.fn() },
+      } as unknown as ManagedAgentProvider;
+      const hook = mount(provider, { enabled: true, events: [] });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(listPending).toHaveBeenCalledTimes(1);
+
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      expect(listPending).toHaveBeenCalledTimes(2);
+      expect(hook.latest?.loadError).toBeDefined();
     },
   );
 });
