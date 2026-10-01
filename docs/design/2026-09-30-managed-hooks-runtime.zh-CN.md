@@ -150,8 +150,9 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
 扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。Hook
-操作运行期间被拒的 prompt 返回 409 `hosted_hook_operation_active`。同一 operation ID
-携带不同输入时返回 409 `hosted_hook_operation_conflict`，重试无法解决。公开
+操作运行期间被拒的 prompt 返回 409 `hosted_hook_operation_active`。同一 Notification/
+扩展 operation ID 携带不同输入时返回 409 `hosted_hook_operation_conflict`，重试无法
+解决。公开
 tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投影展示
 元数据，不暴露 recipe、凭据、模块路径或 handler 引用。未配置 Hook pin 的 Session
 保持原有行为。

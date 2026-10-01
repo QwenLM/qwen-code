@@ -197,9 +197,10 @@ attachment, while retaining original-owner recovery barriers.
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
 cannot overlap a turn or another control operation. A prompt refused while a Hook
-operation runs returns 409 `hosted_hook_operation_active`. Reusing an operation ID
-with different input returns 409 `hosted_hook_operation_conflict`, which a retry
-cannot resolve. The public tenant/actor-scoped
+operation runs returns 409 `hosted_hook_operation_active`. Reusing a
+Notification/expansion operation ID with different input returns 409
+`hosted_hook_operation_conflict`, which a retry cannot resolve. The public
+tenant/actor-scoped
 `GET /v1/agents/sessions/{sessionId}/hook-catalog` projects only display metadata;
 it exposes no recipes, credentials, module paths or handler references. Existing
 Sessions without a Hook pin retain their current behavior.

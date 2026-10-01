@@ -3009,17 +3009,31 @@ it('validates Hook-modified arguments before dispatch', async () => {
 });
 
 it.each([
-  { decision: 'block', reason: 'policy' },
-  {
-    hookSpecificOutput: {
-      hookEventName: HookEventName.PreToolUse,
-      permissionDecision: 'deny',
-      permissionDecisionReason: 'policy',
+  [{ decision: 'block', reason: 'policy' }, 'policy'],
+  [
+    {
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'policy',
+      },
     },
-  },
+    'policy',
+  ],
+  [
+    {
+      continue: false,
+      stopReason: 'halt',
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        permissionDecisionReason: 'needs approval',
+      },
+    },
+    'halt',
+  ],
 ] as const)(
   'does not execute a denied tool or emit a physical post-tool event (%j)',
-  async (output) => {
+  async (output, error) => {
     const fire = vi
       .fn<HostedHookSession['fire']>()
       .mockImplementation(async (event) =>
@@ -3032,7 +3046,7 @@ it.each([
       'model',
       new AbortController().signal,
     );
-    expect(responses[0].functionResponse?.response?.['error']).toBe('policy');
+    expect(responses[0].functionResponse?.response?.['error']).toBe(error);
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(fire.mock.calls.map(([event]) => event)).toEqual([
       HookEventName.PreToolUse,

@@ -1013,9 +1013,13 @@ describe('Hosted Harness no-tool session', () => {
         event: 'Notification',
         input: { message: 'effect', notification_type: 'test' },
       });
-    expect((await send(operationId)).status).toBe(503);
+    const unknown = await send(operationId);
+    expect(unknown.status).toBe(503);
+    expect(unknown.body.code).toBe('hosted_hook_operation_failed');
     expect((await send(randomUUID())).status).toBe(409);
-    expect((await send(operationId)).status).toBe(503);
+    const replay = await send(operationId);
+    expect(replay.status).toBe(503);
+    expect(replay.body.code).toBe('hosted_hook_operation_failed');
     expect(
       requests.filter((request) => request.kind === 'hook-execute'),
     ).toHaveLength(1);
