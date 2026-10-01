@@ -39,6 +39,7 @@ import {
   type OssMediaReplacement,
 } from './reactive-degrade.js';
 import { OMNI_DISCLOSURE_TEXT_PREFIX } from './disclosure.js';
+import { modelText } from '../test-utils/model-fixtures.js';
 
 // The ladder re-runs the REAL policy orchestrator (that wiring is what the
 // memory tests below are about), so only the two true externals are
@@ -117,10 +118,7 @@ function ossContents(): Content[] {
         },
       ],
     },
-    {
-      role: 'model',
-      parts: [{ text: 'ok' }],
-    },
+    modelText('ok'),
   ];
 }
 

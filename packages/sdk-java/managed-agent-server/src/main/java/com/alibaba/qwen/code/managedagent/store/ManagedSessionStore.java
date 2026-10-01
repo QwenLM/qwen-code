@@ -63,6 +63,7 @@ public class ManagedSessionStore {
     private final JdbcTemplate jdbc;
     private ToolPublicationObjectStore publicationObjects;
     private final ManagedExtensionRecordStore extensionRecords;
+    private final ManagedActionStore actions;
     private final RowMapper<HeadRow> headMapper = (result, row) ->
             new HeadRow(result.getString("tenant_id"),
                     result.getString("workspace_id"),
@@ -103,11 +104,19 @@ public class ManagedSessionStore {
         this(jdbc, new ManagedExtensionRecordStore(jdbc));
     }
 
-    @Autowired
     public ManagedSessionStore(JdbcTemplate jdbc,
             ManagedExtensionRecordStore extensionRecords) {
+        this(jdbc, extensionRecords, null);
+    }
+
+    @Autowired
+    public ManagedSessionStore(
+            JdbcTemplate jdbc,
+            ManagedExtensionRecordStore extensionRecords,
+            ManagedActionStore actions) {
         this.jdbc = jdbc;
         this.extensionRecords = extensionRecords;
+        this.actions = actions;
     }
 
     @Autowired(required = false)
@@ -335,6 +344,20 @@ public class ManagedSessionStore {
                 validated.recordBytes(), resourceId -> storedResource(
                         scopeKey, tenantId, request.workspaceId(), sessionId,
                         resourceId));
+        if (actions != null) {
+            actions.apply(
+                    tenantId,
+                    request.workspaceId(),
+                    sessionId, request.firstSequence(), request.eventCount(),
+                    validated.recordBytes(),
+                    resourceId ->
+                            storedResource(
+                                    scopeKey,
+                                    tenantId,
+                                    request.workspaceId(),
+                                    sessionId,
+                                    resourceId));
+        }
         jdbc.update("INSERT INTO qwen_managed_session_journal_tx"
                         + " (tenant_id, workspace_id, session_id,"
                         + " journal_revision, command_key_hash,"
