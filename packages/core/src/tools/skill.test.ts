@@ -1244,6 +1244,53 @@ describe('SkillTool', () => {
       );
     });
 
+    it('rolls back only the current undelivered body while retaining other and historical bodies', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime)
+        .mockResolvedValueOnce(mockSkills[0])
+        .mockResolvedValueOnce(mockSkills[1]);
+      const invoke = async (skill: string) =>
+        partToString(
+          (
+            await (skillTool as SkillToolWithProtectedMethods)
+              .createInvocation({ skill })
+              .execute()
+          ).llmContent,
+        );
+      const first = await invoke('code-review');
+      const other = await invoke('testing');
+      expect(skillTool.getLoadedSkillContent('code-review')).toBe(first);
+      const edited = { ...mockSkills[0], body: 'Replacement review body.' };
+      vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+        edited,
+        mockSkills[1],
+      ]);
+      vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+        edited,
+        mockSkills[1],
+      ]);
+      await skillTool.refreshSkills();
+      expect(skillTool.getLoadedSkillContent('code-review')).toBeUndefined();
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(edited);
+      const replacement = await invoke('code-review');
+      expect(skillTool.getLoadedSkillContent('code-review')).toBe(replacement);
+
+      skillTool.forgetLoadedSkill('code-review');
+
+      expect(skillTool.getLoadedSkillContent('code-review')).toBeUndefined();
+      expect(skillTool.getLoadedSkillContent('testing')).toBe(other);
+      expect(skillTool.getLoadedSkillNames()).toEqual(new Set(['testing']));
+      expect(skillTool.getLoadedSkillContents()).toEqual(
+        new Set([first, other]),
+      );
+      expect(skillTool.getLoadedSkillContentNames()).toEqual(
+        new Map([
+          [first, 'code-review'],
+          [other, 'testing'],
+        ]),
+      );
+      expect(await invoke('code-review')).toBe(replacement);
+    });
+
     it('restores loaded Skill state from full bodies in resumed history', async () => {
       const output = bodyOf(mockSkills[0]);
       await restore(skillPair('skill-call', 'code-review', output));
@@ -1262,6 +1309,107 @@ describe('SkillTool', () => {
       expectLoadedNames('rust:code-review');
       caches(mockSkills);
     });
+
+    it.each([
+      ['', '', 'output'],
+      ['{"toolResults":[]}\n', '', 'output'],
+      ['Preparing skill\n', '\nScript error:\nAFTER_SKILL_THROW', 'error'],
+    ])(
+      'restores complete explicitly emitted Skill bodies from exec: %s',
+      async (prefix, suffix, responseKey) => {
+        const output = buildSkillLlmContent(
+          '/project/.qwen/skills/code-review',
+          mockSkills[0].body,
+        );
+        await skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  args: {
+                    source:
+                      'text((await tools.skill({skill:"code-review"})).output)',
+                  },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  response: { [responseKey]: prefix + output + suffix },
+                },
+              },
+            ],
+          },
+        ]);
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['code-review']),
+        );
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set([output]));
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          mockSkills[0],
+        );
+        const result = await (skillTool as SkillToolWithProtectedMethods)
+          .createInvocation({ skill: 'code-review' })
+          .execute();
+        expect(partToString(result.llmContent)).toContain('already loaded');
+      },
+    );
+
+    it.each([
+      'Skill "code-review" is already loaded in context.',
+      buildSkillLlmContent(
+        '/project/.qwen/skills/code-review',
+        'Older skill body.',
+      ),
+      buildSkillLlmContent(
+        '/project/.qwen/skills/code-review',
+        mockSkills[0].body,
+      ).slice(0, -1),
+    ])(
+      'does not restore incomplete explicit Skill output: %s',
+      async (output) => {
+        await skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  response: { output },
+                },
+              },
+            ],
+          },
+        ]);
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
+      },
+    );
+
     it.each([
       [undefined, ''],
       ['Script failed after loading the skill', ''],
@@ -1294,15 +1442,6 @@ describe('SkillTool', () => {
             name: ToolNames.SKILL,
             args: { skill: 'code-review' },
             output: 'Skill "code-review" is already loaded in context.',
-          },
-        ],
-      }),
-      JSON.stringify({
-        toolResults: [
-          {
-            name: ToolNames.SKILL,
-            args: { skill: 'other-command' },
-            output: bodyOf(mockSkills[0]),
           },
         ],
       }),
@@ -1377,6 +1516,162 @@ describe('SkillTool', () => {
         expectLoadedNames('gated-skill');
         expectNoSideEffects();
       });
+
+      it('does not re-arm side effects from explicitly emitted exec text', async () => {
+        const output = bodyOf(gatedSkill);
+        await skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  args: { source: `text(${JSON.stringify(output)})` },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'exec-call',
+                  name: ToolNames.EXEC,
+                  response: { output },
+                },
+              },
+            ],
+          },
+        ]);
+
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set(['gated-skill']),
+        );
+        expect(registerSkillHooks).not.toHaveBeenCalled();
+        expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['output', false],
+        ['error', false],
+        ['output', true],
+      ] as const)(
+        'restores a complete JSON-escaped Skill body from exec %s without re-arming side effects (legacy label: %s)',
+        async (responseKey, legacyLabel) => {
+          const skill = {
+            ...gatedSkill,
+            body: 'Gated "body".\nRead the \\path before continuing.',
+          };
+          vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([skill]);
+          const body = bodyOf(skill);
+          const output = JSON.stringify(
+            legacyLabel
+              ? {
+                  toolResults: [
+                    {
+                      name: ToolNames.SKILL,
+                      args: { skill: 'other-command' },
+                      output: body,
+                    },
+                  ],
+                }
+              : { output: body, status: 'success' },
+          );
+          await skillTool.restoreLoadedSkillsFromHistory([
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'exec-call',
+                    name: ToolNames.EXEC,
+                    args: {
+                      source: 'text(await tools.skill({skill:"gated-skill"}))',
+                    },
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'exec-call',
+                    name: ToolNames.EXEC,
+                    response: {
+                      [responseKey]:
+                        output +
+                        (responseKey === 'error'
+                          ? '\nScript error:\nAFTER_SKILL_THROW'
+                          : ''),
+                    },
+                  },
+                },
+              ],
+            },
+          ]);
+
+          expect(skillTool.getLoadedSkillNames()).toEqual(
+            new Set(['gated-skill']),
+          );
+          expect(skillTool.getLoadedSkillContent('gated-skill')).toBe(body);
+          expect(skillTool.getLoadedSkillContents()).toEqual(new Set([body]));
+          expect(registerSkillHooks).not.toHaveBeenCalled();
+          expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(['partial body', 'missing closing quote'])(
+        'does not restore a truncated JSON-escaped Skill body: %s',
+        async (shape) => {
+          const skill = {
+            ...gatedSkill,
+            body: 'Gated "body".\nRead the \\path before continuing.',
+          };
+          vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([skill]);
+          const body = bodyOf(skill);
+          const output =
+            shape === 'partial body'
+              ? JSON.stringify({ output: body.slice(0, -1) })
+              : `{"output":${JSON.stringify(body).slice(0, -1)}`;
+          await skillTool.restoreLoadedSkillsFromHistory([
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'exec-call',
+                    name: ToolNames.EXEC,
+                    args: {
+                      source: 'text(await tools.skill({skill:"gated-skill"}))',
+                    },
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'exec-call',
+                    name: ToolNames.EXEC,
+                    response: { output },
+                  },
+                },
+              ],
+            },
+          ]);
+
+          expect(skillTool.getLoadedSkillNames()).toEqual(new Set());
+          expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
+          expect(registerSkillHooks).not.toHaveBeenCalled();
+          expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+        },
+      );
 
       it.each([
         [

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { Part } from '@google/genai';
 import { ApprovalMode, Config } from '../config/config.js';
 import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
@@ -18,6 +21,8 @@ import {
   type ToolCallRuntimeContext,
 } from '../code-mode/tool-call-runtime.js';
 import type { ToolResult } from './tools.js';
+
+let outputDir: string;
 
 function setup(
   name: string,
@@ -37,11 +42,28 @@ function setup(
     codeModeOnly: true,
   });
   const registry = new ToolRegistry(config);
+  vi.spyOn(config.storage, 'getToolResultsDir').mockReturnValue(outputDir);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
   registry.registerTool(new MockTool({ name }));
   registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+  const loadedSkills = new Map<string, string>();
+  const forgetLoadedSkill = vi.fn((name: string) => loadedSkills.delete(name));
+  if (name === ToolNames.SKILL) {
+    Object.assign(registry.getTool(name)!, {
+      getLoadedSkillNames: () => new Set(loadedSkills.keys()),
+      getLoadedSkillContent: (name: string) => loadedSkills.get(name),
+      forgetLoadedSkill,
+    });
+  }
   const dispatch = vi.fn<ToolCallRuntimeContext['dispatch']>(
-    async (name, _args, _signal, onResult) => {
+    async (name, args, _signal, onResult) => {
+      if (
+        name === ToolNames.SKILL &&
+        typeof body === 'string' &&
+        !result.error
+      ) {
+        loadedSkills.set(String(args['skill']), body);
+      }
       const response: ToolCallResponseInfo = {
         callId: 'nested',
         responseParts: convertToFunctionResponse(name, 'nested', body),
@@ -75,7 +97,7 @@ function setup(
     runWithToolCallRuntime({ parentCallId: 'exec-test', dispatch }, () =>
       new ExecTool(config).build({ source }).execute(signal),
     );
-  return { run, dispatch, registry };
+  return { run, dispatch, registry, loadedSkills, forgetLoadedSkill };
 }
 
 function outputText(result: ToolResult): string {
@@ -85,9 +107,15 @@ function outputText(result: ToolResult): string {
 }
 
 describe('exec context tool results', () => {
+  beforeEach(async () => {
+    outputDir = await mkdtemp(path.join(os.tmpdir(), 'exec-context-output-'));
+  });
+  afterEach(async () => {
+    await rm(outputDir, { recursive: true, force: true });
+  });
   it('does not add nested skill results without explicit text output', async () => {
     const body = 'skill instruction '.repeat(4000);
-    const { run } = setup(
+    const { run, loadedSkills, forgetLoadedSkill } = setup(
       ToolNames.SKILL,
       { modelOverride: 'skill-model' },
       body,
@@ -97,17 +125,58 @@ describe('exec context tool results', () => {
     expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
     expect(result.modelOverride).toBe('skill-model');
     expect(result.error).toBeUndefined();
+    expect(loadedSkills.size).toBe(0);
+    expect(forgetLoadedSkill).toHaveBeenCalledWith('test');
   });
 
   it('returns nested skill output only through text()', async () => {
     const body = 'skill instruction '.repeat(20);
-    const { run } = setup(ToolNames.SKILL, {}, body);
+    const { run, loadedSkills } = setup(ToolNames.SKILL, {}, body);
     const result = await run(
       "text((await tools.skill({skill: 'test'})).output);",
     );
     expect(outputText(result)).toBe(body);
     expect(outputText(result).match(/skill instruction/g)).toHaveLength(20);
     expect(JSON.stringify(result.llmContent)).not.toContain('toolResults');
+    expect(loadedSkills.get('test')).toBe(body);
+    expect(result.newlyLoadedSkills).toEqual(['test']);
+  });
+
+  it('retains a complete skill body emitted within a JSON result', async () => {
+    const body = 'Read the "quoted" instruction.\nThen continue.\n';
+    const { run, loadedSkills } = setup(ToolNames.SKILL, {}, body);
+    const result = await run("text(await tools.skill({skill: 'test'}));");
+    expect(JSON.parse(outputText(result)).output).toBe(body);
+    expect(loadedSkills.get('test')).toBe(body);
+    expect(result.newlyLoadedSkills).toEqual(['test']);
+  });
+
+  it('persists oversized explicit output and permits the undelivered skill to reload', async () => {
+    const body = 'BEGIN\n' + 'instruction '.repeat(4000) + '\nEND';
+    const { run, loadedSkills } = setup(ToolNames.SKILL, {}, body);
+    const result = await run(
+      "text((await tools.skill({skill: 'test'})).output);",
+    );
+    expect(outputText(result)).toContain('Full output saved to:');
+    expect(outputText(result).length).toBeLessThanOrEqual(32_000);
+    expect(await readFile(result.persistedOutputFiles![0], 'utf8')).toBe(body);
+    expect(loadedSkills.size).toBe(0);
+    expect(result.newlyLoadedSkills).toBeUndefined();
+  });
+
+  it('keeps emitted skill state and model override after a later script error', async () => {
+    const { run, loadedSkills } = setup(
+      ToolNames.SKILL,
+      { modelOverride: 'skill-model' },
+      'skill body',
+    );
+    const result = await run(
+      "text((await tools.skill({skill: 'test'})).output); throw new Error('later failure');",
+    );
+    expect(result.error).toBeDefined();
+    expect(result.modelOverride).toBe('skill-model');
+    expect(loadedSkills.get('test')).toBe('skill body');
+    expect(result.newlyLoadedSkills).toEqual(['test']);
   });
 
   it('reports a later script failure when nested skill output is not emitted', async () => {
@@ -183,13 +252,12 @@ describe('exec context tool results', () => {
   });
 
   it('clears loaded skill tracking if cancellation prevents delivery', async () => {
-    const { run, dispatch, registry } = setup(
+    const { run, dispatch, loadedSkills, forgetLoadedSkill } = setup(
       ToolNames.SKILL,
       {},
       'skill body',
     );
-    const clearLoadedSkills = vi.fn();
-    Object.assign(registry.getTool(ToolNames.SKILL)!, { clearLoadedSkills });
+    loadedSkills.set('previous', 'previous skill body');
     const controller = new AbortController();
     const pending = run(
       "await tools.skill({skill: 'test'}); await new Promise(() => {});",
@@ -200,7 +268,9 @@ describe('exec context tool results', () => {
     });
     controller.abort();
     await expect(pending).rejects.toThrow();
-    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    expect(forgetLoadedSkill).toHaveBeenCalledOnce();
+    expect(forgetLoadedSkill).toHaveBeenCalledWith('test');
+    expect(loadedSkills.get('previous')).toBe('previous skill body');
   }, 40_000);
 
   it('preserves concurrency for ordinary calls before a goal barrier', async () => {

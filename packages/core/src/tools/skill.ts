@@ -40,6 +40,7 @@ import {
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
   skillModelInvocationBlock,
+  containsCompleteSkillBody,
 } from './skill-utils.js';
 
 /**
@@ -416,6 +417,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return this.loadedSkillContents;
   }
 
+  getLoadedSkillContent(name: string): string | undefined {
+    return this.loadedSkillContentByName.get(name)?.content;
+  }
+
+  /** Rolls back a body that EXEC did not deliver to the model. */
+  forgetLoadedSkill(name: string): void {
+    const loaded = this.loadedSkillContentByName.get(name);
+    if (loaded && this.loadedSkillContents.get(loaded.content) === name) {
+      this.loadedSkillContents.delete(loaded.content);
+    }
+    this.loadedSkillNames.delete(name);
+    this.loadedSkillContentByName.delete(name);
+  }
+
   async restoreLoadedSkillsFromHistory(history: Content[]): Promise<void> {
     this.clearLoadedSkills();
 
@@ -505,42 +520,51 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
         const response = part.functionResponse;
         const output = response?.response?.['output'];
+        const execOutput =
+          typeof output === 'string' ? output : response?.response?.['error'];
         if (
           response?.name === ToolNames.EXEC &&
           typeof response.id === 'string' &&
           pendingExecCalls.delete(response.id) &&
-          typeof output === 'string'
+          typeof execOutput === 'string'
         ) {
           let payload: unknown;
           try {
-            payload = JSON.parse(output.split('\n', 1)[0]);
+            payload = JSON.parse(execOutput.split('\n', 1)[0]);
           } catch {
-            continue;
+            // Current EXEC output is explicit text rather than JSON metadata.
           }
           if (
-            !payload ||
-            typeof payload !== 'object' ||
-            !('toolResults' in payload) ||
-            !Array.isArray(payload.toolResults)
+            payload &&
+            typeof payload === 'object' &&
+            'toolResults' in payload &&
+            Array.isArray(payload.toolResults)
           ) {
-            continue;
+            const results: unknown[] = payload.toolResults;
+            for (const result of results) {
+              if (
+                result &&
+                typeof result === 'object' &&
+                'name' in result &&
+                result.name === ToolNames.SKILL &&
+                'args' in result &&
+                result.args &&
+                typeof result.args === 'object' &&
+                'skill' in result.args &&
+                'output' in result
+              ) {
+                // A script can print this line itself, so it restores the
+                // body only and never re-arms grants or hooks.
+                restoreSkill(result.args.skill, result.output, false);
+              }
+            }
           }
-          const results: unknown[] = payload.toolResults;
-          for (const result of results) {
-            if (
-              result &&
-              typeof result === 'object' &&
-              'name' in result &&
-              result.name === ToolNames.SKILL &&
-              'args' in result &&
-              result.args &&
-              typeof result.args === 'object' &&
-              'skill' in result.args &&
-              'output' in result
-            ) {
-              // A script can print this line itself, so it restores the
-              // body only and never re-arms grants or hooks.
-              restoreSkill(result.args.skill, result.output, false);
+
+          // Explicit EXEC text can restore dedup only. Scripts can print it
+          // themselves, so only direct Skill responses may re-arm side effects.
+          for (const skill of skillByName.values()) {
+            if (containsCompleteSkillBody(execOutput, skill.output)) {
+              restoreSkill(skill.name, skill.output, false);
             }
           }
           continue;

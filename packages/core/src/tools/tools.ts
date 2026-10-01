@@ -643,6 +643,9 @@ export interface ToolResult {
    */
   modelOverride?: string;
 
+  /** New exec skill loads to reconcile after the final output budget. */
+  newlyLoadedSkills?: string[];
+
   /**
    * End the current Goal turn after recording this successful result. Only
    * honored when the tool batch carries a Goal context; ignored otherwise.

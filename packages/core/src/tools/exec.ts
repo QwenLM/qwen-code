@@ -24,6 +24,9 @@ import {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { ToolResult } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import type { SkillTool } from './skill.js';
+import { containsCompleteSkillBody } from './skill-utils.js';
+import { persistAndTruncateToolResult } from './truncation.js';
 
 interface ExecParams {
   source: string;
@@ -56,18 +59,19 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
           : undefined,
       );
     const media: Part[] = [];
+    const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
+      | SkillTool
+      | undefined;
+    const initiallyLoadedSkills = new Set(skillTool?.getLoadedSkillNames?.());
     let retainedOmniMedia = false;
     const metadata: Pick<ToolResult, 'modelOverride' | 'terminateTurn'> = {};
     let skillAttempted = false;
     let skillSucceeded = false;
     const clearSkillTracking = () => {
-      const skill = this.config.getToolRegistry().getTool(ToolNames.SKILL);
-      if (
-        skill &&
-        'clearLoadedSkills' in skill &&
-        typeof skill.clearLoadedSkills === 'function'
-      ) {
-        skill.clearLoadedSkills();
+      for (const name of skillTool?.getLoadedSkillNames?.() ?? []) {
+        if (!initiallyLoadedSkills.has(name)) {
+          skillTool?.forgetLoadedSkill(name);
+        }
       }
     };
     const active = new Set<Promise<unknown>>();
@@ -173,11 +177,30 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
     const sections: string[] = [];
     if (result.output) sections.push(result.output);
     if (failure !== undefined) sections.push(`Script error:\n${failure}`);
-    const output = boundCodeModeOutput(
-      sections.join('\n'),
+    const scriptOutput = sections.join('\n');
+    const persisted =
+      scriptOutput.length > EXEC_MAX_OUTPUT_CHARS
+        ? await persistAndTruncateToolResult(
+            runtime.parentCallId,
+            ToolNames.EXEC,
+            scriptOutput,
+            this.config,
+          )
+        : undefined;
+    const display = boundCodeModeOutput(
+      persisted?.content ?? scriptOutput,
       EXEC_MAX_OUTPUT_CHARS,
     );
-    const display = output;
+    for (const name of skillTool?.getLoadedSkillNames?.() ?? []) {
+      if (initiallyLoadedSkills.has(name)) continue;
+      const body = skillTool?.getLoadedSkillContent?.(name);
+      if (body !== undefined && !containsCompleteSkillBody(display, body)) {
+        skillTool?.forgetLoadedSkill(name);
+      }
+    }
+    const newlyLoadedSkills = [
+      ...(skillTool?.getLoadedSkillNames?.() ?? []),
+    ].filter((name) => !initiallyLoadedSkills.has(name));
     const llmContent: Part[] = [{ text: display }, ...media];
     for (const item of result.content ?? []) {
       llmContent.push({
@@ -202,11 +225,13 @@ class ExecInvocation extends BaseToolInvocation<ExecParams, ToolResult> {
         : llmContent,
       returnDisplay: display,
       ...metadata,
-      persistedOutputFiles: [],
+      persistedOutputFiles: persisted?.outputFile ? [persisted.outputFile] : [],
+      outputBudgetApplied: true,
+      ...(newlyLoadedSkills.length > 0 ? { newlyLoadedSkills } : {}),
       ...(failure === undefined || media.length > 0
         ? {}
         : {
-            error: { message: output, type: ToolErrorType.EXECUTION_FAILED },
+            error: { message: display, type: ToolErrorType.EXECUTION_FAILED },
           }),
     };
   }

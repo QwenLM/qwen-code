@@ -4415,6 +4415,65 @@ describe('runNonInteractive', () => {
       );
     });
 
+    it.each([1000, 30_000])(
+      'reconciles Code Mode skill delivery after the headless output budget (%s)',
+      async (budget) => {
+        setupMetricsMock();
+        const body = `<skill name="budget-skill">${'x'.repeat(14_000)}</skill>`;
+        const forgetLoadedSkill = vi.fn();
+        vi.mocked(mockToolRegistry.getTool).mockImplementation((name) =>
+          name === ToolNames.SKILL
+            ? ({
+                getLoadedSkillContent: () => body,
+                forgetLoadedSkill,
+              } as unknown as ReturnType<typeof mockToolRegistry.getTool>)
+            : ({ kind: Kind.Read } as unknown as ReturnType<
+                typeof mockToolRegistry.getTool
+              >),
+        );
+        mockConfig.getToolOutputBatchBudget = () => budget;
+        mockCoreExecuteToolCall.mockResolvedValue({
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'skill-exec',
+                name: ToolNames.EXEC,
+                response: { output: body },
+              },
+            },
+          ],
+          persistedOutputFiles: [],
+          newlyLoadedSkills: ['budget-skill'],
+        });
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents(
+              toolCallEvents(['skill-exec'], ToolNames.EXEC, 'p-skill-budget'),
+            ),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'go',
+          'p-skill-budget',
+        );
+
+        const parts = mockLlmClient.sendMessageStream.mock
+          .calls[1][0] as Part[];
+        const output = parts[0].functionResponse?.response?.['output'];
+        if (budget < body.length) {
+          expect(output).not.toContain(body);
+          expect(forgetLoadedSkill).toHaveBeenCalledWith('budget-skill');
+        } else {
+          expect(output).toContain(body);
+          expect(forgetLoadedSkill).not.toHaveBeenCalled();
+        }
+        expect(JSON.stringify(parts)).not.toContain('newlyLoadedSkills');
+      },
+    );
+
     it('runs side-effecting (unsafe) tool calls sequentially', async () => {
       setupMetricsMock();
       // Kind.Edit is a mutator: each unsafe call forms its own sequential

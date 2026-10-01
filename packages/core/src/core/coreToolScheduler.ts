@@ -65,6 +65,7 @@ import {
 } from '../tools/truncation.js';
 import {
   finalizeToolResponses,
+  reconcileCodeModeSkillLoads,
   toolResponseTextLength,
 } from '../tools/tool-response-finalizer.js';
 import { ToolConfirmationOutcome, Kind } from '../tools/tools.js';
@@ -1396,6 +1397,12 @@ function withPostToolBatchStop(
     executionStatus !== undefined
       ? { ...baseResponse, executionStatus }
       : baseResponse;
+  if (lastCall.response.newlyLoadedSkills !== undefined) {
+    response.newlyLoadedSkills = lastCall.response.newlyLoadedSkills;
+  }
+  if ('modelOverride' in lastCall.response) {
+    response.modelOverride = lastCall.response.modelOverride;
+  }
   calls[calls.length - 1] = {
     status: 'error',
     request: lastCall.request,
@@ -6056,6 +6063,9 @@ export class CoreToolScheduler {
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
         );
+        if (toolResult.newlyLoadedSkills !== undefined) {
+          cancelledResponse.newlyLoadedSkills = toolResult.newlyLoadedSkills;
+        }
         observeProducerOutput(cancelledResponse);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
@@ -6081,6 +6091,9 @@ export class CoreToolScheduler {
           preserved?.persistedOutputFiles,
           preserved?.visionBridgeNotice,
         );
+        if (toolResult.newlyLoadedSkills !== undefined) {
+          cancelledResponse.newlyLoadedSkills = toolResult.newlyLoadedSkills;
+        }
         observeProducerOutput(cancelledResponse);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
@@ -6179,6 +6192,12 @@ export class CoreToolScheduler {
               ToolErrorType.EXECUTION_DENIED,
               executionStatus,
             );
+            if (toolResult.newlyLoadedSkills !== undefined) {
+              errorResponse.newlyLoadedSkills = toolResult.newlyLoadedSkills;
+            }
+            if ('modelOverride' in toolResult) {
+              errorResponse.modelOverride = toolResult.modelOverride;
+            }
             if (persistedOutputFiles !== undefined) {
               errorResponse.persistedOutputFiles = persistedOutputFiles;
             }
@@ -6532,6 +6551,9 @@ export class CoreToolScheduler {
               ? { modelOverride: toolResult.modelOverride }
               : {}),
           ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
+          ...(toolResult.newlyLoadedSkills !== undefined
+            ? { newlyLoadedSkills: toolResult.newlyLoadedSkills }
+            : {}),
           ...(processedImages.visionBridgeNotice !== undefined
             ? { visionBridgeNotice: processedImages.visionBridgeNotice }
             : {}),
@@ -6785,9 +6807,14 @@ export class CoreToolScheduler {
               : {}),
             ...(processedImages.modelOverride !== undefined
               ? { modelOverride: processedImages.modelOverride }
-              : {}),
+              : 'modelOverride' in toolResult
+                ? { modelOverride: toolResult.modelOverride }
+                : {}),
             ...(processedImages.visionBridgeNotice !== undefined
               ? { visionBridgeNotice: processedImages.visionBridgeNotice }
+              : {}),
+            ...(toolResult.newlyLoadedSkills !== undefined
+              ? { newlyLoadedSkills: toolResult.newlyLoadedSkills }
               : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
           };
@@ -6848,6 +6875,12 @@ export class CoreToolScheduler {
                   : toolResult.returnDisplay,
               ),
         );
+        if ('modelOverride' in toolResult) {
+          errorResponse.modelOverride = toolResult.modelOverride;
+        }
+        if (toolResult.newlyLoadedSkills !== undefined) {
+          errorResponse.newlyLoadedSkills = toolResult.newlyLoadedSkills;
+        }
         if (errorPersistedOutputFiles !== undefined) {
           errorResponse.persistedOutputFiles = Array.from(
             new Set(errorPersistedOutputFiles),
@@ -7024,7 +7057,12 @@ export class CoreToolScheduler {
           cancelMessage,
           executionStatus,
           failureHookArtifacts,
+          producerToolResult?.persistedOutputFiles,
         );
+        if (producerToolResult?.newlyLoadedSkills !== undefined) {
+          cancelledResponse.newlyLoadedSkills =
+            producerToolResult.newlyLoadedSkills;
+        }
         observeProducerOutput(cancelledResponse);
         this.setStatusInternal(callId, 'cancelled', cancelledResponse);
         setToolSpanCancelled(span);
@@ -7079,7 +7117,12 @@ export class CoreToolScheduler {
               : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
             executionStatus,
             failureHookArtifacts,
+            producerToolResult?.persistedOutputFiles,
           );
+          if (producerToolResult?.newlyLoadedSkills !== undefined) {
+            cancelledResponse.newlyLoadedSkills =
+              producerToolResult.newlyLoadedSkills;
+          }
           observeProducerOutput(cancelledResponse);
           this.setStatusInternal(callId, 'cancelled', cancelledResponse);
           setToolSpanCancelled(span);
@@ -7094,6 +7137,17 @@ export class CoreToolScheduler {
           executionStatus,
           failureHookArtifacts,
         );
+        if (producerToolResult && 'modelOverride' in producerToolResult) {
+          errorResponse.modelOverride = producerToolResult.modelOverride;
+        }
+        if (producerToolResult?.newlyLoadedSkills !== undefined) {
+          errorResponse.newlyLoadedSkills =
+            producerToolResult.newlyLoadedSkills;
+        }
+        if (producerToolResult?.persistedOutputFiles !== undefined) {
+          errorResponse.persistedOutputFiles =
+            producerToolResult.persistedOutputFiles;
+        }
         observeProducerOutput(errorResponse);
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -7283,6 +7337,11 @@ export class CoreToolScheduler {
           );
         }
 
+        reconcileCodeModeSkillLoads(
+          this.config,
+          completedCalls.map((call) => call.response),
+        );
+
         for (const call of completedCalls) {
           this.finalizeToolSpan(call.request.callId, true);
         }
@@ -7458,6 +7517,7 @@ export class CoreToolScheduler {
         responseParts: call.response.responseParts,
         persistedOutputFiles: call.response.persistedOutputFiles,
         artifacts: call.response.artifacts,
+        newlyLoadedSkills: call.response.newlyLoadedSkills,
       })),
       new Map(
         completedCalls.map((call) => [

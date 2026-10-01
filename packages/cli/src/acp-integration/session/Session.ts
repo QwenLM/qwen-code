@@ -5,6 +5,7 @@
  */
 
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { reconcileCodeModeSkillLoads } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -644,6 +645,7 @@ function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
 
 type RunToolResult = {
   modelOverride?: string;
+  newlyLoadedSkills?: string[];
   parts: Part[];
   stopAfterPermissionCancel: boolean;
   loopDetected?: boolean;
@@ -780,6 +782,7 @@ type PendingToolResultRecord = {
   toolName: string;
   toolArgs: Record<string, unknown>;
   responseParts: Part[];
+  newlyLoadedSkills?: string[];
   /**
    * `responseParts` without the hook additionalContext appended to them;
    * set only when context was appended. Used instead of `responseParts` if
@@ -12548,7 +12551,10 @@ export class Session implements SessionContext {
         })),
         new Map(records.map((record) => [record.callId, promptId])),
       );
-    const finalizeAndRecord = async (records: PendingToolResultRecord[]) => {
+    const finalizeAndRecord = async (
+      records: PendingToolResultRecord[],
+      deliveredToModel = false,
+    ) => {
       if (records.length === 0) return [];
       // A turn aborted before the result is recorded (e.g. while the result
       // notification or the finalizer's persistence was awaited) keeps the
@@ -12562,6 +12568,15 @@ export class Session implements SessionContext {
       let finalized = await finalizeRecords(records, withHookContext);
       if (withHookContext && abortSignal.aborted) {
         finalized = await finalizeRecords(records, false);
+      }
+      if (deliveredToModel) {
+        reconcileCodeModeSkillLoads(
+          this.config,
+          finalized.map((entry, index) => ({
+            responseParts: entry.responseParts,
+            newlyLoadedSkills: records[index].newlyLoadedSkills,
+          })),
+        );
       }
       records.forEach((record, index) => {
         // A restored ask_user_question whose permission wait timed out stays
@@ -12639,7 +12654,7 @@ export class Session implements SessionContext {
           ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
         };
       }
-      const finalized = await finalizeAndRecord(orderedRecords);
+      const finalized = await finalizeAndRecord(orderedRecords, true);
       return {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
@@ -13383,6 +13398,7 @@ export class Session implements SessionContext {
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
     let executeAttempted = false;
+    let newlyLoadedSkills: string[] | undefined;
     // Set when the tool starts executing, so hook durations exclude
     // validation and permission time. Read from the monotonic clock so a
     // system clock adjustment during a long tool cannot skew the duration.
@@ -13616,6 +13632,7 @@ export class Session implements SessionContext {
         callId,
         toolName,
         responseParts: modelErrorParts,
+        newlyLoadedSkills,
         ...(modelErrorParts !== errorParts
           ? { responsePartsWithoutHookContext: errorParts }
           : {}),
@@ -13652,6 +13669,7 @@ export class Session implements SessionContext {
         );
       return {
         parts: modelErrorParts,
+        newlyLoadedSkills,
         stopAfterPermissionCancel: opts.stopAfterPermissionCancel ?? false,
         loopDetected,
         ...nestedHookContextField(opts.status),
@@ -15343,6 +15361,9 @@ export class Session implements SessionContext {
                       ...('modelOverride' in nested
                         ? { modelOverride: nested.modelOverride }
                         : {}),
+                      ...(nested.newlyLoadedSkills !== undefined
+                        ? { newlyLoadedSkills: nested.newlyLoadedSkills }
+                        : {}),
                       ...(nested.terminateTurn ? { terminateTurn: true } : {}),
                     });
                     if (nestedError !== undefined) {
@@ -15489,6 +15510,7 @@ export class Session implements SessionContext {
             sleepInhibitorHandle.release();
           }
 
+          newlyLoadedSkills = toolResult.newlyLoadedSkills;
           producerObserved = true;
           try {
             observeToolResultBoundary({
@@ -15880,6 +15902,7 @@ export class Session implements SessionContext {
             callId,
             toolName,
             responseParts: modelResponseParts,
+            newlyLoadedSkills,
             ...(modelResponseParts !== responseParts
               ? { responsePartsWithoutHookContext: responseParts }
               : {}),
@@ -15924,8 +15947,9 @@ export class Session implements SessionContext {
           }
           return {
             parts: modelResponseParts,
+            newlyLoadedSkills,
             ...nestedHookContextField(status),
-            ...('modelOverride' in toolResult && succeeded
+            ...('modelOverride' in toolResult && status !== 'cancelled'
               ? { modelOverride: toolResult.modelOverride }
               : {}),
             stopAfterPermissionCancel: nestedPermissionCancelled,

@@ -12,6 +12,7 @@ import { ToolNames } from './tool-names.js';
 import {
   enforceFunctionResponseBudget,
   finalizeToolResponses,
+  reconcileCodeModeSkillLoads,
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
@@ -76,6 +77,50 @@ describe('tool response finalization', () => {
       bytesWritten: Buffer.byteLength(content),
     }));
   });
+
+  it.each([1000, 30_000])(
+    'reconciles complete JSON-encoded skill bodies after budget %s',
+    async (budget) => {
+      const body = 'Read the "quoted" instruction.\n'.repeat(100);
+      const forgetLoadedSkill = vi.fn();
+      const runtimeConfig = config(budget);
+      runtimeConfig.getToolRegistry = () =>
+        ({
+          getTool: () => ({
+            getLoadedSkillContent: () => body,
+            forgetLoadedSkill,
+          }),
+        }) as unknown as ReturnType<Config['getToolRegistry']>;
+      const responses = await finalizeToolResponses(runtimeConfig, [
+        {
+          ...entry(
+            'encoded-skill',
+            [
+              {
+                functionResponse: {
+                  id: 'encoded-skill',
+                  name: ToolNames.EXEC,
+                  response: { output: JSON.stringify({ output: body }) },
+                },
+              },
+            ],
+            [],
+          ),
+          toolName: ToolNames.EXEC,
+          newlyLoadedSkills: ['encoded-skill'],
+        },
+      ]);
+      reconcileCodeModeSkillLoads(runtimeConfig, responses);
+
+      if (budget < body.length) {
+        expect(forgetLoadedSkill).toHaveBeenCalledExactlyOnceWith(
+          'encoded-skill',
+        );
+      } else {
+        expect(forgetLoadedSkill).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('fits exec output to a batch budget without persisting known-empty artifacts', async () => {
     const result = await finalizeToolResponses(config(1000), [

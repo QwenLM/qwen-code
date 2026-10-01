@@ -75,6 +75,13 @@ export function buildSkillLlmContent(baseDir: string, body: string): string {
   return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
 }
 
+export function containsCompleteSkillBody(
+  output: string,
+  body: string,
+): boolean {
+  return output.includes(body) || output.includes(JSON.stringify(body));
+}
+
 /**
  * One model-facing skill/command entry, normalized so file-based skills and
  * model-invocable commands (MCP prompts / file commands) render through a single

@@ -84,6 +84,7 @@ import {
   buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
+import { reconcileCodeModeSkillLoads } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
 import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
@@ -2312,6 +2313,13 @@ export async function runNonInteractive(
               // they resolve as cancelled rather than completing. The run still
               // exits identically (budget overrun → 55, SIGINT → 130;
               // routeAbort discerns) and sends nothing to the model.
+              reconcileCodeModeSkillLoads(
+                config,
+                [...responseByRequest.values()].map((response) => ({
+                  responseParts: [],
+                  newlyLoadedSkills: response.newlyLoadedSkills,
+                })),
+              );
               await routeAbort();
             }
           } else {
@@ -2328,7 +2336,16 @@ export async function runNonInteractive(
               if (!isBudgetExempt(requestInfo)) {
                 budgetEnforcer.tickToolCall();
               }
-              if (abortController.signal.aborted) await routeAbort();
+              if (abortController.signal.aborted) {
+                reconcileCodeModeSkillLoads(
+                  config,
+                  [...responseByRequest.values()].map((response) => ({
+                    responseParts: [],
+                    newlyLoadedSkills: response.newlyLoadedSkills,
+                  })),
+                );
+                await routeAbort();
+              }
               executedRequests.add(requestInfo);
               const toolResponse = await launchToolCall(requestInfo);
               if (finalizeToolCall(requestInfo, toolResponse)) {
@@ -2413,6 +2430,7 @@ export async function runNonInteractive(
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
+            newlyLoadedSkills: response.newlyLoadedSkills,
           })),
           new Map(
             orderedResponses.map(({ request }) => [
@@ -2420,6 +2438,16 @@ export async function runNonInteractive(
               request.prompt_id,
             ]),
           ),
+        );
+
+        reconcileCodeModeSkillLoads(
+          config,
+          abortController.signal.aborted
+            ? finalized.map((response) => ({
+                ...response,
+                responseParts: [],
+              }))
+            : finalized,
         );
 
         const chatRecordingService = config.getChatRecordingService?.();
