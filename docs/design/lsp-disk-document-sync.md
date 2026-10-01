@@ -166,7 +166,11 @@ nested items, line-shifting edits, sibling queries, disk-reading servers and
 in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
-earlier server returned results, while preserving ordinary pull-request catches. Initialization tests exercise capability production through startup.
+earlier server returned results. Other (non-diagnostics) request/pull catches
+are preserved; the two diagnostics pulls now reject a failed or unusable pull
+instead, pinned by `rejects a failed diagnostics pull instead of reporting
+clean` and its workspace twin. Initialization tests exercise capability
+production through startup.
 Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
 unless another file is named, with the listed test going red: R1-5,
 `ensureDocumentSynchronized` returns a constant `true` instead of the open flag

@@ -111,7 +111,9 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
 目标。调用层次测试覆盖工具 JSON 往返、嵌套项、移动行的编辑、其他查询、自行读盘
 服务器及在途响应竞态。固定工作区诊断顺序、结果限制范围及符号重试行为。实际客户端
 和工具测试验证：已跟踪文件被删除、发送抛错或工作区变更不受支持时拒绝操作，包括
-此前已有服务器返回结果的情况，同时保留普通拉取请求的捕获逻辑。初始化测试通过启动路径
+此前已有服务器返回结果的情况。其余（非诊断）请求/拉取的捕获逻辑保持不变；两个
+诊断拉取则改为拒绝失败或不可用的拉取，由 `rejects a failed diagnostics pull
+instead of reporting clean` 及其工作区孪生用例钉住。初始化测试通过启动路径
 验证能力的产生。变异检查必须杀死下列每个具名变异体（除注明外均位于
 `native-lsp-service.ts`），并使所列测试变红：R1-5，`ensureDocumentSynchronized`
 返回恒为 `true` 而非打开标志（`does not delay or retry an empty query after

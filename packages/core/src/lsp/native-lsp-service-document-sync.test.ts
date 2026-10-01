@@ -91,6 +91,15 @@ function createConnection() {
             },
           ];
         }
+        // Diagnostics pulls answer a well-formed empty report by default: a
+        // bare `[]` is an unusable report shape the service must reject, not
+        // the clean answer most tests in this file want as their baseline.
+        if (method === 'textDocument/diagnostic') {
+          return { kind: 'full', items: [] };
+        }
+        if (method === 'workspace/diagnostic') {
+          return { items: [] };
+        }
         return method === 'textDocument/hover' ? { contents: text } : [];
       },
     ),
@@ -2220,20 +2229,58 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'reports %s as a tool error when no server is ready',
       async (operation) => {
+        // A FAILED handle whose admission path recorded no cause must render
+        // as the bare state — the test must describe what the service
+        // actually renders, not hand-set a cause production never recorded.
+        handle.status = 'FAILED';
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        // The state word, not the tool's `LSP diagnostics failed:` prefix.
+        expect(result.error?.message).toContain('test is failed');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'renders the cause the manager recorded for a failed server in %s',
+      async (operation) => {
+        // Mirrors what doStartServer records on the command-not-found
+        // admission path (pinned in lsp-server-manager.test.ts).
         handle.status = 'FAILED';
         handle.error = new Error('command not found: test-server');
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toMatchObject({
           type: ToolErrorType.EXECUTION_FAILED,
         });
-        // The state word, not the tool's `LSP diagnostics failed:` prefix,
-        // plus the recorded cause the service is already holding.
         expect(result.error?.message).toContain('test is failed');
         expect(result.error?.message).toContain(
           'command not found: test-server',
         );
         expect(result.llmContent).not.toContain('No diagnostics found');
-        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'renders the stderr tail of a crashed server as its %s failure cause',
+      async (operation) => {
+        // attachRestartHandler marks a crashed server FAILED without setting
+        // handle.error; the stderr tail is the only recorded cause.
+        handle.status = 'FAILED';
+        handle.connection = undefined;
+        handle.processDiagnostics = {
+          stderrTail: 'clangd: unknown argument\n',
+        };
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(
+          'test is failed (clangd: unknown argument)',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
       },
     );
 
@@ -2425,14 +2472,34 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'caps a huge %s rejection message instead of flooding the tool result',
       async (operation) => {
+        // Two failing servers: per-entry caps alone leave the aggregate
+        // unbounded, so the join must shrink entries to a shared budget
+        // without dropping a server name.
+        const secondConnection = createConnection();
+        secondConnection.request.mockRejectedValue(
+          new Error('y'.repeat(5000)),
+        );
+        withServers([
+          ['test', handle],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: secondConnection,
+            },
+          ],
+        ]);
         connection.request.mockRejectedValue(new Error('x'.repeat(5000)));
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toMatchObject({
           type: ToolErrorType.EXECUTION_FAILED,
         });
-        // getErrorMessage caps the detail at 1000 chars; the rendered message
+        // getErrorMessage caps each entry's detail; the rendered message
         // must stay bounded even with the wrapper text around it.
         expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('test:');
+        expect(result.error!.message).toContain('healthy:');
         expect(result.llmContent).not.toContain('x'.repeat(1001));
       },
     );
@@ -2451,6 +2518,33 @@ describe('NativeLspService disk document synchronization', () => {
         });
         expect(result.error!.message.length).toBeLessThan(1100);
         expect(result.llmContent).not.toContain('y'.repeat(1001));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'caps a huge stderr tail rendered for a crashed server in %s',
+      async (operation) => {
+        // The skipped arm renders the recorded cause next to the failures
+        // arm; a crash leaves only a stderr tail, bounded upstream at 8 KB.
+        mockDiagnosticsResponses(connection);
+        const crashedHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'crashed' },
+          status: 'FAILED',
+          connection: undefined,
+          processDiagnostics: { stderrTail: 'x'.repeat(8192) },
+        };
+        withServers([
+          ['test', handle],
+          ['crashed', crashedHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.error!.message).toContain('crashed is failed');
+        expect(result.llmContent).not.toContain('x'.repeat(201));
       },
     );
 
@@ -2594,7 +2688,7 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
-      'does not name a server that became ready during the %s query',
+      'names a server that became ready during the %s query as never asked',
       async (operation) => {
         const lateConnection = createConnection();
         mockDiagnosticsResponses(lateConnection);
@@ -2618,9 +2712,239 @@ describe('NativeLspService disk document synchronization', () => {
             : { kind: 'full', items: [] };
         });
         const result = await run(queryDiagnosticsTool(operation));
-        expect(result.error).toBeUndefined();
-        expect(result.llmContent).toMatch(/^No diagnostics found/);
+        // The late server received zero requests, so its slice of the answer
+        // is unbacked; the wording must not read as though it answered.
+        expect(lateConnection.request).not.toHaveBeenCalled();
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(
+          'late became ready during the query and was not asked',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
       },
     );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects %s when a connection answers an unusable report shape',
+      async (operation) => {
+        // A non-null response that is not an object carrying an `items`
+        // array answered nothing usable and must not be certified clean.
+        for (const response of [
+          {},
+          [],
+          { items: null },
+          { kind: 'unchanged' },
+          42,
+          'a bare string',
+        ]) {
+          connection.request.mockResolvedValue(response);
+          const result = await run(queryDiagnosticsTool(operation));
+          expect(result.error).toMatchObject({
+            type: ToolErrorType.EXECUTION_FAILED,
+          });
+          expect(result.error?.message).toContain(
+            'server returned an unusable diagnostic report',
+          );
+          expect(result.llmContent).not.toContain('No diagnostics found');
+        }
+      },
+    );
+
+    it.each([
+      {
+        scenario: 'an extensionless file',
+        file: 'Dockerfile',
+        languages: ['dockerfile'],
+      },
+      {
+        scenario: 'a language ID that is not the file extension',
+        file: 'main.rs',
+        languages: ['rust'],
+      },
+    ])(
+      'lets a failed server veto a clean answer for $scenario',
+      async ({ file: name, languages }) => {
+        // Neither an extensionless file nor an unmapped language ID can
+        // positively prove the failed server irrelevant, so the ready
+        // server's empty report must not stand alone.
+        addFile(name, 'content');
+        mockDiagnosticsResponses(connection);
+        const failedHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'failed', languages },
+          status: 'FAILED',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['failed', failedHandle],
+        ]);
+        const tool = lspTool();
+        const result = await run(
+          tool
+            .build({
+              operation: 'diagnostics',
+              filePath: path.join(directory, name),
+            })
+            .execute(new AbortController().signal),
+        );
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain('failed is failed');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it('lets a failed server veto a clean answer its partial extension mapping hid', async () => {
+      // extensionToLanguage covering only .tsx must not hide the declared
+      // `typescript` language, which still owns the queried .ts file.
+      mockDiagnosticsResponses(connection);
+      const failedHandle: LspServerHandle = {
+        ...handle,
+        config: {
+          ...handle.config,
+          name: 'failed',
+          languages: ['typescript'],
+          extensionToLanguage: { '.tsx': 'typescriptreact' },
+        },
+        status: 'FAILED',
+        connection: undefined,
+      };
+      withServers([
+        ['test', handle],
+        ['failed', failedHandle],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('failed is failed');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('does not let an irrelevant server\'s failed pull veto a clean document answer', async () => {
+      // A ready python server that rejects textDocument/diagnostic (e.g. it
+      // never implemented pull diagnostics) says nothing about main.ts; the
+      // typescript server's authoritative empty report stands.
+      mockDiagnosticsResponses(connection);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        ['test', handle],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: { ...handle.config, name: 'pyright', languages: ['python'] },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('lets an irrelevant server\'s failed pull veto an unbacked workspace report', async () => {
+      // The workspace leg stays unqualified: with no queried file there is
+      // no relevance test, so any failed pull vetoes an empty report.
+      mockDiagnosticsResponses(connection);
+      const failingConnection = createConnection();
+      failingConnection.request.mockRejectedValue(
+        new Error('method not found'),
+      );
+      withServers([
+        ['test', handle],
+        [
+          'pyright',
+          {
+            ...handle,
+            config: { ...handle.config, name: 'pyright', languages: ['python'] },
+            connection: failingConnection,
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('method not found');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('rejects workspaceDiagnostics when a clean sibling entry masks a dropped report', async () => {
+      // One entry normalizes to an empty report while a uri-less sibling
+      // carrying a severity-1 error is dropped: the clean entry must not
+      // absorb the loss.
+      connection.request.mockImplementation(async (method: string) =>
+        method === 'workspace/diagnostic'
+          ? {
+              items: [
+                { uri, kind: 'full', items: [] },
+                {
+                  kind: 'full',
+                  items: [{ range, severity: 1, message: 'Type error' }],
+                },
+              ],
+            }
+          : { kind: 'full', items: [] },
+      );
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('unusable');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('rejects workspaceDiagnostics when every inner item fails normalization', async () => {
+      // The file entry has a uri, so the outer entry survives, but its only
+      // reported problem lacks a range and normalizes away.
+      connection.request.mockImplementation(async (method: string) =>
+        method === 'workspace/diagnostic'
+          ? {
+              items: [
+                {
+                  uri,
+                  kind: 'full',
+                  items: [{ severity: 1, message: 'Type error' }],
+                },
+              ],
+            }
+          : { kind: 'full', items: [] },
+      );
+      const result = await run(queryDiagnosticsTool('workspaceDiagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain('unusable');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
+    it('does not blame a server that could never own the file when no server is ready', async () => {
+      // Only a python server is configured and it is down; querying main.ts
+      // must still fail hard, but must name the real state instead of
+      // pointing at pyright.
+      const failedPythonHandle: LspServerHandle = {
+        ...handle,
+        config: { ...handle.config, name: 'pyright', languages: ['python'] },
+        status: 'FAILED',
+        connection: undefined,
+      };
+      withServers([['pyright', failedPythonHandle]]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.error?.message).not.toContain('pyright');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
   });
 });

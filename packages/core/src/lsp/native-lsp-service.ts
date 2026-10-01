@@ -63,7 +63,10 @@ const debugLogger = createDebugLogger('LSP');
  * Render one server a diagnostics query could not use, by name, state and —
  * where the manager recorded one — the cause. `handle.error` is set on only
  * some FAILED transitions and `processDiagnostics` is absent for crash paths,
- * so both are optional here.
+ * so both are optional here. The cause goes through `getErrorMessage` like
+ * the failures arm it is joined with, then is bounded to its last non-empty
+ * line: a stderr tail or a stack-packed message must not flood the tool
+ * result verbatim.
  */
 function describeLspServerState(name: string, handle: LspServerHandle): string {
   if (handle.status === 'READY' && !handle.connection) {
@@ -74,10 +77,25 @@ function describeLspServerState(name: string, handle: LspServerHandle): string {
   // records no `error`, leaving the raw stderr tail as the only cause.
   const tail = handle.processDiagnostics?.stderrTail?.trim();
   const cause = handle.error ?? (tail ? { message: tail } : undefined);
-  const reason = cause && getErrorMessage(cause);
+  const raw = cause && getErrorMessage(cause);
+  const lines = raw
+    ?.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const reason =
+    lines && lines.length > 0 ? lines[lines.length - 1]!.slice(-200) : undefined;
   const state = handle.status.toLowerCase().replace(/_/g, ' ');
   return `${name} is ${state}${reason ? ` (${reason})` : ''}`;
 }
+
+/**
+ * Aggregate budget for the `No LSP diagnostics could be retrieved (…)`
+ * detail: per-entry caps (`getErrorMessage`, `describeLspServerState`) bound
+ * each entry, but the join grows linearly with the number of unusable
+ * servers and would otherwise break the message-level bound the tool tests
+ * assert.
+ */
+const MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH = 1000;
 
 /**
  * Build the rejection for a diagnostics query that retrieved nothing while
@@ -90,10 +108,24 @@ function nothingRetrievedForDiagnostics(
   failures: Array<{ name: string; error: unknown }>,
   skipped: string[],
 ): Error {
-  const detail = [
+  const entries = [
     ...failures.map(({ name, error }) => `${name}: ${getErrorMessage(error)}`),
     ...skipped,
-  ].join('; ');
+  ];
+  let detail = entries.join('; ');
+  if (detail.length > MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH) {
+    // Bound the aggregate without dropping a server name: every over-long
+    // entry shrinks to an equal share of the budget.
+    const share = Math.max(
+      40,
+      Math.floor(MAX_DIAGNOSTIC_REJECTION_DETAIL_LENGTH / entries.length),
+    );
+    detail = entries
+      .map((entry) =>
+        entry.length > share ? `${entry.slice(0, share)}…` : entry,
+      )
+      .join('; ');
+  }
   return new Error(`No LSP diagnostics could be retrieved (${detail})`);
 }
 
@@ -112,6 +144,17 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
   csharp: ['cs'],
   ruby: ['rb'],
 };
+
+/**
+ * Extensions positively attributable to a language through the mapping above.
+ * A file whose extension is outside this set cannot prove any server
+ * irrelevant for it — the fallback that treats a language ID as an extension
+ * is only a guess (`rust` vs `rs`, `yaml` vs `yml`) — so a veto decision
+ * fails closed for unknown extensions.
+ */
+const KNOWN_DIAGNOSTIC_EXTENSIONS: ReadonlySet<string> = new Set(
+  Object.values(LANGUAGE_ID_TO_EXTENSIONS).flat(),
+);
 
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
@@ -588,68 +631,139 @@ export class NativeLspService {
    * Ready handles for a diagnostics query. Rejects outright when nothing is
    * ready — no matching server, a server that failed or never started, a
    * server still starting up — because an empty ready set would otherwise be
-   * reported as a clean result. Servers left out of a non-empty ready set are
-   * accounted for at the decision point by `unreachableDiagnosticServers`,
-   * which re-reads live handle state: a snapshot taken here would be stale by
-   * the time the query loop finishes. `getReadyHandles` itself must keep
-   * returning an empty array for the not-ready case: `replayOpenDocuments`
-   * skips handles missing from its map rather than rejecting.
+   * reported as a clean result. For a document query (`uri` given) the
+   * rejection names only servers the queried file does not provably exclude;
+   * when every configured server is irrelevant for the file the rejection
+   * says so instead of blaming a server that could never own it. Servers
+   * left out of a non-empty ready set are accounted for at the decision
+   * point by `unreachableDiagnosticServers`, which re-reads live handle
+   * state: a snapshot taken here would be stale by the time the query loop
+   * finishes. `getReadyHandles` itself must keep returning an empty array
+   * for the not-ready case: `replayOpenDocuments` skips handles missing from
+   * its map rather than rejecting.
    */
   private getDiagnosticHandles(
     serverName?: string,
+    uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
     const handles = this.getReadyHandles(serverName);
     if (handles.length > 0) {
       return handles;
     }
-    const skipped = Array.from(this.serverManager.getHandles())
-      .filter(([name]) => !serverName || name === serverName)
-      .map(([name, handle]) => describeLspServerState(name, handle));
-    throw new Error(
-      skipped.length > 0
-        ? `No LSP server is ready to provide diagnostics (${skipped.join('; ')})`
-        : serverName
-          ? `No LSP server named ${serverName} is configured or running`
-          : 'No LSP servers are configured or running',
+    const configured = Array.from(this.serverManager.getHandles()).filter(
+      ([name]) => !serverName || name === serverName,
     );
+    const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
+    const skipped = configured
+      .filter(
+        ([, handle]) => !this.serverDeclaredIrrelevant(handle, extension),
+      )
+      .map(([name, handle]) => describeLspServerState(name, handle));
+    if (skipped.length > 0) {
+      throw new Error(
+        `No LSP server is ready to provide diagnostics (${skipped.join('; ')})`,
+      );
+    }
+    if (uri && configured.length > 0) {
+      throw new Error(
+        'No LSP server is ready to provide diagnostics (no configured server covers the queried file)',
+      );
+    }
+    throw new Error(
+      serverName
+        ? `No LSP server named ${serverName} is configured or running`
+        : 'No LSP servers are configured or running',
+    );
+  }
+
+  /**
+   * Lowercased extension of the queried file URI, or undefined when the URI
+   * is unparseable or the file has no extension: an extensionless file
+   * cannot prove any server irrelevant, so the veto decision fails closed.
+   */
+  private diagnosticFileExtension(uri: string): string | undefined {
+    try {
+      return (
+        path.extname(fileURLToPath(uri)).slice(1).toLowerCase() || undefined
+      );
+    } catch {
+      // An unparseable URI cannot prove any server irrelevant; keep the veto.
+      return undefined;
+    }
+  }
+
+  /**
+   * Every extension a server declares it can serve: the explicit
+   * `extensionToLanguage` keys unioned with the extensions its language IDs
+   * imply. Unlike `getWorkspaceSymbolExtensions` — a warmup-file chooser
+   * that deliberately prefers the explicit mapping — a veto decision must
+   * not let a partial user mapping (e.g. only `.tsx`) hide a declared
+   * language (`typescript` still owns `.ts`).
+   */
+  private declaredDiagnosticExtensions(handle: LspServerHandle): Set<string> {
+    const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
+    for (const language of handle.config.languages) {
+      for (const ext of LANGUAGE_ID_TO_EXTENSIONS[language] ?? [
+        language.toLowerCase(),
+      ]) {
+        owned.add(ext);
+      }
+    }
+    return owned;
+  }
+
+  /**
+   * Whether the queried file's extension positively proves this server
+   * cannot own the file. Fails closed on every uncertainty: an undefined
+   * extension (extensionless or unparseable file), an extension no known
+   * language mapping claims (`rs`, `mts`, `yml`, …), or a server declaring
+   * no extensions at all can prove nothing, so the veto stands. Only a
+   * positively attributable extension the server does not declare excuses
+   * it — `python`'s `py` vs a queried `.ts` is the canonical case.
+   */
+  private serverDeclaredIrrelevant(
+    handle: LspServerHandle,
+    extension: string | undefined,
+  ): boolean {
+    if (extension === undefined || !KNOWN_DIAGNOSTIC_EXTENSIONS.has(extension)) {
+      return false;
+    }
+    const owned = this.declaredDiagnosticExtensions(handle);
+    return owned.size > 0 && !owned.has(extension);
   }
 
   /**
    * Rendered states of the servers a diagnostics query did not reach and
    * still cannot reach, recomputed from live handle state at the decision
    * point: a server that finished starting mid-query is no longer named as
-   * pending, and a server that has since become ready is no veto at all (it
-   * simply was not queried this time). For a document query (`uri` given),
-   * only servers whose configured extensions cover the file can veto — a
-   * server that could never own the file must not discard another server's
-   * authoritative empty report. For a workspace query every unreachable
-   * server vetoes, since the report would otherwise certify that server's
-   * slice of the workspace as clean.
+   * pending, but a server that became ready without being queried is no
+   * clean bill either — it received zero requests, so its slice of the
+   * answer is as unbacked as any other unreachable server's, and it is
+   * named with wording that cannot be mistaken for an answer. For a
+   * document query (`uri` given), only servers the file does not provably
+   * exclude can veto — a server that could never own the file must not
+   * discard another server's authoritative empty report. For a workspace
+   * query every unreachable server vetoes, since the report would otherwise
+   * certify that server's slice of the workspace as clean.
    */
   private unreachableDiagnosticServers(
     queried: ReadonlyArray<readonly [string, unknown]>,
     serverName: string | undefined,
     uri?: string,
   ): string[] {
-    let extension: string | undefined;
-    if (uri) {
-      try {
-        extension = path.extname(fileURLToPath(uri)).slice(1).toLowerCase();
-      } catch {
-        // An unparseable URI cannot prove any server irrelevant; keep the veto.
-        extension = undefined;
-      }
-    }
+    const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
     return Array.from(this.serverManager.getHandles())
       .filter(
         ([name, handle]) =>
           (!serverName || name === serverName) &&
           !queried.some(([queriedName]) => queriedName === name) &&
-          !(handle.status === 'READY' && handle.connection !== undefined) &&
-          (extension === undefined ||
-            this.getWorkspaceSymbolExtensions(handle).includes(extension)),
+          !this.serverDeclaredIrrelevant(handle, extension),
       )
-      .map(([name, handle]) => describeLspServerState(name, handle));
+      .map(([name, handle]) =>
+        handle.status === 'READY' && handle.connection !== undefined
+          ? `${name} became ready during the query and was not asked`
+          : describeLspServerState(name, handle),
+      );
   }
 
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
@@ -1858,9 +1972,13 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getDiagnosticHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName, uri);
     const allDiagnostics: LspDiagnostic[] = [];
-    const failures: Array<{ name: string; error: unknown }> = [];
+    const failures: Array<{
+      name: string;
+      error: unknown;
+      handle: LspServerHandle;
+    }> = [];
 
     for (const [name, handle] of handles) {
       // A sync failure must reject, not report incomplete diagnostics as clean.
@@ -1883,9 +2001,10 @@ export class NativeLspService {
           // ledger below.
           failures.push({
             name,
+            handle,
             error: new Error('server returned no response'),
           });
-        } else if (response && typeof response === 'object') {
+        } else if (typeof response === 'object') {
           const responseObj = response as Record<string, unknown>;
           const items = responseObj['items'];
           if (Array.isArray(items)) {
@@ -1905,10 +2024,25 @@ export class NativeLspService {
               // normalization (e.g. no range); that is not a clean report.
               failures.push({
                 name,
+                handle,
                 error: new Error('server returned only unusable diagnostics'),
               });
             }
+          } else {
+            // A report without an `items` array (or a bare array) answered
+            // nothing usable; it must not be certified as a clean report.
+            failures.push({
+              name,
+              handle,
+              error: new Error('server returned an unusable diagnostic report'),
+            });
           }
+        } else {
+          failures.push({
+            name,
+            handle,
+            error: new Error('server returned an unusable diagnostic report'),
+          });
         }
       } catch (error) {
         // A failed pull is not a clean result: keep partial results from
@@ -1917,18 +2051,25 @@ export class NativeLspService {
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
         );
-        failures.push({ name, error });
+        failures.push({ name, handle, error });
       }
     }
 
     if (allDiagnostics.length === 0) {
+      // A server the queried file provably excludes cannot veto the answer —
+      // its failure says nothing about this file — but a failure or
+      // unusable answer from a server that could own the file must.
+      const extension = this.diagnosticFileExtension(uri);
+      const relevantFailures = failures.filter(
+        ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+      );
       const unreachable = this.unreachableDiagnosticServers(
         handles,
         serverName,
         uri,
       );
-      if (failures.length > 0 || unreachable.length > 0) {
-        throw nothingRetrievedForDiagnostics(failures, unreachable);
+      if (relevantFailures.length > 0 || unreachable.length > 0) {
+        throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
       }
     }
     return allDiagnostics;
@@ -2025,17 +2166,23 @@ export class NativeLspService {
             name,
             error: new Error('server returned no response'),
           });
-        } else if (response && typeof response === 'object') {
+        } else if (typeof response === 'object') {
           const responseObj = response as Record<string, unknown>;
           const items = responseObj['items'];
           if (Array.isArray(items)) {
-            let examined = 0;
             let dropped = 0;
+            let pushed = 0;
             for (const item of items) {
               if (results.length >= limit) {
                 break;
               }
-              examined++;
+              const reported =
+                item !== null &&
+                typeof item === 'object' &&
+                Array.isArray((item as Record<string, unknown>)['items'])
+                  ? ((item as Record<string, unknown>)['items'] as unknown[])
+                      .length
+                  : 0;
               const normalized = this.normalizer.normalizeFileDiagnostics(
                 item,
                 name,
@@ -2044,17 +2191,37 @@ export class NativeLspService {
                 dropped++;
               } else if (normalized.diagnostics.length > 0) {
                 results.push(normalized);
+                pushed++;
+              } else if (reported > 0) {
+                // The file entry carried problems but none survived
+                // normalization (e.g. no range); a sibling clean entry must
+                // not absorb that loss.
+                dropped++;
               }
             }
-            if (examined > 0 && dropped === examined) {
-              // The server did report files but none survived normalization
-              // (e.g. no uri/items); that is not a clean report.
+            if (dropped > 0 && pushed === 0) {
+              // The server reported files or problems but contributed
+              // nothing usable; that is not a clean report. Keyed on
+              // "dropped something, kept nothing" rather than a total
+              // wipeout so a clean sibling entry cannot mask the loss.
               failures.push({
                 name,
                 error: new Error('server returned only unusable diagnostics'),
               });
             }
+          } else {
+            // A report without an `items` array (or a bare array) answered
+            // nothing usable; it must not be certified as a clean report.
+            failures.push({
+              name,
+              error: new Error('server returned an unusable diagnostic report'),
+            });
           }
+        } else {
+          failures.push({
+            name,
+            error: new Error('server returned an unusable diagnostic report'),
+          });
         }
       } catch (error) {
         // A failed pull is not a clean result: keep partial results from
