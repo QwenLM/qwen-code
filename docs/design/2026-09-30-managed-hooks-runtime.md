@@ -155,9 +155,14 @@ operations and inactive activations. On cold load, pending file history is obser
 through the original Runtime owner saved in the matching checkpoint tool inputs,
 before earlier Hook owners are released. Missing or conflicting owner evidence
 keeps recovery blocked; no new durable field is needed.
+Shell receipt recovery also reads the original Runtime owner from its committed
+tool input when acknowledging capture delivery; neither the prompt ID nor the
+replacement Hook owner identifies that execution.
 
 HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
-refused. A local runner-construction failure before dispatch is a settled failure
+refused. The Runtime URL allowlist uses the same allowed-variable interpolation
+as the HTTP runner; internal secrets and native SSRF checks remain enforced.
+A local runner-construction failure before dispatch is a settled failure
 under the saved fail policy. A received failure response can settle; a lost response after sending
 remains unknown and cannot be retried automatically. Hook outputs are bounded.
 For an in-flight managed HTTP Hook, user cancellation keeps the original request
@@ -227,6 +232,8 @@ Model attempts and usage are associated with the original Hook operation and
 originating turn when present. Budget accounting follows the existing Session
 and turn budget semantics; Hook operations must not reset the original budget.
 There is no new monetary-budget policy or independent Hook token pool.
+Isolated model Config cleanup failures are logged separately and do not replace
+an already returned Hook result or the primary operation error.
 
 ## Event integration
 
@@ -261,6 +268,10 @@ initial pin is restored when omitted on load and must match when supplied; later
 committed registrations remain authoritative. Workspace cold load verifies Hook
 record resources and the complete function-message snapshot closure before
 attachment, while retaining original-owner recovery barriers.
+Hook scope identifiers accept the existing Broker character grammar, including
+leading punctuation. Session status reports `recoveryBlocked`, and load reports
+`recoveryRequired`, while Hook operations block prompt admission. Reconciliation
+clears this diagnostic when the saved operation actually settles.
 
 Runtime-only takeover flags keep Hook Sessions on the existing Hook-aware load
 reconciliation path. The Runtime-only continue/cancel routes refuse Hook Sessions

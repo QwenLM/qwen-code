@@ -11,6 +11,7 @@ import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HookRegistry } from '@qwen-code/qwen-code-core/hooks/hookRegistry.js';
 import { HookRunner } from '@qwen-code/qwen-code-core/hooks/hookRunner.js';
+import { interpolateUrl } from '@qwen-code/qwen-code-core/hooks/envInterpolator.js';
 import { HookCommandIsolationUnavailableError } from '@qwen-code/qwen-code-core/hooks/hook-command-cgroup.js';
 import {
   HookEventName,
@@ -74,7 +75,7 @@ export class ManagedHookError extends Error {
   }
 }
 
-const identifier = /^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,511}$/u;
+const identifier = /^[a-zA-Z0-9:_.-]{1,512}$/u;
 const MAX_OPERATIONS = 4096;
 const MAX_BYTES = 60 * 1024;
 const FUNCTION_SETTLEMENT_GRACE_MS = 1000;
@@ -766,7 +767,9 @@ export class ManagedHookRuntime {
         return;
       }
       const runner = new HookRunner(
-        config.type === HookType.Http ? [config.url] : undefined,
+        config.type === HookType.Http
+          ? [interpolateUrl(config.url, config.allowedEnvVars ?? [])]
+          : undefined,
       );
       dispatched = true;
       const result = await runner.executeHook(
