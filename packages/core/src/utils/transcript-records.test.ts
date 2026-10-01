@@ -460,6 +460,7 @@ describe('validateTranscriptRecord', () => {
     agent_retry: true,
     agent_session_ready: true,
     file_history_snapshot: true,
+    absorbed_snapshot_offset: true,
     user_text_elements: true,
     session_artifact_event: true,
     session_artifact_snapshot: true,

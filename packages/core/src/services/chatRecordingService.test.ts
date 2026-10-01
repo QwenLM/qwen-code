@@ -1273,6 +1273,39 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordAbsorbedSnapshotOffset', () => {
+    it('does not keep a rejected offset for rewind to re-append', async () => {
+      svc.recordAbsorbedSnapshotOffset({
+        absorbedSnapshotCount: 2,
+        boundaryPromptId: 'p2',
+      });
+      user('keep');
+      svc.rewindRecording(0, { truncatedCount: 1 });
+      await svc.flush();
+      const offsets = () =>
+        writes().filter(
+          (record) => record.subtype === 'absorbed_snapshot_offset',
+        );
+      expect(offsets()).toHaveLength(2);
+      expect(offsets().at(-1)?.systemPayload).toEqual({
+        absorbedSnapshotCount: 2,
+        boundaryPromptId: 'p2',
+      });
+
+      svc.recordAbsorbedSnapshotOffset({
+        absorbedSnapshotCount: -1,
+      } as Parameters<ChatRecordingService['recordAbsorbedSnapshotOffset']>[0]);
+      const afterReject = offsets().length;
+      svc.rewindRecording(0, { truncatedCount: 1 });
+      await svc.flush();
+      expect(offsets()).toHaveLength(afterReject);
+      expect(
+        (svc as unknown as { currentAbsorbedSnapshotOffset?: unknown })
+          .currentAbsorbedSnapshotOffset,
+      ).toBeUndefined();
+    });
+  });
+
   describe('recordUserTextElements', () => {
     it('records user text elements as a strict system payload', async () => {
       const payload = {

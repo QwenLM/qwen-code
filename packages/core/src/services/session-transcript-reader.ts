@@ -32,10 +32,12 @@ import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
+  isAbsorbedSnapshotOffsetPayload,
   isValidSessionApprovalModePayload,
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
   normalizeSessionApprovalModePayload,
+  type AbsorbedSnapshotOffsetRecordPayload,
   type AttributionSnapshotPayload,
   type ChatRecord,
   type ParentSessionRecordPayload,
@@ -297,6 +299,8 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   goalRecoverySourceUuid?: string;
   initialTurn: number;
   backgroundNotificationTaskIds: string[];
+  /** Latest rewind offset on the active chain. */
+  absorbedSnapshotOffset?: AbsorbedSnapshotOffsetRecordPayload;
 }
 
 export interface SessionRestoreProjection {
@@ -3169,6 +3173,13 @@ export class SessionTranscriptReader {
       );
     });
     const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
+    const absorbedOffsetUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'absorbed_snapshot_offset'
+      );
+    });
+    const absorbedOffsetSet = new Set(absorbedOffsetUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -3218,6 +3229,7 @@ export class SessionTranscriptReader {
         sessionSourceUuid,
         ...sessionModelUuids,
         ...sessionApprovalModeUuids,
+        ...absorbedOffsetUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -3243,6 +3255,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let sessionApprovalMode: SessionApprovalModeRecordPayload | undefined;
+    let absorbedSnapshotOffset: AbsorbedSnapshotOffsetRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
     let firstRecordSeen = false;
     const deferredPreReadRecords = new Map<string, ChatRecord>();
@@ -3283,6 +3296,11 @@ export class SessionTranscriptReader {
             record.systemPayload,
           );
         }
+      } else if (
+        absorbedOffsetSet.has(record.uuid) &&
+        isAbsorbedSnapshotOffsetPayload(record.systemPayload)
+      ) {
+        absorbedSnapshotOffset = record.systemPayload;
       }
       if (
         record.type === 'assistant' &&
@@ -3522,6 +3540,7 @@ export class SessionTranscriptReader {
       initialTurn: turnStateValue.initialTurn,
       backgroundNotificationTaskIds:
         turnStateValue.backgroundNotificationTaskIds,
+      ...(absorbedSnapshotOffset ? { absorbedSnapshotOffset } : {}),
     };
 
     await assertIndexSnapshotUnchanged(index, sessionId);

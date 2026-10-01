@@ -374,6 +374,7 @@ export interface ChatRecord {
     | 'agent_retry'
     | 'agent_session_ready'
     | 'file_history_snapshot'
+    | 'absorbed_snapshot_offset'
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
@@ -449,6 +450,7 @@ export interface ChatRecord {
     | AgentRetryRecordPayload
     | AgentSessionReadyRecordPayload
     | FileHistorySnapshotRecordPayload
+    | AbsorbedSnapshotOffsetRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
@@ -811,6 +813,34 @@ export interface RewindRecordPayload {
 }
 
 /**
+ * Snapshot prefix compression removed from the rewindable list.
+ * `boundaryPromptId` is the first live snapshot, or the last absorbed
+ * snapshot when the live tail is empty.
+ */
+export interface AbsorbedSnapshotOffsetRecordPayload {
+  absorbedSnapshotCount: number;
+  boundaryPromptId?: string;
+}
+
+export function isAbsorbedSnapshotOffsetPayload(
+  payload: unknown,
+): payload is AbsorbedSnapshotOffsetRecordPayload {
+  if (typeof payload !== 'object' || payload === null) return false;
+  const record = payload as AbsorbedSnapshotOffsetRecordPayload;
+  if (
+    !Number.isInteger(record.absorbedSnapshotCount) ||
+    record.absorbedSnapshotCount < 0
+  ) {
+    return false;
+  }
+  return (
+    record.boundaryPromptId === undefined ||
+    (typeof record.boundaryPromptId === 'string' &&
+      record.boundaryPromptId.length > 0)
+  );
+}
+
+/**
  * Stored payload for file history snapshot persistence.
  * Each entry records one or more snapshots for session resume.
  */
@@ -1137,6 +1167,10 @@ export class ChatRecordingService {
   /** Last-wins daemon session approval state, used to skip duplicate writes. */
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
+    | undefined;
+  /** Last accepted compression rewind offset. Invalid writes clear it. */
+  private currentAbsorbedSnapshotOffset:
+    | AbsorbedSnapshotOffsetRecordPayload
     | undefined;
   private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
@@ -2962,6 +2996,17 @@ export class ChatRecordingService {
         });
       }
 
+      // The offset record is last-wins on the active chain. One written before
+      // this re-root is not an ancestor of the new leaf, so resume cannot see it.
+      if (this.currentAbsorbedSnapshotOffset) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'absorbed_snapshot_offset',
+          systemPayload: this.currentAbsorbedSnapshotOffset,
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -2969,6 +3014,31 @@ export class ChatRecordingService {
       }
     } catch (error) {
       debugLogger.error('Error saving rewind record:', error);
+    }
+  }
+
+  /**
+   * Persists the compression rewind offset so resume does not infer it
+   * from the live snapshot and prompt counts.
+   */
+  recordAbsorbedSnapshotOffset(
+    payload: AbsorbedSnapshotOffsetRecordPayload,
+  ): void {
+    if (!isAbsorbedSnapshotOffsetPayload(payload)) {
+      debugLogger.error('Rejected absorbed snapshot offset payload');
+      this.currentAbsorbedSnapshotOffset = undefined;
+      return;
+    }
+    this.currentAbsorbedSnapshotOffset = payload;
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'absorbed_snapshot_offset',
+        systemPayload: payload,
+      });
+    } catch (error) {
+      debugLogger.error('Error saving absorbed snapshot offset:', error);
     }
   }
 
