@@ -609,8 +609,8 @@ describe('extractShellOperationsAcrossCommand', () => {
   // Quoted shell metacharacters are legal in real directory names
   // (`mkdir 'foo;bar'` is valid POSIX). tokenize strips the quotes before the
   // cd target is classified, so the metacharacter escalation must only fire
-  // when a backslash forced the dual-reading walk; in the single consistent
-  // reading a quoted `;`/`&` is a name, not a split artifact.
+  // for a segment only one quote reading produces; when both readings segment
+  // the command identically a quoted `;`/`&` is a name, not a split artifact.
   it.each([
     ["cd 'foo;bar' && echo {} > settings.json", '/repo/foo;bar/settings.json'],
     ["cd 'a&b' && echo {} > settings.json", '/repo/a&b/settings.json'],
@@ -621,6 +621,21 @@ describe('extractShellOperationsAcrossCommand', () => {
       "cd 'foo;bar' && echo {} > settings.json && printf 'a\\n'",
       '/repo/foo;bar/settings.json',
     ],
+    // A quoted name holding both a backslash and a metacharacter is real
+    // syntax both readings segment identically, not an artifact (#R7-1).
+    [
+      "cd 'D:\\R&D\\build' && npm test > results.txt",
+      'D:/R&D/build/results.txt',
+    ],
+    [
+      "cd 'C:\\Users\\me\\R&D' && echo {} > settings.json",
+      'C:/Users/me/R&D/settings.json',
+    ],
+    [
+      "cd 'R&D\\shared' && echo {} > settings.json",
+      '/repo/R&D/shared/settings.json',
+    ],
+    ["cd 'r&d\\x' && printf p > .env", '/repo/r&d/x/.env'],
   ])(
     'resolves the quoted metacharacter directory in %s without escalating',
     (command, expectedPath) => {
@@ -726,5 +741,28 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
     // backslash never reaches a splitter; both readings see the same
     // `cat > f <<EOF` and the gate must not change the result.
     expect(across('cat > f <<EOF\necho a\\b\nEOF')).toEqual([write('/repo/f')]);
+  });
+
+  it('does not trust the first operand of a multi-operand cd (#R7-2)', () => {
+    // bash rejects `cd /evil 'a\'' ; cd /repo '` with `too many arguments`,
+    // so the cwd never moves; the write must stay attributed to the pre-cd
+    // cwd with the cwd-unknown flags, not published as a phantom /evil path
+    // a deny rule could cite.
+    expect(
+      across(`cd /evil 'a\\'' ; cd /repo ' ; echo {} > .qwen/settings.json`),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+    expect(
+      across(`cd .qwen 'a\\'' ; cd src ' ; echo {} > settings.json`),
+    ).toEqual([uncertainWrite('/repo/settings.json')]);
+  });
+
+  it('drops a coarser escape-everywhere walk whose quoted span swallows real operators (#R7-3)', () => {
+    // The escape-everywhere reading keeps `; cd .qwen ; echo {} >
+    // settings.json` inside what it treats as an unterminated quote, then
+    // mines the redirect out of that quoted text against the stale cwd.
+    // bash sees four segments here, so only the bash walk survives the merge.
+    expect(
+      across(`cd sub ; echo 'a\\' ; cd .qwen ; echo {} > settings.json`),
+    ).toEqual([write('/repo/sub/.qwen/settings.json')]);
   });
 });

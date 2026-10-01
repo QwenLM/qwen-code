@@ -2058,26 +2058,24 @@ type CdResolution =
   | { kind: 'dynamic' }
   | { kind: 'static'; cwd: string; cwdUnknown: boolean };
 
-function isDynamicShellPath(
-  word: string,
-  splitArtifactPossible: boolean,
-): boolean {
+function isDynamicShellPath(word: string, artifactSegment: boolean): boolean {
   if (word.includes('$') || word.includes('`')) return true;
   // A `cd` target that carries both escape residue and operator
-  // metacharacters is a quoting artifact of the segment split, not a real
-  // directory, so it must escalate like a `$`/backtick target instead of
-  // becoming a concrete cwd writes get attributed to (#12246 variant).
-  // tokenize strips quotes but keeps backslashes, so a genuinely quoted name
-  // like `cd 'foo;bar'` arrives as a bare word with no backslash, while an
-  // artifact such as `x\;cd /etc` retains the escape that produced it.
-  return splitArtifactPossible && word.includes('\\') && /[;|&><]/.test(word);
+  // metacharacters in a segment only one quote reading produces is a quoting
+  // artifact of the split, not a real directory, so it must escalate like a
+  // `$`/backtick target instead of becoming a concrete cwd writes get
+  // attributed to (#12246 variant). tokenize keeps a backslash inside single
+  // quotes, so a genuinely quoted name can hold both characters too
+  // (`cd 'D:\R&D\build'`); what marks the artifact is that the other reading
+  // never segments this span, not the word's spelling (#12280 R7-1).
+  return artifactSegment && word.includes('\\') && /[;|&><]/.test(word);
 }
 
 function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
-  splitArtifactPossible = false,
+  artifactSegment = false,
 ): CdResolution {
   const words = tokenize(command);
   extractRedirects(words, cwd);
@@ -2106,11 +2104,18 @@ function resolveCdTargetCwd(
     targetIndex++;
   }
 
+  // bash rejects a `cd` carrying more than one operand (`too many
+  // arguments`), so the cwd never moves; trusting words[targetIndex] there
+  // would attribute later writes to a directory the shell never entered
+  // (#12280 R7-2). Sits after extractRedirects so `cd x > /dev/null` still
+  // counts as one operand.
+  if (words.length > targetIndex + 1) return { kind: 'dynamic' };
+
   const target = words[targetIndex] ?? process.env['HOME'];
   if (
     !target ||
     target === '-' ||
-    isDynamicShellPath(target, splitArtifactPossible)
+    isDynamicShellPath(target, artifactSegment)
   ) {
     return { kind: 'dynamic' };
   }
@@ -2143,12 +2148,13 @@ function resolveCdTargetCwd(
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
  *   - Operation order is preserved across segments within one quote reading.
- *     Commands containing a backslash are walked once per quote reading
- *     (escape-everywhere and bash's literal-backslash-in-single-quotes) and
- *     the two operation sets are merged (deduped), so a boundary only one
- *     reading sees cannot hide a write behind a `cd` attribution mismatch
- *     (#12246); merged results may append the second reading's extra ops at
- *     the tail rather than in command order.
+ *     Commands containing a backslash are walked under bash's
+ *     literal-backslash-in-single-quotes reading; the escape-everywhere
+ *     reading's operations are merged in (deduped) only when that reading
+ *     splits strictly finer, so a boundary only it sees can still surface a
+ *     write (#12246) without its coarser quoted spans publishing cwd-derived
+ *     paths no shell produces (#12280 R7-3). Merged results may append the
+ *     second reading's extra ops at the tail rather than in command order.
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2170,18 +2176,29 @@ export function extractShellOperationsAcrossCommand(
   // The walks split stripHeredocBodies(command), so a backslash that only
   // exists inside a heredoc body can never make the two readings diverge;
   // gate on what the walks will see rather than on the raw command.
-  if (!stripHeredocBodies(command).includes('\\')) {
+  const stripped = stripHeredocBodies(command);
+  if (!stripped.includes('\\')) {
     return walkCompoundCommand(command, cwd, 0, false, undefined);
   }
   // The two quote readings can disagree on where the operators are when a
   // backslash appears: the escape-everywhere reading sees terminators that
   // bash's literal-backslash-in-single-quotes reading does not (and vice
-  // versa). Each reading is walked on its own because it is self-consistent;
-  // the union split's mixed boundaries would attribute writes to phantom
-  // cwds that no shell produces. Both operation sets are kept, since the
-  // permission layer aggregates to the most restrictive verdict (#12246).
-  const ops = walkCompoundCommand(command, cwd, 0, false, 'escape-everywhere');
+  // versa). Each reading is walked on its own; the union split's mixed
+  // boundaries would attribute writes to phantom cwds that no shell produces.
+  // The bash walk always contributes. The escape-everywhere walk contributes
+  // only when it splits strictly finer (more operator boundaries): when it is
+  // coarser, a span it treats as an unterminated quote swallows real
+  // operators, and redirect mining then resolves paths out of that quoted
+  // text against a stale cwd, publishing concrete phantom paths no shell
+  // produces (#12280 R7-3).
   const bashOps = walkCompoundCommand(command, cwd, 0, false, 'bash');
+  const escapeIsFiner =
+    splitCompoundCommandSegmentsForReading(stripped, 'escape-everywhere')
+      .length > splitCompoundCommandSegmentsForReading(stripped, 'bash').length;
+  if (!escapeIsFiner) {
+    return bashOps;
+  }
+  const ops = walkCompoundCommand(command, cwd, 0, false, 'escape-everywhere');
   const seen = new Set(ops.map((op) => JSON.stringify(op)));
   for (const op of bashOps) {
     const key = JSON.stringify(op);
@@ -2318,6 +2335,18 @@ function walkCompoundCommand(
   const subCommands = reading
     ? splitCompoundCommandSegmentsForReading(stripped, reading)
     : splitCompoundCommandSegments(stripped);
+  // A quoting-artifact `cd` target only exists in one reading's split, so
+  // artifact-ness is decided per segment: a segment string the other reading
+  // produces identically is real syntax, even when its target word carries
+  // both a backslash and a metacharacter (#12280 R7-1).
+  const otherReadingSegments = reading
+    ? new Set(
+        splitCompoundCommandSegmentsForReading(
+          stripped,
+          reading === 'bash' ? 'escape-everywhere' : 'bash',
+        ).map((segment) => segment.command),
+      )
+    : undefined;
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
@@ -2335,7 +2364,7 @@ function walkCompoundCommand(
       sub,
       effectiveCwd,
       cwdUnknown,
-      reading !== undefined,
+      otherReadingSegments !== undefined && !otherReadingSegments.has(sub),
     );
     if (cdTarget.kind === 'static') {
       if (!backgrounded) {

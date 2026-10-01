@@ -1772,6 +1772,75 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('deny rule still cites a quoted dir holding both backslash and metacharacter (#R7-1)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(C:/Users/me/R&D/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // Both readings segment `cd 'C:\Users\me\R&D'` identically, so the
+      // directory keeps its static cwd and the Write deny still fires.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'C:\\Users\\me\\R&D' && echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('does not hard-deny the write a multi-operand cd never redirects (#R7-2)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // bash rejects the two-operand cd, so the write lands in /repo; the
+      // cwd-unknown flags escalate it to ask instead of a deny citing a path
+      // the command never writes.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen 'a\\'' ; cd src ' ; echo {} > settings.json`,
+        }),
+      ).toBe('ask');
+    });
+
+    it('allows the write only the coarser quote reading misplaces (#R7-3)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(sub/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // Real bash writes only sub/.qwen/settings.json; the phantom
+      // sub/settings.json op came from the coarser reading and must not cite
+      // the deny rule.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd sub ; echo 'a\\' ; cd .qwen ; echo {} > settings.json`,
+        }),
+      ).toBe('allow');
+      // Backslash-free control asserts the same.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd sub ; echo 'a' ; cd .qwen ; echo {} > settings.json`,
+        }),
+      ).toBe('allow');
+    });
+
     it('semicolon compound: deny in second → deny', async () => {
       pm = makePm(echoRm);
       expect(await pm.evaluate(sh('echo hello; rm -rf /'))).toBe('deny');
