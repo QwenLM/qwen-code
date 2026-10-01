@@ -155,12 +155,17 @@ describe('OpenTuiStatsDialog scrolling', () => {
   });
 
   it('returns to the top when the tab changes', () => {
-    render(
+    const { getByTestId } = render(
       <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={7} />,
     );
     send('pagedown');
     send('tab');
     expect(mocks.state.scroller.scrollTo).toHaveBeenCalledWith(0);
+    // The Activity tab body renders inside the scroll container too.
+    expect(getByTestId('scrollbox').textContent).toContain(
+      'Activity (this session)',
+    );
+    expect(getByTestId('scrollbox').textContent).toContain('Requests:');
   });
 
   it('keeps the embedded body unscrolled and ignores the arrow keys', () => {
