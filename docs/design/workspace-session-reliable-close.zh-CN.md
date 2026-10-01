@@ -32,7 +32,7 @@ binding 退休前必须确认：无活跃逻辑 Session、无未结算 execution
 
 ## 实现区域
 
-Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAPI 与生成的 WebShell 类型；Runtime Broker repository/service/provider 与 schema；Hosted Harness 准入和同目录测试。不新增 lifecycle orchestrator 或大范围核心重构。与 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 对齐生命周期契约，与 [#12740](https://github.com/QwenLM/qwen-code/issues/12740) 对齐 Harness 恢复。
+Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAPI 与生成的 WebShell 类型；Runtime Broker repository/service/provider 与 schema；Hosted Harness 准入和同目录测试。close 迁移使用 V27，接在上游工具结果投影的 V26 迁移之后。public 和 WebShell capability 同时保留上游 Artifact 读取与可选 close 支持。不新增 lifecycle orchestrator 或大范围核心重构。与 [#12867](https://github.com/QwenLM/qwen-code/issues/12867) 对齐生命周期契约，与 [#12740](https://github.com/QwenLM/qwen-code/issues/12740) 对齐 Harness 恢复。
 
 ## 验证与验收
 
@@ -40,4 +40,4 @@ Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAP
 
 只有准入已永久封闭，原 writer、Sessions、worker 和 holder 全部结算，close 才算完成；历史数据保留。没有未决产品问题。
 
-本地已通过 build/typecheck/bundle、定向 TS/Java 测试、真实 MySQL 准入与 claim 并发，以及注入测试主机身份的真实 POSIX worker 停机。既有 Hosted 文件与审批 E2E 通过。新增持久 close E2E 已编译，但仅支持 Linux，在 macOS 实际跳过；生产 host/boot/PID namespace 校验和完整物理恢复故障矩阵仍需在 Linux 执行。公开 Artifacts 当前尚未实现，因此保留断言覆盖已实现的历史、managed resources 和 Workspace 文件，不虚构 Artifact 端点。命令与详细结果记录在 `.qwen/e2e-tests/workspace-session-reliable-close.md`。
+本地已通过 build/typecheck/bundle、定向 TS/Java 测试、真实 MySQL 准入与 claim 并发，以及注入测试主机身份的真实 POSIX worker 停机。既有 Hosted 文件与审批 E2E 通过。持久 close E2E 在 macOS 本地实际跳过；后续 Linux CI 已通过包含生产 host/boot/PID namespace 校验的正常 close 验收。完整物理恢复故障矩阵仍未执行。上游 #13037 已实现公开 Artifact 读取，其 API 回归验证 writer seal 且 Session CLOSED 后仍能读取已提交内容；close 路径保留这些行和对象。这些读取回归补充原有 close 对历史、resources 和文件的保留断言。命令与详细结果记录在 `.qwen/e2e-tests/workspace-session-reliable-close.md`。

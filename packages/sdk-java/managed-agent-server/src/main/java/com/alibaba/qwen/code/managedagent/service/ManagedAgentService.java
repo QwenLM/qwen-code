@@ -86,7 +86,7 @@ public class ManagedAgentService {
     private ManagedActionStore actions;
     private RuntimeWarmer runtimeWarmer;
 
-    @Autowired
+    @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
     }
@@ -548,8 +548,7 @@ public class ManagedAgentService {
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        supportsClose(session)));
+                new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session), supportsClose(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

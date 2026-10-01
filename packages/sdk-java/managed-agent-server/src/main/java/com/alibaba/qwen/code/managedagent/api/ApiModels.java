@@ -84,10 +84,13 @@ public final class ApiModels {
         }
     }
 
-    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-            boolean sessionClose) {
+    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions, boolean sessionClose) {
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions) {
             this(tasks, artifacts, actions, false);
+        }
+
+        public WebShellSessionCapabilities(boolean tasks, boolean actions) {
+            this(tasks, false, actions, false);
         }
     }
 
