@@ -1,0 +1,1039 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { createHash } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  describeTransaction,
+  type StoredTransaction,
+} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+import { createInitialHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
+import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
+import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import {
+  managedSessionEventsDigest,
+  type ManagedSessionDurableRef,
+  type ManagedSessionEvent,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  verifyRecoverySession,
+  type RecoverySessionIO,
+  type RecoverySessionSource,
+} from './workspace-recovery-session.js';
+
+const SESSION = '6d629e8b-ceb2-4c98-9fa2-2b1a34777517';
+const KEY = {
+  tenantId: 'tenant',
+  workspaceId: 'private-workspace',
+  sessionId: SESSION,
+};
+const hash = (bytes: Buffer) =>
+  createHash('sha256').update(bytes).digest('hex');
+
+function fixture() {
+  const resources = new Map<string, Buffer>();
+  const refs = new Map<string, ManagedSessionDurableRef>();
+  const complete = new Set<string>();
+  const transactions: StoredTransaction[] = [];
+  const source: Omit<RecoverySessionSource, 'head'> & {
+    head: NonNullable<RecoverySessionSource['head']>;
+  } = {
+    sessionId: SESSION,
+    binding: {
+      tenantId: 'tenant',
+      workspaceId: 'public-workspace',
+      workspaceGeneration: '1',
+      storageId: 'storage',
+      cwdRelative: '.',
+      contextConfigRef: 'config',
+      contextRevision: '1',
+    },
+    configRef: 'config',
+    policyRef: 'policy',
+    approvalMode: 'default',
+    publicSession: {
+      version: 1,
+      status: 'READY',
+      lastSequence: 0,
+      harnessBootId: null,
+      harnessEventEpoch: 0,
+      harnessLastEventId: 0,
+      deletedAt: null,
+    },
+    creation: {
+      actorIdHex: '01',
+      idempotencyKey: 'created',
+      requestDigest: 'a'.repeat(64),
+      turnId: null,
+      createdAt: 1,
+    },
+    head: {
+      ...KEY,
+      state: 'SEALED',
+      storageVersion: 1,
+      writerId: 'writer',
+      writerGeneration: 1,
+      writerLeaseUntil: null,
+      journalRevision: 0,
+      committedSequence: 0,
+      lastCommitDigest: null,
+      activationEpoch: 0,
+      latestCheckpointResourceId: null,
+      compactedThroughRevision: 0,
+      recoveryStatus: 'READY',
+      recoveryDetailCode: null,
+    },
+  };
+  function resource(kind: string, value: unknown): ManagedSessionDurableRef {
+    const bytes = Buffer.from(JSON.stringify(value));
+    const ref = {
+      resourceId: `resource-${resources.size}`,
+      kind,
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    resources.set(ref.resourceId, bytes);
+    return ref;
+  }
+  function tx(records: unknown[]) {
+    const bytes = Buffer.from(
+      records.map((value) => JSON.stringify(value)).join('\n') + '\n',
+    );
+    const descriptor = describeTransaction(
+      records,
+      bytes,
+      source.head!.activationEpoch,
+      KEY,
+    );
+    const { refs: _refs, ...metadata } = descriptor;
+    const transaction: StoredTransaction = {
+      ...metadata,
+      journalRevision: transactions.length + 1,
+      recordBytesBase64: bytes.toString('base64'),
+      byteLength: bytes.length,
+      recordDigest: hash(bytes),
+    };
+    transactions.push(transaction);
+    source.head = {
+      ...source.head!,
+      journalRevision: transaction.journalRevision,
+      committedSequence: transaction.lastSequence,
+      lastCommitDigest: transaction.commitDigest,
+      activationEpoch: transaction.activationEpoch,
+      latestCheckpointResourceId:
+        transaction.latestCheckpointResourceId ??
+        source.head!.latestCheckpointResourceId,
+    };
+  }
+  function event(
+    kind: ManagedSessionEvent['kind'],
+    payload: Record<string, unknown>,
+  ): ManagedSessionEvent {
+    return {
+      v: 1,
+      sequence: source.head!.committedSequence + 1,
+      eventId: `event-${source.head!.committedSequence + 1}`,
+      sessionKey: KEY,
+      kind,
+      occurredAt: 1,
+      payload,
+      ...(kind === 'checkpoint.committed' || kind === 'model.attempt'
+        ? {
+            subject: {
+              type: 'activation',
+              scopeId: 'activation',
+              activationId: 'activation',
+              epoch: 1,
+            },
+          }
+        : {}),
+    } as ManagedSessionEvent;
+  }
+  function append(events: ManagedSessionEvent[]) {
+    const records = events.map((managedSession) => ({
+      subtype: 'managed_session_event_v1',
+      sessionId: SESSION,
+      managedSession,
+    }));
+    tx([
+      ...records,
+      {
+        subtype: 'managed_session_commit_v1',
+        sessionId: SESSION,
+        managedSession: {
+          transactionId: `tx-${transactions.length}`,
+          commandId: `command-${transactions.length}`,
+          operation: 'test',
+          contentDigest: 'a'.repeat(64),
+          firstSequence: events[0].sequence,
+          lastSequence: events.at(-1)!.sequence,
+          eventCount: events.length,
+          eventsDigest: managedSessionEventsDigest(events),
+          previousCommitDigest: source.head!.lastCommitDigest,
+        },
+      },
+    ]);
+  }
+  tx([
+    {
+      subtype: 'session_execution_engine',
+      sessionId: SESSION,
+      systemPayload: { version: 1, engine: 'managed' },
+    },
+    {
+      subtype: 'managed_session_header_v1',
+      sessionId: SESSION,
+      managedSession: {
+        formatVersion: 1,
+        minimumReader: 'managed-session/1',
+        sessionKey: KEY,
+        engine: 'managed',
+        definitionRef: resource('managed-definition', {
+          engine: 'managed',
+          sessionId: SESSION,
+          toolProfile: 'hosted-workspace-files/1',
+        }),
+        rootSnapshotRef: resource('managed-root', { cwd: '/original/cwd' }),
+        createdBy: 'hosted-harness',
+      },
+    },
+  ]);
+  const io: RecoverySessionIO = {
+    async *transactions() {
+      yield* transactions;
+    },
+    read: vi.fn(async (ref) => {
+      const bytes = resources.get(ref.resourceId);
+      if (!bytes) throw new Error('missing_resource');
+      return bytes;
+    }),
+    enqueue: async (ref) => {
+      const prior = refs.get(ref.resourceId);
+      if (prior && JSON.stringify(prior) !== JSON.stringify(ref))
+        throw new Error('reference_conflict');
+      refs.set(ref.resourceId, ref);
+    },
+    nextReference: async () =>
+      [...refs.values()].find((ref) => !complete.has(ref.resourceId)) ?? null,
+    completeReference: async (ref) => {
+      complete.add(ref.resourceId);
+    },
+    publicationReceipt: vi.fn(async () => {
+      throw new Error('unexpected_publication');
+    }),
+    publicationObject: vi.fn(async () => {
+      throw new Error('unexpected_object');
+    }),
+    verifyBackup: vi.fn(async () => {}),
+  };
+  const record = (subtype?: string, systemPayload?: unknown) => ({
+    uuid: 'record-id',
+    parentUuid: null,
+    sessionId: SESSION,
+    type: 'system',
+    timestamp: '2026-10-01T00:00:00.000Z',
+    cwd: '/original/cwd',
+    version: 'hosted-harness/1',
+    ...(subtype ? { subtype, systemPayload } : {}),
+  });
+  return {
+    source,
+    io,
+    resources,
+    transactions,
+    resource,
+    event,
+    append,
+    record,
+    complete,
+    refs,
+  };
+}
+
+async function shellFixture(
+  remote = false,
+  directStreams: 'none' | 'stdout' | 'both' = 'none',
+) {
+  const f = fixture();
+  const identity = {
+    tenantId: 'tenant',
+    sessionId: SESSION,
+    turnId: 'prompt',
+    executionCallId: 'execution',
+    callId: 'call',
+    invocationDigest: 'sha256:' + 'a'.repeat(64),
+    bindingGeneration: '1',
+    captureId: 'capture',
+    revision: 1,
+  };
+  const store = new ResourceToolResultSegmentStore({
+    read: f.io.read,
+    async publish(kind, bytes, resourceId = `capture-${f.resources.size}`) {
+      f.resources.set(resourceId, bytes);
+      return {
+        resourceId,
+        kind,
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+    },
+  });
+  const capture = new LocalShellResultCapture(
+    store,
+    {
+      publish: async (kind, bytes) => {
+        const resourceId = `capture-${f.resources.size}`;
+        f.resources.set(resourceId, bytes);
+        return {
+          resourceId,
+          kind,
+          schemaVersion: 1,
+          byteLength: bytes.length,
+          digest: hash(bytes),
+        };
+      },
+      read: f.io.read,
+    },
+    identity,
+  );
+  capture.setStarted(1);
+  const binary =
+    directStreams === 'none'
+      ? Buffer.from([0xff, 0, 0xa1, 0x41])
+      : Buffer.alloc(2 * 1024 * 1024 + 1, 0x91);
+  await capture.write('stdout', binary);
+  await capture.finish('stdout', true);
+  await capture.finish('stderr', true);
+  capture.setProcessResult({
+    rawOutput: binary,
+    output: 'preview',
+    exitCode: 0,
+    signal: null,
+    error: null,
+    aborted: false,
+    pid: 1,
+    executionMethod: 'child_process',
+  });
+  let envelope = await capture.finalize('success', [{ text: 'preview' }]);
+  let manifestRef = envelope.capture!.manifest!;
+  const originalManifest = parseToolResultManifestBytes(
+    f.resources.get(manifestRef.resourceId)!,
+  );
+  if (directStreams !== 'none') {
+    const contents = originalManifest.contents.map((stream) => {
+      if (stream.streamId !== 'stdout' && directStreams !== 'both')
+        return stream;
+      const bytes = stream.streamId === 'stdout' ? binary : Buffer.alloc(0);
+      const ref = {
+        resourceId: `body-${stream.streamId}`,
+        kind: 'managed-tool-result-content',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      f.resources.set(ref.resourceId, bytes);
+      return { ...stream, body: { ref } };
+    });
+    manifestRef = f.resource('managed-tool-result-manifest', {
+      ...originalManifest,
+      contents,
+    });
+    envelope = {
+      ...envelope,
+      capture: { ...envelope.capture!, manifest: manifestRef },
+    };
+  }
+  const argsRef = f.resource('managed-tool-input', {
+    toolName: 'run_shell_command',
+    input: { command: 'command' },
+  });
+  f.append([
+    f.event('input.accepted', {
+      inputId: 'prompt',
+      turnId: 'prompt',
+      source: 'hosted-harness',
+      contentRef: f.resource('managed-input', 'prompt'),
+      admissionRef: f.resource('managed-admission', { promptId: 'prompt' }),
+      deadline: null,
+    }),
+  ]);
+  const initial = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'initial',
+    coveredSequence: 1,
+    activationId: 'activation',
+    turnId: null,
+    promptId: null,
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: null,
+  });
+  const checkpointRef = f.resource('managed-checkpoint', initial);
+  f.append([
+    f.event('checkpoint.committed', {
+      checkpointId: 'initial',
+      coveredSequence: 1,
+      previousCheckpointId: null,
+      stateRef: checkpointRef,
+      boundary: null,
+    }),
+  ]);
+  const history = {
+    messageId: 'shell-history',
+    timestamp: '2026-10-01T00:00:00.000Z',
+    model: 'model',
+    parts: [{ text: 'preview' }],
+  };
+  const outcomeRef = f.resource(
+    'managed-tool-outcome',
+    remote
+      ? {
+          schemaVersion: 1,
+          decision: 'committed',
+          envelope,
+          manifestRef,
+          history,
+        }
+      : { version: 1, decision: 'committed', envelope, identity },
+  );
+  f.append([
+    f.event('tool.receipt', {
+      executionCallId: 'execution',
+      toolOutcomeRef: outcomeRef,
+      resultRef: manifestRef,
+      resources: [manifestRef],
+      historyRevision: 3,
+    }),
+  ]);
+  const terminalRef = f.resource('managed-tool-terminal', envelope);
+  const binding = {
+    publication: 'managed-tool-publication/1',
+    publicationId: 'publication',
+    sessionKey: KEY,
+    turnId: 'prompt',
+    executionCallId: 'execution',
+    modelCallId: 'model-call',
+    runtimeBindingId: 'runtime-binding',
+    reference: {
+      sessionId: 'runtime',
+      promptId: 'runtime',
+      callId: 'call',
+      argsDigest: identity.invocationDigest,
+    },
+    bindingGeneration: '1',
+    captureId: 'capture',
+    revision: 1,
+    captureScope: 'process_pipes',
+    capturePolicy: 'complete_required',
+    argsRef,
+    requestDigest: 'sha256:' + 'b'.repeat(64),
+    writerId: 'writer',
+    writerGeneration: 1,
+    activationId: 'activation',
+    activationEpoch: 1,
+    intentSequence: 1,
+    checkpointRef,
+  };
+  const seals = ['stdout', 'stderr']
+    .filter(
+      (streamId) =>
+        directStreams !== 'both' &&
+        !(directStreams === 'stdout' && streamId === 'stdout'),
+    )
+    .map((streamId) => ({
+      streamId,
+      segmentCount: streamId === 'stdout' ? 1 : 0,
+      byteLength: streamId === 'stdout' ? binary.length : 0,
+      digest: hash(streamId === 'stdout' ? binary : Buffer.alloc(0)),
+    }));
+  if (remote) {
+    vi.mocked(f.io.publicationReceipt).mockResolvedValue({
+      publicationId: 'publication',
+      binding,
+      terminalRef,
+      outcomeRef,
+      manifestRef,
+      receiptSequence: 3,
+      receiptRevision: 4,
+      seals,
+    });
+    vi.mocked(f.io.publicationObject).mockImplementation(
+      async ({ slotKey }) => ({
+        slotKey,
+        resourceId: null,
+        kind: null,
+        byteLength: binary.length,
+        digest: hash(binary),
+        bytesBase64: binary.toString('base64'),
+      }),
+    );
+  }
+  const state = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'final',
+    coveredSequence: 3,
+    activationId: 'activation',
+    turnId: 'prompt',
+    promptId: 'prompt',
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: 'initial',
+  });
+  const settled = f.event('turn.settled', {
+    turnId: 'prompt',
+    outcome: 'completed',
+    stopReason: null,
+    resultRef: f.resource(
+      'managed-turn-result',
+      f.record('turn_result', { promptId: 'prompt', state: 'completed' }),
+    ),
+    usageRef: null,
+    pendingOwnersRef: null,
+  });
+  const checkpoint = {
+    ...f.event('checkpoint.committed', {
+      checkpointId: 'final',
+      coveredSequence: 3,
+      previousCheckpointId: 'initial',
+      stateRef: f.resource('managed-checkpoint', state),
+      boundary: 'turn_complete',
+    }),
+    sequence: 5,
+    eventId: 'final-checkpoint',
+  };
+  f.append([settled, checkpoint]);
+  const localSegmentId = hash(
+    Buffer.from(JSON.stringify(['capture', 'stdout', 0])),
+  );
+  const emptySealId = hash(
+    Buffer.from(JSON.stringify(['capture', 'stderr', 'seal'])),
+  );
+  await store.close();
+  return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
+}
+
+describe('verifyRecoverySession', () => {
+  it('distinguishes an absent head from a writer-created head without genesis', async () => {
+    const f = fixture();
+    f.transactions.length = 0;
+    f.source.head = {
+      ...f.source.head,
+      state: 'ACTIVE',
+      writerLeaseUntil: 1,
+      journalRevision: 0,
+      committedSequence: 0,
+      lastCommitDigest: null,
+    };
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unsupported private journal head',
+    );
+    await expect(
+      verifyRecoverySession({ ...f.source, head: null }, f.io),
+    ).resolves.toEqual({ fileHistory: 'not_captured' });
+    expect(f.io.read).not.toHaveBeenCalled();
+  });
+
+  it('does not mistake a business resourceId argument for a durable reference', async () => {
+    const f = fixture();
+    f.append([
+      f.event('message.committed', {
+        messageId: 'record-id',
+        role: 'system',
+        parentMessageId: null,
+        contentRef: f.resource(
+          'managed-message',
+          f.record('slash_command', { resourceId: 'business-id' }),
+        ),
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.refs.has('business-id')).toBe(false);
+  });
+
+  it('refuses an unexplained referenced resource protocol', async () => {
+    const f = fixture();
+    const unknown = f.resource('managed-unknown-protocol', {});
+    f.append([
+      f.event('message.committed', {
+        messageId: 'record-id',
+        role: 'system',
+        parentMessageId: null,
+        contentRef: f.resource(
+          'managed-message',
+          f.record('slash_command', { unknown }),
+        ),
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unsupported resource protocol',
+    );
+  });
+
+  it('streams transactions while verifying their resource closure before advancing', async () => {
+    const f = fixture();
+    let previousRecordRef: ManagedSessionDurableRef | null = null;
+    for (let index = 0; index < 150; index++) {
+      const recordRef = f.resource('managed-session_metadata', {
+        operationId: `title-${index}`,
+        revision: index + 1,
+        previousRecordRef,
+        title: `title-${index}`,
+      });
+      f.append([
+        f.event('domain.committed', {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: `title-${index}`,
+          recordRef,
+        }),
+      ]);
+      previousRecordRef = recordRef;
+    }
+    f.io.transactions = async function* () {
+      for (const tx of f.transactions) {
+        yield tx;
+        expect(f.io.read).toHaveBeenCalled();
+        if (tx.journalRevision > 1) {
+          const first = JSON.parse(
+            Buffer.from(tx.recordBytesBase64, 'base64')
+              .toString()
+              .split('\n')[0],
+          ) as {
+            managedSession: {
+              payload: { recordRef: ManagedSessionDurableRef };
+            };
+          };
+          expect(f.io.read).toHaveBeenCalledWith(
+            first.managedSession.payload.recordRef,
+          );
+        }
+      }
+    };
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+  });
+  it('verifies local binary output and the original empty stderr seal', async () => {
+    const f = await shellFixture();
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.read).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: f.emptySealId }),
+    );
+    const missing = await shellFixture();
+    missing.resources.delete(missing.emptySealId);
+    await expect(
+      verifyRecoverySession(missing.source, missing.io),
+    ).rejects.toThrow('missing_resource');
+  });
+
+  it('refuses corrupt local output bytes beyond the preview', async () => {
+    const f = await shellFixture();
+    f.resources.set(f.localSegmentId, Buffer.from([0xff, 0, 0xa1, 0x42]));
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'resource bytes conflict',
+    );
+  });
+
+  it('verifies remote original publication bytes and requires both original seals', async () => {
+    const f = await shellFixture(true);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.publicationObject).toHaveBeenCalledWith({
+      sessionId: SESSION,
+      publicationId: 'publication',
+      slotKey: 'segment:stdout:0',
+    });
+    const missing = await shellFixture(true);
+    const receipt = await missing.io.publicationReceipt({
+      sessionId: SESSION,
+      executionCallId: 'execution',
+      sequence: 3,
+      outcomeRef: missing.manifestRef,
+      manifestRef: missing.manifestRef,
+    });
+    vi.mocked(missing.io.publicationReceipt).mockResolvedValue({
+      ...receipt,
+      seals: receipt.seals.slice(0, 1),
+    });
+    await expect(
+      verifyRecoverySession(missing.source, missing.io),
+    ).rejects.toThrow('seal ownership conflicts');
+  });
+
+  it('accepts original O2 body.ref content above 2 MiB without SQL seals', async () => {
+    const f = await shellFixture(true, 'both');
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceId: 'body-stdout',
+        byteLength: 2 * 1024 * 1024 + 1,
+      }),
+    );
+    expect(f.io.read).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'body-stderr', byteLength: 0 }),
+    );
+    expect(f.io.publicationObject).not.toHaveBeenCalled();
+  });
+
+  it('refuses corrupted original O2 body.ref bytes', async () => {
+    const f = await shellFixture(true, 'both');
+    const bytes = Buffer.from(f.binary);
+    bytes[bytes.length - 1] ^= 1;
+    f.resources.set('body-stdout', bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'resource bytes conflict',
+    );
+  });
+
+  it('requires the empty paged stderr seal when stdout uses body.ref', async () => {
+    const f = await shellFixture(true, 'stdout');
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    const missing = await shellFixture(true, 'stdout');
+    const receipt = await missing.io.publicationReceipt({
+      sessionId: SESSION,
+      executionCallId: 'execution',
+      sequence: 3,
+      outcomeRef: missing.manifestRef,
+      manifestRef: missing.manifestRef,
+    });
+    vi.mocked(missing.io.publicationReceipt).mockResolvedValue({
+      ...receipt,
+      seals: [],
+    });
+    await expect(
+      verifyRecoverySession(missing.source, missing.io),
+    ).rejects.toThrow('seal ownership conflicts');
+  });
+
+  it('refuses unexplained seals for direct content and conflicting paged seals', async () => {
+    const direct = await shellFixture(true, 'both');
+    const receipt = await direct.io.publicationReceipt({
+      sessionId: SESSION,
+      executionCallId: 'execution',
+      sequence: 3,
+      outcomeRef: direct.manifestRef,
+      manifestRef: direct.manifestRef,
+    });
+    vi.mocked(direct.io.publicationReceipt).mockResolvedValue({
+      ...receipt,
+      seals: [
+        {
+          streamId: 'stdout',
+          segmentCount: 0,
+          byteLength: direct.binary.length,
+          digest: hash(direct.binary),
+        },
+      ],
+    });
+    await expect(
+      verifyRecoverySession(direct.source, direct.io),
+    ).rejects.toThrow('seal ownership conflicts');
+    const paged = await shellFixture(true, 'stdout');
+    const saved = await paged.io.publicationReceipt({
+      sessionId: SESSION,
+      executionCallId: 'execution',
+      sequence: 3,
+      outcomeRef: paged.manifestRef,
+      manifestRef: paged.manifestRef,
+    });
+    vi.mocked(paged.io.publicationReceipt).mockResolvedValue({
+      ...saved,
+      seals: saved.seals.map((seal) => ({ ...seal, digest: 'a'.repeat(64) })),
+    });
+    await expect(verifyRecoverySession(paged.source, paged.io)).rejects.toThrow(
+      'original Shell seal conflicts',
+    );
+  });
+
+  it('refuses a remote receipt at a different original journal revision', async () => {
+    const f = await shellFixture(true);
+    const receipt = await f.io.publicationReceipt({
+      sessionId: SESSION,
+      executionCallId: 'execution',
+      sequence: 3,
+      outcomeRef: f.manifestRef,
+      manifestRef: f.manifestRef,
+    });
+    vi.mocked(f.io.publicationReceipt).mockResolvedValue({
+      ...receipt,
+      receiptRevision: 5,
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'original publication receipt conflicts',
+    );
+  });
+  it('uses the actual private workspace key and verifies an initial journal', async () => {
+    const f = fixture();
+    expect(await verifyRecoverySession(f.source, f.io)).toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.complete.size).toBe(f.refs.size);
+    expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+  });
+
+  it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {
+    const f = fixture();
+    f.transactions[0] = {
+      ...f.transactions[0],
+      recordBytesBase64: Buffer.from('changed\n').toString('base64'),
+    };
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'transaction bytes conflict',
+    );
+  });
+
+  it('rejects a skipped journal revision and a truncated fixed cut', async () => {
+    const f = fixture();
+    f.transactions[0] = { ...f.transactions[0], journalRevision: 2 };
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'journal revisions',
+    );
+    f.transactions[0] = { ...f.transactions[0], journalRevision: 1 };
+    f.source.head = { ...f.source.head!, journalRevision: 2 };
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'pinned private head',
+    );
+  });
+
+  it('rejects a resource digest mismatch and conflicting same-ID metadata', async () => {
+    const f = fixture();
+    f.resources.set('resource-0', Buffer.from('{}'));
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'resource bytes conflict',
+    );
+    const other = fixture();
+    await other.io.enqueue({
+      resourceId: 'resource-0',
+      kind: 'managed-root',
+      schemaVersion: 1,
+      byteLength: 2,
+      digest: 'a'.repeat(64),
+    });
+    await expect(verifyRecoverySession(other.source, other.io)).rejects.toThrow(
+      'reference_conflict',
+    );
+  });
+
+  it('refuses a runnable before_model checkpoint with an unresolved accepted input', async () => {
+    const f = fixture();
+    const inputRef = f.resource('managed-input', 'prompt');
+    f.append([
+      f.event('input.accepted', {
+        inputId: 'turn',
+        turnId: 'turn',
+        source: 'hosted-harness',
+        contentRef: inputRef,
+        admissionRef: f.resource('managed-admission', { promptId: 'turn' }),
+        deadline: null,
+      }),
+    ]);
+    const state = createInitialHarnessCheckpoint({
+      sessionKey: KEY,
+      checkpointId: 'checkpoint',
+      coveredSequence: 1,
+      activationId: 'activation',
+      turnId: null,
+      promptId: null,
+      definitionRevision: 'definition',
+      configRevision: 'config',
+      inputDigest: 'a'.repeat(64),
+      previousCheckpointId: null,
+    });
+    f.append([
+      f.event('checkpoint.committed', {
+        checkpointId: 'checkpoint',
+        coveredSequence: 1,
+        previousCheckpointId: null,
+        stateRef: f.resource('managed-checkpoint', state),
+        boundary: null,
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unfinished Harness work',
+    );
+  });
+
+  it('accepts an initial before_model checkpoint without pending work', async () => {
+    const f = fixture();
+    f.append([
+      f.event('domain.committed', {
+        domain: 'session_metadata',
+        version: 1,
+        operationId: 'title',
+        recordRef: f.resource('managed-session_metadata', {
+          operationId: 'title',
+          revision: 1,
+          previousRecordRef: null,
+          title: 'title',
+        }),
+      }),
+    ]);
+    const state = createInitialHarnessCheckpoint({
+      sessionKey: KEY,
+      checkpointId: 'checkpoint',
+      coveredSequence: 1,
+      activationId: 'activation',
+      turnId: null,
+      promptId: null,
+      definitionRevision: 'definition',
+      configRevision: 'config',
+      inputDigest: 'a'.repeat(64),
+      previousCheckpointId: null,
+    });
+    f.append([
+      f.event('checkpoint.committed', {
+        checkpointId: 'checkpoint',
+        coveredSequence: 1,
+        previousCheckpointId: null,
+        stateRef: f.resource('managed-checkpoint', state),
+        boundary: null,
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+  });
+
+  it('verifies every retained backup and preserves original-absence nulls', async () => {
+    const f = fixture();
+    const snapshots = [
+      {
+        promptId: 'prompt',
+        timestamp: '2026-10-01T00:00:00.000Z',
+        trackedFileBackups: {
+          'existing.txt': {
+            backupFileName: 'backup',
+            version: 1,
+            backupTime: '2026-10-01T00:00:00.000Z',
+          },
+          'new.txt': {
+            backupFileName: null,
+            version: 0,
+            backupTime: '2026-10-01T00:00:00.000Z',
+          },
+        },
+      },
+    ];
+    const ref = f.resource('managed-file_history', {
+      operationId: 'history',
+      revision: 1,
+      previousRecordRef: null,
+      record: f.record('file_history_snapshot', { snapshots }),
+    });
+    f.append([
+      f.event('domain.committed', {
+        domain: 'file_history',
+        version: 1,
+        operationId: 'history',
+        recordRef: ref,
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'captured',
+    });
+    expect(f.io.verifyBackup).toHaveBeenCalledWith({
+      ownerSessionId: SESSION,
+      filePath: 'existing.txt',
+      backupFileName: 'backup',
+      version: 1,
+      backupTime: '2026-10-01T00:00:00.000Z',
+    });
+    expect(
+      vi
+        .mocked(f.io.verifyBackup)
+        .mock.calls.every(([request]) => request.backupFileName !== null),
+    ).toBe(true);
+    vi.mocked(f.io.verifyBackup).mockRejectedValue(new Error('missing_backup'));
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'missing_backup',
+    );
+  });
+
+  it('rejects unsupported committed domains and broken domain predecessors', async () => {
+    const f = fixture();
+    f.append([
+      f.event('domain.committed', {
+        domain: 'mcp_configuration',
+        version: 1,
+        operationId: 'mcp',
+        recordRef: f.resource('managed-mcp_configuration', {}),
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unsupported committed domain',
+    );
+    const other = fixture();
+    other.append([
+      other.event('domain.committed', {
+        domain: 'session_metadata',
+        version: 1,
+        operationId: 'title',
+        recordRef: other.resource('managed-session_metadata', {
+          operationId: 'title',
+          revision: 2,
+          previousRecordRef: null,
+          title: 'title',
+        }),
+      }),
+    ]);
+    await expect(verifyRecoverySession(other.source, other.io)).rejects.toThrow(
+      'missing domain predecessor',
+    );
+  });
+
+  it('rejects a pending Hosted history undo and a foreign reader record', async () => {
+    const f = fixture();
+    f.append([
+      f.event('domain.committed', {
+        domain: 'file_history',
+        version: 1,
+        operationId: 'history',
+        recordRef: f.resource('managed-file_history', {
+          operationId: 'history',
+          revision: 1,
+          previousRecordRef: null,
+          schemaVersion: 1,
+          state: { ownerSessionId: SESSION, snapshots: [], files: {} },
+          pendingTurn: null,
+          pendingUndo: { requestId: 'undo', promptId: 'prompt' },
+          record: f.record('file_history_snapshot', { snapshots: [] }),
+        }),
+      }),
+    ]);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unfinished Harness work',
+    );
+    const other = fixture();
+    other.append([
+      other.event('message.committed', {
+        messageId: 'record-id',
+        role: 'system',
+        parentMessageId: null,
+        contentRef: other.resource('managed-message', {
+          ...other.record('slash_command', {}),
+          sessionId: 'wrong',
+        }),
+      }),
+    ]);
+    await expect(verifyRecoverySession(other.source, other.io)).rejects.toThrow(
+      'invalid reader-facing record',
+    );
+  });
+});

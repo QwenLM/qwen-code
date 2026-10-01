@@ -1,0 +1,242 @@
+# W1b: Offline Workspace Recovery Bundles
+
+[English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
+
+Status: implementation in progress. Based on main `937ed13a1` and the original
+file-history dependency [#13110](https://github.com/QwenLM/qwen-code/pull/13110)
+at `fee8f8763`. Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
+Completes the W1b slice of the [W1 recovery design](2026-09-29-managed-workspace-w1-recovery.md),
+without implementing W1c placement promotion.
+
+## 1. Problem and scope
+
+W1a verifies surviving storage identity and private Session history. It does not
+prove that a backup contains the complete shared Workspace, worker file-history
+backups, authoritative journal and private resources at one recovery point.
+Public transcripts, a directory name, a released holder and a list of object
+names do not provide that proof.
+
+Implement one private offline maintenance workflow for trusted single-host
+Linux deployments. It covers every bound Session sharing tenant/storage,
+including retained archived, closed and deleted rows; Hosted files and Shell
+profiles; accepted O2 results; and the actual backup bytes used by #13110.
+Unsupported profiles or unexplained references prevent a compatible recovery
+point for the entire storage. Unbound Sessions remain untouched.
+
+The first provider is `local-workspace-bundle/1`: an operator prepares a copy of
+the Workspace and retained worker backup directories outside all active roots.
+Maintenance compares that copy with the stopped sources, exports private
+authority resources, and seals a versioned manifest. The durable SQL receipt's
+manifest digest is the trust anchor. Neither chmod nor a bundle's self-reported
+hash proves immutable contents. Every later read verifies the pinned bytes.
+
+W1b does not overwrite active files, acquire a Session writer, replay effects,
+rewrite history, change a ContextBinding, provision a Runtime or lift a fence.
+SQL/VM rollback, hostile same-UID writers, online snapshots, cross-host
+placement, host images and W1c activation are outside this acceptance.
+
+## 2. Maintenance boundary and fixed cut
+
+Before capture, operators close Session creation, input admission and background
+dispatch; settle or cancel all admitted work; stop Harness, Session Store
+writers, workers and external filesystem writers; prevent their restart; and
+release or expire writer leases. Only after exact storage holders are cleared
+may they establish W1a's fence. Keep these processes stopped throughout capture.
+The maintenance entry requires explicit offline confirmation and checks the
+observable conditions. A fence or expired lease alone never certifies stopped
+processes: current creation and model-only journal paths do not read that fence.
+
+Use distinct recovery and fence operation UUIDs. Pin the fence operation and
+expected mount revision in the recovery request. A repeated recovery UUID with
+different request bytes conflicts. A completed request replays its original
+receipt; checking current compatibility uses a fresh verification operation.
+
+Enumerate original `workspace_storage_id` membership with stable Session ID
+pagination, not the public ACL/status/updated-at list. Save each original
+creation receipt and request digest, exact seven-field ContextBinding, frozen
+configuration references, public Session version/event watermark/admitted-work
+state, and the real private Session Store key. Its workspace ID must not be
+replaced with the product Workspace ID. Pin the private writer identity/state,
+journal revision, committed sequence, last commit digest, activation epoch,
+checkpoint, compaction and recovery state. Missing heads are uninitialized,
+not permission to create history. Active work, pending lifecycle operations,
+live writer leases, unsupported compaction and blocked recovery refuse capture.
+
+Recheck a Session before each derived commit and recheck the complete membership
+and source digest before sealing or recording compatibility. New Sessions,
+model-only commits, changed bindings, renewed writers and new admitted work
+invalidate the old cut. No retry silently advances its watermarks.
+
+## 3. Persistent workflow and private entry
+
+Three additive tables hold recovery operations, pinned Session sources, and
+asset/reference work. They are derived metadata; original creation receipts,
+journals, resource rows and resource-ref rows are never modified. The next
+unused Flyway migration introduces them without repairing old history.
+
+Operation phases are `CAPTURING`, `SEALED`, `VERIFYING`, `VERIFIED` and
+`INVALIDATED`. I/O interruption retains the phase and progress. Source drift
+invalidates the operation. Operators investigate and start a new recovery UUID
+under the still-owned fence; no operation takes over another fence.
+
+The Java private main supports `capture`, `verify` and `inspect` with an
+operator-owned JSON request and `--offline-confirmed` for mutations. Requests
+identify tenant/storage, recovery UUID, fence UUID, expected mount revision,
+canonical source/bundle roots, the original worker file-history root, the Node
+executable and matching packaged CLI entrypoint. Verification additionally
+names the sealed capture operation. JDBC credentials and optional O2 object
+storage credentials are environment-only. There is no HTTP maintenance route.
+
+Java owns JDBC, scope checks, source snapshots, pagination, conflict checks and
+conditional completion. A matching packaged CLI child runs the read-only
+TypeScript filesystem/protocol validator. They exchange one correlated JSON
+request/response at a time over pipes; record/object bounds follow the existing
+protocol limits. Child failure or an unexpected response cannot seal an
+operation. No public writer token or production Harness is created.
+
+The packaged maintenance artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`.
+Run `java -jar <artifact> capture <request.json> --offline-confirmed`,
+`java -jar <artifact> verify <request.json> --offline-confirmed`, or
+`java -jar <artifact> inspect <request.json>`. Deploy the schema through the normal
+upgrade first; the maintenance executable does not run migrations or boot the
+Broker. Configure `W1_JDBC_URL`, `W1_JDBC_USER`, and `W1_JDBC_PASSWORD`. Optional
+external O2 reads use `W1_OSS_ENDPOINT`, `W1_OSS_REGION`, `W1_OSS_BUCKET` and the
+existing OSS environment credential provider. Credentials are removed from the
+Node child's environment. No public model service is required.
+
+A capture request has `version: 1`, `operationId`, `tenantId`, `storageId`,
+`fenceOperationId`, `mountRevision`, `sourceRoot`, `bundleRoot`, `fileHistoryRoot`,
+`nodeExecutable`, and `cliEntry`. Paths are absolute; the roots must be canonical
+and separate. `cliEntry` points to the matching packaged `dist/cli.js`.
+Verification uses a fresh `operationId` and adds `captureOperationId`, retaining
+the original scope, fence, revision and roots. Inspect needs only version,
+operation/tenant/storage IDs and optionally `afterSessionId`. It reports pinned
+Session sources in pages of 32 with `nextSessionId`, queue/completion counts,
+registration, stable `lastErrorCode` and the original receipt. It acquires no
+writer. Original absence or `not_captured` history does not require an unused
+worker backup directory to exist; a referenced missing backup always fails.
+
+Implementation consumers are the private Java main/store/reader and the matching
+CLI worker, local provider and Session validator. The only shared production
+changes are pure Session Store parser exports and a typed read-only W1a guard
+query. Existing HTTP Session readers, writers, Hosted turn routes and Runtime
+worker dispatch remain on their established paths. The additive V26 work queue
+indexes support asset-key paging and Session/state reference selection.
+
+Session pages and reference queues are persisted and bounded. Read one journal
+transaction or resource at a time; use protocol parsers and digest-chain checks
+without accumulating a whole Session log. File bytes are hashed in 1 MiB chunks.
+Temporary files are exclusively created, synced and atomically published before
+their derived progress commits. Retry reuses matching bytes; conflicting
+existing bytes are refused. Filesystem paths and opaque object keys never
+become unchecked output paths.
+
+## 4. Bundle format and complete closure
+
+The operator-prepared bundle contains `workspace/` and, where retained,
+`file-history/<Session ID>/`. Maintenance adds `authority/objects/<SHA-256>` blobs and the reserved
+`.w1-recovery/` directory with `manifest.json`, `sessions.ndjson` and
+`assets.ndjson`. Indexes are newline-delimited, versioned and streamed in stable
+order. The top-level manifest records provider/version, tenant/storage,
+registration, original mount revision/fence/capture IDs, fixed-cut digest,
+index counts/digests and the explicit non-activation conclusion. SQL stores
+the final manifest digest and original completion receipt.
+
+Capture compares the entire candidate Workspace tree against the stopped
+registered source. It records normalized relative names, entry types, basic
+POSIX modes, byte lengths and content digests. Regular files and directories
+are supported. Relative symlinks must resolve completely inside their own
+root; enumeration never traverses symlink directories. Absolute, escaping,
+cyclic or dangling links, hard-linked regular files and special files refuse.
+No ACL/xattr or full host-image recovery is claimed. Candidate-only or missing
+entries refuse; provider metadata and private blobs are also checked for
+undeclared files. Source and candidate roots cannot alias or overlap.
+
+Private exports preserve exact journal transaction bytes and source digests.
+Validate genesis identity, revision/sequence continuity, commit markers and
+the final pinned head. Traverse header references, typed event references,
+checkpoint groups and historical domain predecessor chains. Reuse existing
+record/checkpoint/message/file-history/tool-result parsers. Check owner, kind,
+schema, length and digest; resource-ID metadata conflicts and unknown domains
+refuse. Persistent queues and deduplication keep closure memory bounded and
+prevent cyclic resource chains from looping.
+
+For Shell, verify the original accepted publication/receipt, its ownership and
+journal position, result manifest, pages, content/segments and seals, including
+full-stream lengths/digests and empty streams. Export exact O2 object bytes;
+do not substitute a new publication or validate object existence alone. This
+maintenance reader must not renew publication/writer tokens or quarantine
+production authority. An incomplete/unknown result is not a settled cut.
+
+Require a settled initial/finished-turn cut, rather than merely a runnable
+checkpoint. Awaited approvals, Runtime work, model continuation, pending file
+history/undo and unresolved accepted input refuse compatible capture. Validate
+reader-facing messages without rewriting their content or cwd strings.
+
+## 5. File-history evidence
+
+Use #13110's saved history records and owner/path validators. Follow all retained
+records and their predecessors, not only the latest snapshot. Resolve backups
+in the explicitly supplied original worker history volume under the owning
+Harness Session ID, and compare those bytes with the operator's copied volume.
+Missing/corrupt referenced backups, failed capture records, ownership conflicts
+or pending history/undo refuse; never substitute current Workspace content.
+
+A recorded null backup filename is original absence. A missing non-null backup
+is corruption. No history domain means `not_captured`, not invented undo
+availability. Existing historical backup metadata has no original content
+digest: W1b establishes a retained-byte digest at this capture and guarantees
+consistency from that point, not proof that the preimage was never corrupted
+before capture. Preserve original history/undo conflict semantics.
+
+## 6. Conclusions, compatibility and rollout
+
+Keep `contentVerified`, `authorityCompatible` and `activation` separate.
+`VERIFIED` identifies a checked bundle; `activation` is always false.
+Compatibility requires exact current storage membership, bindings, admitted
+states and journal watermarks, plus a valid matching maintenance boundary.
+Any incompatible Session prevents compatibility for the whole shared storage.
+A lost source root still permits pinned bundle content verification; it does
+not authorize registration repair, mapping promotion or lifting a fence.
+An old receipt is not current authorization. A future W1c consumer must recheck
+the cut and expected mount revision immediately before its own transition.
+
+Transient I/O failures retain progress for same-ID retry. Digest/scope conflicts
+are reported without overwriting artifacts; source drift is invalidated. Keep
+private stable diagnostics and exclude credentials from output. Inspect is
+read-only. Normal W1a cold loading does not scan backup trees on every Turn.
+
+Deploy the matching Java/CLI bundle and additive schema offline. Old binaries
+ignore the new metadata/fence assumptions; they must remain stopped. Target
+main in one Draft PR, with #13110 explicitly identified until merged and fully
+integrated. Do not mark ready before real Linux/MySQL acceptance.
+
+## 7. Validation and acceptance
+
+Write the working plan in `.qwen/e2e-tests/managed-workspace-w1b-bundle.md`.
+Dry-run global `qwen` first and report the absent private entry honestly; use a
+maintenance-process test-script fallback rather than a fake model success.
+
+- Capture two Workspaces and multiple files/Shell Sessions sharing storage,
+  including archived rows, O2 output and a distinct history volume.
+- Interrupt at every batch, blob publication, SQL progress and final receipt
+  boundary. Same-ID retry produces identical indexes/digests and no authority
+  mutation or duplicate references.
+- Inject late creation, model-only commits, writer renewal, binding changes
+  and accepted input. Refuse the old cut and preserve the fence/active tree.
+- Remove/corrupt checkpoints, messages, domain predecessors, backup bytes,
+  O2 pages/segments/seals and manifests. Missing empty-stream seals refuse.
+- Cover root overlap, escaping/looping links, special files, undeclared entries,
+  cross-Session references, prototype-named files and snapshot source mismatch.
+- Distinguish original absence, uncaptured history, missing backups, pending
+  undo and partial restoration. Source loss permits content-only verification;
+  later authoritative work refuses compatibility.
+- Exercise paginated large membership and streamed large file/output data,
+  plus W1a original-receipt and cold-load regressions.
+
+Build, typecheck, bundle, focused package tests and Java Checkstyle are required.
+Use packaged Harness/worker, Java Broker and MySQL 8 on Linux for physical and
+persistence gates. H2/macOS results are separate evidence, not Linux acceptance.
+Complete two consecutive clean self-audit passes and independent review; attach
+the measured E2E report to the single PR. There are no open provider/scope
+choices; remaining acceptance evidence is recorded as pending until measured.

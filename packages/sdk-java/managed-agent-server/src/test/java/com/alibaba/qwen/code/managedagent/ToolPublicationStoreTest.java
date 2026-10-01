@@ -543,11 +543,21 @@ class ToolPublicationStoreTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"intact", "partial", "missing-page", "corrupt-page", "missing-segment",
+    @ValueSource(strings = {"intact", "large-segment", "large-content", "partial", "missing-page", "corrupt-page", "missing-segment",
             "corrupt-segment", "missing-empty-seal"})
     void publishesImmutableSegmentAndResourceUnderOriginalAuthorization(String damage) {
         boolean partial = "partial".equals(damage);
-        reserve();
+        boolean contentBody = "large-content".equals(damage);
+        boolean large = "large-segment".equals(damage) || contentBody;
+        String segmentText = contentBody ? "abc".repeat(700_000) : large ? "abc".repeat(1024 * 1024) : "abc";
+        int segmentLength = segmentText.length();
+        if (large) {
+            store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
+                    new ToolPublicationStore.Capacity(16 * 1024 * 1024, 64 * 1024 * 1024, 64 * 1024 * 1024, 10));
+            store.apply(request("reserve").put("captureBytes", segmentLength), WRITER_TOKEN, PUBLICATION_TOKEN);
+        } else {
+            reserve();
+        }
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
@@ -567,37 +577,41 @@ class ToolPublicationStoreTest {
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
-        byte[] segment = "abc".getBytes(StandardCharsets.UTF_8);
+        byte[] segment = segmentText.getBytes(StandardCharsets.UTF_8);
         JsonNode first = data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-1", "stdout", 0, segment, digest("abc"));
+                "operation-1", "stdout", 0, segment, digest(segmentText));
         segment[0] = 'x';
         assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-1", "stdout", 0, "abc".getBytes(StandardCharsets.UTF_8), digest("abc")))
+                "operation-1", "stdout", 0, segmentText.getBytes(StandardCharsets.UTF_8), digest(segmentText)))
                 .isEqualTo(first);
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "operation-1")
                 .path("receipt")).isEqualTo(first);
         assertThat(objects.values()).singleElement().satisfies(bytes ->
-                assertThat(bytes).isEqualTo("abc".getBytes(StandardCharsets.UTF_8)));
+                assertThat(bytes).isEqualTo(segmentText.getBytes(StandardCharsets.UTF_8)));
         assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix", "stdout")
-                .path("byteLength").asLong()).isEqualTo(3);
-        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", 1,
-                3, digest("abc")).path("segmentCount").asInt()).isEqualTo(1);
+                .path("byteLength").asLong()).isEqualTo(segmentLength);
+        if (!contentBody) {
+            assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", 1,
+                    segmentLength, digest(segmentText)).path("segmentCount").asInt()).isEqualTo(1);
+        }
         if (!partial) {
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
                     0, digest(""));
         }
         assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix-2", "stdout")
-                .path("sealed").asBoolean()).isTrue();
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "operation-extra", "stdout", 1, "x".getBytes(StandardCharsets.UTF_8), null))
-                .hasMessageContaining("sealed");
+                .path("sealed").asBoolean()).isEqualTo(!contentBody);
+        if (!contentBody) {
+            assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+                    "operation-extra", "stdout", 1, "x".getBytes(StandardCharsets.UTF_8), null))
+                    .hasMessageContaining("sealed");
+        }
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-2", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
                 .hasMessageContaining("conflicts");
         ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
                 .put("type", "page").put("captureId", "capture-1")
                 .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
-        page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 3).put("digest", digest("abc")));
+        page.putArray("segments").add(JSON.createObjectNode().put("byteLength", segmentLength).put("digest", digest(segmentText)));
         assertThatThrownBy(() -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-page-slot", "page:stdout:1", "managed-tool-result-page",
                 page.toString().getBytes(StandardCharsets.UTF_8)))
@@ -608,7 +622,7 @@ class ToolPublicationStoreTest {
         assertThat(data.readResource(key, "pub-1", ref.path("resourceId").asText()))
                 .isEqualTo(page.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(jdbc.queryForObject("SELECT capture_used_bytes FROM qwen_tool_publication",
-                Long.class)).isEqualTo(3L);
+                Long.class)).isEqualTo((long) segmentLength);
         assertThat(jdbc.queryForObject("SELECT producer_used_bytes FROM qwen_tool_publication",
                 Long.class)).isEqualTo(page.toString().getBytes(StandardCharsets.UTF_8).length);
         ObjectNode manifest = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
@@ -623,12 +637,17 @@ class ToolPublicationStoreTest {
                 .put("captureReason", partial ? "storage_failed" : null).put("upstreamTruncated", false);
         ObjectNode content = JSON.createObjectNode().put("streamId", "stdout")
                 .put("role", "stdout").put("mimeType", "application/octet-stream")
-                .put("state", "sealed").put("byteLength", 3).put("digest", digest("abc"));
+                .put("state", "sealed").put("byteLength", segmentLength).put("digest", digest(segmentText));
         content.putArray("missingRanges");
         ObjectNode body = JSON.createObjectNode();
-        ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", 1).put("byteLength", 3);
+        ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", 1).put("byteLength", segmentLength);
         pageLink.set("ref", ref);
-        body.putArray("pages").add(pageLink);
+        if (contentBody) {
+            body.set("ref", data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "operation-content", "content:stdout",
+                    "managed-tool-result-content", segmentText.getBytes(StandardCharsets.UTF_8)));
+        } else {
+            body.putArray("pages").add(pageLink);
+        }
         content.set("body", body);
         manifest.putArray("contents").add(content);
         ObjectNode stderr = JSON.createObjectNode().put("streamId", "stderr")
@@ -719,7 +738,11 @@ class ToolPublicationStoreTest {
         assertThatThrownBy(() -> admissions.verifyReceipt(key, WRITER_TOKEN, wrongExecution))
                 .hasMessageContaining("receipt conflicts");
         if (partial) return;
-        if (!"intact".equals(damage)) {
+        if ("intact".equals(damage) || large) {
+            com.alibaba.qwen.code.managedagent.store.WorkspaceRecoveryReaderAssertions.verifyOriginalPublication(
+                    jdbc, bucket, key, admission, manifestRef, receiptSequence, segmentText.getBytes(StandardCharsets.UTF_8));
+        }
+        if (!"intact".equals(damage) && !large) {
             switch (damage) {
                 case "missing-page" -> jdbc.update("DELETE FROM qwen_tool_publication_object"
                         + " WHERE slot_key = 'page:stdout:0'");
@@ -740,14 +763,17 @@ class ToolPublicationStoreTest {
         assertThat(data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef, identity,
                 "stdout", 1, 2)).isEqualTo("bc".getBytes(StandardCharsets.UTF_8));
         assertThat(data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef, identity,
-                "stdout", 3, 0)).isEmpty();
+                "stdout", segmentLength, 0)).isEmpty();
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
-                identity, "stdout", 2, 2)).hasMessageContaining("range exceeds");
-        objects.values().iterator().next()[0] = 'z';
+                identity, "stdout", segmentLength - 1, 2)).hasMessageContaining("range exceeds");
+        String damagedSlot = contentBody ? "content:stdout" : "segment:stdout:0";
+        String damagedKey = jdbc.queryForObject("SELECT object_key FROM qwen_tool_publication_object WHERE slot_key = ?",
+                String.class, damagedSlot);
+        objects.get(damagedKey)[0] = 'z';
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
         assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object"
-                + " WHERE slot_key = 'segment:stdout:0'", String.class)).isEqualTo("QUARANTINED");
+                + " WHERE slot_key = ?", String.class, damagedSlot)).isEqualTo("QUARANTINED");
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
     }
