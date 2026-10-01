@@ -3852,6 +3852,100 @@ describe('Hosted Harness tool approvals', () => {
     expect(state.model).not.toHaveBeenCalled();
   });
 
+  it.each(['pending-snapshot', 'history-settled'])(
+    'reloads settled file results after %s without redispatch',
+    async (phase) => {
+      vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+      const { server, clientId, answer, status } = await waitingSession();
+      const fileState = {
+        ownerSessionId: SESSION_ID,
+        snapshots: [],
+        files: {},
+      };
+      if (phase === 'pending-snapshot') {
+        vi.mocked(
+          HostedWorkspaceBroker.prototype.fileHistory,
+        ).mockImplementation(async (operation) => {
+          if (operation.action === 'snapshot')
+            throw new Error('snapshot reply lost');
+          return fileState;
+        });
+      } else {
+        vi.spyOn(
+          HostedWorkspaceToolTurn.prototype,
+          'consumeResults',
+        ).mockRejectedValueOnce(
+          new HostedToolRecoveryRequiredError(
+            new Error('interrupted before model continuation'),
+          ),
+        );
+      }
+      expect((await answer('allow')).status).toBe(200);
+      await waitFor(async () =>
+        expect(await status()).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        }),
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({})
+        .expect(204);
+      vi.mocked(HostedWorkspaceBroker.prototype.fileHistory)
+        .mockResolvedValue(fileState)
+        .mockClear();
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, resumeFromToolResults }) => {
+          expect(resumeFromToolResults).toHaveLength(1);
+          await toolTurn!.consumeResults();
+          return {
+            text: 'resumed from saved file result',
+            model: 'test-model',
+          };
+        },
+      );
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), toolProfile: files });
+      expect(loaded.status).toBe(200);
+      const recoveredId = loaded.body.clientId as string;
+      await waitFor(async () => {
+        const response = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', recoveredId);
+        expect(response.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      });
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      expect(HostedWorkspaceBroker.prototype.fileHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: phase === 'pending-snapshot' ? 'snapshot' : 'bind',
+        }),
+      );
+      const history = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/files/history`),
+      ).set('X-Qwen-Client-Id', recoveredId);
+      expect(history.body.history.pendingTurn).toBeNull();
+      expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', recoveredId)
+        .send({})
+        .expect(204);
+      expect(
+        (
+          await headers(
+            supertest(server).post(`/session/${SESSION_ID}/load`),
+          ).send({ managedSessionStore: store(), toolProfile: files })
+        ).status,
+      ).toBe(200);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
+      expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
+    },
+  );
+
   it('cancels a waiting approval through the cancel route and releases the Workspace', async () => {
     const { server, clientId, answer, status } = await waitingSession();
     await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))

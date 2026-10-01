@@ -9,6 +9,7 @@ import {
   commitHostedFileHistory,
   assertHostedFileHistoryCapacity,
   HostedFileHistoryRefusedError,
+  canSettleHostedFileHistory,
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -277,8 +278,29 @@ export class HostedWorkspaceToolTurn {
       this.acquired = true;
       if (!this.mcp) {
         const saved = await readHostedFileHistory(this.session);
-        if (saved?.pendingTurn || saved?.pendingUndo)
+        if (saved?.pendingUndo)
           throw new Error('Hosted file history requires recovery.');
+        if (saved?.pendingTurn) {
+          if (
+            !recovering ||
+            saved.pendingTurn !== this.promptId ||
+            !(await canSettleHostedFileHistory(this.session, saved))
+          )
+            throw new Error('Hosted file history requires recovery.');
+          const state = await this.broker.fileHistory({
+            kind: 'raw-file-history',
+            action: 'snapshot',
+          });
+          if (!isDeepStrictEqual(state.snapshots, saved.state.snapshots))
+            throw new Error('Original file history snapshots changed.');
+          await commitHostedFileHistory(this.session, {
+            schemaVersion: 1,
+            state,
+            pendingTurn: null,
+            pendingUndo: null,
+          });
+          return;
+        }
         try {
           await this.broker.fileHistory({
             kind: 'raw-file-history',
@@ -516,6 +538,7 @@ export class HostedWorkspaceToolTurn {
           schemaVersion: 1 as const,
           state,
           pendingTurn: this.promptId,
+          pendingMessageId: messageId,
           pendingUndo: null,
         };
         await assertHostedFileHistoryCapacity(this.session, prepared);
@@ -582,23 +605,38 @@ export class HostedWorkspaceToolTurn {
             'managed-tool-input',
             request.inputBytes,
           ));
-        const prepared =
-          request.isShell && this.publication
-            ? await this.broker.prepareV3(
-                request.runtimeCallId,
-                request.argsDigest,
-                request.digest,
-                request.publicationId!,
-              )
-            : null;
-        const executionCallId =
-          prepared?.executionCallId ??
-          (await this.broker.prepare(
-            request.runtimeCallId,
-            request.digest,
-            request.inputDigest,
-            this.promptId,
-          ));
+        let prepared;
+        let executionCallId: string;
+        try {
+          prepared =
+            request.isShell && this.publication
+              ? await this.broker.prepareV3(
+                  request.runtimeCallId,
+                  request.argsDigest,
+                  request.digest,
+                  request.publicationId!,
+                )
+              : null;
+          executionCallId =
+            prepared?.executionCallId ??
+            (await this.broker.prepare(
+              request.runtimeCallId,
+              request.digest,
+              request.inputDigest,
+              this.promptId,
+            ));
+        } catch (cause) {
+          if (
+            !(cause instanceof HostedWorkspaceBrokerRejection) ||
+            cause.status !== 409 ||
+            cause.code !== 'runtime_execution_conflict'
+          )
+            throw cause;
+          refusals[ordinal] =
+            'Runtime refused this execution reservation before dispatch: ' +
+            (cause.reason ?? cause.message).slice(0, 512);
+          continue;
+        }
         reserved.set(ordinal, executionCallId);
         const toolDefinitionRef = await this.session.resources.publish(
           'managed-tool-definition',
@@ -707,10 +745,11 @@ export class HostedWorkspaceToolTurn {
           );
         }
       }
-      await this.harness.commitAwaitRuntimeBatch(bindings, {
-        turnId: this.promptId,
-        promptId: this.promptId,
-      });
+      if (bindings.length)
+        await this.harness.commitAwaitRuntimeBatch(bindings, {
+          turnId: this.promptId,
+          promptId: this.promptId,
+        });
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
         const authority = this.session.authority;

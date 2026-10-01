@@ -17,6 +17,7 @@ export interface HostedFileHistoryRecord {
   schemaVersion: 1;
   state: HostedFileHistoryState;
   pendingTurn: string | null;
+  pendingMessageId?: string;
   pendingUndo: { requestId: string; promptId: string } | null;
   undoReceipts?: Array<{
     requestId: string;
@@ -100,6 +101,8 @@ export async function readHostedFileHistory(
   if (
     record.schemaVersion !== 1 ||
     !(record.pendingTurn === null || typeof record.pendingTurn === 'string') ||
+    (record.pendingMessageId !== undefined &&
+      (typeof record.pendingMessageId !== 'string' || !record.pendingTurn)) ||
     !(
       record.pendingUndo === null ||
       (typeof record.pendingUndo?.requestId === 'string' &&
@@ -114,9 +117,55 @@ export async function readHostedFileHistory(
       session.authority.sessionHeader.sessionKey.sessionId,
     ),
     pendingTurn: record.pendingTurn,
+    ...(record.pendingMessageId !== undefined
+      ? { pendingMessageId: record.pendingMessageId }
+      : {}),
     pendingUndo: record.pendingUndo,
     undoReceipts: record.undoReceipts ?? [],
   };
+}
+
+export async function canSettleHostedFileHistory(
+  session: ManagedSession,
+  record: HostedFileHistoryRecord,
+): Promise<boolean> {
+  if (!record.pendingTurn || !record.pendingMessageId || record.pendingUndo)
+    return false;
+  const authorization = await session.authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable') return false;
+  const checkpoint = authorization.checkpoint;
+  const items = checkpoint.tools?.items ?? [];
+  if (
+    checkpoint.identity.promptId !== record.pendingTurn ||
+    checkpoint.identity.turnId !== record.pendingTurn ||
+    checkpoint.continuation.phase !== 'results_ready' ||
+    !items.some((item) => item.modelMessageId === record.pendingMessageId) ||
+    items.some((item) => item.state !== 'settled' || !item.outcomeRef)
+  )
+    return false;
+  const current = (await session.sink.project()).filter(
+    (item) => item.daemonPromptId === record.pendingTurn,
+  );
+  const index = current.findLastIndex((item) => item.type === 'assistant');
+  const assistant = current[index];
+  if (assistant?.uuid !== record.pendingMessageId) return false;
+  const calls =
+    assistant.message?.parts?.flatMap((part) =>
+      part.functionCall?.id ? [part.functionCall.id] : [],
+    ) ?? [];
+  const tail = current.slice(index + 1);
+  const results = tail.flatMap(
+    (item) =>
+      item.message?.parts?.flatMap((part) =>
+        part.functionResponse?.id ? [part.functionResponse.id] : [],
+      ) ?? [],
+  );
+  return (
+    calls.length > 0 &&
+    tail.every((item) => item.type === 'tool_result') &&
+    new Set(calls).size === calls.length &&
+    isDeepStrictEqual(calls.sort(), results.sort())
+  );
 }
 
 export async function commitHostedFileHistory(

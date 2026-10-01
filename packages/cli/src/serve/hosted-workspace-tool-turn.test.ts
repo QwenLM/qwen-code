@@ -26,7 +26,10 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionRecords } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-projection.js';
-import { readHostedFileHistory } from './hosted-file-history.js';
+import {
+  readHostedFileHistory,
+  commitHostedFileHistory,
+} from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import { HostedWorkspaceBrokerRejection } from './hosted-workspace-broker.js';
@@ -2853,3 +2856,125 @@ it.each(['bind', 'prepare', 'release', 'store'] as const)(
     expect(broker.release).toHaveBeenCalledTimes(phase === 'release' ? 1 : 0);
   },
 );
+
+it.each([false, true])(
+  'settles definite reservation conflicts (mixed: %s)',
+  async (mixed) => {
+    if (mixed) broker.prepare.mockResolvedValueOnce('read-execution');
+    broker.prepare.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_execution_conflict',
+        undefined,
+        'execution identity already in use',
+      ),
+    );
+    const responses = await turn.execute(
+      mixed ? calls : [calls[1]],
+      mixed ? parts : [parts[1]],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain('before dispatch');
+    expect(broker.execute).toHaveBeenCalledTimes(mixed ? 1 : 0);
+    expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+    if (mixed) await turn.consumeResults();
+    await turn.finish();
+    expect(broker.release).toHaveBeenCalledOnce();
+  },
+);
+
+it('recovers settled file history by observing the original runtime without rebinding or executing', async () => {
+  broker.fileHistory.mockImplementation(async (operation) => {
+    if (operation.action === 'snapshot') throw new Error('response lost');
+    return {
+      ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      snapshots: [],
+      files: {},
+    };
+  });
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const saved = await readHostedFileHistory(session);
+  expect(saved?.pendingMessageId).toEqual(
+    (await session.sink.project()).find((item) => item.type === 'assistant')
+      ?.uuid,
+  );
+  broker.fileHistory.mockResolvedValue(saved!.state);
+  broker.fileHistory.mockClear();
+  broker.execute.mockClear();
+  const recovered = createTurn();
+  await recovered.resumeCommittedResults();
+  expect(
+    broker.fileHistory.mock.calls.map(([operation]) => operation.action),
+  ).toEqual(['snapshot']);
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBeNull();
+  expect(
+    (await readHostedFileHistory(session))?.pendingMessageId,
+  ).toBeUndefined();
+  await recovered.consumeResults();
+  await recovered.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it.each([
+  'previous-batch',
+  'missing-message-id',
+  'incomplete-results',
+  'changed-snapshots',
+  'missing-runtime',
+])('does not clear pending history for %s', async (failure) => {
+  broker.fileHistory.mockImplementation(async (operation) => {
+    if (operation.action === 'snapshot') throw new Error('response lost');
+    return {
+      ownerSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      snapshots: [],
+      files: {},
+    };
+  });
+  await expect(
+    turn.execute(calls, parts, 'model', new AbortController().signal),
+  ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+  const saved = (await readHostedFileHistory(session))!;
+  if (failure === 'previous-batch')
+    saved.pendingMessageId = await commit('assistant', parts, 'model');
+  if (failure === 'missing-message-id') delete saved.pendingMessageId;
+  if (failure === 'incomplete-results') {
+    const project = session.sink.project.bind(session.sink);
+    vi.spyOn(session.sink, 'project').mockImplementation(async (...args) => {
+      const records = await project(...args);
+      const lastResult = records.findLastIndex(
+        (item) => item.type === 'tool_result',
+      );
+      return records.filter((_, index) => index !== lastResult);
+    });
+  }
+  await commitHostedFileHistory(session, saved);
+  broker.fileHistory.mockResolvedValue(
+    failure === 'changed-snapshots'
+      ? { ...saved.state, snapshots: [{ promptId: 'unexpected' }] }
+      : saved.state,
+  );
+  if (failure === 'missing-runtime')
+    broker.fileHistory.mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'managed_runtime_provider_operation_failed',
+      ),
+    );
+  broker.fileHistory.mockClear();
+  const recovered = createTurn();
+  await expect(recovered.resumeCommittedResults()).rejects.toBeInstanceOf(
+    HostedToolRecoveryRequiredError,
+  );
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBe('prompt');
+  expect(broker.release).not.toHaveBeenCalled();
+  if (
+    ['previous-batch', 'missing-message-id', 'incomplete-results'].includes(
+      failure,
+    )
+  )
+    expect(broker.fileHistory).not.toHaveBeenCalled();
+});

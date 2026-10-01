@@ -9,6 +9,8 @@ import express from 'express';
 import supertest from 'supertest';
 import * as fsPromises from 'node:fs/promises';
 import {
+  chmod,
+  stat,
   mkdtemp,
   mkdir,
   readFile,
@@ -111,7 +113,7 @@ it('restores exact bytes even when different contents decode to the same UTF-8 t
   expect(await readFile(file)).toEqual(original);
 });
 
-it.each(['prompt', 'next-prompt'])(
+it.each(['prompt'])(
   'refuses to absorb an external edit when preparing %s',
   async (promptId) => {
     const file = path.join(workspace, 'a');
@@ -131,6 +133,62 @@ it.each(['prompt', 'next-prompt'])(
     expect(await readFile(file, 'utf8')).toBe('external');
   },
 );
+
+it.each(['content', 'mode', 'delete'])(
+  'accepts %s drift only after a new prompt backs it up',
+  async (change) => {
+    const file = path.join(workspace, 'a');
+    await writeFile(file, 'before');
+    await chmod(file, 0o600);
+    await history.prepare('prompt', ['a']);
+    await history.execute('a', () => writeFile(file, 'tracked'));
+    const original = history.state().snapshots[0];
+    if (change === 'content') await writeFile(file, 'external');
+    if (change === 'mode') await chmod(file, 0o700);
+    if (change === 'delete') await rm(file);
+    expect((await history.rewind('prompt')).conflict).toBe(true);
+    history = new ManagedRuntimeFileHistory(owner, workspace, history.state());
+    await history.prepare('next-prompt', ['a']);
+    expect(history.state().snapshots[0]).toEqual(original);
+    await history.execute('a', () => writeFile(file, 'after'));
+    expect((await history.rewind('next-prompt')).conflict).toBe(false);
+    if (change === 'delete') {
+      await expect(readFile(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    } else {
+      expect(await readFile(file, 'utf8')).toBe(
+        change === 'content' ? 'external' : 'tracked',
+      );
+      expect((await stat(file)).mode & 0o777).toBe(
+        change === 'mode' ? 0o700 : 0o600,
+      );
+    }
+    expect((await history.rewind('prompt')).conflict).toBe(false);
+    expect(await readFile(file, 'utf8')).toBe('before');
+  },
+);
+
+it('does not accept drift if any backup or verification fails', async () => {
+  const file = path.join(workspace, 'a');
+  await writeFile(file, 'before');
+  await history.prepare('prompt', ['a']);
+  const expected = history.state().files;
+  await writeFile(file, 'external');
+  const checkpoint = history.history.checkpoint.bind(history.history);
+  vi.spyOn(history.history, 'checkpoint').mockImplementationOnce(async (id) => {
+    await checkpoint(id);
+    await writeFile(file, 'changed during preparation');
+  });
+  await expect(history.prepare('next-prompt', ['a'])).rejects.toThrow(
+    'changed during backup preparation',
+  );
+  expect(history.state().files).toEqual(expected);
+  expect((await history.rewind('prompt')).conflict).toBe(true);
+  vi.spyOn(fsPromises, 'copyFile').mockImplementation(async () => {
+    throw new Error('disk full');
+  });
+  await expect(history.prepare('third-prompt', ['a'])).rejects.toThrow();
+  expect(history.state().files).toEqual(expected);
+});
 
 it('requires successful backups and refuses missing persisted backups', async () => {
   await writeFile(path.join(workspace, 'a'), 'before');

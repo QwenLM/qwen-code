@@ -33,8 +33,11 @@ Bind 从 Session Store 恢复最新完整历史状态，以稳定的 Harness Ses
 启动文件副作用前，将此状态提交到现有 `file_history` domain。每次提交也携带现有
 `file_history_snapshot` 读取记录，保持 transcript 投影对该 domain 的兼容。
 被拒绝的调用不创建备份；同一 prompt 的多次修改保留首次修改前的内容。
-准备阶段也会拒绝已跟踪路径在上次工具副作用后的变化；后续 Write/Edit 不能静默
-接纳外部或 Shell 修改。明确的准备拒绝会转为本批 Write/Edit 的持久化工具错误，
+同一 prompt 内，准备阶段拒绝已跟踪路径在上次工具副作用后的变化。新 prompt 是
+重新建立基线的边界：先采样所有跟踪文件，创建并验证新快照，再复核采样，整批成功后
+才接受新的预期状态。外部／Shell 修改的字节及权限因此成为该 prompt 的修改前备份，
+旧快照继续保留。同 prompt 重试及撤销仍拒绝漂移。准备期间其他写入者必须暂停；
+备份失败或采样变化不能刷新预期状态。明确的准备拒绝会转为本批 Write/Edit 的持久化工具错误，
 其他获准调用可以继续。新回合的 bind 明确拒绝在确认释放 runtime 后将回合结算为错误。
 这两种情况不阻塞 Session，也不保留空闲 Workspace 租约；补回缺失备份后可重试。
 响应未知或释放失败仍需恢复。恢复已保存的 Shell 续执行则不同：bind 拒绝时保留
@@ -43,8 +46,16 @@ Bind 从 Session Store 恢复最新完整历史状态，以稳定的 Harness Ses
 视为未知结果，包括即时执行响应与同一调用的重试。
 
 每批调用完成后，包括工具报错和取消，worker 记录受影响文件的当前字节摘要及权限。
-Harness 在模型继续和释放 runtime 前持久化结果状态。执行未知或历史持久化失败时
-阻塞 Session。重试观察不派发新的文件修改。通过内容相等避免重复历史提交，不将
+Harness 在模型继续和释放 runtime 前持久化结果状态。明确的执行预留冲突转为持久化
+工具拒绝，不创建 runtime binding，其他获准调用仍正常结算。没有预留项的批次跳过
+runtime 等待 checkpoint，记录拒绝后完成历史结算并清除 pending。
+执行未知或历史持久化失败时阻塞 Session。detach 后 load 仅在匹配的持久 checkpoint
+包含非空且全部已结算的工具结果时恢复 pending turn；pendingMessageId 将证据绑定到
+当前批次的 assistant 消息，不能用上一批结果清除新标记。Harness 获取原 runtime，
+直接读取其已绑定历史，不重新绑定副作用前的状态。核对快照身份并持久化结算后，从
+已有结果继续模型，不重新派发工具。原 runtime 缺失、执行未知、结果不完整、快照
+变化、pending undo 或观察／持久化失败仍阻塞。超时及 finally 均不能清除标记。
+历史已结算但模型尚未继续时的中断也可恢复。重试观察不派发新的文件修改。通过内容相等避免重复历史提交，不将
 worker 内的 revision 计数器用作持久化身份。
 
 Session Store 保存快照及预期文件状态，备份字节保留在 FileHistoryService 的

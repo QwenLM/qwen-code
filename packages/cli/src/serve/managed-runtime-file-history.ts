@@ -81,16 +81,24 @@ export class ManagedRuntimeFileHistory {
       throw new Error(
         'Hosted file history has reached its 100 snapshot limit.',
       );
+    const newPrompt = snapshots.at(-1)?.promptId !== promptId;
+    const observed: HostedFileHistoryState['files'] = Object.create(null);
+    for (const file of new Set([
+      ...(newPrompt ? Object.keys(this.files) : []),
+      ...paths,
+    ])) {
+      observed[file] = await this.fingerprint(file);
+      if (
+        !newPrompt &&
+        Object.hasOwn(this.files, file) &&
+        !isDeepStrictEqual(observed[file], this.files[file])
+      )
+        throw new Error('Hosted file changed outside tracked mutations.');
+    }
     await this.history.checkpoint(promptId);
     await this.history.run(async () => {
       for (const file of paths) {
         const absolute = await this.resolve(file);
-        const current = await this.fingerprint(file);
-        if (
-          Object.hasOwn(this.files, file) &&
-          !isDeepStrictEqual(current, this.files[file])
-        )
-          throw new Error('Hosted file changed outside tracked mutations.');
         await this.history.service.trackEdit(absolute);
         const backups = this.history.service
           .getSnapshots()
@@ -100,17 +108,15 @@ export class ManagedRuntimeFileHistory {
           throw new Error(
             'Hosted file backup failed; mutation was not started.',
           );
-        this.files[file] = current;
-        this.prepared.add(file);
       }
-      for (const snapshot of this.history.state().snapshots)
-        for (const file of Object.keys(snapshot.trackedFileBackups)) {
-          const relative = file.split(path.sep).join('/');
-          if (!Object.hasOwn(this.files, relative))
-            this.files[relative] = await this.fingerprint(relative);
-        }
+      await this.ready();
+      for (const [file, expected] of Object.entries(observed))
+        if (!isDeepStrictEqual(await this.fingerprint(file), expected))
+          throw new Error('Hosted file changed during backup preparation.');
+      Object.assign(this.files, observed);
+      if (newPrompt) this.prepared.clear();
+      for (const file of paths) this.prepared.add(file);
     });
-    await this.ready();
   }
 
   async execute<T>(file: string, action: () => Promise<T>): Promise<T> {

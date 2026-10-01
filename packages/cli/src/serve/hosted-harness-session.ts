@@ -9,6 +9,7 @@ import {
   commitHostedFileHistory,
   assertHostedFileHistoryCapacity,
   HostedFileHistoryRefusedError,
+  canSettleHostedFileHistory,
 } from './hosted-file-history.js';
 import { parseHostedFileHistoryState } from './hosted-file-history-protocol.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1006,7 +1007,11 @@ export function registerHostedHarnessSessionRoutes(
         session.mcp = new HostedMcpSession(brokerOptions, managed, mcpServers);
       if (pinned) session.approval = pinned;
       const fileHistory = await readHostedFileHistory(managed);
-      if (fileHistory?.pendingTurn || fileHistory?.pendingUndo) {
+      if (
+        fileHistory?.pendingUndo ||
+        (fileHistory?.pendingTurn &&
+          !(await canSettleHostedFileHistory(managed, fileHistory)))
+      ) {
         await managed.close();
         error(
           res,
@@ -1042,15 +1047,24 @@ export function registerHostedHarnessSessionRoutes(
       let settlePromptId: string | undefined;
       if (
         restore.recoveryStatus === 'ok' &&
-        session.publication &&
+        (session.publication || fileHistory) &&
         brokerOptions
       ) {
-        const promptId = await recoverShellReceipts(
-          session,
-          brokerOptions,
-          restore.throughSequence,
-        );
+        const receiptPromptId = session.publication
+          ? await recoverShellReceipts(
+              session,
+              brokerOptions,
+              restore.throughSequence,
+            )
+          : null;
         const authorization = await managed.authority.harnessRunAuthorization();
+        const promptId =
+          receiptPromptId ??
+          (fileHistory &&
+          hasUnsettledInput(session, restore.throughSequence) &&
+          authorization.status === 'runnable'
+            ? authorization.checkpoint.identity.promptId
+            : null);
         const projected = await managed.sink.project();
         const current = projected.filter(
           (item) => item.daemonPromptId === promptId,
@@ -1077,7 +1091,13 @@ export function registerHostedHarnessSessionRoutes(
           tail.every((item) => item.type === 'tool_result') &&
           typeof prompt === 'string' &&
           prompt.length > 0 &&
-          parts.length > 0
+          parts.length > 0 &&
+          (!fileHistory ||
+            (await canSettleHostedFileHistory(managed, {
+              ...fileHistory,
+              pendingTurn: promptId,
+              pendingMessageId: current[lastAssistant].uuid,
+            })))
         )
           resume = { promptId, text: prompt, parts };
         if (

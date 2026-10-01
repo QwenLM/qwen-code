@@ -42,8 +42,13 @@ Each commit also carries the existing `file_history_snapshot` reader record,
 so transcript projection continues to understand the domain.
 Denied calls do not create backups. Repeated edits retain the prompt's original
 preimage.
-Preparation also refuses changes to a tracked path since the last tool effect;
-another Write/Edit cannot silently absorb an external or Shell edit. A definite
+Within a prompt, preparation refuses changes to a tracked path since the last
+tool effect. A new prompt is the rebaseline boundary: prepare samples all tracked
+files, creates and validates a new snapshot, then verifies the samples again
+before accepting the new expected state. This retains external/Shell bytes and
+modes in that prompt's preimage without changing older snapshots. Same-prompt
+retries and undo still refuse drift. Other writers must be quiescent during
+preparation; a failed backup or changed sample cannot refresh expected state. A definite
 preparation refusal becomes a persisted tool error for the batch's Write/Edit
 calls; other admitted calls may continue. A definite bind refusal in a new turn
 ends it with an error after confirmed runtime release. Neither case blocks the Session
@@ -58,8 +63,22 @@ the immediate execution response and retries of the same invocation.
 After every completed batch, including tool errors and cancellation, the
 worker records current byte digests and modes for affected files. The Harness
 persists the resulting state before model continuation and runtime release.
-Unknown execution or failed history persistence blocks the Session. Retrying
-observation does not dispatch another mutation. Content equality avoids
+A definite execution-reservation conflict becomes a durable tool refusal and
+creates no runtime binding; other admitted calls still settle normally. A batch
+with no reservations skips the runtime wait checkpoint and clears its prepared
+history after recording the refusals.
+Unknown execution or failed history persistence blocks the Session. On detach
+and load, a pending turn may resume only when its matching durable checkpoint
+contains nonempty, fully settled tool results. A durable `pendingMessageId` binds
+this evidence to the current batch's assistant message, not a previous batch.
+The Harness acquires the original
+runtime and reads its already-bound history without rebinding the pre-effect
+state. It checks snapshot identity, persists settlement, and resumes from the
+saved results without dispatching the tools again. A missing original runtime,
+unknown execution, incomplete results, changed snapshots, pending undo or failed
+observation/persistence remains blocked. No timeout or finally block clears the
+marker. This also handles interruption after history settlement but before model
+continuation. Retrying observation does not dispatch another mutation. Content equality avoids
 duplicate history commits; worker-local revision counters are not durable IDs.
 
 Snapshots and expected file states are stored in the Session Store. Backup
