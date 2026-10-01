@@ -280,6 +280,24 @@ describe('OpenTuiFooter', () => {
     mocks.state.dimensions = { width: 110, height: 40 };
   });
 
+  it('shows the current runtime tool policy without an environment marker', () => {
+    const config = fakeConfig({
+      getShellExecutionSandbox: () =>
+        ({
+          filesystem: 'read-only',
+          network: 'closed',
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        }) as ReturnType<Config['getShellExecutionSandbox']>,
+    });
+    const { container } = render(
+      <OpenTuiFooter config={config} streaming={false} />,
+    );
+    expect(container.textContent).toContain(
+      'tools / auto → bwrap (full) / read-only / command network: closed',
+    );
+  });
+
   it('wraps the status row onto a second line instead of truncating it', () => {
     mocks.state.dimensions = { width: 50, height: 40 };
     const { container } = render(

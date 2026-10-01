@@ -230,7 +230,7 @@ export function removeDaemonTokenFromUrl(): void {
       changed = true;
     }
   }
-  if (changed) window.history.replaceState(null, '', url);
+  if (changed) window.history.replaceState(window.history.state, '', url);
 }
 
 export function getDaemonAuthHeaders(): HeadersInit | undefined {
@@ -253,8 +253,9 @@ export function getAllowedDaemonOrigin(raw: string): string {
       return '';
     }
     // A bracketed IPv6 literal is not a valid CSP host-source (CSP3 host-part
-    // excludes '[', ']' and ':'), so a remote http://[::1]:4170 target would
-    // be served a connect-src every browser drops, and the gate would loop on
+    // excludes '[', ']' and ':'). The invalid source expression is ignored
+    // while the rest of connect-src stays in effect, so a remote
+    // http://[::1]:4170 target remains blocked and the gate would loop on
     // "unreachable" with only a console violation as evidence. Exempt the
     // page's own origin: 'self' covers it, and qwen serve --hostname '[::1]'
     // is a documented deployment.
@@ -367,7 +368,7 @@ export function navigateToDaemon(
     if (continuation) {
       const currentUrl = new URL(window.location.href);
       currentUrl.searchParams.set(continuation[0], continuation[1]);
-      window.history.replaceState(null, '', currentUrl);
+      window.history.replaceState(window.history.state, '', currentUrl);
     }
     window.location.reload();
     return true;

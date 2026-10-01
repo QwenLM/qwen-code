@@ -164,6 +164,22 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-context-worker.ts',
+    {
+      reason:
+        'Managed Runtime startup selects its deployment-owned MCP manifest from the process environment; server definitions are then scoped by tenant and workspace.',
+      accesses: { 'key:QWEN_MANAGED_MCP_CONFIG': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-mcp-runtime.ts',
+    {
+      reason:
+        'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
+      accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
@@ -192,9 +208,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
-        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
+        'The Hosted Harness capability digest is a process-scoped contract fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
+        'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -237,16 +255,12 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
         'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move. The bwrap backend forwards its launch environment ' +
-        'through whole-environment references; proxy settings are read from ' +
-        'the resulting baseEnv parameter rather than process.env. It also reads ' +
-        'XDG_CACHE_HOME to grant the cache directory the Seatbelt profiles ' +
-        'already grant.',
+        'leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
-        'key:BUILD_SANDBOX': 3,
+        'key:BUILD_SANDBOX': 2,
         'key:COLORTERM': 2,
-        'key:DEBUG': 6,
+        'key:DEBUG': 5,
         'key:DEBUG_MODE': 1,
         'key:DEBUG_PORT': 2,
         'key:GEMINI_API_KEY': 2,
@@ -261,7 +275,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:HTTPS_PROXY': 2,
         'key:NO_PROXY': 2,
         'key:NODE_ENV': 1,
-        'key:NODE_OPTIONS': 2,
+        'key:NODE_OPTIONS': 1,
         'key:OPENAI_API_KEY': 2,
         'key:OPENAI_BASE_URL': 2,
         'key:OPENAI_MODEL': 2,
@@ -270,7 +284,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
         'key:QWEN_CODE_WARNINGS_FILE': 2,
-        'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 2,
+        'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
         'key:QWEN_CODE_TEST_VAR': 2,
         'key:QWEN_SANDBOX_PROXY_COMMAND': 2,
         'key:SANDBOX_ENV': 2,
@@ -281,12 +295,32 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:SEATBELT_PROFILE': 1,
         'key:TERM': 2,
         'key:VIRTUAL_ENV': 1,
-        'key:XDG_CACHE_HOME': 1,
         'key:http_proxy': 2,
         'key:https_proxy': 2,
         'key:no_proxy': 2,
-        whole: 9,
+        whole: 6,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/daemon-update.ts',
+    {
+      reason:
+        'The process-global updater snapshots the running daemon launcher and its managed npm installation stamp, not workspace configuration.',
+      accesses: {
+        'key:QWEN_CODE_CLI': 1,
+        'key:QWEN_CODE_MANAGED_NPM_PIN': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
+    {
+      reason:
+        'A daemon-wide ambient usage-statistics opt-out is a process-scoped ' +
+        'operator decision that must close the gate for every hosted ' +
+        'workspace; an ambient opt-in belongs to another hosted repository.',
+      accesses: { 'key:QWEN_USAGE_STATISTICS_ENABLED': 2 },
     },
   ],
   [
@@ -311,8 +345,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { whole: 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback. ' +
+        'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
+        'by design: it governs work no session owns (a recovery sweep and the ' +
+        'dispatch timer), so it cannot be a per-session setting.',
+      accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
   [

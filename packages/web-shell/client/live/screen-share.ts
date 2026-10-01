@@ -5,14 +5,9 @@
  */
 
 /**
- * The screen the user shares with a Live call, and the single frame the model
- * gets when it asks to look.
- *
- * Sharing and looking are deliberately separate. `getDisplayMedia` needs a user
- * gesture, and the model asks in the middle of a turn, so the stream is opened
- * once by a click and kept; each request then pulls one frame from it. The user
- * decides what is shareable, the model decides when a look is worth it, and
- * stopping the share ends both.
+ * User-authorized screen source for Live Voice frames and on-demand captures.
+ * The picker needs a user gesture; callers can then sample the retained stream
+ * until the user stops sharing or the call ends.
  */
 
 /** The daemon rejects anything larger; see MAX_HOST_VISUAL_IMAGE_BYTES. */
@@ -252,9 +247,15 @@ export async function startScreenShare(
     return deliver(roomiest);
   };
 
+  let pendingFrame: Promise<LiveScreenFrame> | undefined;
   return {
     label: track.label || 'screen',
     stop,
-    grab,
+    grab: () => {
+      pendingFrame ??= grab().finally(() => {
+        pendingFrame = undefined;
+      });
+      return pendingFrame;
+    },
   };
 }

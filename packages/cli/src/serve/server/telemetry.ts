@@ -182,6 +182,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'GET /session/:id/lsp',
   },
   {
+    method: 'POST',
+    path: '/session/:id/mcp-app/tools/call',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mcp-app/tools/call',
+  },
+  {
     method: 'GET',
     path: '/session/:id/resources',
     attribution: 'handler_resolved',
@@ -276,6 +282,30 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/continue',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/continue',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads/:uploadId/chunks',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads/:uploadId/chunks',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads/:uploadId/complete',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads/:uploadId/complete',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/attachment-uploads/:uploadId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/attachment-uploads/:uploadId',
   },
   {
     method: 'POST',
@@ -626,6 +656,15 @@ export function resolveDaemonTelemetryRoute(
     return {
       route: 'GET /workspaces/:workspace/session/:id/turn-index',
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
+    };
+  }
+  const workspaceToolCalls = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/tool-calls$/,
+  );
+  if (workspaceToolCalls?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/tool-calls',
+      sessionId: decodePathSegment(workspaceToolCalls[1]),
     };
   }
   const workspaceExport = path.match(

@@ -10,7 +10,49 @@
  * disabled entries.
  */
 
+// @vitest-environment jsdom
+
 import { describe, it, expect, vi } from 'vitest';
+import { render } from '@testing-library/react';
+import { execFile } from 'node:child_process';
+import type { Config } from '@qwen-code/qwen-code-core';
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const execFile = vi.fn();
+  return { ...actual, default: { ...actual, execFile }, execFile };
+});
+vi.mock('@opentui/react', () => ({
+  useRenderer: () => ({
+    addInputHandler: vi.fn(),
+    removeInputHandler: vi.fn(),
+  }),
+  useKeyboard: vi.fn(),
+}));
+const buildJsxRuntime = vi.hoisted(() => async () => {
+  const React = await import('react');
+  const Box = ({ children }: { children?: React.ReactNode }) =>
+    React.createElement('div', null, children);
+  const Text = ({ children }: { children?: React.ReactNode }) =>
+    React.createElement('span', null, children);
+  const jsx = (
+    type: unknown,
+    props: Record<string, unknown> | null,
+    key?: React.Key,
+  ) =>
+    React.createElement(
+      type === 'box'
+        ? Box
+        : type === 'text'
+          ? Text
+          : (type as React.ElementType),
+      { ...props, key },
+      props?.['children'] as React.ReactNode,
+    );
+  return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
+});
+vi.mock('@opentui/react/jsx-runtime', () => buildJsxRuntime());
+vi.mock('@opentui/react/jsx-dev-runtime', () => buildJsxRuntime());
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -19,7 +61,7 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
-import { readHooksEnabled, Shell } from './dialogs-misc.js';
+import { readHooksEnabled, Shell, OpenTuiDiffDialog } from './dialogs-misc.js';
 import { C } from './theme.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -63,5 +105,24 @@ describe('readHooksEnabled (the real disableAllHooks switch)', () => {
         settingsWith({ disableAllHooks: false }),
       ),
     ).toBe(false);
+  });
+});
+
+describe('OpenTuiDiffDialog sandbox', () => {
+  it('refuses a direct diff mount before spawning Git', () => {
+    const config = {
+      getShellExecutionSandbox: () => ({ network: 'closed' }),
+    } as unknown as Config;
+    const { container } = render(
+      <OpenTuiDiffDialog
+        config={config}
+        settings={settingsWith({})}
+        onClose={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain(
+      'Diff preview unavailable in tool sandbox',
+    );
+    expect(execFile).not.toHaveBeenCalled();
   });
 });

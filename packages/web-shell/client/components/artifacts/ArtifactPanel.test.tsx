@@ -55,6 +55,7 @@ const {
     mockSecondaryWorkspaceActions,
     mockWorkspace: {
       capabilities: {
+        features: [] as string[],
         workspaceCwd: '/primary',
         workspaces: [
           {
@@ -97,6 +98,20 @@ vi.mock('../terminal/TerminalPanel', () => ({
   TerminalPanel: ({ terminalId }: { terminalId: string }) => (
     <div data-testid="terminal-panel" data-terminal-id={terminalId} />
   ),
+}));
+
+vi.mock('../workspace-agents/ThreadsRoute', () => ({
+  ThreadsRoute: () => <div data-testid="workspace-agent-thread-route" />,
+}));
+
+const sideTaskPanelProps = vi.hoisted(() => ({
+  current: undefined as Record<string, unknown> | undefined,
+}));
+vi.mock('./SideTaskPanel', () => ({
+  SideTaskPanel: (props: Record<string, unknown>) => {
+    sideTaskPanelProps.current = props;
+    return <div data-testid="side-task-panel" />;
+  },
 }));
 
 const { ArtifactPanel } = await import('./ArtifactPanel');
@@ -336,6 +351,7 @@ function scheduledTaskPanel(
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  sideTaskPanelProps.current = undefined;
   // The boundary matrix spies on DOMParser.prototype per row; restore it so
   // the leak cannot skew call-count assertions in later tests.
   vi.restoreAllMocks();
@@ -367,6 +383,7 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
+  mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
   mockWorkspace.capabilities = {
     workspaceCwd: '/primary',
@@ -385,6 +402,57 @@ afterEach(() => {
       },
     ],
   };
+});
+
+it('does not mount restored agent activity when collaboration is disabled', async () => {
+  const node = document.createElement('div');
+  document.body.appendChild(node);
+  const root = createRoot(node);
+  mounted.push({ root, container: node });
+  const render = () => (
+    <I18nProvider language="en">
+      <ArtifactPanel
+        artifacts={[]}
+        tabs={[
+          {
+            id: 'agent-activity:/repo:thread-1',
+            kind: 'agent_activity',
+            title: 'Team',
+            threadId: 'thread-1',
+            workspaceCwd: '/repo',
+          },
+        ]}
+        activeTabId="agent-activity:/repo:thread-1"
+        reviewChanges={[]}
+        selectedReviewPath={null}
+        onSelectTab={() => {}}
+        onCloseTab={() => {}}
+        onOpenFilePreview={() => {}}
+        onClose={() => {}}
+      />
+    </I18nProvider>
+  );
+
+  act(() => root.render(render()));
+  // Let the lazy `ThreadsRoute` import settle before asserting absence, the
+  // same way the positive half below does: `<Suspense fallback={null}>`
+  // satisfies `toBeNull()` on its own, so without this flush the negative half
+  // still passes with the collaboration gate deleted and pins nothing.
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(
+    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+
+  mockWorkspace.capabilities.features = ['agent_collaboration_v1'];
+  act(() => root.render(render()));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(
+    node.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).not.toBeNull();
 });
 
 describe('ArtifactPanel context usage tabs', () => {
@@ -2059,6 +2127,52 @@ describe('ArtifactPanel add menu', () => {
     ).find((button) => button.textContent === 'New');
     act(() => reopenedCreate?.click());
     expect(onCreateSideTask).toHaveBeenCalledOnce();
+  });
+
+  it('forwards model management policy and the refusal callback to the side task panel', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const modelManagement = { allowAdd: false, allowDelete: false };
+    const onSideTaskInitialPromptRefused = vi.fn();
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'side-task:1',
+                kind: 'side_task',
+                title: 'Side task',
+                parentSessionId: 'parent-session',
+                workspaceCwd: '/work/project',
+                sessionId: 'side-session-1',
+              },
+            ]}
+            activeTabId="side-task:1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            sideTaskAvailable
+            modelManagement={modelManagement}
+            onSideTaskInitialPromptRefused={onSideTaskInitialPromptRefused}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(sideTaskPanelProps.current?.modelManagement).toEqual(
+      modelManagement,
+    );
+    expect(sideTaskPanelProps.current?.onInitialPromptRefused).toBe(
+      onSideTaskInitialPromptRefused,
+    );
   });
 
   it('creates a side task directly from the empty page when there is no history', () => {

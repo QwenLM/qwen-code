@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createDaemonToolPreview,
   createDaemonTranscriptState,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
@@ -18,6 +19,7 @@ import {
   assistantBlockRendersAsSystemNotice,
   transcriptBlocksToDaemonMessages,
 } from './transcriptToMessages.js';
+import { getToolDescription } from '../components/messages/toolFormatting';
 
 function textBlock(
   id: string,
@@ -284,7 +286,7 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
-  it('keeps active shell input previews out of output while preserving actual content', () => {
+  it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
       serverTimestamp: 500,
@@ -300,9 +302,14 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(getTool({ ...block, rawOutput: 'actual output' })?.rawOutput).toBe(
       'actual output',
     );
+    // `details` is a redacted dump of the input, so it must never surface as
+    // the result of a completed or failed call either.
+    expect(getTool({ ...block, status: 'completed' })?.rawOutput).toBe(
+      undefined,
+    );
     expect(
       getTool({ ...block, status: 'failed', details: 'Timed out' })?.rawOutput,
-    ).toBe('Timed out');
+    ).toBeUndefined();
   });
 
   it('does not treat a historical background launch as agent completion', () => {
@@ -3112,6 +3119,39 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it.each([
+    { name: 'missing input', input: undefined },
+    { name: 'null input', input: null },
+    { name: 'name argument', input: { name: 'health' } },
+    { name: 'toolName argument', input: { toolName: 'health' } },
+  ])('does not infer empty MCP args from a preview: $name', ({ input }) => {
+    const toolName = 'mcp__sample__ping';
+    const title = 'ping (sample MCP Server): {}';
+    const preview = createDaemonToolPreview(input, { toolName, title });
+    expect(preview).toEqual({
+      kind: 'mcp_invocation',
+      serverId: 'sample',
+      toolName: 'ping',
+    });
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('mcp-safe', 'mcp-call', 'completed', 1, {
+          toolName,
+          title,
+          preview,
+          rawInput: undefined,
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool =
+      messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+    expect(tool).toBeDefined();
+    expect(tool?.args).toBeUndefined();
+    expect(getToolDescription(tool!)).toBe(title);
+  });
+
   it.each(['cancelled', 'canceled'])(
     'keeps %s edits unapplied in safe projection',
     (status) => {
@@ -4802,7 +4842,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tools?.[2]?.kind).toBeUndefined();
   });
 
-  it('getToolRawOutput fallback returns rawOutput ?? details for non-cancelled', () => {
+  it('does not fall back to input details as a non-cancelled tool result', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'tc1', 'completed', 1, {
         toolName: 'Read',
@@ -4813,7 +4853,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
 
     const tool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(tool?.rawOutput).toBe('some detail info');
+    expect(tool?.rawOutput).toBeUndefined();
   });
 
   it('does not use content text as generic raw output', () => {
@@ -5980,5 +6020,33 @@ describe('assistantBlockRendersAsSystemNotice', () => {
     expect(
       assistantBlockRendersAsSystemNotice(textBlock('u-1', 'user', 'hi', 1)),
     ).toBe(false);
+  });
+});
+
+it('projects generic tool wrappers into real names and arguments in chat messages', () => {
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'wrapped',
+        status: 'completed',
+        rawInput: {
+          name: 'mcp__server__lookup',
+          arguments: { query: 'value' },
+        },
+        _meta: { toolName: 'tool_call' },
+      },
+    }),
+  );
+  const message = transcriptBlocksToDaemonMessages(state.blocks).find(
+    (message) => message.role === 'tool_group',
+  );
+  expect(message?.role === 'tool_group' && message.tools[0]).toMatchObject({
+    toolName: 'mcp__server__lookup',
+    title: 'mcp__server__lookup',
+    args: { query: 'value' },
   });
 });
