@@ -19,7 +19,10 @@ import {
   buildMediaMemoryRecallAdvisor,
   reanchorRememberedMedia,
 } from './memory-recall.js';
-import { OmniRecallMediaMemoryTool } from './recall-media-memory-tool.js';
+import {
+  OmniRecallMediaMemoryTool,
+  type OmniRecallMediaMemoryParams,
+} from './recall-media-memory-tool.js';
 
 describe('OmniRecallMediaMemoryTool', () => {
   let tmpDir: string;
@@ -44,6 +47,22 @@ describe('OmniRecallMediaMemoryTool', () => {
       ...overrides,
     } as unknown as Config;
   }
+
+  const newTool = (overrides?: Partial<Record<string, unknown>>) =>
+    new OmniRecallMediaMemoryTool(toolConfig(overrides));
+
+  const recall = (params: OmniRecallMediaMemoryParams, tool = newTool()) =>
+    tool.build(params).execute(new AbortController().signal);
+
+  /** Bind session handle `n` to an image file with no persistent record. */
+  const bindImage = (n: number, fileRef: string) =>
+    registry.bind({
+      fileId: `f${n}`,
+      fileVersionId: `v${n}`,
+      rootFileId: `f${n}`,
+      fileRef,
+      mediaType: 'image',
+    }).resourceId;
 
   /** Record one image file into the persistent store and bind its session
    * handle, mirroring what a delivery does. */
@@ -73,108 +92,77 @@ describe('OmniRecallMediaMemoryTool', () => {
   }
 
   it('rejects a request naming more handles than maxFilesPerCall', () => {
-    const tool = new OmniRecallMediaMemoryTool(toolConfig());
     const max = DEFAULT_OMNI_MEMORY_CONFIG.recall.active.maxFilesPerCall;
     const resourceIds = Array.from({ length: max + 1 }, (_, i) => `m-${i}`);
-    expect(() => tool.build({ resourceIds, query: 'q' })).toThrow(
+    expect(() => newTool().build({ resourceIds, query: 'q' })).toThrow(
       /maxFilesPerCall/,
     );
   });
 
   it('rejects an empty resourceIds list at the schema layer', () => {
-    const tool = new OmniRecallMediaMemoryTool(toolConfig());
-    expect(() => tool.build({ resourceIds: [], query: 'q' })).toThrow();
+    expect(() => newTool().build({ resourceIds: [], query: 'q' })).toThrow();
   });
 
   it('admits a full absolute path at the schema layer (R3-7)', () => {
-    // The path form passes a whole absolute path as a reference, not a
-    // ~16-char handle. An over-tight maxLength would make Ajv reject the very
-    // path the annotation displayed — before resolution, with no shorter id to
-    // retry. A 301-char path clears the schema (maxLength 4096); it is then
-    // rejected at RECALL as an unknown reference, not at the schema layer.
-    const tool = new OmniRecallMediaMemoryTool(toolConfig());
+    // The path form passes a whole absolute path, not a ~16-char handle. An
+    // over-tight maxLength would make Ajv reject the very path the annotation
+    // displayed — before resolution, with no shorter id to retry. A 301-char
+    // path clears the schema (maxLength 4096); RECALL then rejects it as an
+    // unknown reference, not the schema layer.
     const longPath = '/' + 'x'.repeat(300);
     expect(() =>
-      tool.build({ resourceIds: [longPath], query: 'q' }),
+      newTool().build({ resourceIds: [longPath], query: 'q' }),
     ).not.toThrow();
   });
 
   it('counts DISTINCT files, not raw references, against maxFilesPerCall (R3-9)', () => {
     // One file is addressable two ways — its 【媒体路径】 path and its
-    // 【媒体资源】 handle. A compliant call naming file1 by BOTH plus file2 by
-    // handle is 3 references but 2 DISTINCT files, so with maxFilesPerCall: 2
-    // it must PASS. The old raw-reference count charged 3 > 2 and wrongly
-    // rejected it; resolveBindings dedups per binding downstream, so the cap
-    // must count the same unit.
+    // 【媒体资源】 handle. Naming file1 by BOTH plus file2 by handle is 3
+    // references but 2 DISTINCT files, so with maxFilesPerCall: 2 it must
+    // PASS. The old raw-reference count charged 3 > 2 and wrongly rejected
+    // it; resolveBindings dedups per binding downstream, so the cap must
+    // count the same unit.
     const file1 = path.join(tmpDir, 'one.png');
-    const file2 = path.join(tmpDir, 'two.png');
-    const handle1 = registry.bind({
-      fileId: 'f1',
-      fileVersionId: 'v1',
-      rootFileId: 'f1',
-      fileRef: file1,
-      mediaType: 'image',
-    }).resourceId;
-    const handle2 = registry.bind({
-      fileId: 'f2',
-      fileVersionId: 'v2',
-      rootFileId: 'f2',
-      fileRef: file2,
-      mediaType: 'image',
-    }).resourceId;
-    const tool = new OmniRecallMediaMemoryTool(
-      toolConfig({
-        getOmniMemoryConfig: () => ({
-          ...DEFAULT_OMNI_MEMORY_CONFIG,
-          recall: {
-            ...DEFAULT_OMNI_MEMORY_CONFIG.recall,
-            active: {
-              ...DEFAULT_OMNI_MEMORY_CONFIG.recall.active,
-              maxFilesPerCall: 2,
-            },
+    const handle1 = bindImage(1, file1);
+    const handle2 = bindImage(2, path.join(tmpDir, 'two.png'));
+    const tool = newTool({
+      getOmniMemoryConfig: () => ({
+        ...DEFAULT_OMNI_MEMORY_CONFIG,
+        recall: {
+          ...DEFAULT_OMNI_MEMORY_CONFIG.recall,
+          active: {
+            ...DEFAULT_OMNI_MEMORY_CONFIG.recall.active,
+            maxFilesPerCall: 2,
           },
-        }),
+        },
       }),
-    );
+    });
     // [handle1, path-of-file1, handle2] = 3 references, 2 distinct files.
     expect(() =>
       tool.build({ resourceIds: [handle1, file1, handle2], query: 'q' }),
     ).not.toThrow();
     // A third DISTINCT file still trips the cap.
-    const handle3 = registry.bind({
-      fileId: 'f3',
-      fileVersionId: 'v3',
-      rootFileId: 'f3',
-      fileRef: path.join(tmpDir, 'three.png'),
-      mediaType: 'image',
-    }).resourceId;
+    const handle3 = bindImage(3, path.join(tmpDir, 'three.png'));
     expect(() =>
-      tool.build({
-        resourceIds: [handle1, handle2, handle3],
-        query: 'q',
-      }),
+      tool.build({ resourceIds: [handle1, handle2, handle3], query: 'q' }),
     ).toThrow(/maxFilesPerCall/);
   });
 
   it('returns invalid_tool_params for a handle this session never issued', async () => {
-    const tool = new OmniRecallMediaMemoryTool(toolConfig());
-    const invocation = tool.build({
+    const result = await recall({
       resourceIds: ['media-99-deadbeef'],
       query: 'anything',
     });
-    const result = await invocation.execute(new AbortController().signal);
     expect(result.error?.type).toBe('invalid_tool_params');
     expect(result.llmContent).toContain('unknown_resource');
   });
 
   it('recalls the recorded metadata entry for a bound handle', async () => {
     const resourceId = await recordAndBind();
-    const tool = new OmniRecallMediaMemoryTool(toolConfig());
-    const invocation = tool.build({
+    const result = await recall({
       resourceIds: [resourceId],
       query: 'image dimensions',
     });
-    const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     const payload = JSON.parse(result.llmContent as string);
     expect(payload.files).toHaveLength(1);
@@ -190,26 +178,17 @@ describe('OmniRecallMediaMemoryTool', () => {
   });
 
   it('degrades to a plain miss when the store has never been written', async () => {
-    const resourceId = registry.bind({
-      fileId: 'f1',
-      fileVersionId: 'v1',
-      rootFileId: 'f1',
-      fileRef: path.join(tmpDir, 'ghost.png'),
-      mediaType: 'image',
-    }).resourceId;
-    const tool = new OmniRecallMediaMemoryTool(toolConfig());
-    const invocation = tool.build({ resourceIds: [resourceId], query: 'q' });
-    const result = await invocation.execute(new AbortController().signal);
+    const resourceId = bindImage(1, path.join(tmpDir, 'ghost.png'));
+    const result = await recall({ resourceIds: [resourceId], query: 'q' });
     expect(result.error).toBeUndefined();
     expect(JSON.parse(result.llmContent as string).status).toBe('miss');
   });
 
   it('reports media memory unavailable on a config without memory', async () => {
-    const tool = new OmniRecallMediaMemoryTool(
-      toolConfig({ getOmniMemoryConfig: () => undefined }),
+    const result = await recall(
+      { resourceIds: ['media-1-ab'], query: 'q' },
+      newTool({ getOmniMemoryConfig: () => undefined }),
     );
-    const invocation = tool.build({ resourceIds: ['media-1-ab'], query: 'q' });
-    const result = await invocation.execute(new AbortController().signal);
     expect(result.error?.type).toBe('execution_failed');
   });
 });
@@ -266,8 +245,8 @@ describe('reanchorRememberedMedia', () => {
 
     expect(anchored).toBeDefined();
     // The handle resolves like any delivered one, so recall accepts it —
-    // which is the whole point: the memory of a deleted file stays
-    // reachable instead of being stranded forever.
+    // the whole point: a deleted file's memory stays reachable instead of
+    // being stranded forever.
     const binding = registry.resolve(anchored!.resourceId);
     expect(binding).toMatchObject({ fileRef: filePath, mediaType: 'video' });
     expect(anchored!.annotation).toContain('【媒体资源】gone.mkv：');
@@ -285,53 +264,40 @@ describe('reanchorRememberedMedia', () => {
 
   it('returns undefined when memory is not configured', async () => {
     const filePath = await rememberThenDelete();
+    const noMemory = cfg({ getOmniMemoryConfig: () => undefined });
     await expect(
-      reanchorRememberedMedia(
-        cfg({ getOmniMemoryConfig: () => undefined }),
-        filePath,
-      ),
+      reanchorRememberedMedia(noMemory, filePath),
     ).resolves.toBeUndefined();
   });
 });
 
 describe('buildMediaMemoryRecallAdvisor', () => {
-  function advisorConfig(params: {
-    registered: string[];
-    enabled: string[];
-  }): Config {
-    return {
+  /** An advisor over `enabled` (modelAccess on) and `registered` (present in
+   * the tool registry) tools; registered defaults to the enabled set. */
+  function advisorFor(enabled: string[], registered = enabled) {
+    return buildMediaMemoryRecallAdvisor({
       getToolRegistry: () => ({
         getTool: (name: string) =>
-          params.registered.includes(name) ? { name } : undefined,
+          registered.includes(name) ? { name } : undefined,
       }),
       getOmniPolicyToolsSettings: () =>
         Object.fromEntries(
-          params.enabled.map((name) => [
-            name,
-            { modelAccess: { enabled: true } },
-          ]),
+          enabled.map((name) => [name, { modelAccess: { enabled: true } }]),
         ),
-    } as unknown as Config;
+    } as unknown as Config);
   }
 
   const gap = (channels: string[], reason = 'not_processed') =>
     ({ scope: {}, channels, reason }) as never;
+  const videoGap = (resourceId: string, channels: string[], reason?: string) =>
+    ({ resourceId, mediaType: 'video', gap: gap(channels, reason) }) as const;
 
   it('suggests only registered, model-accessible tools', () => {
-    const advise = buildMediaMemoryRecallAdvisor(
-      advisorConfig({
-        registered: [
-          ToolNames.OMNI_EXTRACT_KEYFRAMES,
-          ToolNames.OMNI_EXTRACT_AUDIO,
-        ],
-        enabled: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
-      }),
+    const advise = advisorFor(
+      [ToolNames.OMNI_EXTRACT_KEYFRAMES],
+      [ToolNames.OMNI_EXTRACT_KEYFRAMES, ToolNames.OMNI_EXTRACT_AUDIO],
     );
-    const actions = advise({
-      resourceId: 'media-1-ab',
-      mediaType: 'video',
-      gap: gap(['visual', 'speech_text']),
-    });
+    const actions = advise(videoGap('media-1-ab', ['visual', 'speech_text']));
     // extract-audio is registered but not opened to the model; the
     // advisor must not steer the model into a gated call.
     expect(actions).toEqual([
@@ -345,33 +311,16 @@ describe('buildMediaMemoryRecallAdvisor', () => {
   });
 
   it('never suggests a tool that is not registered in this session', () => {
-    // modelAccess settings say what the operator ALLOWS; the tool registry
-    // says what actually exists this turn (omni tools are absent when omni
-    // is off, when ffmpeg is missing, or under a tool filter). Advising an
-    // unregistered tool spends the model's next turn on a call that comes
-    // back "tool not found" — a dead end recall itself invented.
-    const advise = buildMediaMemoryRecallAdvisor(
-      advisorConfig({
-        registered: [],
-        enabled: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
-      }),
-    );
-    expect(
-      advise({
-        resourceId: 'media-6-ab',
-        mediaType: 'video',
-        gap: gap(['visual']),
-      }),
-    ).toEqual([]);
+    // modelAccess says what the operator ALLOWS; the tool registry says what
+    // exists this turn (omni tools are absent when omni is off, ffmpeg is
+    // missing, or under a tool filter). Advising an unregistered tool spends
+    // the model's next turn on a "tool not found" dead end recall invented.
+    const advise = advisorFor([ToolNames.OMNI_EXTRACT_KEYFRAMES], []);
+    expect(advise(videoGap('media-6-ab', ['visual']))).toEqual([]);
   });
 
   it('suggests transcription for an audio speech_text gap', () => {
-    const advise = buildMediaMemoryRecallAdvisor(
-      advisorConfig({
-        registered: [ToolNames.OMNI_TRANSCRIBE_AUDIO],
-        enabled: [ToolNames.OMNI_TRANSCRIBE_AUDIO],
-      }),
-    );
+    const advise = advisorFor([ToolNames.OMNI_TRANSCRIBE_AUDIO]);
     const actions = advise({
       resourceId: 'media-2-cd',
       mediaType: 'audio',
@@ -383,36 +332,20 @@ describe('buildMediaMemoryRecallAdvisor', () => {
   });
 
   it('does not re-suggest audio extraction once the track exists', () => {
-    // The payload that RETURNS the extracted audio still reports the
-    // video's speech_text channel as open. Matching that channel made the
-    // advisor suggest extracting the track again in the very same payload;
-    // the model is supposed to chain to transcription instead.
-    const advise = buildMediaMemoryRecallAdvisor(
-      advisorConfig({
-        registered: [
-          ToolNames.OMNI_EXTRACT_AUDIO,
-          ToolNames.OMNI_TRANSCRIBE_AUDIO,
-        ],
-        enabled: [
-          ToolNames.OMNI_EXTRACT_AUDIO,
-          ToolNames.OMNI_TRANSCRIBE_AUDIO,
-        ],
-      }),
-    );
-    expect(
-      advise({
-        resourceId: 'media-4-aa',
-        mediaType: 'video',
-        gap: gap(['speech_text']),
-      }),
-    ).toEqual([]);
+    // The payload that RETURNS the extracted audio still reports the video's
+    // speech_text channel as open. Matching that channel made the advisor
+    // suggest extracting the track again in the very same payload; the model
+    // is supposed to chain to transcription instead.
+    const advise = advisorFor([
+      ToolNames.OMNI_EXTRACT_AUDIO,
+      ToolNames.OMNI_TRANSCRIBE_AUDIO,
+    ]);
+    expect(advise(videoGap('media-4-aa', ['speech_text']))).toEqual([]);
     // A wholly unprocessed video still gets the extraction step.
     expect(
-      advise({
-        resourceId: 'media-4-aa',
-        mediaType: 'video',
-        gap: gap(['acoustic', 'speech_text']),
-      }).map((a) => a.toolName),
+      advise(videoGap('media-4-aa', ['acoustic', 'speech_text'])).map(
+        (a) => a.toolName,
+      ),
     ).toEqual([ToolNames.OMNI_EXTRACT_AUDIO]);
   });
 
@@ -420,34 +353,16 @@ describe('buildMediaMemoryRecallAdvisor', () => {
     // Keyframes deliberately never claim complete visual coverage, so
     // suggesting keyframe extraction against `partial_coverage` would
     // advise the same step forever.
-    const advise = buildMediaMemoryRecallAdvisor(
-      advisorConfig({
-        registered: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
-        enabled: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
-      }),
-    );
+    const advise = advisorFor([ToolNames.OMNI_EXTRACT_KEYFRAMES]);
     expect(
-      advise({
-        resourceId: 'media-5-bb',
-        mediaType: 'video',
-        gap: gap(['visual'], 'partial_coverage'),
-      }),
+      advise(videoGap('media-5-bb', ['visual'], 'partial_coverage')),
     ).toEqual([]);
   });
 
   it('never suggests anything for an unavailable artifact', () => {
-    const advise = buildMediaMemoryRecallAdvisor(
-      advisorConfig({
-        registered: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
-        enabled: [ToolNames.OMNI_EXTRACT_KEYFRAMES],
-      }),
-    );
+    const advise = advisorFor([ToolNames.OMNI_EXTRACT_KEYFRAMES]);
     expect(
-      advise({
-        resourceId: 'media-3-ef',
-        mediaType: 'video',
-        gap: gap(['visual'], 'artifact_unavailable'),
-      }),
+      advise(videoGap('media-3-ef', ['visual'], 'artifact_unavailable')),
     ).toEqual([]);
   });
 });

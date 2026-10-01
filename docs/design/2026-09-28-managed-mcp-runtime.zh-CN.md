@@ -46,6 +46,8 @@ MCP 需要独立配置与操作记录、不可变目录修订、由 Runtime 持�
 
 Harness 空闲重载后，先推进现有配置记录的持久修订，再为新 writer 签发 grant；目录和连接 pin 保持不变。Runtime grant gate 仍拒绝同一修订更换 owner。初始配置明确失败后，显式替换命令可安装允许的新定义，无需先让失败的初始定义恢复。未决配置以 HTTP 503 阻止该 server 的新修订，但仍允许重试原显式配置命令。后续未知查询不能覆写已经明确失败或取消的配置。Detach 会按原操作对账所有未决配置，包括被旧版本 writer 的新配置越过的历史记录；只有明确结算并完成 drain 后才释放所有权。
 
+连接释放持久化为 `active → releasing → drained → released`。`releasing` 只表示释放意图；`drained` 表示已取得确定的释放回执，或证明该配置从未打开连接。Harness 必须提交所有排空回执，才请求 Broker 释放原 owner。重新加载时跳过已排空连接，只重试原 owner 的释放，包括 Broker 释放确认丢失的情况。关闭超时后，只要物理 transport 仍打开，结果就保持未知；之后确认物理关闭时，原释放回执转为已结算，使后续配置能够继续排空。未知调用仍保留其占用。历史日志中的 `releasing → released` 转移仍可读取。对于旧写者留下且剩余记录均处于 releasing 或 drained 的状态，只有 Broker 明确拒绝获取原 owner、表明其准入已经关闭时，才允许重试原 owner 释放；Broker 仍须证明物理排空。网络错误及其他拒绝不得触发此恢复路径。必须先部署能够识别 `drained` 的 store，再部署写入它的 Harness；无需 SQL 迁移。本修复不会强制恢复被旧写者提前封锁、且仍持有打开连接的 Runtime Session。
+
 ## 准入、凭据与清理
 
 Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装的 server binding。配置凭据留在 Runtime。Stdio command、参数、环境键和值不能包含 NUL；无效定义在分配连接前拒绝。公开目录不包含连接配方、环境、headers、endpoint、进程标识、grant 或内部 binding ID。错误使用有界稳定代码，不回显可能带凭据的底层连接异常。Hosted 原始操作路由在提交操作之前，拒绝资源 URI、prompt 名称以及参数键和值中的非法 Unicode。Broker 也在序列化前拒绝非法 Unicode，防止转发时静默改写请求内容。超大 MCP control 在转发给 Runtime 前返回不可重试的 413。

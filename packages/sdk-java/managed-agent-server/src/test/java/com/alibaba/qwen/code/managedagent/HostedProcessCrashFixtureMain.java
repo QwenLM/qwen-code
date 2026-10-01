@@ -26,6 +26,14 @@ public final class HostedProcessCrashFixtureMain {
         String tenant = args[3];
         String fault = args[4];
         Path workspace = root.resolve("workspace");
+        Path worker = root.resolve("fixture-worker.mjs");
+        Path cliPath = Path.of(cli).toAbsolutePath().normalize();
+        ObjectMapper mapper = new ObjectMapper();
+        Files.writeString(worker, "await import("
+                + mapper.writeValueAsString(cliPath.getParent().getParent()
+                        .resolve("integration-tests/helpers/hosted-file-read-gate.mjs").toUri().toString())
+                + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
+                + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
         var spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
                 "--server.address=127.0.0.1", "--server.port=0",
@@ -44,7 +52,7 @@ public final class HostedProcessCrashFixtureMain {
                 "--qwen.managed-agent.runtime-broker.credential-key-id=test",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
-                "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
+                "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",

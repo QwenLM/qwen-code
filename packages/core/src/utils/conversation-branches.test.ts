@@ -8,6 +8,12 @@ import { describe, expect, it } from 'vitest';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { inspectConversationBranches } from './conversation-branches.js';
 import { buildOrderedUuidChain } from './conversation-chain.js';
+import {
+  content,
+  fnCall,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 function record(
   uuid: string,
@@ -27,6 +33,11 @@ function record(
   };
 }
 
+/** A user record whose single text part is `text`. */
+function user(uuid: string, parentUuid: string | null, text: string) {
+  return record(uuid, parentUuid, { message: userText(text) });
+}
+
 function assistant(
   uuid: string,
   parentUuid: string | null,
@@ -34,7 +45,7 @@ function assistant(
 ): ChatRecord {
   return record(uuid, parentUuid, {
     type: 'assistant',
-    message: { role: 'model', parts: [{ text }] },
+    message: modelText(text),
   });
 }
 
@@ -50,6 +61,19 @@ function system(
   });
 }
 
+const leafUuids = (records: ChatRecord[]) =>
+  inspectConversationBranches(records).branches.map(
+    (branch) => branch.leafUuid,
+  );
+
+const chainTo = (records: ChatRecord[], leafUuid: string) =>
+  buildOrderedUuidChain(records, { leafUuid, detectGaps: true });
+
+const branchWithLeaf = (records: ChatRecord[], leafUuid: string) =>
+  inspectConversationBranches(records).branches.find(
+    (branch) => branch.leafUuid === leafUuid,
+  );
+
 describe('inspectConversationBranches', () => {
   it('returns no branches or diagnostics for an empty transcript', () => {
     expect(inspectConversationBranches([])).toEqual({
@@ -60,17 +84,11 @@ describe('inspectConversationBranches', () => {
 
   it('identifies ordinary sibling branches and summarizes their divergence', () => {
     const records = [
-      record('root-user', null, {
-        message: { role: 'user', parts: [{ text: 'shared request' }] },
-      }),
+      user('root-user', null, 'shared request'),
       assistant('shared-answer', 'root-user', 'shared answer'),
-      record('left-user', 'shared-answer', {
-        message: { role: 'user', parts: [{ text: 'take the left path' }] },
-      }),
+      user('left-user', 'shared-answer', 'take the left path'),
       assistant('left-leaf', 'left-user', 'left result'),
-      record('right-user', 'shared-answer', {
-        message: { role: 'user', parts: [{ text: 'take the right path' }] },
-      }),
+      user('right-user', 'shared-answer', 'take the right path'),
       assistant('right-leaf', 'right-user', 'right result'),
     ];
 
@@ -98,9 +116,7 @@ describe('inspectConversationBranches', () => {
 
   it('summarizes a single linear branch without a branch point', () => {
     const records = [
-      record('root-user', null, {
-        message: { role: 'user', parts: [{ text: 'only request' }] },
-      }),
+      user('root-user', null, 'only request'),
       assistant('only-answer', 'root-user', 'only answer'),
     ];
 
@@ -116,19 +132,17 @@ describe('inspectConversationBranches', () => {
   it('summarizes user records from clean display metadata', () => {
     const records = [
       record('root-user', null, {
-        message: {
-          role: 'user',
-          parts: [
-            { text: 'expanded model prompt' },
-            {
-              text: [
-                '<qwen:user-prompt-submit-context>',
-                'hook-only context',
-                '</qwen:user-prompt-submit-context>',
-              ].join('\n'),
-            },
-          ],
-        },
+        message: content(
+          'user',
+          { text: 'expanded model prompt' },
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ),
         systemPayload: {
           displayText: 'raw @file prompt',
           hookContext: 'hook-only context',
@@ -195,11 +209,7 @@ describe('inspectConversationBranches', () => {
       ),
     ];
 
-    expect(
-      inspectConversationBranches(records).branches.map(
-        (branch) => branch.leafUuid,
-      ),
-    ).toEqual(['conversation-leaf']);
+    expect(leafUuids(records)).toEqual(['conversation-leaf']);
   });
 
   it('drops neutral-only branches without a conversation ancestor', () => {
@@ -244,11 +254,7 @@ describe('inspectConversationBranches', () => {
       assistant('real-leaf', 'root'),
     ];
 
-    expect(
-      inspectConversationBranches(records).branches.map(
-        (branch) => branch.leafUuid,
-      ),
-    ).toEqual(['real-leaf']);
+    expect(leafUuids(records)).toEqual(['real-leaf']);
   });
 
   it('collapses a neutral chain but preserves significant system terminals', () => {
@@ -262,11 +268,12 @@ describe('inspectConversationBranches', () => {
       system('file-history', 'root', 'file_history_snapshot'),
     ];
 
-    expect(
-      inspectConversationBranches(records).branches.map(
-        (branch) => branch.leafUuid,
-      ),
-    ).toEqual(['compression', 'slash', 'attribution', 'file-history']);
+    expect(leafUuids(records)).toEqual([
+      'compression',
+      'slash',
+      'attribution',
+      'file-history',
+    ]);
   });
 
   it('classifies rewind descendants and siblings without discarding either', () => {
@@ -279,20 +286,12 @@ describe('inspectConversationBranches', () => {
       assistant('new-leaf', 'new-user'),
     ];
 
-    const analysis = inspectConversationBranches(records);
-    const oldBranch = analysis.branches.find(
-      (branch) => branch.leafUuid === 'old-leaf',
-    );
-    const newBranch = analysis.branches.find(
-      (branch) => branch.leafUuid === 'new-leaf',
-    );
-
-    expect(oldBranch).toMatchObject({
+    expect(branchWithLeaf(records, 'old-leaf')).toMatchObject({
       classification: 'rewind-sibling',
       containsRewindUuids: [],
       siblingRewindUuids: ['rewind'],
     });
-    expect(newBranch).toMatchObject({
+    expect(branchWithLeaf(records, 'new-leaf')).toMatchObject({
       classification: 'rewind-descendant',
       containsRewindUuids: ['rewind'],
       siblingRewindUuids: [],
@@ -309,10 +308,7 @@ describe('inspectConversationBranches', () => {
       assistant('mixed-leaf', 'second-rewind'),
     ];
 
-    const mixed = inspectConversationBranches(records).branches.find(
-      (branch) => branch.leafUuid === 'mixed-leaf',
-    );
-    expect(mixed).toMatchObject({
+    expect(branchWithLeaf(records, 'mixed-leaf')).toMatchObject({
       classification: 'mixed-rewind',
       containsRewindUuids: ['second-rewind'],
       siblingRewindUuids: ['first-rewind'],
@@ -328,10 +324,7 @@ describe('inspectConversationBranches', () => {
       assistant('second-leaf', 'unrelated-rewind'),
     ];
 
-    const firstBranch = inspectConversationBranches(records).branches.find(
-      (branch) => branch.leafUuid === 'first-leaf',
-    );
-    expect(firstBranch).toMatchObject({
+    expect(branchWithLeaf(records, 'first-leaf')).toMatchObject({
       classification: 'ordinary',
       containsRewindUuids: [],
       siblingRewindUuids: [],
@@ -368,12 +361,7 @@ describe('inspectConversationBranches', () => {
       },
       { kind: 'parent-cycle', uuids: ['cycle-a', 'cycle-b'] },
     ]);
-    expect(
-      buildOrderedUuidChain(records, {
-        leafUuid: 'orphan',
-        detectGaps: true,
-      }),
-    ).toEqual({
+    expect(chainTo(records, 'orphan')).toEqual({
       uuids: ['orphan'],
       gaps: [{ childUuid: 'orphan', missingParentUuid: 'missing' }],
     });
@@ -381,9 +369,7 @@ describe('inspectConversationBranches', () => {
 
   it('does not mix roles when duplicate UUID records have different types', () => {
     const records = [
-      record('duplicate', null, {
-        message: { role: 'user', parts: [{ text: 'user text' }] },
-      }),
+      user('duplicate', null, 'user text'),
       assistant('duplicate', null, 'assistant text'),
     ];
 
@@ -398,9 +384,7 @@ describe('inspectConversationBranches', () => {
   it('filters synthetic prompts and thoughts and truncates summary text', () => {
     const longText = 'x'.repeat(220);
     const records = [
-      record('real-user', null, {
-        message: { role: 'user', parts: [{ text: '  real\n request  ' }] },
-      }),
+      user('real-user', null, '  real\n request  '),
       record('notification', 'real-user', {
         subtype: 'notification',
         message: { role: 'user', parts: [{ text: 'synthetic prompt' }] },
@@ -415,31 +399,24 @@ describe('inspectConversationBranches', () => {
       }),
       record('external-notification', 'mid-turn', {
         externalInputKind: 'notification',
-        message: {
-          role: 'user',
-          parts: [{ text: 'background agent notification' }],
-        },
+        message: userText('background agent notification'),
       }),
       record('visible-assistant', 'external-notification', {
         type: 'assistant',
-        message: {
-          role: 'model',
-          parts: [{ text: 'hidden', thought: true }, { text: longText }],
-        },
+        message: content(
+          'model',
+          { text: 'hidden', thought: true },
+          { text: longText },
+        ),
       }),
       record('tool-call', 'visible-assistant', {
         type: 'assistant',
-        message: {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                name: 'dangerous-looking-tool',
-                args: { secret: 'must not enter the summary' },
-              },
-            },
-          ],
-        },
+        message: content(
+          'model',
+          fnCall('dangerous-looking-tool', {
+            secret: 'must not enter the summary',
+          }),
+        ),
       }),
     ];
 
@@ -461,11 +438,7 @@ describe('inspectConversationBranches', () => {
     records[1]!.timestamp = '2099-01-01T00:00:00.000Z';
     records[2]!.timestamp = '2000-01-01T00:00:00.000Z';
 
-    expect(
-      inspectConversationBranches(records).branches.map(
-        (branch) => branch.leafUuid,
-      ),
-    ).toEqual(['first-leaf', 'second-leaf']);
+    expect(leafUuids(records)).toEqual(['first-leaf', 'second-leaf']);
   });
 
   it('uses collapsed physical leaf order instead of ancestor order', () => {
@@ -476,11 +449,7 @@ describe('inspectConversationBranches', () => {
       system('first-title', 'first-root', 'custom_title'),
     ];
 
-    expect(
-      inspectConversationBranches(records).branches.map(
-        (branch) => branch.leafUuid,
-      ),
-    ).toEqual(['second-root', 'first-root']);
+    expect(leafUuids(records)).toEqual(['second-root', 'first-root']);
   });
 
   it('normalizes the sanitized incident topology from three raw terminals to two branches', () => {
@@ -499,17 +468,13 @@ describe('inspectConversationBranches', () => {
       (candidate) =>
         !records.some((record) => record.parentUuid === candidate.uuid),
     );
-    const analysis = inspectConversationBranches(records);
 
     expect(rawTerminals.map((record) => record.uuid)).toEqual([
       'old-title-tail',
       'new-answer',
       'artifact-side-tail',
     ]);
-    expect(analysis.branches.map((branch) => branch.leafUuid)).toEqual([
-      'old-answer',
-      'new-answer',
-    ]);
+    expect(leafUuids(records)).toEqual(['old-answer', 'new-answer']);
   });
 
   it('returns leaves accepted by the existing explicit reconstruction path', () => {
@@ -521,11 +486,8 @@ describe('inspectConversationBranches', () => {
       assistant('right-leaf', 'right'),
     ];
 
-    const chains = inspectConversationBranches(records).branches.map((branch) =>
-      buildOrderedUuidChain(records, {
-        leafUuid: branch.leafUuid,
-        detectGaps: true,
-      }),
+    const chains = leafUuids(records).map((leafUuid) =>
+      chainTo(records, leafUuid),
     );
 
     expect(chains).toEqual([
