@@ -2970,7 +2970,7 @@ describe('ShellTool', () => {
       const killed = await runFg('worker-process', {
         output: '',
         exitCode: null,
-        signal: 'SIGTERM',
+        signal: 15,
         aborted: false,
         error: null,
       });
@@ -2983,14 +2983,14 @@ describe('ShellTool', () => {
           'Output: (empty)',
           'Error: (none)',
           'Exit Code: (none)',
-          'Signal: SIGTERM',
+          'Signal: 15',
         ].join('\n'),
       );
 
       const aborted = await runFg('worker-process', {
         output: '',
         exitCode: null,
-        signal: 'SIGTERM',
+        signal: 15,
         aborted: true,
       });
       expect(aborted.llmContent).not.toContain('Full output sha256:');
