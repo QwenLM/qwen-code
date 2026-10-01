@@ -239,7 +239,7 @@ Runtime 在任何副作用之前拒绝的派发,证明没有开始执行。未�
 - 一个规范的 grant、定义固定、运行块和 monitor 运行。
 - 568 个用例:grant(140,其中每个 domain 各有一个有效 grant)、grant 替换(22)、定义固定(25)、定义固定对(7)、运行块(152)、运行修订(61)、monitor 运行(118)和 monitor 修订(43)。每个无效用例都针对一条规则。
 
-schema 固定每条记录的结构,以及它能清晰表达的所有规则,包括全部状态、原因和停止原因规则。它无法表达 UTF-8 字节上限、NFC、格式良好的 UTF-16、可读的 2^63−1 上界、由另一字段推导出的记录 kind,或依赖另一字段的上界;TypeScript 测试列出 schema 与模块结论不同的用例。它的正则表达式遵循 ECMA-262,这是 draft 2020-12 的规定;采用其他正则语义的 validator(例如 Java 的默认实现)可能接受末尾的换行,而两个模块都会拒绝。一个依据本文编写、独立于两种语言的 Python 实现为每个用例标注了结论,它与 `managed-tool-result/1` 的做法一样放在仓库之外,生成器在它与标注不一致时停止。为 [#12887](https://github.com/QwenLM/qwen-code/issues/12887) 第 1 项新增的十个用例改由一个新编写的 Python 参考标注,原生成器未取得:它只覆盖这十个用例与其正向控制,没有重新审计其余 558 条标注,也只解释部分 schema,因此语料的 schema 权威仍是下文列出的 Ajv 校验。
+schema 固定每条记录的结构,以及它能清晰表达的所有规则,包括全部状态、原因和停止原因规则。它无法表达 UTF-8 字节上限、NFC、格式良好的 UTF-16、可读的 2^63−1 上界、由另一字段推导出的记录 kind,或依赖另一字段的上界;TypeScript 测试列出 schema 与模块结论不同的用例。它的正则表达式遵循 ECMA-262,这是 draft 2020-12 的规定;采用其他正则语义的 validator(例如 Java 的默认实现)可能接受末尾的换行,而两个模块都会拒绝。一个依据本文编写、独立于两种语言的 Python 实现为每个用例标注了结论,它与 `managed-tool-result/1` 的做法一样放在仓库之外,生成器在它与标注不一致时停止。为 [#12887](https://github.com/QwenLM/qwen-code/issues/12887) 第 1 项新增的十个用例、以及在同一 runtime 绑定下重新隔离的 monitor 后继用例,改由一个新编写的 Python 参考标注,原生成器未取得:它只覆盖这十一个用例与其正向控制,没有重新审计其余 557 条标注,也只解释部分 schema,因此语料的 schema 权威仍是下文列出的 Ajv 校验。
 
 - **TypeScript。** `packages/core/src/managed-runtime/managed-extension-record.ts` 解析 grant、定义固定、运行块与 monitor 运行,并检查 grant 替换、定义固定对和修订。在 H0c 之前没有代码导入它。
 - **Java。** `managed-agent-server` 中的 `ManagedExtensionRecords` 在 Jackson 树上实现同样的规则。一个测试回放每个用例,检查每条线上的每一对状态,固定常量,并用 schema 校验 fixtures。
