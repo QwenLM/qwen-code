@@ -1774,10 +1774,10 @@ describe('Gemini Client (client.ts)', () => {
       // declared nor bridge-reachable and gates the Agent (and, via the
       // shared conjunct, Codebase Search) guidance out of the system prompt
       // for a session that declares agent to the model.
-      const reg = deferredToolRegistry(() => null, [
-        ToolNames.AGENT,
-        'delegate work',
-      ]);
+      const reg = deferredToolRegistry(
+        () => null,
+        [ToolNames.AGENT, 'delegate work'],
+      );
       reg.isPermissionDeferred.mockReturnValue(false);
       // The declaration list picks agent up only once the eager reveal fires.
       reg.getFunctionDeclarations.mockImplementation(() =>
@@ -1820,10 +1820,10 @@ describe('Gemini Client (client.ts)', () => {
       // The incomplete-bridge fallback deliberately withholds permission-
       // deferred tools from the eager reveal, so this session can neither
       // declare agent nor reach it through the (absent) bridge.
-      const reg = deferredToolRegistry(() => null, [
-        ToolNames.AGENT,
-        'delegate work',
-      ]);
+      const reg = deferredToolRegistry(
+        () => null,
+        [ToolNames.AGENT, 'delegate work'],
+      );
       reg.getFunctionDeclarations.mockReturnValue([]);
       reg.isPermissionDeferred.mockImplementation(
         (name: string) => name === ToolNames.AGENT,
