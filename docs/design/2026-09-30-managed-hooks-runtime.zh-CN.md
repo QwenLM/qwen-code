@@ -27,6 +27,14 @@ ordinal、registration、plan、有效输入、原 Runtime Session、取消意�
 条目。TypeScript 与 Java 消费共用正反例，并校验资源闭包、固定版本、唯一 ordinal，
 以及在 intent 时原子消费 once key。
 
+这些校验的开销不能随 Session 的 Hook 历史增长。once key、occurrence 与 ordinal、
+目录 pin 在记录的各个修订之间不变，因此 Session Store 在记录首次提交时把它们投影到
+带索引的列。(Session, once key) 和 (Session, occurrence, ordinal) 上的唯一索引拒绝
+重复，包括并发重复。occurrence 绑定与目录摘要只需与同一 key 下的一条已提交记录比较，
+因为准入保证同一 key 下的记录彼此一致。Session authority 在内存中维护相同的 key，
+重新打开日志时按线性时间回放记录。因此准入不再重读较早的记录，也不再在每次准入时
+发现其中某条记录已损坏；所有记录及其资源闭包在 Session 恢复时完整校验。
+
 每个 occurrence 固定目录与计划。Session 内串行准入 occurrence，防止并发事件
 同时预订同一个 once Hook；每个计划内部仍保留原生并行/顺序执行行为。同一 ID 携带不同语义输入会被拒绝。顺序执行持久化
 每一步有效输入，并复用原生 prompt context 和工具输入累积逻辑；并行结果按计划顺序
@@ -128,6 +136,9 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 同时需要 Hosted Workspace tool profile 和 Broker。加载时省略初始 pin 会恢复保存值，
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
+打开 authority 时，每条记录及其引用的每个资源只读取一次，无论有多少修订引用它。
+Workspace 校验复用该结果，只读取它必须自行检查的内容，例如 plan 及其消息快照。
+相互独立的读取按有界批次并发执行。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
 扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。公开
@@ -139,6 +150,11 @@ tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投
 Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V26 将首次
 准入的日志序号保存为 `first_sequence`，后续修订保持不变。最新已结算目录按该序号选择，
 与原生注册顺序一致；即使旧注册较晚结算，也不受时钟或 UUID 排序影响。
+Migration V27 增加准入列与索引；V28 从经过校验的记录体为 V26 写入的记录回填。
+记录体缺失或损坏的记录不写入 key，V28 按资源缺失的方式阻塞其所属 Session
+（`BLOCKED_RESOURCE`），使后续准入无法复用该记录已消费的 once key；其他 Session
+不受影响。迁移后不支持再运行早于 V27 的二进制：它写入的 Hook 记录不带这些 key，
+Session Store 的检查看不到这些记录，但 Session authority 仍在内存中执行这些约束。
 
 ## 验证与验收
 

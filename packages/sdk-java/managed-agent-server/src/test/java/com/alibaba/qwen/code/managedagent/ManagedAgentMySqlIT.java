@@ -67,7 +67,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 class ManagedAgentMySqlIT {
     @Test
     @Order(1)
-    void upgradesAndExercisesStoresOnMySql() {
+    void upgradesAndExercisesStoresOnMySql() throws IOException {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration")
@@ -89,11 +89,16 @@ class ManagedAgentMySqlIT {
         LegacyLifecycleCommands.Sessions lifecycle =
                 LegacyLifecycleCommands.insert(jdbc, "mysql-lifecycle");
         Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration")
+                .target(MigrationVersion.fromVersion("26")).load().migrate();
+        LegacyHookRecords.insert(jdbc, "mysql-hooks", "session_hooks");
+        Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         LegacyEvents.assertBackfilled(jdbc, "mysql-upgrade",
                 "session_upgrade");
         LegacyLifecycleCommands.assertMigrated(jdbc, "mysql-lifecycle",
                 lifecycle);
+        LegacyHookRecords.assertBackfilled(jdbc, "mysql-hooks", "session_hooks");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " managed_agent_consumer_progress WHERE tenant_id = ?"
                         + " AND session_id = ? AND consumer_name = ?",
@@ -960,6 +965,55 @@ class ManagedAgentMySqlIT {
         com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verify(source, jdbc, store, authority);
         com.alibaba.qwen.code.managedagent.service.WorkspaceRecoveryContract.verifyOperatorPrepare(
                 source, jdbc, store, authority);
+    }
+
+    @Test
+    @Order(12)
+    void admitsHookExecutionsWithoutReadingTheirHistoryOnMySql() throws Exception {
+        DriverManagerDataSource dataSource = dataSource();
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+        String session = "mysql-hooks-" + UUID.randomUUID();
+        HookAdmissionHistory history = new HookAdmissionHistory(dataSource,
+                "mysql-hook-index", "mysql-hook-workspace", session);
+        // Equal modulo 4, so both admissions run the same checks.
+        HookAdmissionHistory.Admission early = history.admitUntil(18);
+        HookAdmissionHistory.Admission late = history.admitUntil(2002);
+        System.out.printf("Hook admission at %d executions: %d SELECTs,"
+                        + " %d statements, %.1f ms; at %d: %d SELECTs,"
+                        + " %d statements, %.1f ms%n", early.history(),
+                early.selects(), early.statements(), early.nanos() / 1e6,
+                late.history(), late.selects(), late.statements(),
+                late.nanos() / 1e6);
+        assertThat(late.selects()).isEqualTo(early.selects());
+        assertThat(late.statements()).isEqualTo(early.statements());
+
+        // Each admission lookup is an index lookup, not a scan of the
+        // Session's Hook records.
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.queryForList("ANALYZE TABLE qwen_managed_session_extension_record");
+        String scopeKey = sha256("mysql-hook-index\u0000" + session);
+        for (Object[] lookup : List.of(
+                new Object[] {"uq_managed_session_hook_once",
+                        "hook_once_key_hash = ?", sha256("once-7")},
+                new Object[] {"uq_managed_session_hook_ordinal",
+                        "hook_occurrence_hash = ? AND hook_ordinal = ?",
+                        sha256("occurrence-7"), 1},
+                new Object[] {"uq_managed_session_hook_ordinal",
+                        "hook_occurrence_hash = ?", sha256("occurrence-7")},
+                new Object[] {"idx_managed_session_hook_definition",
+                        "hook_definition_hash = ?", sha256("catalog-1\u00001")})) {
+            Object[] arguments = new Object[lookup.length - 1];
+            arguments[0] = scopeKey;
+            System.arraycopy(lookup, 2, arguments, 1, lookup.length - 2);
+            assertThat(jdbc.queryForList("EXPLAIN SELECT record_resource_id FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_scope_key = ? AND " + lookup[1]
+                            + " LIMIT 1", arguments))
+                    .as((String) lookup[1])
+                    .extracting(row -> row.get("key"))
+                    .containsExactly(lookup[0]);
+        }
     }
 
     private static Process startWorkspaceProcess(String action,

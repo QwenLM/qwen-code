@@ -33,6 +33,18 @@ They do not create user task entries. TypeScript and Java consume shared positiv
 and negative fixtures and enforce resource closure, stable pins, unique ordinals,
 and atomic consumption of once keys at intent.
 
+These checks must not grow with a Session's Hook history. The once key, the
+occurrence and ordinal, and the catalog pin never change across a record's
+revisions, so the Session Store projects them into indexed columns when a record
+first commits. Unique indexes on (Session, once key) and (Session, occurrence,
+ordinal) refuse duplicates, including concurrent ones. The occurrence binding and
+the catalog digest are compared with one committed record of the same key,
+because admission keeps every record under a key in agreement. The Session
+authority keeps the same keys in memory, so a reopened log replays its records in
+linear time. Admission therefore no longer re-reads earlier records, and no
+longer notices on each admission that one of them was damaged; every record and
+its resource closure are verified when the Session is restored.
+
 Each occurrence fixes its catalog and plan. Occurrences are admitted serially
 within a Session so concurrent events cannot reserve the same once Hook; execution
 inside each plan retains native parallel/sequential behavior. Repeated IDs with different semantic
@@ -164,7 +176,11 @@ definitionDigest}` with a Hosted Workspace tool profile and Broker. The saved
 initial pin is restored when omitted on load and must match when supplied; later
 committed registrations remain authoritative. Workspace cold load verifies Hook
 record resources and the complete function-message snapshot closure before
-attachment, while retaining original-owner recovery barriers.
+attachment, while retaining original-owner recovery barriers. Opening the
+authority reads each record, and each resource a record names, once however many
+revisions name it. The Workspace verification reuses that result and reads only
+what it must inspect itself, such as plans and their message snapshots.
+Independent reads run in bounded batches.
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration
 updates, Notification/expansion operations, and operation status/cancel. Mutations
@@ -179,6 +195,14 @@ projection, and their collocated tests. Migration V26 records the first admissio
 journal sequence as `first_sequence`, which later revisions preserve. The latest
 settled catalog is chosen by this sequence, matching native registration order
 even when an older registration settles later, independently of clocks or UUIDs.
+Migration V27 adds the admission columns and indexes; V28 backfills them for records
+written under V26 from their verified bodies. A record whose body is missing or
+corrupt keeps no keys, and V28 blocks its Session as a missing resource does
+(`BLOCKED_RESOURCE`), so no later admission can reuse a once key it consumed;
+other Sessions are unaffected. Running a binary older than V27 against a migrated
+database is unsupported: it writes Hook records without these keys, which the
+Session Store's checks then cannot see, although the Session authority still
+enforces them in memory.
 
 ## Validation and acceptance
 

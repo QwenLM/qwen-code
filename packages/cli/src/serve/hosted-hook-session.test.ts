@@ -1190,6 +1190,51 @@ it.each(['decision', 'continue'] as const)(
   },
 );
 
+it('reads each saved Stop plan once however many turns check it', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Stop }],
+  };
+  for (let turn = 0; turn < 12; turn++)
+    await hooks.fire(
+      HookEventName.Stop,
+      `stop-${turn}`,
+      { prompt_id: `prompt-${turn}` },
+      signal(),
+    );
+  const read = vi.spyOn(session.resources, 'read');
+  const plans = () =>
+    read.mock.calls.filter(([ref]) => ref.kind === 'managed-hook-plan').length;
+  for (let turn = 12; turn < 20; turn++)
+    expect(await hooks.wasStopBlocked(`prompt-${turn}`)).toBe(false);
+  expect(plans()).toBe(12);
+  // A replacement Harness reads them once again, then not per turn.
+  const restored = new HostedHookSession(options, session, pin);
+  for (let turn = 0; turn < 3; turn++)
+    expect(await restored.wasStopBlocked('prompt-new')).toBe(false);
+  expect(plans()).toBe(24);
+});
+
+it('drains a long settled history without rescanning it per occurrence', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
+  };
+  for (let index = 0; index < 30; index++)
+    await hooks.fire(
+      HookEventName.Notification,
+      `notification-${index}`,
+      { message: `${index}` },
+      signal(),
+    );
+  const scans = vi.spyOn(session.authority, 'extensionRecordsInDomain');
+  const commits = vi.spyOn(session.authority, 'commitExtensionRecord');
+  await hooks.drain();
+  expect(commits).not.toHaveBeenCalled();
+  // A fixed number of passes over the history, not one per occurrence.
+  expect(scans.mock.calls.length).toBeLessThanOrEqual(3);
+});
+
 it.each([false, true])(
   'preserves a large Session context within individual resource limits (function Hook: %s)',
   async (hasFunction) => {

@@ -93,6 +93,17 @@ const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const CLIENT = /^[A-Za-z0-9._:-]{1,128}$/u;
+/** References whose resources a cold Workspace load verifies at once. */
+const RESTORE_READ_BATCH = 32;
+/** Resource kinds whose contents a cold Workspace load inspects. */
+const RESTORE_CONTAINER_KINDS = new Set([
+  'managed-session_metadata',
+  'managed-tool-outcome',
+  'managed-tool-result-manifest',
+  'managed-checkpoint',
+  'managed-hook-plan',
+  'managed-hook-message-chunks',
+]);
 
 interface HostedSession {
   managed: ManagedSession;
@@ -285,23 +296,39 @@ async function verifyWorkspaceRestore(
   const { authority, resources, sink } = session.managed;
   const segmentStore = new ResourceToolResultSegmentStore(toolResults);
   const manifests = new Map<string, ManagedSessionDurableRef>();
-  const verified = new Map<string, ManagedSessionDurableRef>();
+  // Opening the authority already read every Stage H record and the
+  // resources its body references. Those are checked for conflicting
+  // references but not read again, unless this verification descends into
+  // their kind; the records' references are queued below for that reason.
+  const verified = new Map<
+    string,
+    { ref: ManagedSessionDurableRef; done: Promise<void> }
+  >();
+  for (const [id, ref] of await authority.verifiedExtensionResources())
+    if (!RESTORE_CONTAINER_KINDS.has(ref.kind))
+      verified.set(id, { ref, done: Promise.resolve() });
   const publicationManifests = new Set<string>();
   let incomplete = false;
-  async function readRef(ref: ManagedSessionDurableRef): Promise<void> {
+  function readRef(ref: ManagedSessionDurableRef): Promise<void> {
     const previous = verified.get(ref.resourceId);
     if (previous) {
       if (
-        previous.kind !== ref.kind ||
-        previous.schemaVersion !== ref.schemaVersion ||
-        previous.byteLength !== ref.byteLength ||
-        previous.digest !== ref.digest
+        previous.ref.kind !== ref.kind ||
+        previous.ref.schemaVersion !== ref.schemaVersion ||
+        previous.ref.byteLength !== ref.byteLength ||
+        previous.ref.digest !== ref.digest
       )
-        throw new Error('Hosted resource references conflict.');
-      return;
+        return Promise.reject(
+          new Error('Hosted resource references conflict.'),
+        );
+      return previous.done;
     }
+    const done = verifyRef(ref);
+    verified.set(ref.resourceId, { ref, done });
+    return done;
+  }
+  async function verifyRef(ref: ManagedSessionDurableRef): Promise<void> {
     const bytes = await resources.read(ref);
-    verified.set(ref.resourceId, ref);
     if (ref.kind === 'managed-tool-result-manifest')
       manifests.set(ref.resourceId, ref);
     if (ref.kind === 'managed-session_metadata') {
@@ -385,10 +412,8 @@ async function verifyWorkspaceRestore(
     }
   }
   const header = authority.sessionHeader;
-  await readRef(header.definitionRef);
-  await readRef(header.rootSnapshotRef);
-  if (header.baseTranscriptProof) await readRef(header.baseTranscriptProof);
-  for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
+  const events = authority.eventsInSequenceRange(1, throughSequence);
+  for (const event of events) {
     if (
       event.kind === 'domain.committed' &&
       !['session_metadata', 'hook_registration', 'hook_execution'].includes(
@@ -396,17 +421,40 @@ async function verifyWorkspaceRestore(
       )
     )
       throw new Error('Hosted recovery domain is unsupported.');
+  }
+  const refs = [
+    header.definitionRef,
+    header.rootSnapshotRef,
+    ...(header.baseTranscriptProof ? [header.baseTranscriptProof] : []),
+  ];
+  for (const event of events) {
     for (const [field, value] of Object.entries(event.payload)) {
       if (field.endsWith('Ref') && value !== null && value !== undefined) {
-        const ref = value as unknown as ManagedSessionDurableRef;
-        await readRef(ref);
+        refs.push(value as unknown as ManagedSessionDurableRef);
       } else if (field === 'resources' && Array.isArray(value)) {
-        for (const ref of value) {
-          const resource = ref as unknown as ManagedSessionDurableRef;
-          await readRef(resource);
-        }
+        for (const ref of value)
+          refs.push(ref as unknown as ManagedSessionDurableRef);
       }
     }
+  }
+  // A record's references never change across its revisions, so the latest
+  // revision names all of them.
+  for (const entry of authority.extensionRecordsInDomain('hook_registration'))
+    refs.push(parseHookRegistration(entry.record).catalogRef);
+  for (const entry of authority.extensionRecordsInDomain('hook_execution')) {
+    const execution = parseHookExecution(entry.record);
+    refs.push(execution.planRef, execution.inputRef);
+    if (execution.resultRef) refs.push(execution.resultRef);
+  }
+  // Independent reads, a bounded batch at a time; a resource several
+  // references name is still read once. A batch settles fully before a
+  // failure is reported, so no read outlives the verification.
+  for (let index = 0; index < refs.length; index += RESTORE_READ_BATCH) {
+    const results = await Promise.allSettled(
+      refs.slice(index, index + RESTORE_READ_BATCH).map((ref) => readRef(ref)),
+    );
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure) throw failure.reason;
   }
   if (session.publication) {
     for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
