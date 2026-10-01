@@ -5,6 +5,11 @@
 Implemented for [#10377](https://github.com/QwenLM/qwen-code/issues/10377).
 The feature is opt-in and defaults off.
 
+Partly superseded by [Lazy Code Mode](lazy-code-mode.md): `tool_search` is now
+a top-level direct control, and `exec` omits deferred tool signatures while
+search is available. The exposure table and the deferred-schema paragraph below
+describe this MVP; `tool_call` stays hidden.
+
 ## Goal
 
 Add a `tools.codeModeOnly` setting that replaces the ordinary model-facing

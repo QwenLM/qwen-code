@@ -19,8 +19,10 @@ import {
   ManagedToolInvalidError,
   ManagedToolUnavailableError,
   type ManagedToolExecutor,
+  ManagedMcpToolUnknownError,
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
+import { ManagedMcpError } from './managed-mcp-runtime.js';
 
 const REFERENCE_KEYS = Object.freeze([
   'argsDigest',
@@ -140,6 +142,14 @@ export function registerManagedRuntimeToolRoutes(
         );
         res.status(200).json({ protocolVersion: 2, state: 'settled', result });
       } catch (error) {
+        if (error instanceof ManagedMcpError) {
+          res.status(400).json({ code: error.code });
+          return;
+        }
+        if (error instanceof ManagedMcpToolUnknownError) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
         if (error instanceof ManagedToolInvalidError) {
           invalid(res);
           return;
@@ -181,17 +191,25 @@ export function registerManagedRuntimeToolRoutes(
         invalid(res);
         return;
       }
-      const view = executor.status(reference);
-      if (!view) {
-        res.status(200).json({ protocolVersion: 2, state: 'unknown' });
-        return;
+      try {
+        const view = executor.status(reference);
+        if (!view) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
+        res.status(200).json({
+          protocolVersion: 2,
+          state: view.state,
+          ...(view.state === 'settled' ? { result: view.result } : {}),
+          lastSequence: view.lastSequence,
+        });
+      } catch (error) {
+        if (error instanceof ManagedToolConflictError) {
+          res.status(409).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
       }
-      res.status(200).json({
-        protocolVersion: 2,
-        state: view.state,
-        ...(view.state === 'settled' ? { result: view.result } : {}),
-        lastSequence: view.lastSequence,
-      });
     },
     handleManagedRuntimeJsonError,
   );
@@ -208,16 +226,24 @@ export function registerManagedRuntimeToolRoutes(
         invalid(res);
         return;
       }
-      const view = executor.cancel(reference);
-      if (!view) {
-        res.status(200).json({ protocolVersion: 2, state: 'unknown' });
-        return;
+      try {
+        const view = executor.cancel(reference);
+        if (!view) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
+        res.status(200).json({
+          protocolVersion: 2,
+          state: view.state,
+          ...(view.state === 'settled' ? { result: view.result } : {}),
+        });
+      } catch (error) {
+        if (error instanceof ManagedToolConflictError) {
+          res.status(409).json({ code: error.code, error: error.message });
+          return;
+        }
+        throw error;
       }
-      res.status(200).json({
-        protocolVersion: 2,
-        state: view.state,
-        ...(view.state === 'settled' ? { result: view.result } : {}),
-      });
     },
     handleManagedRuntimeJsonError,
   );

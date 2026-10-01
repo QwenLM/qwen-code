@@ -64,7 +64,6 @@ describe('operator execution sandbox policy', () => {
     false,
     [],
     {},
-    { ...restricted, backend: 'landlock' },
     { ...restricted, backend: ['auto'] },
     { ...restricted, network: '${MODE}' },
     { ...restricted, workspace: '/' },
@@ -72,6 +71,14 @@ describe('operator execution sandbox policy', () => {
     expect(() => parseExecutionSandboxSettings(value)).toThrow(
       'tools.executionSandbox',
     );
+  });
+  it('accepts an explicit Landlock backend for capability validation at startup', () => {
+    expect(
+      parseExecutionSandboxSettings({
+        ...writable,
+        backend: 'landlock',
+      }),
+    ).toEqual({ ...writable, backend: 'landlock' });
   });
   it('requires complete objects even in a higher priority scope', () => {
     expect(() =>
