@@ -567,16 +567,26 @@ class ManagedSessionStoreHttpClient {
     };
     let committed: unknown;
     if (publicationId === undefined) {
-      committed = await this.commitWithUncertainRetry(() =>
-        this.json('/transactions:commit', 'POST', commitBody),
-      );
+      committed = await this.json('/transactions:commit', 'POST', commitBody);
     } else {
-      committed = await this.commitWithUncertainRetry(() =>
-        this.publicationRequest(
-          `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
-          commitBody,
-        ),
-      );
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          committed = await this.publicationRequest(
+            `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
+            commitBody,
+          );
+          break;
+        } catch (error) {
+          const uncertain =
+            (error instanceof ManagedSessionStoreHttpError &&
+              (error.status === 429 || error.status >= 500)) ||
+            error instanceof TypeError ||
+            (error instanceof DOMException &&
+              ['AbortError', 'TimeoutError'].includes(error.name));
+          if (!uncertain || attempt === 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
     }
     const receipt = asRecord(committed, 'commit receipt');
     const revision = safeCounter(receipt['journalRevision'], 'journalRevision');
@@ -695,22 +705,6 @@ class ManagedSessionStoreHttpClient {
     if (response.headers.get('Cache-Control') !== 'no-store')
       throw corrupt('Publication response is missing Cache-Control: no-store.');
     return readBoundedPublicationJson(response);
-  }
-
-  private async commitWithUncertainRetry(
-    send: () => Promise<unknown>,
-  ): Promise<unknown> {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        return await send();
-      } catch (error) {
-        lastError = error;
-        if (!isUncertainCommitError(error) || attempt === 2) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-    throw lastError;
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -1428,16 +1422,6 @@ function decodeBase64(value: string, label: string): Buffer {
 
 function sha256(value: Buffer): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function isUncertainCommitError(error: unknown): boolean {
-  return (
-    (error instanceof ManagedSessionStoreHttpError &&
-      (error.status === 429 || error.status >= 500)) ||
-    error instanceof TypeError ||
-    (error instanceof DOMException &&
-      ['AbortError', 'TimeoutError'].includes(error.name))
-  );
 }
 
 function corrupt(message: string): ManagedSessionRecordError {
