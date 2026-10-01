@@ -173,6 +173,7 @@ export function buildTrajectory(
       depth: subagentId !== undefined ? 1 : 0,
       status: timing.status ?? 'unknown',
       timing: span,
+      ...(recordId !== undefined ? { recordId } : {}),
       ...(timing.model !== undefined ? { model: timing.model } : {}),
       ...(timing.responseId !== undefined
         ? { responseId: timing.responseId }

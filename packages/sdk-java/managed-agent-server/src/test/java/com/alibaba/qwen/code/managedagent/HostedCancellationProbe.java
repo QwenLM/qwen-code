@@ -245,7 +245,7 @@ final class HostedCancellationProbe implements AutoCloseable {
                 .map(value -> (Process) ReflectionTestUtils.getField(value, "process")).toList();
         processes.forEach(Process::destroyForcibly);
         for (Process process : processes) {
-            assertThat(process.waitFor(5, TimeUnit.SECONDS)).as("FIFO worker cleanup").isTrue();
+            assertThat(process.waitFor(5, TimeUnit.SECONDS)).as("Blocked worker cleanup").isTrue();
         }
     }
 }

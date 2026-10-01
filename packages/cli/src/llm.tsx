@@ -99,6 +99,7 @@ import {
   recordAcpConfigStartupEvent,
 } from './utils/acp-startup-profiler.js';
 import {
+  exitWhenSupervisorExits,
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -429,6 +430,7 @@ export async function main() {
   // that never completes — reach no other scrub, so it happens here for
   // all of them. A session that does bind one re-exports its own pair.
   clearInheritedPeerMessagingEnv();
+  exitWhenSupervisorExits();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -492,6 +494,20 @@ export async function main() {
     isAcpMode &&
     privateAcpParentCapability !== undefined &&
     conversationsRuntimeMarkerSeen;
+  // Only the daemon that spawns a Managed host can drive its sessions, and
+  // the Conversations runtime is never paired. A repeated option arrives as
+  // an array, which is refused too.
+  if (
+    argv.acpExecutionEngine !== undefined &&
+    (argv.acpExecutionEngine !== 'managed' ||
+      !isAcpMode ||
+      privateAcpParentCapability === undefined ||
+      conversationsRuntimeProvenance)
+  ) {
+    throw new Error(
+      '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+    );
+  }
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
@@ -1278,6 +1294,7 @@ export async function main() {
             ? privateAcpParentCapability
             : undefined,
           conversationsRuntimeProvenance,
+          executionEngine: argv.acpExecutionEngine,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
