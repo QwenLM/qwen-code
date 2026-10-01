@@ -19,7 +19,10 @@ export function projectJavaAgentEvent(
     type,
     sessionId: event.sessionId,
     turnId: event.turnId ?? '',
-    data: normalizeData(type, event.data),
+    data: normalizeData(type, {
+      ...event.data,
+      ...(event.itemId ? { itemId: event.itemId } : {}),
+    }),
   };
 }
 
@@ -51,26 +54,17 @@ export function projectJavaAgentItem(
       );
   }
   if (item.type === 'tool_call') {
-    const failed = ['failed', 'cancelled'].includes(item.status.toLowerCase());
-    const settled = ['completed', 'failed', 'cancelled'].includes(
-      item.status.toLowerCase(),
-    );
+    const type = toolEventType(item.status);
     return [
       projectedItemEvent(
         item,
         item.firstSequence,
-        settled ? 'tool_completed' : 'tool_started',
-        {
+        type,
+        normalizeData(type, {
           ...item.attributes,
           itemId: item.itemId,
-          toolCallId:
-            item.attributes['toolCallId'] ?? item.attributes['callId'],
-          toolName:
-            item.attributes['toolName'] ??
-            item.attributes['name'] ??
-            item.attributes['title'],
-          failed,
-        },
+          status: item.status,
+        }),
       ),
     ];
   }
@@ -114,6 +108,8 @@ function eventType(
       return 'assistant_thought';
     case 'item.tool_call.updated':
       return toolEventType(data?.['status']);
+    case 'item.tool_result.updated':
+      return 'tool_result_updated';
     case 'turn.completed':
       return 'completed';
     case 'turn.failed':
@@ -147,7 +143,14 @@ function normalizeData(
   data: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const value = data ?? {};
-  if (['tool_requested', 'tool_started', 'tool_completed'].includes(type)) {
+  if (
+    [
+      'tool_requested',
+      'tool_started',
+      'tool_completed',
+      'tool_result_updated',
+    ].includes(type)
+  ) {
     return {
       ...value,
       toolCallId: value['toolCallId'] ?? value['callId'],
@@ -155,6 +158,7 @@ function normalizeData(
       failed:
         value['failed'] === true ||
         ['failed', 'cancelled'].includes(String(value['status']).toLowerCase()),
+      cancelled: String(value['status']).toLowerCase() === 'cancelled',
     };
   }
   if (type !== 'accepted') return value;

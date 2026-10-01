@@ -1,5 +1,6 @@
 import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
+import type { ManagedToolResult } from './managed-tool-result-types';
 
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
@@ -40,7 +41,10 @@ export function managedEventsToMessages(
     // Approval updates carry no Turn and render outside the transcript, so
     // they must not settle or split the Turn being streamed.
     if (event.type === 'action_updated') continue;
-    if (event.turnId !== currentTurnId) {
+    if (
+      event.type !== 'tool_result_updated' &&
+      event.turnId !== currentTurnId
+    ) {
       settle();
       currentTurnId = event.turnId;
     }
@@ -91,28 +95,59 @@ export function managedEventsToMessages(
     } else if (
       event.type === 'tool_requested' ||
       event.type === 'tool_started' ||
-      event.type === 'tool_completed'
+      event.type === 'tool_completed' ||
+      event.type === 'tool_result_updated'
     ) {
-      settle();
+      if (event.type !== 'tool_result_updated') settle();
       const callId = data['toolCallId'];
-      if (typeof callId !== 'string') continue;
-      const key = `${event.turnId}:${callId}`;
-      let tool = tools.get(key);
+      const itemId = data['itemId'];
+      const identity = typeof itemId === 'string' ? itemId : callId;
+      if (typeof identity !== 'string') continue;
+      const key = `${event.turnId}:${identity}`;
+      const legacyKey =
+        typeof callId === 'string' ? `${event.turnId}:${callId}` : undefined;
+      let tool =
+        tools.get(key) ?? (legacyKey ? tools.get(legacyKey) : undefined);
+      const result = readResult(data['result'], event);
       if (!tool) {
+        if (event.turnId === currentTurnId) settle();
         tool = {
           callId: key,
           toolName:
-            typeof data['toolName'] === 'string' ? data['toolName'] : callId,
+            typeof data['toolName'] === 'string'
+              ? data['toolName']
+              : result
+                ? 'run_shell_command'
+                : identity,
           status: 'pending',
         };
-        tools.set(key, tool);
-        messages.push({
+        const message: Message = {
           id,
           role: 'tool_group',
           tools: [tool],
           timestamp: event.at,
-        });
+        };
+        let previous = -1;
+        if (event.type === 'tool_result_updated') {
+          for (let index = messages.length - 1; index >= 0; index--) {
+            if (
+              messages[index].id.startsWith(
+                `managed:${event.sessionId}:${event.turnId}:`,
+              )
+            ) {
+              previous = index;
+              break;
+            }
+          }
+        }
+        if (previous >= 0) messages.splice(previous + 1, 0, message);
+        else messages.push(message);
       }
+      tools.set(key, tool);
+      if (legacyKey) tools.set(legacyKey, tool);
+      if (typeof itemId === 'string') tool.callId = key;
+      if (typeof data['toolName'] === 'string')
+        tool.toolName = data['toolName'];
       if (data['input'] !== undefined) {
         const input =
           typeof data['input'] === 'string' && data['truncated'] === true
@@ -121,12 +156,51 @@ export function managedEventsToMessages(
         tool.args = record(input);
         if (Object.keys(tool.args).length === 0) tool.args = { input };
       }
+      if (result) {
+        if (
+          tool.toolResult &&
+          result.projection_revision <= tool.toolResult.projection_revision
+        )
+          continue;
+        tool.toolResult = result;
+        tool.status =
+          result.execution_status === 'success' ? 'completed' : 'failed';
+        tool.wasCancelled = result.execution_status === 'cancelled';
+        if (
+          typeof result.preview?.text === 'string' &&
+          tool.rawOutput === undefined
+        ) {
+          tool.rawOutput =
+            result.preview.text +
+            (result.preview.truncated === true ? `\n${truncatedLabel}` : '');
+        }
+        tool.endTime ??= event.at;
+      }
+      if (tool.toolResult) {
+        if (
+          event.type === 'tool_completed' &&
+          typeof data['output'] === 'string'
+        ) {
+          const output =
+            data['output'] +
+            (data['truncated'] === true ? `\n${truncatedLabel}` : '');
+          if (
+            data['truncated'] !== true ||
+            typeof tool.rawOutput !== 'string' ||
+            output.length > tool.rawOutput.length
+          ) {
+            tool.rawOutput = output;
+          }
+        }
+        continue;
+      }
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
         tool.startTime = event.at;
       }
       if (event.type === 'tool_completed') {
         tool.status = data['failed'] === true ? 'failed' : 'completed';
+        tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
         if (typeof data['output'] === 'string') {
           tool.rawOutput =
@@ -143,6 +217,7 @@ export function managedEventsToMessages(
       for (const tool of tools.values()) {
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
+          tool.wasCancelled = event.type === 'cancelled';
           tool.endTime = event.at;
         }
       }
@@ -158,4 +233,31 @@ export function managedEventsToMessages(
     }
   }
   return messages;
+}
+
+function readResult(
+  value: unknown,
+  event: ManagedAgentSessionEvent,
+): ManagedToolResult | undefined {
+  const result = record(value);
+  if (
+    typeof result['id'] !== 'string' ||
+    result['id'].length === 0 ||
+    result['session_id'] !== event.sessionId ||
+    result['turn_id'] !== event.turnId ||
+    typeof result['item_id'] !== 'string' ||
+    result['item_id'].length === 0 ||
+    result['item_id'] !== record(event.data)['itemId'] ||
+    !Number.isSafeInteger(result['projection_revision']) ||
+    Number(result['projection_revision']) < 1 ||
+    typeof result['execution_status'] !== 'string' ||
+    !['success', 'error', 'cancelled', 'not_started'].includes(
+      result['execution_status'],
+    ) ||
+    typeof result['delivery_status'] !== 'string' ||
+    !['pending', 'committed', 'blocked'].includes(result['delivery_status']) ||
+    !Array.isArray(result['artifacts'])
+  )
+    return undefined;
+  return value as ManagedToolResult;
 }
