@@ -1377,6 +1377,12 @@ describe('CoreToolScheduler', () => {
     },
   );
 
+  const URL_REQUIRED_PARAMS = {
+    type: 'object',
+    properties: { url: { type: 'string' } },
+    required: ['url'],
+  };
+
   /** tool_call bridge + hidden deferred MockTool (mcp__github__create_issue). */
   function bridgeWithDeferred(
     deferredOptions: Partial<ConstructorParameters<typeof MockTool>[0]> = {},
@@ -1639,666 +1645,6 @@ describe('CoreToolScheduler', () => {
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
   });
 
-  it('denies a policy-blocked bridged target before validating its arguments', async () => {
-    // The owner execution allowlist must win over the bridge argument
-    // pre-check: a denied target gets the specific EXECUTION_DENIED naming
-    // the policy, not an INVALID_TOOL_PARAMS parameter error for a call that
-    // could never run (and the denied tool's validator never executes). The
-    // allowlist test above does not discriminate — its MockTool carries no
-    // required schema, so the pre-check passes it. Mutation check: running
-    // the pre-check ahead of the policy gate turns this red with "params
-    // must have required property 'url'".
-    const execute = vi.fn();
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'web_fetch',
-      shouldDefer: true,
-      params: {
-        type: 'object',
-        properties: {
-          url: { type: 'string' },
-          prompt: { type: 'string' },
-        },
-        required: ['url', 'prompt'],
-        additionalProperties: false,
-      },
-      execute,
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        isToolExecutionAllowed: (name: string) => name !== 'web_fetch',
-      });
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-deny-before-precheck',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-deny-before-precheck',
-      },
-      new AbortController().signal,
-    );
-
-    expect(execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(completed.response.error?.message).toContain(
-        "is not permitted by this agent's tool policy",
-      );
-      expect(completed.response.error?.message).not.toContain(
-        "required property 'url'",
-      );
-    }
-  });
-
-  it('denies a permission-manager-blocked bridged target with the loop denial, not a parameter pre-check refusal', async () => {
-    // The scheduler applies two execution policies to a bridged target: the
-    // owner allowlist (forwarded into resolution, tested above) and the
-    // permission-manager enablement gate in _schedule. A pm-denied target
-    // with schema-invalid arguments must still surface the loop's own
-    // denial — with its deny-rule attribution — rather than the bridge's
-    // INVALID_TOOL_PARAMS pre-check refusal, which would tell the model to
-    // fix arguments on a call that could never run. Mutation check:
-    // dropping the suppressArgumentPreCheck wiring in
-    // resolveToolCallBridgeRequest turns this red with "params must have
-    // required property 'url'".
-    const execute = vi.fn();
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'web_fetch',
-      shouldDefer: true,
-      params: {
-        type: 'object',
-        properties: {
-          url: { type: 'string' },
-          prompt: { type: 'string' },
-        },
-        required: ['url', 'prompt'],
-        additionalProperties: false,
-      },
-      execute,
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        permissionManager: {
-          isToolEnabled: async (name: string) => name !== 'web_fetch',
-          findMatchingDenyRule: () => 'permissions.deny: web_fetch',
-        },
-      });
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-pm-deny-target',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-pm-deny-target',
-      },
-      new AbortController().signal,
-    );
-
-    expect(execute).not.toHaveBeenCalled();
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-      expect(completed.response.error?.message).toContain(
-        'permissions.deny: web_fetch',
-      );
-      expect(completed.response.error?.message).not.toContain(
-        "required property 'url'",
-      );
-    }
-  });
-
-  it('logs the policy lookup failure and still pre-checks a bridged target', async () => {
-    // The try/catch around the permission-manager lookup is the only thing
-    // keeping a policy-store rejection out of _schedule's Promise.all, whose
-    // try closes with a bare finally: an uncaught rejection there rejects the
-    // public schedule() and fails the whole batch instead of one call. The
-    // guard returns false ("do not suppress"), so the pre-check still runs and
-    // still names the missing field. The swallow is logged because _schedule
-    // pushes the bridge refusal and continues ahead of the permission gate, so
-    // nothing else records that the lookup failed. Mutation check: inlining
-    // !(await permissionManager.isToolEnabled(...)) without the try turns this
-    // red — schedule() rejects, or the call completes EXECUTION_DENIED instead
-    // of INVALID_TOOL_PARAMS. Deleting only the debugLogger.warn turns the log
-    // assertion red.
-    const execute = vi.fn();
-    const policyError = new Error('policy store unavailable');
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const deferred = new MockTool({
-      name: 'web_fetch',
-      shouldDefer: true,
-      params: {
-        type: 'object',
-        properties: {
-          url: { type: 'string' },
-          prompt: { type: 'string' },
-        },
-        required: ['url', 'prompt'],
-        additionalProperties: false,
-      },
-      execute,
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [deferred.name, deferred],
-        ]),
-        deferredHiddenNames: new Set([deferred.name]),
-        permissionManager: {
-          isToolEnabled: async (name: string) => {
-            if (name === 'web_fetch') {
-              throw policyError;
-            }
-            return true;
-          },
-          findMatchingDenyRule: () => undefined,
-        },
-      });
-    debugLoggerWarnSpy.mockClear();
-
-    await scheduler.schedule(
-      {
-        callId: 'bridge-policy-lookup-throws',
-        name: ToolNames.TOOL_CALL,
-        args: { name: deferred.name, arguments: {} },
-        isClientInitiated: false,
-        prompt_id: 'prompt-bridge-policy-lookup-throws',
-      },
-      new AbortController().signal,
-    );
-
-    expect(execute).not.toHaveBeenCalled();
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Bridge pre-check policy lookup failed for'),
-      deferred.name,
-      policyError,
-    );
-    const completed = onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    expect(completed.status).toBe('error');
-    if (completed.status === 'error') {
-      expect(completed.response.errorType).toBe(
-        ToolErrorType.INVALID_TOOL_PARAMS,
-      );
-      expect(completed.response.error?.message).toContain(
-        "required property 'url'",
-      );
-    }
-  });
-
-  it('accrues bridge argument refusals per target for retry-loop detection', async () => {
-    // The refusal carries the validated targetName for exactly this
-    // accounting: alternating broken bridged calls against two distinct
-    // targets must strike per-target counters. Keyed on the wrapper
-    // (`tool_call`) instead, each strike prunes the other target's counter
-    // and neither ever reaches VALIDATION_RETRY_LOOP_THRESHOLD — the loop
-    // this PR exists to stop escapes the early stop directive. Mutation
-    // check: keying the refusal branch on reqInfo.name turns this red.
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const makeDeferred = (name: string, required: string[]) =>
-      new MockTool({
-        name,
-        shouldDefer: true,
-        params: {
-          type: 'object',
-          properties: Object.fromEntries(
-            required.map((key) => [key, { type: 'string' }]),
-          ),
-          required,
-          additionalProperties: false,
-        },
-      });
-    const writeFile = makeDeferred('write_file', ['file_path', 'content']);
-    const webFetch = makeDeferred('web_fetch', ['url', 'prompt']);
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [writeFile.name, writeFile],
-          [webFetch.name, webFetch],
-        ]),
-        deferredHiddenNames: new Set([writeFile.name, webFetch.name]),
-      });
-
-    const scheduleAlternatingBatch = async (batchId: number) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        [
-          {
-            callId: `bridge-loop-${batchId}-write`,
-            name: ToolNames.TOOL_CALL,
-            args: { name: 'write_file', arguments: {} },
-            isClientInitiated: false,
-            prompt_id: 'prompt-bridge-loop',
-          },
-          {
-            callId: `bridge-loop-${batchId}-fetch`,
-            name: ToolNames.TOOL_CALL,
-            args: { name: 'web_fetch', arguments: {} },
-            isClientInitiated: false,
-            prompt_id: 'prompt-bridge-loop',
-          },
-        ],
-        new AbortController().signal,
-      );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
-    };
-
-    for (const batch of [
-      await scheduleAlternatingBatch(1),
-      await scheduleAlternatingBatch(2),
-    ]) {
-      expect(batch).toHaveLength(2);
-      for (const completed of batch) {
-        expect(completed.status).toBe('error');
-        if (completed.status === 'error') {
-          expect(completed.response.errorType).toBe(
-            ToolErrorType.INVALID_TOOL_PARAMS,
-          );
-          expect(completed.response.error?.message).not.toContain(
-            'RETRY LOOP DETECTED',
-          );
-        }
-      }
-    }
-
-    const third = await scheduleAlternatingBatch(3);
-    expect(third).toHaveLength(2);
-    for (const completed of third) {
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.errorType).toBe(
-          ToolErrorType.INVALID_TOOL_PARAMS,
-        );
-        expect(completed.response.error?.message).toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-  });
-
-  it('does not preserve stale bridge-refusal counters across a policy-denied bridge batch', async () => {
-    // An EXECUTION_DENIED bridge refusal accrues nothing, so it must not
-    // keep the denied target's stale retry counters alive through the
-    // batch-start prune — otherwise the next bridged malformed call fires
-    // RETRY LOOP DETECTED one failure early. Mutation check: keying the
-    // presence-set widening on targetName presence alone (instead of the
-    // INVALID_TOOL_PARAMS error type) turns this red.
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const writeFile = new MockTool({
-      name: 'write_file',
-      shouldDefer: true,
-      params: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string' },
-          content: { type: 'string' },
-        },
-        required: ['file_path', 'content'],
-        additionalProperties: false,
-      },
-    });
-    let policyDenies = false;
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [writeFile.name, writeFile],
-        ]),
-        deferredHiddenNames: new Set([writeFile.name]),
-        isToolExecutionAllowed: () => !policyDenies,
-      });
-
-    const runBatch = async (
-      batchId: string,
-      requests: Array<{
-        name: string;
-        args: Record<string, unknown>;
-      }>,
-    ) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        requests.map((request, index) => ({
-          callId: `${batchId}-${index}`,
-          ...request,
-          isClientInitiated: false,
-          prompt_id: 'prompt-bridge-stale-counter',
-        })),
-        new AbortController().signal,
-      );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
-    };
-
-    // Seed the target's bridge-channel counter to threshold - 1.
-    for (const batch of ['seed-1', 'seed-2']) {
-      const [completed] = await runBatch(batch, [
-        {
-          name: ToolNames.TOOL_CALL,
-          args: { name: 'write_file', arguments: {} },
-        },
-      ]);
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.errorType).toBe(
-          ToolErrorType.INVALID_TOOL_PARAMS,
-        );
-        expect(completed.response.error?.message).not.toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-
-    // A batch whose only request is a policy-denied bridged write_file:
-    // records nothing, and must not retain the stale counter.
-    policyDenies = true;
-    const [denied] = await runBatch('denied', [
-      {
-        name: ToolNames.TOOL_CALL,
-        args: { name: 'write_file', arguments: {} },
-      },
-    ]);
-    expect(denied.status).toBe('error');
-    if (denied.status === 'error') {
-      expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
-    }
-    policyDenies = false;
-
-    // The next bridged malformed call restarts at 1, not threshold.
-    const [after] = await runBatch('after', [
-      {
-        name: ToolNames.TOOL_CALL,
-        args: { name: 'write_file', arguments: {} },
-      },
-    ]);
-    expect(after.status).toBe('error');
-    if (after.status === 'error') {
-      expect(after.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
-      expect(after.response.error?.message).not.toContain(
-        'RETRY LOOP DETECTED',
-      );
-    }
-  });
-
-  it('accrues bridged pre-check refusals independently from the same target’s direct failures', async () => {
-    // A bridged pre-check refusal and a direct validation failure of the
-    // SAME target must not share a retry namespace: recordRetryableToolError
-    // prunes same-prefix keys on every record, so an unmarked shared key
-    // would let the two channels reset each other every batch and the mixed
-    // loop would never reach the threshold — the loop this PR exists to
-    // stop. Mutation check: keying the refusal branch on the bare
-    // targetName (no channel marker) turns this red.
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const writeFile = new MockTool({
-      name: 'write_file',
-      shouldDefer: true,
-      params: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string' },
-          content: { type: 'string' },
-        },
-        required: ['file_path', 'content'],
-        additionalProperties: false,
-      },
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [writeFile.name, writeFile],
-        ]),
-        deferredHiddenNames: new Set([writeFile.name]),
-      });
-
-    const runMixedBatch = async (batchId: number) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        [
-          {
-            callId: `mixed-${batchId}-bridge`,
-            name: ToolNames.TOOL_CALL,
-            args: { name: 'write_file', arguments: {} },
-            isClientInitiated: false,
-            prompt_id: 'prompt-bridge-mixed-channel',
-          },
-          {
-            callId: `mixed-${batchId}-direct`,
-            name: 'write_file',
-            args: {},
-            isClientInitiated: false,
-            prompt_id: 'prompt-bridge-mixed-channel',
-          },
-        ],
-        new AbortController().signal,
-      );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
-    };
-
-    for (const batch of [await runMixedBatch(1), await runMixedBatch(2)]) {
-      expect(batch).toHaveLength(2);
-      for (const completed of batch) {
-        expect(completed.status).toBe('error');
-        if (completed.status === 'error') {
-          expect(completed.response.errorType).toBe(
-            ToolErrorType.INVALID_TOOL_PARAMS,
-          );
-          expect(completed.response.error?.message).not.toContain(
-            'RETRY LOOP DETECTED',
-          );
-        }
-      }
-    }
-
-    const third = await runMixedBatch(3);
-    expect(third).toHaveLength(2);
-    const [bridgeRefusal, directFailure] = third;
-    expect(bridgeRefusal.status).toBe('error');
-    expect(directFailure.status).toBe('error');
-    // Both halves of the claim this test's name makes: each channel reaches
-    // the threshold on its own key by the third batch.
-    if (bridgeRefusal.status === 'error') {
-      expect(bridgeRefusal.response.error?.message).toContain(
-        'RETRY LOOP DETECTED',
-      );
-    }
-    if (directFailure.status === 'error') {
-      expect(directFailure.response.error?.message).toContain(
-        'RETRY LOOP DETECTED',
-      );
-    }
-  });
-
-  it('accrues alternating bridged and direct failures of one target across separate batches', async () => {
-    // The channel marker alone is not enough: the batch-start presence prune
-    // runs per batch, so if each batch preserves only the channel it contains,
-    // a model that alternates between bridging a deferred target and calling
-    // it directly deletes the OTHER channel's counter every turn. Neither
-    // counter then exceeds 1, RETRY LOOP DETECTED is never injected, and the
-    // mixed-channel loop runs indefinitely — the stagnation this PR exists to
-    // stop. Mutation check: dropping `bridgeRetryToolName(r.name)` from the
-    // presence set in _schedule turns this red (no batch ever fires).
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const writeFile = new MockTool({
-      name: 'write_file',
-      shouldDefer: true,
-      params: {
-        type: 'object',
-        properties: {
-          file_path: { type: 'string' },
-          content: { type: 'string' },
-        },
-        required: ['file_path', 'content'],
-        additionalProperties: false,
-      },
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [writeFile.name, writeFile],
-        ]),
-        deferredHiddenNames: new Set([writeFile.name]),
-      });
-
-    // One request per batch, so each batch's presence set holds exactly one
-    // channel plus whatever the widening adds for it.
-    const runSingleBatch = async (
-      callId: string,
-      request: { name: string; args: Record<string, unknown> },
-    ) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        {
-          callId,
-          name: request.name,
-          args: request.args,
-          isClientInitiated: false,
-          prompt_id: 'prompt-bridge-alternating',
-        },
-        new AbortController().signal,
-      );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    };
-    const bridged = {
-      name: ToolNames.TOOL_CALL,
-      args: { name: 'write_file', arguments: {} },
-    };
-    const direct = { name: 'write_file', args: {} };
-
-    const messages: string[] = [];
-    for (const batchId of [1, 2, 3, 4, 5, 6]) {
-      const completed = await runSingleBatch(
-        `alternating-${batchId}`,
-        batchId % 2 === 1 ? bridged : direct,
-      );
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.errorType).toBe(
-          ToolErrorType.INVALID_TOOL_PARAMS,
-        );
-        messages.push(completed.response.error?.message ?? '');
-      }
-    }
-
-    // The bridged channel climbs 1, 2, 3 across the odd batches while the
-    // even batches restart the direct channel, so the directive fires exactly
-    // once — on the fifth batch — and never prematurely.
-    expect(messages).toHaveLength(6);
-    for (const early of messages.slice(0, 4)) {
-      expect(early).not.toContain('RETRY LOOP DETECTED');
-    }
-    expect(messages[4]).toContain('RETRY LOOP DETECTED');
-    expect(messages[5]).not.toContain('RETRY LOOP DETECTED');
-  });
-
-  it('clears a target’s bridge-marked counter when a bridged call to it succeeds', async () => {
-    // The clearing half of the presence widening. A resolved bridge renames
-    // the request to the TARGET, so the batch-start presence set now keeps
-    // both of that target's channels and the prune no longer drops the stale
-    // bridge-marked count. clearRetryCountsForTool must cover the marked
-    // channel too, or the surviving count of 2 plus two later refusals would
-    // fire RETRY LOOP DETECTED prematurely. Mutation check: reverting
-    // clearRetryCountsForTool to the bare `${toolName}:` prefix turns this red.
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: [{ text: 'published' }],
-      returnDisplay: 'published',
-    });
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    // A neutral target: PATH_ARG_KEYS (file_path/path/...) are rewritten on
-    // request.args during execution, which is not what this case measures.
-    const publishNote = new MockTool({
-      name: 'publish_note',
-      shouldDefer: true,
-      execute,
-      params: {
-        type: 'object',
-        properties: {
-          note_id: { type: 'string' },
-          body: { type: 'string' },
-        },
-        required: ['note_id', 'body'],
-        additionalProperties: false,
-      },
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [bridge.name, bridge],
-          [publishNote.name, publishNote],
-        ]),
-        deferredHiddenNames: new Set([publishNote.name]),
-      });
-
-    const runBridged = async (
-      callId: string,
-      args: Record<string, unknown>,
-    ) => {
-      onAllToolCallsComplete.mockClear();
-      await scheduler.schedule(
-        {
-          callId,
-          name: ToolNames.TOOL_CALL,
-          args: { name: 'publish_note', arguments: args },
-          isClientInitiated: false,
-          prompt_id: 'prompt-bridge-clear',
-        },
-        new AbortController().signal,
-      );
-      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
-      return onAllToolCallsComplete.mock.calls[0][0][0] as ToolCall;
-    };
-
-    // Two bridged refusals take the marked channel to 2.
-    for (const batchId of [1, 2]) {
-      const completed = await runBridged(`clear-${batchId}`, {});
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.error?.message).not.toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-
-    // A successful bridged execution of the SAME target clears both channels.
-    const succeeded = await runBridged('clear-success', {
-      note_id: 'n-1',
-      body: 'ok',
-    });
-    expect(succeeded.status).toBe('success');
-    expect(execute).toHaveBeenCalledTimes(1);
-
-    // Two more refusals restart at 1 instead of inheriting the stale count.
-    for (const batchId of [3, 4]) {
-      const completed = await runBridged(`clear-after-${batchId}`, {});
-      expect(completed.status).toBe('error');
-      if (completed.status === 'error') {
-        expect(completed.response.error?.message).not.toContain(
-          'RETRY LOOP DETECTED',
-        );
-      }
-    }
-  });
-
   it('applies the retry-loop directive to repeated invalid tool_call envelopes', async () => {
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
@@ -2334,18 +1680,50 @@ describe('CoreToolScheduler', () => {
     expect(functionResponseOf(third)?.name).toBe(ToolNames.TOOL_CALL);
   });
 
+  it('names the target when a bridged call fails its own validation (#12889)', async () => {
+    const { completed, deferred } = await runBridgeCall('bridge-invalid-args', {
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    expectStatus(completed, 'error');
+    expect(completed.response.errorType).toBe(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain(`Deferred tool "${deferred.name}"`);
+    expect(message).toContain("must have required property 'url'");
+    expect(message).toContain(ToolNames.TOOL_SEARCH);
+  });
+
+  it("leaves a direct call's validation error unlabelled", async () => {
+    const direct = new MockTool({
+      name: 'needs_url',
+      params: URL_REQUIRED_PARAMS,
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName: toolMap(direct) });
+
+    await scheduler.schedule(
+      toolRequest('direct-invalid-args', direct.name, {}, 'prompt-direct'),
+      new AbortController().signal,
+    );
+
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+    expectStatus(completed, 'error');
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain("must have required property 'url'");
+    expect(message).not.toContain('Deferred tool');
+  });
+
   it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
-    // R1-18: invalid envelopes record under the bridge channel
-    // (`tool_call(via tool_call):<msg>`), while a successfully resolved
-    // envelope renames the request to the resolved TARGET before the
-    // batch-start prune runs — so the prune is the only mechanism that
-    // clears a stale bridge-channel count across a successful bridged
-    // execution. Interleave one: without the prune (e.g. a refactor keying
-    // presence by model-facing name), the count
-    // of 2 would survive the successful call and the next two identical
-    // failures would reach the threshold and inject RETRY LOOP DETECTED
-    // prematurely — while the direct-tool isolation test stays green, because
-    // there recording and prune names never diverge.
+    // R1-18: invalid envelopes record under the model-facing name
+    // (`tool_call:<msg>`), but a resolved envelope is renamed to the TARGET
+    // before the batch-start prune runs, so the prune alone clears a stale
+    // `tool_call:` count across a successful bridged execution. Without it
+    // (e.g. presence keyed by model-facing name) the count of 2 survives and
+    // the next two identical failures inject RETRY LOOP DETECTED prematurely,
+    // while the direct-tool isolation test (whose names never diverge) passes.
     const execute = vi.fn().mockResolvedValue({
       llmContent: [{ text: 'issue created' }],
       returnDisplay: 'issue created',
@@ -7780,42 +7158,21 @@ describe('CoreToolScheduler request queueing', () => {
 });
 
 describe('CoreToolScheduler truncated output protection', () => {
-  /** AUTO_EDIT scheduler whose registry lists and resolves `tool` (plus any `extraTools`). */
-  function createTruncationTestScheduler(
-    tool: AnyDeclarativeTool,
-    toolNames: string[] = [tool.name],
-    options: {
-      extraTools?: AnyDeclarativeTool[];
-      deferredHiddenNames?: ReadonlySet<string>;
-    } = {},
-  ) {
-    const toolsByName = new Map<string, AnyDeclarativeTool>([
-      [tool.name, tool],
-      ...(options.extraTools ?? []).map(
-        (extra) => [extra.name, extra] as const,
-      ),
-    ]);
+  /** AUTO_EDIT scheduler whose registry lists and resolves only `tool`. */
+  function createTruncationTestScheduler(tool: AnyDeclarativeTool) {
     return schedulerWithCallbacks(
       makeSchedulerConfig(
         {
-          getTool: (name: string) => toolsByName.get(name) ?? tool,
-          ensureTool: async (name: string) => toolsByName.get(name) ?? tool,
-          getAllToolNames: () => [
-            ...toolNames,
-            ...(options.extraTools ?? []).map((extra) => extra.name),
-          ],
+          getTool: () => tool,
+          ensureTool: async () => tool,
+          getAllToolNames: () => [tool.name],
           getFunctionDeclarations: () => [],
           tools: new Map(),
-          isDeferredAndHidden: (name: string) =>
-            options.deferredHiddenNames?.has(name) ?? false,
         } as unknown as ToolRegistry,
         {
           getApprovalMode: () => ApprovalMode.AUTO_EDIT,
           getPermissionsDeny: () => undefined,
           isInteractive: () => true,
-          // The bridged path resolves deferred tool calls, which reads the
-          // depth policy; makeSchedulerConfig's defaults omit it.
-          getMaxSubagentDepth: () => DEFAULT_MAX_SUBAGENT_DEPTH,
         },
       ),
     );
@@ -7914,76 +7271,6 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(expectTruncationRejection(completedCall)).not.toContain(
       "params must have required property 'content'",
     );
-  });
-
-  it('should prefer truncation handling over the bridge argument pre-check for a bridged write_file call', async () => {
-    // Same as the direct-call case above, but reached through the tool_call
-    // bridge (#12889): the bridge pre-check runs ahead of the truncation
-    // guards below, so it must yield when the request is stamped
-    // wasOutputTruncated — otherwise a max_tokens-cut envelope surfaces as a
-    // schema mismatch and the model re-sends the same oversized write.
-    // Mutation check: dropping the wasOutputTruncated condition from the
-    // pre-check turns this red with "params must have required property
-    // 'content'".
-    const writeFileConfig = {
-      getProjectRoot: () => '/tmp',
-      getTargetDir: () => '/tmp',
-      getFileSystemService: () => ({
-        readTextFile: vi.fn(),
-        writeTextFile: vi.fn(),
-      }),
-      getDefaultFileEncoding: () => undefined,
-      setApprovalMode: vi.fn(),
-    } as unknown as Config;
-    const writeFileTool = new WriteFileTool(writeFileConfig);
-    const bridge = new MockTool({ name: ToolNames.TOOL_CALL });
-    const toolSearch = new MockTool({ name: ToolNames.TOOL_SEARCH });
-    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
-      writeFileTool,
-      [WriteFileTool.Name],
-      {
-        extraTools: [bridge, toolSearch],
-        deferredHiddenNames: new Set([WriteFileTool.Name]),
-      },
-    );
-
-    await scheduler.schedule(
-      [
-        {
-          callId: '1',
-          name: ToolNames.TOOL_CALL,
-          args: {
-            name: WriteFileTool.Name,
-            arguments: { file_path: '/tmp/test.txt' },
-          },
-          isClientInitiated: false,
-          prompt_id: 'prompt-id-bridge-write-file-truncated',
-          wasOutputTruncated: true,
-        },
-      ],
-      new AbortController().signal,
-    );
-
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-    });
-
-    const completedCalls = onAllToolCallsComplete.mock
-      .calls[0][0] as ToolCall[];
-    expect(completedCalls).toHaveLength(1);
-    const completedCall = completedCalls[0];
-    expect(completedCall.status).toBe('error');
-
-    if (completedCall.status === 'error') {
-      const errorMessage = completedCall.response.error?.message;
-      expect(errorMessage).toContain('truncated due to max_tokens limit');
-      expect(errorMessage).toContain(
-        'rejected to prevent writing truncated content',
-      );
-      expect(errorMessage).not.toContain(
-        "params must have required property 'content'",
-      );
-    }
   });
 
   it('should inject retry loop directive after repeated truncated write_file rejections', async () => {

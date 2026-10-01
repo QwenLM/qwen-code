@@ -21,7 +21,6 @@ import {
   deferredDeclarationFingerprint,
   type ToolRegistry,
 } from './tool-registry.js';
-import { SchemaValidator } from '../utils/schemaValidator.js';
 import {
   getExcludedToolUnavailableMessage,
   getLeaderOnlyToolUnavailableMessage,
@@ -52,33 +51,6 @@ export type DeferredToolCallResolution =
 export interface DeferredToolCallOptions {
   /** Omission keeps AgentTool excluded in subagent contexts. */
   maxSubagentDepth?: number;
-  /**
-   * Set when the model's response was cut by max_tokens. The bridged
-   * arguments may be incomplete for transport reasons rather than a schema
-   * misreading, so the argument pre-check must yield to the caller's
-   * truncation-aware handling (the scheduler rejects truncated Edit-kind
-   * calls outright and appends truncation guidance to build-time validation
-   * failures) instead of reporting a schema mismatch.
-   */
-  wasOutputTruncated?: boolean;
-  /**
-   * The caller's per-target execution policy (scheduler execution allowlist
-   * / permission-manager enablement). Consulted before the argument
-   * pre-check so a denied target keeps its specific EXECUTION_DENIED refusal
-   * instead of surfacing a parameter error for a call that could never run.
-   */
-  isTargetExecutionAllowed?: (targetName: string) => boolean | Promise<boolean>;
-  /**
-   * Set when the caller applies its own target policy downstream of
-   * resolution (the scheduler's permission-manager gate) with a richer
-   * denial message than the bridge can build. Returning true skips the
-   * argument pre-check for that target so the caller's own denial — not a
-   * parameter error for a call that could never run — is what the model
-   * sees.
-   */
-  suppressArgumentPreCheck?: (targetName: string) => boolean | Promise<boolean>;
-  /** Media-policy fields supplied by the caller's downstream modelAccess gate. */
-  getDefaultArgumentNames?: (targetName: string) => readonly string[];
 }
 
 export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
@@ -90,97 +62,17 @@ function bridgeRefusal(message: string): Error {
 }
 
 /**
- * Schema keywords whose subtree the relaxation below must leave byte-identical.
- * `oneOf`/`not` discriminate: a per-branch `additionalProperties: false` tells
- * branches apart, so relaxing it there inverts the schema's meaning instead of
- * widening acceptance (`if` selects a branch by the same mechanism). Annotation
- * keywords hold data the schema compares against, not a subschema. `$defs` and
- * `definitions` are reached only through `$ref`: they are shared definitions,
- * and relaxing inside one silently rewrites every branch that references it —
- * each use site is already covered directly by the walk above.
- * (`allOf`/`anyOf`/`then`/`else` are deliberately absent: relaxing under them
- * only widens acceptance, so the walk descends.)
+ * Names the target in a validation error its own `build()` raised after
+ * tool_call unwrapped it. Unlabelled, "params must have required property
+ * 'url'" reads as a fault in tool_call's `{name, arguments}` envelope
+ * (#12889). Only relabels a rejection the target already made, so it can never
+ * refuse a call the target would accept.
  */
-const VERBATIM_SCHEMA_KEYS: ReadonlySet<string> = new Set([
-  'oneOf',
-  'not',
-  'if',
-  'const',
-  'default',
-  'enum',
-  'example',
-  'examples',
-  '$defs',
-  'definitions',
-]);
-
-/**
- * Schema keywords whose value maps an arbitrary NAME to a subschema or
- * constraint. The names are data, so a property literally named
- * `additionalProperties` keeps its own schema rather than being read as the
- * keyword: these are walked by value only.
- */
-const NAME_TO_SCHEMA_KEYS: ReadonlySet<string> = new Set([
-  'dependencies',
-  'dependentSchemas',
-  'patternProperties',
-  'properties',
-]);
-
-/** Relaxes `additionalProperties: false` in an already-cloned schema tree. */
-function relaxAdditionalPropertiesInPlace(node: unknown): void {
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      relaxAdditionalPropertiesInPlace(item);
-    }
-    return;
-  }
-  if (!node || typeof node !== 'object') {
-    return;
-  }
-  const schema = node as Record<string, unknown>;
-  for (const [key, value] of Object.entries(schema)) {
-    if (VERBATIM_SCHEMA_KEYS.has(key)) {
-      continue;
-    }
-    if (NAME_TO_SCHEMA_KEYS.has(key)) {
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        const byName = value as Record<string, unknown>;
-        for (const subschema of Object.values(byName)) {
-          relaxAdditionalPropertiesInPlace(subschema);
-        }
-      }
-      continue;
-    }
-    if (key === 'additionalProperties' && value === false) {
-      schema[key] = true;
-      continue;
-    }
-    relaxAdditionalPropertiesInPlace(value);
-  }
-}
-
-/**
- * Deep-clones a target schema with `additionalProperties: false` relaxed at
- * every position where relaxing only widens acceptance. Some targets
- * deliberately tolerate surplus keys (for example, Agent's `name` outside team
- * mode, or todo_write's item-level extra fields), so that decision is left to
- * their own build(): a nested `additionalProperties: false` (todo_write's items
- * schema) must not refuse bridged calls the target's own validator accepts.
- *
- * The walk is structural rather than keyed on the property name alone, because
- * a name-keyed rewrite also reaches the positions listed in
- * `VERBATIM_SCHEMA_KEYS` and `NAME_TO_SCHEMA_KEYS`, where it makes the
- * pre-check STRICTER than the schema the target publishes: an input matching
- * exactly one `oneOf` branch then matches two and `oneOf` fails, and a `const`
- * branch compares against rewritten data.
- */
-function relaxAdditionalProperties(schema: unknown): Record<string, unknown> {
-  // The JSON round-trip deep-clones, so the walk can relax in place and never
-  // touches the target's own schema object (which it may mutate and reuse).
-  const clone = JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
-  relaxAdditionalPropertiesInPlace(clone);
-  return clone;
+export function describeBridgedArgumentError(
+  targetName: string,
+  message: string,
+): string {
+  return `Deferred tool "${targetName}" (called through ${ToolNames.TOOL_CALL}) rejected the arguments: ${message.replace(/\.$/, '')}. Pass arguments matching the schema returned by ${ToolNames.TOOL_SEARCH} for "${targetName}".`;
 }
 
 export async function resolveDeferredToolCall(
@@ -302,21 +194,6 @@ export async function resolveDeferredToolCall(
       errorType: ToolErrorType.EXECUTION_DENIED,
     };
   }
-  // The caller's execution policy precedes the hidden-tool gate and the
-  // argument pre-check: a denied target keeps its specific denial rather
-  // than a parameter error for a call that could never run.
-  if (
-    options?.isTargetExecutionAllowed !== undefined &&
-    !(await options.isTargetExecutionAllowed(target.name))
-  ) {
-    return {
-      error: bridgeRefusal(
-        `Tool "${target.name}" is not permitted by this agent's tool policy (execution allowlist or disallowedTools blocklist).`,
-      ),
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      targetName: target.name,
-    };
-  }
 
   if (!registry.isDeferredAndHidden(target.name)) {
     return {
@@ -382,93 +259,6 @@ export async function resolveDeferredToolCall(
     return {
       error: bridgeRefusal(
         `Deferred tool "${target.name}" changed since tool_search last returned it. Run tool_search with select:${target.name} and call it with the current schema.`,
-      ),
-      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-      targetName: target.name,
-    };
-  }
-
-  // The bridge envelope deliberately types `arguments` as a bare object (the
-  // declaration must stay byte-stable across catalog changes), so `{}` is
-  // envelope-valid even when the target requires fields. Pre-validate against
-  // the target's model-visible schema so the refusal names the target and the
-  // missing field, instead of surfacing a bare Ajv message after the call has
-  // been unwrapped (#12889). Validate clones of both sides: SchemaValidator
-  // coerces argument values in place and the scheduler re-validates them at
-  // build time; and Ajv caches a compiled schema by object identity, so a
-  // target that mutates its own schema object in place (AgentTool's refresh
-  // adds and removes `model`/`name`) would otherwise stay pinned to whatever
-  // shape it had on the first bridged call. Compile the per-call copy in an
-  // isolated validator so it sees the current shape without reserving the
-  // target's `$id` in the process-shared registry.
-  //
-  // Only the schema layer runs here — never the target's full
-  // validateToolParams: its value-level rules (fs stats, content scans, the
-  // AgentTool refresh kick) run unchanged at build() time, so running them
-  // here would pay their side effects twice per bridged call. The
-  // model-visible `schema` getter is also what makes this safe for omni
-  // media-policy targets: their declaration is a projection with operator
-  // `lockedArguments` stripped from `required`, while their
-  // `validateToolParams` deliberately checks the NATIVE schema plus io value
-  // rules that assume the modelAccess gate (which both frontends run AFTER
-  // bridge resolution) has merged those arguments back in — running it here
-  // would refuse calls the very next stage accepts.
-  // Defaults remain model-visible and overridable; omit their names only
-  // from this clone's required list because the same gate supplies them.
-  let paramsError: string | null = null;
-  // A truncated response yields to the caller's truncation handling: the
-  // arguments are incomplete for transport reasons, not a schema misreading.
-  // A target the caller's own downstream policy gate will deny (the
-  // scheduler's permission-manager gate owns the richer denial message)
-  // must surface that denial, not a parameter error for a call that could
-  // never run.
-  const preCheckSuppressed =
-    options?.suppressArgumentPreCheck !== undefined &&
-    (await options.suppressArgumentPreCheck(target.name));
-  if (!options?.wasOutputTruncated && !preCheckSuppressed) {
-    try {
-      const argsClone = structuredClone(invocation.params.arguments);
-      // Surplus-key tolerance is the target's own call, so relax the keyword
-      // wherever relaxing only widens acceptance — but never inside a
-      // composition branch or annotation data, where the rewrite inverts the
-      // schema's meaning and the pre-check ends up stricter than the schema the
-      // target publishes. See relaxAdditionalProperties.
-      const schemaClone = relaxAdditionalProperties(
-        target.schema.parametersJsonSchema,
-      );
-      if (
-        target.mediaPolicyDescriptor?.kind === 'media_policy' &&
-        Array.isArray(schemaClone['required'])
-      ) {
-        const defaults = new Set(
-          options?.getDefaultArgumentNames?.(target.name),
-        );
-        schemaClone['required'] = schemaClone['required'].filter(
-          (name) => !defaults.has(name),
-        );
-      }
-      const required = new Set(
-        Array.isArray(schemaClone['required']) ? schemaClone['required'] : [],
-      );
-      for (const [name, value] of Object.entries(argsClone)) {
-        if (value === null && !required.has(name)) {
-          delete argsClone[name];
-        }
-      }
-      const compiled = SchemaValidator.compileIsolated(schemaClone);
-      if ('validate' in compiled) {
-        paramsError = compiled.validate(argsClone);
-      }
-    } catch {
-      // A target whose validation throws under this pre-check must not become
-      // a new bridge failure mode: the scheduler's build() reports the same
-      // throw as before.
-    }
-  }
-  if (paramsError) {
-    return {
-      error: bridgeRefusal(
-        `Deferred tool "${target.name}" rejected the arguments: ${paramsError}. Pass arguments matching the schema returned by tool_search for "${target.name}".`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
       targetName: target.name,

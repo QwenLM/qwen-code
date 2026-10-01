@@ -12,10 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
-import {
-  evaluateMediaPolicyToolCall,
-  resolveMediaPolicyModelAccess,
-} from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
+import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
@@ -115,6 +112,7 @@ import {
   ToolErrorType,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -13699,6 +13697,7 @@ export class Session implements SessionContext {
     }
 
     let toolName = fc.name;
+    let bridgedThroughToolCall = false;
     if (
       !appExecution &&
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
@@ -13751,43 +13750,13 @@ export class Session implements SessionContext {
         );
       }
       const resolution = await resolveDeferredToolCall(toolRegistry, args, {
-        getDefaultArgumentNames: (targetName) =>
-          Object.keys(
-            resolveMediaPolicyModelAccess(this.config, targetName)
-              .defaultArguments,
-          ),
         // Thread the real configured depth so the ACP frontend applies the
         // same depth-gated AgentTool re-admission as the terminal scheduler
         // and tool_search — the exclusion contract must be consistent across
         // all three frontends (wenshao triage follow-up). Omitting it would
         // fail closed, not open, but the corner case should agree everywhere.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
-        // Mirror the scheduler's split of the two bridge policy options:
-        // isTargetExecutionAllowed is the OUTER OWNER's execution allowlist
-        // (only agent-core supplies one — this frontend has no such knob),
-        // while the permission manager owns enablement / deny rules. So the pm
-        // goes into suppressArgumentPreCheck: a pm-denied target skips the
-        // argument pre-check (no INVALID_TOOL_PARAMS strike for a call that
-        // could never run) and the L1 enablement gate below stays ACP's only
-        // policy authority, keeping its own denial wording and its
-        // isTrustedLiveTool exemption. Wiring the pm into
-        // isTargetExecutionAllowed instead made resolution short-circuit with
-        // the bridge's scheduler-flavoured message, which names an execution
-        // allowlist and a disallowedTools blocklist that ACP never reads.
-        ...(pm
-          ? {
-              suppressArgumentPreCheck: async (targetName: string) =>
-                !(await pm.isToolEnabled(targetName)),
-            }
-          : {}),
-      }).catch(
-        (
-          error: unknown,
-        ): Awaited<ReturnType<typeof resolveDeferredToolCall>> => ({
-          error: error instanceof Error ? error : new Error(String(error)),
-          errorType: ToolErrorType.UNHANDLED_EXCEPTION,
-        }),
-      );
+      });
       const bridgeCancellation = cancelBeforeExecutionIfAborted(toolName);
       if (bridgeCancellation) return bridgeCancellation;
       if ('error' in resolution) {
@@ -13803,6 +13772,7 @@ export class Session implements SessionContext {
       toolName = resolution.tool.name;
       args = resolution.arguments;
       tool = resolution.tool;
+      bridgedThroughToolCall = true;
     }
 
     if (!tool) {
@@ -15977,7 +15947,15 @@ export class Session implements SessionContext {
                 : undefined,
           };
         } catch (e) {
-          const error = e instanceof Error ? e : new Error(String(e));
+          const caught = e instanceof Error ? e : new Error(String(e));
+          // Same labelling as the scheduler: a target reached through
+          // tool_call names itself when its own build() rejects the arguments.
+          const error =
+            bridgedThroughToolCall && !toolBuildSucceeded
+              ? new Error(
+                  describeBridgedArgumentError(toolName, caught.message),
+                )
+              : caught;
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
           const executionTimeoutException =
