@@ -1185,9 +1185,9 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
   ])('pins the union op set for the comment-shape row %s (#R1-6)', (cmd) => {
     // bash runs only the echo (the `#` opens a comment); neither quote
     // reading models comments, so the bash reading splits at the `&&`/`|`
-    // and emits a phantom touch op. The phantom is pre-existing — the
-    // union walk at the merge base produced the same op — and comment
-    // modeling belongs to the #11882 umbrella.
+    // and emits a phantom touch op. The phantom is pre-existing (the union
+    // walk at the merge base produced the same op), and comment modeling
+    // belongs to the #11882 umbrella.
     expect(extractShellOperationsAcrossCommand(cmd, '/repo')).toEqual([
       { virtualTool: 'write_file', filePath: '/tmp/x' },
     ]);
