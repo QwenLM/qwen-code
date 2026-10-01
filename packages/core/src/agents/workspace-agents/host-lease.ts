@@ -328,36 +328,48 @@ export async function reportHostRunProgress(
     const previous =
       run.progress?.attempt === input.attempt ? run.progress : undefined;
     if (previous && previous.sequence > input.sequence) return { ok: true };
-    run.progress = {
-      attempt: input.attempt,
-      sequence: input.sequence,
-      receivedAt: now,
-      activityAt:
-        previous?.sequence === input.sequence ? previous.activityAt : now,
-      stage:
-        previous?.sequence === input.sequence ? previous.stage : input.stage,
-      detail:
-        previous?.sequence === input.sequence ? previous.detail : input.detail,
-      outputText:
-        previous?.sequence === input.sequence
-          ? previous.outputText
-          : (input.outputText ?? previous?.outputText),
-      thoughtText:
-        previous?.sequence === input.sequence
-          ? previous.thoughtText
-          : (input.thoughtText ?? previous?.thoughtText),
-    };
     const steps =
       previous?.sequence === input.sequence
         ? previous.steps
         : (input.steps ?? previous?.steps);
-    if (steps) run.progress.steps = steps;
-    run.usageByRound = withHostUsage(
-      run.usageByRound,
-      input.attempt,
-      input.tokens,
+    // A new object through `withRun`, like every other write in this module.
+    // Mutating the run that `find` returned only reaches the store because
+    // `writeThread` is handed that same reference; a copy-on-write transaction
+    // layer would silently drop both the progress and the token accounting.
+    await transaction.writeThread(
+      withRun(thread, input.runId, (target) => ({
+        ...target,
+        progress: {
+          attempt: input.attempt,
+          sequence: input.sequence,
+          receivedAt: now,
+          activityAt:
+            previous?.sequence === input.sequence ? previous.activityAt : now,
+          stage:
+            previous?.sequence === input.sequence
+              ? previous.stage
+              : input.stage,
+          detail:
+            previous?.sequence === input.sequence
+              ? previous.detail
+              : input.detail,
+          outputText:
+            previous?.sequence === input.sequence
+              ? previous.outputText
+              : (input.outputText ?? previous?.outputText),
+          thoughtText:
+            previous?.sequence === input.sequence
+              ? previous.thoughtText
+              : (input.thoughtText ?? previous?.thoughtText),
+          ...(steps ? { steps } : {}),
+        },
+        usageByRound: withHostUsage(
+          target.usageByRound,
+          input.attempt,
+          input.tokens,
+        ),
+      })),
     );
-    await transaction.writeThread(thread);
     return { ok: true };
   });
 }

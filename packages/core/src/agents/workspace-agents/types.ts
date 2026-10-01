@@ -101,6 +101,16 @@ export function hostOffersProgram(
   return host.providers.includes(AGENT_PROGRAM_LABELS[program]);
 }
 
+/**
+ * The coordinator's pinned answer for a Host credential it will not accept.
+ *
+ * A Host clears its stored credential and re-joins only on this exact body;
+ * every other 401 — the bearer gate while the runtime is still starting, or
+ * the routes being unmounted — is worth a retry. Both halves read this
+ * constant so the coupling is a compile error rather than a string match.
+ */
+export const AGENT_HOST_CREDENTIAL_REJECTED = 'Invalid Agent Host credential.';
+
 export type WorkspaceAgentExecution =
   | { mode: 'local' }
   | {

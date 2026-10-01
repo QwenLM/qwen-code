@@ -21,6 +21,7 @@ import {
   enrollAgentHost,
   heartbeatAgentHost,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { AGENT_HOST_CREDENTIAL_REJECTED } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
@@ -169,7 +170,7 @@ export function registerAgentHostTransportRoutes(
         secret,
       ))
     ) {
-      res.status(401).json({ error: 'Invalid Agent Host credential.' });
+      res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
       return;
     }
     next();
@@ -334,7 +335,7 @@ export function registerAgentHostTransportRoutes(
         !providers.every((provider) => typeof provider === 'string') ||
         (enrollmentToken !== undefined && typeof enrollmentToken !== 'string')
       ) {
-        res.status(401).json({ error: 'Invalid Agent Host credential.' });
+        res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
         return;
       }
       const runtime = runtimeFor(workspaceRegistry, workspaceId);
@@ -356,7 +357,7 @@ export function registerAgentHostTransportRoutes(
           },
         );
         if (!host) {
-          res.status(401).json({ error: 'Invalid Agent Host credential.' });
+          res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
           return;
         }
         if (input['run'] !== undefined) {
@@ -410,7 +411,7 @@ export function registerAgentHostTransportRoutes(
       const secret = hostSecret(req);
       const waitMs = readWaitMs(body(req)['waitMs']);
       if (!workspaceId || !hostId || !secret) {
-        res.status(401).json({ error: 'Invalid Agent Host credential.' });
+        res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
         return;
       }
       if (waitMs === undefined) {
@@ -444,7 +445,7 @@ export function registerAgentHostTransportRoutes(
           if (
             !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
           ) {
-            res.status(401).json({ error: 'Invalid Agent Host credential.' });
+            res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
             return;
           }
           if (req.socket.destroyed || res.writableEnded) return;
@@ -461,7 +462,7 @@ export function registerAgentHostTransportRoutes(
             assignment &&
             !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
           ) {
-            res.status(401).json({ error: 'Invalid Agent Host credential.' });
+            res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
             return;
           }
           if (req.socket.destroyed || res.writableEnded) return;

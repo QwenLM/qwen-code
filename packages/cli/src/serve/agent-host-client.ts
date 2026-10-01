@@ -30,6 +30,7 @@ import {
   agentThreadSessionId,
 } from '../runtime/agent-session-source.js';
 import {
+  AGENT_HOST_CREDENTIAL_REJECTED,
   AGENT_PROGRAM_LABELS,
   type AgentProgram,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
@@ -163,14 +164,14 @@ function isPermanentRejection(error: unknown): boolean {
  * still starting, or while collaboration is off and the routes are
  * unmounted — neither says anything about this Host's credential, and
  * treating them as revocation deletes the credential and strands the Host
- * until an operator re-joins it by hand. The string is the route's pinned
- * answer (`routes/agent-hosts.ts`).
+ * until an operator re-joins it by hand. The route answers with the same
+ * exported constant, so the two halves cannot drift apart silently.
  */
 export function isRevocation(error: unknown): boolean {
   return (
     (error as { status?: number } | null | undefined)?.status === 401 &&
     (error as Error | null | undefined)?.message ===
-      'Invalid Agent Host credential.'
+      AGENT_HOST_CREDENTIAL_REJECTED
   );
 }
 
