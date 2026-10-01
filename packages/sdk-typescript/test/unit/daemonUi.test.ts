@@ -11196,9 +11196,11 @@ describe('daemonBlockToPlainText sanitizes tool preview content', () => {
       updatedAt: 1,
     };
     const plain = daemonBlockToPlainText(block);
-    expect(plain).not.toContain('\x1b[');
+    expect(plain).not.toContain('\x1b');
     expect(plain).not.toContain('\r');
-    expect(plain).toContain('https://api.example.com/data');
+    // Assert the visible method survives too: a "fix" that dropped the field
+    // entirely would satisfy the two assertions above.
+    expect(plain).toContain('POSTPWN https://api.example.com/data');
   });
 
   it('strips terminal escapes from the tool status line', async () => {
