@@ -57,7 +57,12 @@ export function goalToolResultProvenance(
     typeof toolName === 'string' ? toolName.toLowerCase() : toolName;
   if (
     lowerToolName === ToolNames.GET_GOAL ||
-    lowerToolName === ToolNames.UPDATE_GOAL
+    lowerToolName === ToolNames.UPDATE_GOAL ||
+    // Discovery is bookkeeping too: a `tool_search` schema lookup during a
+    // Goal turn is the Goal's own navigation, not evidence about the world —
+    // otherwise the finishing turn's `tool_search select:update_goal` enters
+    // the catalog as an `external_fact` and reads as progress.
+    requestName === ToolNames.TOOL_SEARCH
   ) {
     return { goalContext: { ...goalContext }, provenance: 'goal_runtime' };
   }

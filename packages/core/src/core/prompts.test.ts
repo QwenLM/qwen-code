@@ -63,6 +63,7 @@ interface PromptOpts {
   todo?: boolean;
   codeMode?: boolean;
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
 }
 
 /** getCoreSystemPrompt with named options; omitted ones take their defaults. */
@@ -75,7 +76,9 @@ const corePrompt = (o: PromptOpts = {}) =>
     o.style,
     o.todo,
     o.codeMode,
-    o.declaredTools ? { declaredTools: o.declaredTools } : undefined,
+    o.declaredTools || o.agentReachable !== undefined
+      ? { declaredTools: o.declaredTools, agentReachable: o.agentReachable }
+      : undefined,
   );
 
 /** Asserts `text` contains every `has` entry and none of the `lacks` ones. */
@@ -1334,7 +1337,7 @@ describe('resident tool gating (#12032)', () => {
     return [guidance, examples];
   }
 
-  it('saves about 1.1k characters of policy text for a file-work allowlist', () => {
+  it('saves about 1.1k characters of policy text for a file-work allowlist when Agent is not bridge-reachable', () => {
     const full = promptFor();
     const trimmed = promptFor(FILE_WORK_TOOLS);
 
@@ -1345,6 +1348,30 @@ describe('resident tool gating (#12032)', () => {
     const saved = full.length - trimmed.length;
     expect(saved).toBeGreaterThan(900);
     expect(saved).toBeLessThan(1_500);
+    expect(countExamples(trimmed)).toBe(countExamples(full));
+  });
+
+  it('saves only the monitor policy text for a file-work allowlist when Agent is bridge-reachable', () => {
+    // The bridge-intact trimmed session is the default: tool_search/tool_call
+    // are exempt from `tools.eager`, so Agent stays reachable and §4.6 keeps
+    // both Agent bullets. The only policy text that drops is the monitor
+    // line (317 characters at the commit that added this pin) — the
+    // delegation (448) and codebase-search (368) bullets survive. Goes red
+    // if the Agent bullets start dropping in a bridge-intact session (the
+    // §4.6 regression) or if the monitor line stops dropping.
+    const full = promptFor();
+    const trimmed = corePrompt({
+      model: 'gpt-4',
+      declaredTools: FILE_WORK_TOOLS,
+      agentReachable: true,
+    });
+
+    expect(trimmed).toContain('- **Subagent Delegation:**');
+    expect(trimmed).toContain('- **Codebase Search:**');
+    expect(trimmed).not.toContain('- **Monitor Processes:**');
+    const saved = full.length - trimmed.length;
+    expect(saved).toBeGreaterThan(250);
+    expect(saved).toBeLessThan(450);
     expect(countExamples(trimmed)).toBe(countExamples(full));
   });
 

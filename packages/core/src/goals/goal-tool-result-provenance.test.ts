@@ -45,6 +45,21 @@ describe('goalToolResultProvenance', () => {
     },
   );
 
+  it('marks tool_search during a Goal turn as bookkeeping, not evidence', () => {
+    // With the Goal tools deferred by default, the finishing turn discovers
+    // update_goal through `tool_search select:` first; recorded as an
+    // ordinary tool result it would enter the verifier's catalog as an
+    // `external_fact` (a schema dump cited as proof about the world) and
+    // count toward the finishing turn's evidence-bearing results.
+    expect(
+      goalToolResultProvenance({
+        name: ToolNames.TOOL_SEARCH,
+        args: { query: 'select:update_goal' },
+        goalContext: permit,
+      }),
+    ).toEqual({ goalContext: permit, provenance: 'goal_runtime' });
+  });
+
   it.each([ToolNames.GET_GOAL, ToolNames.UPDATE_GOAL])(
     'marks a bridged %s result as the Goal’s own bookkeeping',
     (name) => {

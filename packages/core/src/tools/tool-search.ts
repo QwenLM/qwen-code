@@ -130,7 +130,7 @@ interface ScoredTool {
   score: number;
 }
 
-function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
+export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
   return Boolean(
     registry.getTool(ToolNames.TOOL_SEARCH) &&
       registry.getTool(ToolNames.TOOL_CALL),

@@ -59,17 +59,7 @@ Four things to know before you use it:
 
 `tools.visible` is the escape hatch for one tool you want declared up front even though it is deferred by default.
 
-Agent and Goal coordination (`agent`, `list_agents`, `get_goal`, `update_goal`,
-and `propose_goal`) is deferred by default; no `tools.eager` configuration is
-needed. The model sees short discovery entries instead of the full schemas.
-Their first use needs discovery through the bridge, so compare whole-task cost
-and successful delegation/Goal completion as well as the first request. These
-are ordinary deferred tools: `tools.visible`, preloading, and the incomplete-
-bridge eager fallback described above still apply. Preloading is all-or-nothing
-over the whole deferred candidate pool, and these five declarations are large,
-so a `tools.toolSearch.threshold` that used to reveal every deferred tool at
-session start can now reveal none of them. Re-take a `/context` reading after
-changing either one.
+Agent and Goal coordination (`agent`, `list_agents`, `get_goal`, `update_goal`, and `propose_goal`) is deferred by default; no `tools.eager` configuration is needed. The model sees short discovery entries instead of the full schemas. Their first use needs discovery through the bridge, so compare whole-task cost and successful delegation/Goal completion as well as the first request. These are ordinary deferred tools: `tools.visible`, preloading, and the incomplete-bridge eager fallback described above still apply. Preloading is all-or-nothing over the whole deferred candidate pool, and these five declarations are large, so a `tools.toolSearch.threshold` that used to reveal every deferred tool at session start can now reveal none of them. Re-take a `/context` reading after changing either one.
 
 ### 3. Move scenario guidance out of context files into skills
 

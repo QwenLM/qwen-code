@@ -1159,9 +1159,9 @@ describe('ProposeGoalTool', () => {
     // `tools.visible`, or the incomplete-bridge fallback. The figure is what
     // the three tools cost today plus room for a sentence; growing past it
     // should be a decision, not drift. (5 860 before the descriptions were
-    // trimmed; raised from 3 800 for the short self-contained first line each
-    // one now needs in the deferred discovery catalog, which renders
-    // `description.split('\n')[0]` only.)
+    // trimmed; the deferred discovery catalog renders
+    // `description.split('\n')[0]` only, so each description keeps one short
+    // self-contained first line and the body opens without restating it.)
     const tools = [
       new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
       new UpdateGoalTool(makeConfig({})),
@@ -1174,7 +1174,7 @@ describe('ProposeGoalTool', () => {
       )
       .join('');
 
-    expect(advertised.length).toBeLessThan(4_200);
+    expect(advertised.length).toBeLessThan(3_800);
   });
 
   it('gives each Goal tool a catalog entry that is a whole first line', () => {

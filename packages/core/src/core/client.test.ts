@@ -618,6 +618,9 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: LlmClient;
   let mockGenerateContentFn: Mock;
+  /** Backing state for the prompt-surface setters/getters on the mock. */
+  let promptToolSnapshot: ReadonlySet<string> | undefined;
+  let promptAgentReachable: boolean | undefined;
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
     getSnapshots: ReturnType<typeof vi.fn>;
@@ -756,6 +759,8 @@ describe('Gemini Client (client.ts)', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     contents = [userText('hello')];
+    promptToolSnapshot = undefined;
+    promptAgentReachable = undefined;
     mockInteractionTelemetry.outputCaptures.length = 0;
     mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue({});
     // The client concatenates these with the auto-memory suffix, so the
@@ -875,8 +880,14 @@ describe('Gemini Client (client.ts)', () => {
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
-      setPromptAgentReachable: vi.fn(),
-      setPromptToolSnapshot: vi.fn(),
+      setPromptAgentReachable: vi.fn((reachable: boolean) => {
+        promptAgentReachable = reachable;
+      }),
+      setPromptToolSnapshot: vi.fn((snapshot: ReadonlySet<string>) => {
+        promptToolSnapshot = snapshot;
+      }),
+      getPromptAgentReachable: vi.fn(() => promptAgentReachable),
+      getPromptToolSnapshot: vi.fn(() => promptToolSnapshot),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
@@ -1702,6 +1713,17 @@ describe('Gemini Client (client.ts)', () => {
       await client.startChat();
 
       expect(setReachable).toHaveBeenLastCalledWith(true);
+      // Record-to-read wiring: the instruction built later in the same
+      // startChat must read back exactly what the setters recorded (the
+      // mocked getters are backed by that state), or gating renders with
+      // `declaredTools === undefined` and never engages.
+      const surface = vi.mocked(getCoreSystemPrompt).mock.calls.at(-1)?.[7] as
+        | { declaredTools?: ReadonlySet<string>; agentReachable?: boolean }
+        | undefined;
+      expect(surface?.agentReachable).toBe(true);
+      expect(surface?.declaredTools).toEqual(
+        new Set([ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]),
+      );
     });
 
     it('re-reveals deferred tools that appear in resumed history', async () => {
@@ -2666,6 +2688,65 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
         'prompt-bridged-goal-result',
+      );
+    });
+
+    it('keeps the turn budget for a bridged Agent call the bridge refused', async () => {
+      // A refusal (or cancellation) still arrives as a `tool_call`-named
+      // functionResponse with the same call id, but with `error` in place of
+      // `output` — no Agent invocation ever ran, so the reminder force would
+      // fire on shape alone and reset the cadence for nothing.
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockReturnValue(undefined);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      client.getChat().setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-refused',
+                name: ToolNames.TOOL_CALL,
+                args: {
+                  name: 'agent',
+                  args: { description: 'd', prompt: 'p' },
+                },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const stream = client.sendMessageStream(
+        [
+          {
+            functionResponse: {
+              id: 'call-refused',
+              name: ToolNames.TOOL_CALL,
+              response: {
+                error:
+                  '[tool_call bridge refused] Deferred tool "agent" changed since tool_search last returned it.',
+              },
+            },
+          },
+        ],
+        new AbortController().signal,
+        'prompt-bridged-agent-refused',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-bridged-agent-refused',
+      );
+      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalledWith(
+        'prompt-bridged-agent-refused',
+        true,
       );
     });
 
@@ -11934,7 +12015,15 @@ Other open files:
         outputStyle,
         false,
         codeModeOnly,
-        { declaredTools: undefined },
+        // The prompt-surface getters on the mock are backed by what
+        // startChat recorded: no declarations in the registry mock, and no
+        // bridge-reachable Agent.
+        {
+          declaredTools: new Set(),
+          agentReachable: false,
+          executionSandboxFilesystem: undefined,
+          executionSandboxBackend: undefined,
+        },
       ] as const;
     /** generateContent args whose config carries `systemInstruction`. */
     const withInstruction = (systemInstruction: string) =>

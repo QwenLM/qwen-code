@@ -19,6 +19,7 @@ import type {
   Tool,
 } from '@google/genai';
 import { buildAdvisorReminder } from './advisor-policy.js';
+import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
@@ -2203,9 +2204,7 @@ export class LlmClient {
     deferredSummary: readonly DeferredToolSummary[],
   ): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
-    const bridgeAvailable =
-      !!toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
-      !!toolRegistry.getTool(ToolNames.TOOL_CALL);
+    const bridgeAvailable = isDeferredToolBridgeAvailable(toolRegistry);
     if (!bridgeAvailable) {
       if (deferredSummary.length > 0) {
         const withheld: string[] = [];
@@ -2725,8 +2724,7 @@ export class LlmClient {
       // nor bridge-reachable, so it correctly reads unreachable here.
       this.config.setPromptAgentReachable?.(
         declaredTools.has(ToolNames.AGENT) ||
-          (!!toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
-            !!toolRegistry.getTool(ToolNames.TOOL_CALL) &&
+          (isDeferredToolBridgeAvailable(toolRegistry) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
       [history, snapshotEntries] = await profiler.time(
@@ -4697,35 +4695,45 @@ export class LlmClient {
             break;
           }
           if (response.name === ToolNames.TOOL_CALL && response.id) {
+            // A refused or cancelled bridge call carries `error` (the
+            // refusal/cancellation prefixes; `convertToFunctionErrorResponse`
+            // moves `output` into `error`) — nothing was delegated on that
+            // turn, so it must not force the reminder, mirroring the
+            // refused/cancelled exclusion in the sibling seeding pass.
+            if (
+              (response.response as Record<string, unknown> | undefined)?.[
+                'error'
+              ] !== undefined
+            ) {
+              continue;
+            }
             (bridgedResponseIds ??= new Set<string>()).add(response.id);
           }
         }
         if (!carriesAgentToolResult && bridgedResponseIds) {
-          for (const message of this.getHistoryShallow()) {
-            for (const historyPart of message.parts ?? []) {
-              const call = historyPart.functionCall;
-              if (
-                call?.name !== ToolNames.TOOL_CALL ||
-                !call.id ||
-                !bridgedResponseIds.has(call.id)
-              ) {
-                continue;
-              }
-              const bridgedName = (
-                call.args as Record<string, unknown> | undefined
-              )?.['name'];
-              if (
-                typeof bridgedName === 'string' &&
-                canonicalToolName(bridgedName) === ToolNames.AGENT
-              ) {
-                carriesAgentToolResult = true;
-                break;
-              }
-            }
-            if (carriesAgentToolResult) {
-              break;
-            }
-          }
+          // Newest-first over raw history: the matching functionCall is the
+          // model message that just ran, so the scan exits at the first
+          // hit instead of cloning and walking the whole history per send.
+          carriesAgentToolResult =
+            this.getChat().findLastHistoryEntry((message) =>
+              (message.parts ?? []).some((historyPart) => {
+                const call = historyPart.functionCall;
+                if (
+                  call?.name !== ToolNames.TOOL_CALL ||
+                  !call.id ||
+                  !bridgedResponseIds.has(call.id)
+                ) {
+                  return false;
+                }
+                const bridgedName = (
+                  call.args as Record<string, unknown> | undefined
+                )?.['name'];
+                return (
+                  typeof bridgedName === 'string' &&
+                  canonicalToolName(bridgedName) === ToolNames.AGENT
+                );
+              }),
+            ) !== undefined;
         }
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
