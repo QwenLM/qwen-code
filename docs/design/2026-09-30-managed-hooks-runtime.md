@@ -228,7 +228,8 @@ record resources and the complete function-message snapshot closure before
 attachment, while retaining original-owner recovery barriers. Opening the
 authority reads each record, and each resource a record names, once however many
 revisions name it. The Workspace verification reuses that result and reads only
-what it must inspect itself, such as plans and their message snapshots.
+what it must inspect itself, such as plans and their message snapshots; the
+authority keeps none of it once the Session is open.
 Independent reads run in bounded batches.
 
 Private Session/client-scoped routes provide `GET /session/:id/hooks`, registration

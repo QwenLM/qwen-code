@@ -173,7 +173,8 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
 打开 authority 时，每条记录及其引用的每个资源只读取一次，无论有多少修订引用它。
-Workspace 校验复用该结果，只读取它必须自行检查的内容，例如 plan 及其消息快照。
+Workspace 校验复用该结果，只读取它必须自行检查的内容，例如 plan 及其消息快照；
+Session 打开后 authority 不再保留该结果。
 相互独立的读取按有界批次并发执行。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/

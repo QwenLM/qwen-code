@@ -1351,6 +1351,29 @@ it('drains a long settled history without rescanning it per occurrence', async (
   expect(scans.mock.calls.length).toBeLessThanOrEqual(3);
 });
 
+it('settles an occurrence whose children were committed after an earlier status check', async () => {
+  await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  // A replacement Harness checks one occurrence before another commits.
+  const replacement = new HostedHookSession(options, session, pin);
+  expect((await replacement.status('call-1')).resultRef).not.toBeNull();
+  execute = async () => {
+    throw new Error('lost reply');
+  };
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const child = requests.filter(
+    (request) => request.kind === 'hook-execute',
+  )[1]!;
+  replies.set(child.operationId, {
+    operationId: child.operationId,
+    state: 'settled',
+    result: { success: true, outcome: 'success', duration: 0 },
+  });
+  // Its status reads the new child's reply, so the occurrence settles.
+  expect((await replacement.status('call-2')).resultRef).not.toBeNull();
+});
+
 it.each([false, true])(
   'preserves a large Session context within individual resource limits (function Hook: %s)',
   async (hasFunction) => {

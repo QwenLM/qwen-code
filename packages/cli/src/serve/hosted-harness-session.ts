@@ -58,10 +58,7 @@ import {
   hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
-import {
-  parseHookRegistration,
-  parseHookExecution,
-} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
 import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -105,9 +102,14 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const CLIENT = /^[A-Za-z0-9._:-]{1,128}$/u;
 /** References whose resources a cold Workspace load verifies at once. */
 const RESTORE_READ_BATCH = 32;
-/** Resource kinds whose contents a cold Workspace load inspects. */
+/**
+ * Resource kinds a cold Workspace load descends into. Of the resources that
+ * opening the Session verified, those of these kinds are queued again, so
+ * what they reference is verified too; the rest are not read again.
+ */
 const RESTORE_CONTAINER_KINDS = new Set([
   'managed-session_metadata',
+  'managed-file_history',
   'managed-tool-outcome',
   'managed-tool-result-manifest',
   'managed-checkpoint',
@@ -385,23 +387,25 @@ async function readShellReceipt(
 
 async function verifyWorkspaceRestore(
   session: HostedSession,
+  preverified: ReadonlyMap<string, ManagedSessionDurableRef>,
   toolResults: DurableToolResultResourceStore,
   throughSequence: number,
 ): Promise<boolean> {
   const { authority, resources, sink } = session.managed;
   const segmentStore = new ResourceToolResultSegmentStore(toolResults);
   const manifests = new Map<string, ManagedSessionDurableRef>();
-  // Opening the authority already read every Stage H record and the
-  // resources its body references. Those are checked for conflicting
-  // references but not read again, unless this verification descends into
-  // their kind; the records' references are queued below for that reason.
+  // What opening the Session verified is checked for conflicting references
+  // but not read again, except the kinds this verification descends into,
+  // which are queued with the other references below.
   const verified = new Map<
     string,
     { ref: ManagedSessionDurableRef; done: Promise<void> }
   >();
-  for (const [id, ref] of await authority.verifiedExtensionResources())
-    if (!RESTORE_CONTAINER_KINDS.has(ref.kind))
-      verified.set(id, { ref, done: Promise.resolve() });
+  const descend: ManagedSessionDurableRef[] = [];
+  for (const [id, ref] of preverified) {
+    if (RESTORE_CONTAINER_KINDS.has(ref.kind)) descend.push(ref);
+    else verified.set(id, { ref, done: Promise.resolve() });
+  }
   const publicationManifests = new Set<string>();
   let incomplete = false;
   function readRef(ref: ManagedSessionDurableRef): Promise<void> {
@@ -488,16 +492,6 @@ async function verifyWorkspaceRestore(
         if (nested) await readRef(nested);
       }
     }
-    if (ref.kind === 'managed-hook_registration') {
-      const registration = parseHookRegistration(JSON.parse(bytes.toString()));
-      await readRef(registration.catalogRef);
-    }
-    if (ref.kind === 'managed-hook_execution') {
-      const execution = parseHookExecution(JSON.parse(bytes.toString()));
-      await readRef(execution.planRef);
-      await readRef(execution.inputRef);
-      if (execution.resultRef) await readRef(execution.resultRef);
-    }
     if (ref.kind === 'managed-hook-plan') {
       const plan = object(JSON.parse(bytes.toString()));
       if (!plan) throw new Error('Hosted Hook plan is invalid.');
@@ -548,15 +542,7 @@ async function verifyWorkspaceRestore(
       }
     }
   }
-  // A record's references never change across its revisions, so the latest
-  // revision names all of them.
-  for (const entry of authority.extensionRecordsInDomain('hook_registration'))
-    refs.push(parseHookRegistration(entry.record).catalogRef);
-  for (const entry of authority.extensionRecordsInDomain('hook_execution')) {
-    const execution = parseHookExecution(entry.record);
-    refs.push(execution.planRef, execution.inputRef);
-    if (execution.resultRef) refs.push(execution.resultRef);
-  }
+  refs.push(...descend);
   // Independent reads, a bounded batch at a time; a resource several
   // references name is still read once. A batch settles fully before a
   // failure is reported, so no read outlives the verification.
@@ -1152,8 +1138,14 @@ export function registerHostedHarnessSessionRoutes(
         activationLeaseDurationMs: store.leaseDurationMs,
         journalStore: stores.journalStore,
         resourceStore: stores.resourceStore,
-        ...(refs ? { create: refs, requireNew: true } : {}),
+        ...(refs
+          ? { create: refs, requireNew: true }
+          : { retainVerifiedResources: true }),
       });
+      // Taken now, so the authority keeps none of it for the Session's
+      // lifetime; a cold Workspace load reuses it below.
+      const preverified =
+        await managed.authority.takeVerifiedExtensionResources();
       const definition = object(
         JSON.parse(
           (
@@ -1293,6 +1285,7 @@ export function registerHostedHarnessSessionRoutes(
         try {
           incompletePublication = await verifyWorkspaceRestore(
             session,
+            preverified,
             stores.toolResultResources,
             restore.throughSequence,
           );

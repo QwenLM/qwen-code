@@ -16,8 +16,9 @@ import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 
-// Counts how often a Hook execution body is validated, which is what an
-// admission check that reads the Session's whole history repeats.
+// Counts the checks of a Hook execution body made through this module's
+// exports: parses, and start and successor checks. An admission check that
+// reads the Session's whole history repeats them.
 const parsed = vi.hoisted(() => ({ executions: 0 }));
 vi.mock('./managed-hook-record.js', async (importOriginal) => {
   const actual =
@@ -27,6 +28,14 @@ vi.mock('./managed-hook-record.js', async (importOriginal) => {
     parseHookExecution: (value: unknown) => {
       parsed.executions++;
       return actual.parseHookExecution(value);
+    },
+    isHookExecutionStart: (value: unknown) => {
+      parsed.executions++;
+      return actual.isHookExecutionStart(value);
+    },
+    isHookExecutionSuccessor: (previous: unknown, next: unknown) => {
+      parsed.executions++;
+      return actual.isHookExecutionSuccessor(previous, next);
     },
   };
 });
@@ -81,7 +90,12 @@ async function history() {
   });
   const reads: string[] = [];
   const failing = new Set<string>();
-  const io = { inFlight: 0, delayMs: 0, slow: new Map<string, number>() };
+  const io = {
+    inFlight: 0,
+    peak: 0,
+    delayMs: 0,
+    slow: new Map<string, number>(),
+  };
   const resources: ManagedSessionResourceStore = {
     publish: (kind, bytes) => local.publish(kind, bytes),
     read: async (ref) => {
@@ -89,6 +103,7 @@ async function history() {
       if (failing.has(ref.resourceId))
         throw new Error(`resource ${ref.resourceId} is unavailable`);
       io.inFlight++;
+      io.peak = Math.max(io.peak, io.inFlight);
       try {
         const delay = io.slow.get(ref.resourceId) ?? io.delayMs;
         if (delay > 0)
@@ -104,7 +119,7 @@ async function history() {
     await lease?.release();
     lease = undefined;
   };
-  const open = async (create = false) => {
+  const open = async (create = false, retainVerifiedResources = false) => {
     await release();
     lease = await SessionWriterLease.acquire({
       runtimeBaseDir,
@@ -118,6 +133,7 @@ async function history() {
         cwd: '/workspace',
         version: 'test',
         resources,
+        ...(retainVerifiedResources ? { retainVerifiedResources } : {}),
         ...(create
           ? {
               create: {
@@ -216,8 +232,8 @@ async function history() {
     get authority() {
       return authority;
     },
-    reopen: async () => {
-      authority = await open();
+    reopen: async (retainVerifiedResources = false) => {
+      authority = await open(false, retainVerifiedResources);
       return authority;
     },
     release,
@@ -238,6 +254,7 @@ it('admits a Hook execution without validating the history it accumulated', asyn
 
     // Reopening replays every revision once and reads every resource once.
     session.reads.length = 0;
+    session.io.peak = 0;
     parsed.executions = 0;
     const reopened = await session.reopen();
     expect(reopened.extensionRecordsInDomain('hook_execution')).toHaveLength(
@@ -247,6 +264,9 @@ it('admits a Hook execution without validating the history it accumulated', asyn
     // 106 records, 3 revisions each, 1 input and 1 result each, a plan per
     // occurrence, the catalog and 3 registration revisions.
     expect(session.reads.length).toBe(106 * 5 + 27 + 4);
+    // A window of 32 revisions, each reading its record and then at most
+    // three resources at once; an unbounded one reads hundreds here.
+    expect(session.io.peak).toBeLessThanOrEqual(32 * 3);
     // A bounded number per revision; reading the history at each admission
     // takes several thousand here.
     expect(parsed.executions).toBeLessThanOrEqual(106 * 3 * 4);
@@ -263,6 +283,24 @@ it('refuses consumed once keys, taken ordinals and a moved occurrence from an in
       'hook_execution',
       'execution-0',
     )!.record as HookExecution;
+    // A replacement catalog, which new occurrences bind to.
+    const replaced = {
+      ...templates.hook_registration.run.definition!,
+      definitionId: 'catalog-2',
+    };
+    for (const state of ['admitted', 'running', 'settled'] as const)
+      await session.commit('hook_registration', {
+        ...templates.hook_registration,
+        registrationId: 'registration-2',
+        catalogId: 'catalog-2',
+        catalogRef: session.execution(0).inputRef,
+        run: {
+          ...templates.hook_registration.run,
+          state,
+          effectId: 'registration-2',
+          definition: replaced,
+        },
+      });
     for (const live of [true, false]) {
       if (!live) await session.reopen();
       // The oldest once key, not only a recent one, stays consumed.
@@ -284,6 +322,14 @@ it('refuses consumed once keys, taken ordinals and a moved occurrence from an in
           occurrenceId: 'occurrence-0',
           ordinal: 7,
           planRef: session.execution(0).inputRef,
+        },
+        // An existing occurrence keeps its registration.
+        {
+          occurrenceId: 'occurrence-0',
+          ordinal: 7,
+          planRef,
+          registrationId: 'registration-2',
+          run: { ...session.execution(1000).run, definition: replaced },
         },
       ])
         await expect(
@@ -367,10 +413,32 @@ it('still refuses a reopen when a shared or late resource is missing or corrupt'
       plan.kind,
       plan.resourceId,
     );
-    await writeFile(file, '{"index":"changed"}');
-    await expect(session.reopen()).rejects.toThrow();
+    // The same length, so only the digest tells it apart.
+    await writeFile(file, '{"index":5}');
+    await expect(session.reopen()).rejects.toThrow(
+      'does not match its recorded digest',
+    );
     await rm(file);
     await expect(session.reopen()).rejects.toThrow('not present');
+  } finally {
+    await session.release();
+  }
+});
+
+it('keeps what opening verified only until a caller takes it', async () => {
+  const session = await history();
+  try {
+    for (let index = 0; index < 8; index++) await session.settle(index);
+    const reopened = await session.reopen();
+    expect((await reopened.takeVerifiedExtensionResources()).size).toBe(0);
+    session.reads.length = 0;
+    const retained = await session.reopen(true);
+    // Everything opening read, and nothing else.
+    expect(
+      [...(await retained.takeVerifiedExtensionResources()).keys()].sort(),
+    ).toEqual([...new Set(session.reads)].sort());
+    expect(session.reads).toHaveLength(8 * 5 + 2 + 4);
+    expect((await retained.takeVerifiedExtensionResources()).size).toBe(0);
   } finally {
     await session.release();
   }

@@ -333,6 +333,12 @@ export interface OpenManagedSessionAuthorityOptions {
   readonly expectedCommitProof?: ManagedSessionCommitProof;
   /** Required only for domain records, whose bodies live in resources. */
   readonly resources?: ManagedSessionResourceStore;
+  /**
+   * Keeps the Stage H resources that opening verified until
+   * `takeVerifiedExtensionResources()` takes them. Otherwise they are
+   * released once the log is open.
+   */
+  readonly retainVerifiedResources?: boolean;
 }
 
 /**
@@ -409,7 +415,7 @@ export class LocalManagedSessionAuthority {
    * The Stage H record resources an opened log replayed, and the resources
    * they reference, each read and verified once. Resources are immutable by
    * ID, so a later revision that names the same reference needs no second
-   * read.
+   * read. Kept past the open only until a caller takes them.
    */
   private readonly verifiedResources = new Map<
     string,
@@ -605,6 +611,8 @@ export class LocalManagedSessionAuthority {
       authority.recordRecoveryFacts(event, branches.has(event.eventId));
     }
     await authority.rebuildExtensionRecords();
+    if (options.retainVerifiedResources !== true)
+      authority.verifiedResources.clear();
     return authority;
   }
 
@@ -1471,8 +1479,10 @@ export class LocalManagedSessionAuthority {
    * references. A caller verifying a wider closure can skip them, still
    * checking that no other reference names the same ID differently, and must
    * itself descend into what those referenced resources reference in turn.
+   * Only a log opened with `retainVerifiedResources` keeps them, and only
+   * until the first call takes them; a later call returns none.
    */
-  async verifiedExtensionResources(): Promise<
+  async takeVerifiedExtensionResources(): Promise<
     ReadonlyMap<string, ManagedSessionDurableRef>
   > {
     const verified = new Map<string, ManagedSessionDurableRef>();
@@ -1480,6 +1490,7 @@ export class LocalManagedSessionAuthority {
       await entry.verified;
       verified.set(resourceId, entry.ref);
     }
+    this.verifiedResources.clear();
     return verified;
   }
 
