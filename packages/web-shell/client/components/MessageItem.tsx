@@ -55,6 +55,7 @@ interface MessageItemProps {
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
+  onToolResultOpen?: (itemId: string) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
@@ -102,6 +103,7 @@ export const MessageItem = memo(function MessageItem({
   onImagePreview,
   onAttachmentPreview,
   onTurnOutputOpen,
+  onToolResultOpen,
   onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
@@ -215,6 +217,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <AssistantMessage
             content={message.content}
+            author={message.author}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
@@ -233,6 +236,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ThinkingMessage
             content={message.content}
+            author={message.author}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
@@ -262,6 +266,7 @@ export const MessageItem = memo(function MessageItem({
           <ToolGroup
             tools={message.tools}
             onTurnOutputOpen={onTurnOutputOpen}
+            onToolResultOpen={onToolResultOpen}
             thoughts={message.thoughts}
             compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
@@ -468,6 +473,7 @@ function areMessageItemPropsEqual(
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
   if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
+  if (prev.onToolResultOpen !== next.onToolResultOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
@@ -526,6 +532,11 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   if (prev.timestamp !== next.timestamp) return false;
+  if (
+    prev.author?.name !== next.author?.name ||
+    prev.author?.color !== next.author?.color
+  )
+    return false;
   switch (prev.role) {
     case 'user':
       return (
@@ -630,6 +641,8 @@ function areToolCallsEqual(
     prev.subContent === next.subContent &&
     stableJson(prev.args) === stableJson(next.args) &&
     stableJson(prev.rawOutput) === stableJson(next.rawOutput) &&
+    stableJson(prev.toolResult) === stableJson(next.toolResult) &&
+    prev.wasCancelled === next.wasCancelled &&
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)

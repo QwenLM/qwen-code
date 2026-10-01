@@ -44,18 +44,32 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
+        requireReady(request);
         return delegate.provision(request);
     }
 
     @Override
     public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        requireReady(request);
         return delegate.provision(request, seed);
     }
 
     @Override
     public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
+        requireReady(request);
         return delegate.ensureResource(request, seed, knownHandle);
+    }
+
+    private void requireReady(RuntimeProvisionRequest request) {
+        if (!request.isManagedContext() || !executionStore.verifiedRecoveryEnabled()) {
+            return;
+        }
+        var resolved = resolver.resolve(request.getIsolationKey());
+        if (!resolved.scope().equals(request.getScope())
+                || !resolved.binding().getStorageId().equals(request.getStorageId())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     @Override

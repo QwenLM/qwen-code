@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 public final class LocalProcessRuntimeProvisioner
         implements RuntimeProvisioner {
     static final String KIND = "local-process";
-    private static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration READY_TIMEOUT = Duration.ofSeconds(30);
     private static final int READY_RECORD_LIMIT = 32 * 1024;
     private static final Pattern CAPABILITY_DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
@@ -159,6 +159,58 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
         return store != null && LocalRuntimeStore.supported(handle);
+    }
+
+    /** Local operator attestation requires the exact registered worker to be gone. */
+    public RuntimeObservation attestOperatorStop(RuntimeBindingRecord binding, String recoveryId) {
+        if (store == null || binding == null || !binding.getRequest().isManagedContext()
+                || !LocalRuntimeStore.supported(binding.getResourceHandle())
+                || binding.getProvisionSeed() == null || binding.getLease() == null
+                || recoveryId == null || !recoveryId.matches("[0-9a-f-]{36}")) {
+            throw LocalRuntimeStore.blocked();
+        }
+        return store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    boolean sameBoot = store.sameBoot(registration);
+                    if ((!sameBoot && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)
+                            || (sameBoot && !registration.processAbsent())) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    if (registration.state() != LocalRuntimeStore.State.RETIRED) {
+                        resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                    }
+                    RuntimeProvisionSeed seed = binding.getProvisionSeed();
+                    RuntimeResourceHandle handle = binding.getResourceHandle();
+                    return RuntimeObservation.notFound(
+                            binding.getLossEvidence() == null
+                                    ? localEvidence(seed, handle,
+                                            RuntimeRecoveryEvidence.Fact.JOURNAL_LOST,
+                                            "registered-process-exit")
+                                    : binding.getLossEvidence(),
+                            localEvidence(seed, handle,
+                                    RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED,
+                                    "operator-attested:" + recoveryId));
+                });
+    }
+
+    /** Read-only preflight of the original durable registration. */
+    public void verifyOperatorRegistration(RuntimeBindingRecord binding) {
+        if (store == null || binding == null || !binding.getRequest().isManagedContext()
+                || !LocalRuntimeStore.supported(binding.getResourceHandle())
+                || binding.getProvisionSeed() == null || binding.getLease() == null) {
+            throw LocalRuntimeStore.blocked();
+        }
+        store.locked(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle(), false, (resource, registration) -> {
+                    if ((!store.sameBoot(registration) && !store.rebooted(registration))
+                            || (registration.state() != LocalRuntimeStore.State.READY
+                                    && registration.state() != LocalRuntimeStore.State.RETIRED)) {
+                        throw LocalRuntimeStore.blocked();
+                    }
+                    return null;
+                });
     }
 
     @Override

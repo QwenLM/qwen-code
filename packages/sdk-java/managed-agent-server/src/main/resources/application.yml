@@ -30,17 +30,22 @@ management:
 qwen:
   managed-agent:
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
+    trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
     session-store:
       enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       writer-lease-duration: '${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}'
+    tool-publication:
+      enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
+      workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'
       base-url: '${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}'
       token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN:}'
       capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST:}'
       approval-mode: '${QWEN_MANAGED_AGENT_APPROVAL_MODE:yolo}'
+      approval-timeout: '${QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:10m}'
       connect-timeout: '5s'
       request-timeout: '30s'
       heartbeat-interval: '30s'
@@ -72,6 +77,8 @@ qwen:
       state-directory: '${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}'
       durable-local-process: '${QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:false}'
       trusted-local-reboot-recovery: '${QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:false}'
+      operator-recovery-enabled: '${QWEN_MANAGED_AGENT_RUNTIME_OPERATOR_RECOVERY_ENABLED:false}'
+      verified-workspace-recovery-enabled: '${QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED:false}'
       credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:}'
       credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:}'
       node-executable: '${QWEN_MANAGED_AGENT_NODE_EXECUTABLE:}'

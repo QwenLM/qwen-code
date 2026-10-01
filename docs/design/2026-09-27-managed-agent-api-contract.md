@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md)
+Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md); D6 designed in [Actions](2026-09-30-managed-agent-actions.md), with its Hosted Harness part (D6a) implemented
 Date: 2026-09-27
 Issue: [#12793](https://github.com/QwenLM/qwen-code/issues/12793), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 

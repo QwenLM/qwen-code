@@ -38,6 +38,7 @@ import {
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import type { Mem0Settings } from './mem0-settings.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -2330,6 +2331,67 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for managed auto-memory.',
     showInDialog: false,
     properties: {
+      mem0: {
+        type: 'object',
+        label: 'Mem0',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as Mem0Settings | undefined,
+        description:
+          'Bundled Mem0 connection. Configure in user or system settings.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['baseUrl'],
+          properties: {
+            baseUrl: { type: 'string', format: 'uri' },
+            envKey: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              default: 'MEM0_API_KEY',
+              description:
+                'Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field.',
+            },
+            credentialEnv: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              deprecated: true,
+              description:
+                'Legacy alias for envKey. If both are set, their values must match.',
+            },
+            protocol: {
+              type: 'string',
+              enum: [
+                'mem0-v2',
+                'mem0-v3',
+                'mem0-oss-2026-08',
+                'aliyun-polardb-mysql-2026-08',
+                'mem0-platform-v3',
+                'mem0-oss-rest-2026-08',
+              ],
+              default: 'mem0-v2',
+            },
+            scope: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                userId: { type: 'string', minLength: 1, maxLength: 256 },
+                agentId: { type: 'string', minLength: 1, maxLength: 256 },
+                appId: { type: 'string', minLength: 1, maxLength: 256 },
+              },
+            },
+            enableWrites: { type: 'boolean', default: false },
+            allowInsecureHttp: { type: 'boolean', default: false },
+            timeoutMs: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 30000,
+              default: 5000,
+            },
+          },
+        },
+      },
       enableManagedAutoMemory: {
         type: 'boolean',
         label: 'Enable Managed Auto-Memory',
@@ -4309,6 +4371,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+        showInDialog: true,
+      },
+      agentCollaboration: {
+        type: 'boolean',
+        label: 'Enable Agent Collaboration',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
       },
       artifact: {

@@ -5,12 +5,10 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { constants } from 'node:fs';
-import { lstat, open, readFile, writeFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
@@ -44,9 +42,7 @@ const report = {
 };
 const proof = path.join(config.directory, 'proof.txt');
 const inFlight = !['harness-prepare', 'harness-result'].includes(config.fault);
-if (inFlight) execFileSync('mkfifo', [proof]);
-else await writeFile(proof, 'x');
-let writer: FileHandle | undefined;
+await writeFile(proof, 'x');
 let cli = new HostedHarnessProcess();
 let clientId = '';
 let restoring = false;
@@ -86,16 +82,9 @@ async function killHarness() {
 }
 
 async function enteredTool() {
-  await waitUntil(async () => {
-    try {
-      writer = await open(proof, constants.O_WRONLY | constants.O_NONBLOCK);
-      return true;
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ENXIO') throw cause;
-      return false;
-    }
-  });
-  assert((await lstat(proof)).isFIFO());
+  await waitUntil(() => existsSync(`${proof}.read-entered`));
+  assert((await lstat(proof)).isFile());
+  assert.equal(await readFile(proof, 'utf8'), 'x');
   const evidence = await control('evidence');
   assert.equal(evidence.executionState, 'EXECUTING');
   assert.equal(evidence.dispatchGeneration, 1);
@@ -149,6 +138,8 @@ const proxy = createServer(async (req, res) => {
       report.operations.push(operation);
       const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
       if (executionId) assert.equal(executionId, report.executionCallId);
+      if (operation === 'start' && inFlight)
+        await writeFile(`${proof}.read-gate`, '');
     }
     const upstream = await fetch(url, {
       method: req.method,
@@ -197,9 +188,7 @@ const proxy = createServer(async (req, res) => {
       await enteredTool();
       if (config.fault === 'harness-start') {
         await killHarness();
-        await writer!.write('x');
-        await writer!.close();
-        writer = undefined;
+        await unlink(`${proof}.read-gate`);
         injected = true;
         res.destroy();
         return;
@@ -289,12 +278,11 @@ async function start() {
 }
 
 async function assertEffect() {
-  if (['harness-start', 'harness-result'].includes(config.fault)) {
-    assert((await lstat(proof)).isFile());
-    assert.equal(await readFile(proof, 'utf8'), 'xx');
-  } else if (config.fault === 'harness-prepare')
-    assert.equal(await readFile(proof, 'utf8'), 'x');
-  else assert((await lstat(proof)).isFIFO());
+  assert((await lstat(proof)).isFile());
+  assert.equal(
+    await readFile(proof, 'utf8'),
+    ['harness-start', 'harness-result'].includes(config.fault) ? 'xx' : 'x',
+  );
   assert.equal(
     await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
     'decoy',
@@ -424,9 +412,8 @@ try {
   console.error(`FG6C ${config.fault}`, JSON.stringify(report), cli.output);
   throw cause;
 } finally {
-  // The parent owns worker cleanup; do not supply input to an uncertain Edit.
+  // The parent owns worker cleanup; do not unblock an uncertain Edit.
   await cli.close();
-  await writer?.close();
   await model.close();
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));
