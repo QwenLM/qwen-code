@@ -204,8 +204,7 @@ export function MemoryMessage({
     // loaded file's own endings — only when they are uniformly CRLF, so a
     // mixed-ending file is never double-CR'd by a blanket re-expansion.
     const restoreCrlf =
-      content.includes('\r\n') &&
-      !content.replace(/\r\n/g, '').includes('\n');
+      content.includes('\r\n') && !content.replace(/\r\n/g, '').includes('\n');
     const payload = restoreCrlf ? draft.replace(/\n/g, '\r\n') : draft;
     writeMemory({
       scope: selectedEntry.scope,

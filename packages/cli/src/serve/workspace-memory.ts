@@ -685,7 +685,12 @@ async function readMemoryFileContent(
   // A UTF-8 BOM survives the fatal decode below as an invisible U+FEFF
   // first character; a replace save would then drop the BOM. BOM'd
   // UTF-16/32 fails the fatal decode on its own.
-  if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 0xef &&
+    buffer[1] === 0xbb &&
+    buffer[2] === 0xbf
+  ) {
     return {};
   }
   try {
