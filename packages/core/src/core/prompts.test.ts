@@ -983,6 +983,27 @@ describe('main-session style: reminder decision matches prompt section', () => {
     );
   });
 
+  it.each(['open', 'closed'] as const)(
+    'names effective command networking %s in the model prompt',
+    (network) => {
+      const config = {
+        ...headlessConfig(),
+        getShellExecutionSandbox: () => ({
+          filesystem: 'read-only' as const,
+          network,
+          requestedBackend: 'bwrap' as const,
+          effectiveBackend: 'bwrap' as const,
+          workspace: '/workspace',
+          installation: '/installation',
+          state: '/state',
+        }),
+      };
+      expect(getMainSessionBaseSystemPrompt(config)).toContain(
+        `command network policy is ${network}`,
+      );
+    },
+  );
+
   it.each(['read-only', 'workspace-write'] as const)(
     'describes resolved Landlock restrictions for %s',
     (filesystem) => {

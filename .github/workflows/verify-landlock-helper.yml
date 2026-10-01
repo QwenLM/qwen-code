@@ -6,6 +6,8 @@ on:
       - '.github/workflows/verify-landlock-helper.yml'
       - 'packages/core/vendor/landlock-run/**'
       - 'scripts/build_landlock_run.mjs'
+      - 'scripts/tests/stdio-relay.test.py'
+      - 'scripts/tests/sandbox-stdio.test.py'
   push:
     branches:
       - 'main'
@@ -13,6 +15,8 @@ on:
       - '.github/workflows/verify-landlock-helper.yml'
       - 'packages/core/vendor/landlock-run/**'
       - 'scripts/build_landlock_run.mjs'
+      - 'scripts/tests/stdio-relay.test.py'
+      - 'scripts/tests/sandbox-stdio.test.py'
   workflow_dispatch:
 
 permissions:
@@ -59,6 +63,17 @@ jobs:
           node scripts/build_landlock_run.mjs '${{ matrix.arch }}'
           cmp "${RUNNER_TEMP}/committed-helper" "${committed}"
           file "${committed}"
+
+      - name: 'Verify real stdin consumption and FIFO shutdown'
+        run: python3 scripts/tests/stdio-relay.test.py packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run
+
+      - name: 'Verify standard streams inside a closed-network sandbox'
+        env:
+          QWEN_TEST_BWRAP: 'sudo bwrap'
+        run: |-
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          python3 scripts/tests/sandbox-stdio.test.py packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run
 
       - name: 'Verify kernel enforcement and inheritance'
         env:

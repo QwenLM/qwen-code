@@ -335,17 +335,23 @@ describe('parseArguments', () => {
     'reports bwrap migration before prompt conflicts: %j',
     async (...flags) => {
       process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
-      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit called');
-      });
       mockWriteStderrLine.mockClear();
-      try {
-        await expect(parseArguments()).rejects.toThrow('process.exit called');
-        expect(mockWriteStderrLine).toHaveBeenCalledWith(
-          expect.stringContaining('Whole-CLI bwrap has been removed'),
-        );
-      } finally {
-        exit.mockRestore();
+      await expect(parseArguments()).rejects.toThrow(
+        'Whole-CLI bwrap has been removed',
+      );
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['docker', 'podman', 'sandbox-exec'])(
+    'preserves named sandbox selection %s',
+    async (backend) => {
+      for (const flags of [[`--sandbox=${backend}`], ['-s', backend]]) {
+        process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+        expect(await parseArguments()).toMatchObject({
+          sandbox: backend,
+          prompt: 'query',
+        });
       }
     },
   );

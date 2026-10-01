@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { resolveLandlockRunner } from './landlock-runner-path.js';
+
 interface RelayReport {
   content: string;
   isDirectory: boolean;
@@ -114,6 +116,7 @@ writeSync(3, JSON.stringify({ 'exit-code': 0 }) + '\\n');
         String(process.pid),
         statusPath,
         envPath,
+        resolveLandlockRunner(),
         fakeBwrap,
         reportPath,
       ],

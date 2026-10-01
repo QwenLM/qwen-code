@@ -54,6 +54,7 @@ describe('Landlock execution adapter', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     executeSandboxRelay.mockReset();
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'landlock-test-')));
     for (const name of ['workspace', 'installation', 'state'])
       mkdirSync(path.join(root, name));
@@ -237,6 +238,7 @@ describe('Landlock execution adapter', () => {
   );
 
   it('launches the helper through the relay with read and write grants', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     let relayLaunch!: ProcessLaunch;
     executeSandboxRelay.mockImplementation(
       async (_policy, _payload, _roots, createLaunch) => {
@@ -285,6 +287,7 @@ describe('Landlock execution adapter', () => {
       String(process.pid),
       '/state/status.json',
       '/state/payload-env.json',
+      realpathSync(landlockRunnerPath()),
       realpathSync(runner),
       '--status-fd',
       '3',

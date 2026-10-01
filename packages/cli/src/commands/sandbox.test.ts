@@ -117,11 +117,21 @@ describe('qwen sandbox tool boundary', () => {
       expect(mocks.stderr.mock.calls.flat().join('\n')).toContain(
         'Whole-CLI bwrap has been removed',
       );
-      expect(process.exitCode).toBe(1);
+      expect(process.exitCode).toBe(52);
       expect(mocks.probe).not.toHaveBeenCalled();
       expect(mocks.execute).not.toHaveBeenCalled();
     },
   );
+  it('reports inherited whole-CLI state separately from tool confinement', async () => {
+    mocks.settings.mockReturnValue({ merged: {} });
+    vi.stubEnv('SANDBOX', 'docker');
+    await run();
+    expect(mocks.stdout.mock.calls.flat().join('\n')).toContain(
+      'Tool execution sandbox: none (inherited whole-CLI marker: docker)',
+    );
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
   it('retains the operator policy in bare mode', async () => {
     await run({ bare: true });
     expect(mocks.minimal).toHaveBeenCalledOnce();
@@ -158,7 +168,13 @@ describe('qwen sandbox tool boundary', () => {
     expect(mocks.stdout).not.toHaveBeenCalled();
   });
   it('inherits redirected stdin and preserves byte-exact output', async () => {
-    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk, callback) => {
+        if (typeof callback === 'function')
+          (callback as (error?: Error | null) => void)();
+        return true;
+      });
     mocks.execute.mockImplementationOnce(
       async (_policy, _payload, onOutput: (event: object) => void) => {
         onOutput({
@@ -185,7 +201,7 @@ describe('qwen sandbox tool boundary', () => {
       streamStdout: true,
       streamRawOutput: true,
     });
-    expect(write).toHaveBeenCalledWith(Buffer.from([0xff, 0x00]));
+    expect(write.mock.calls[0]?.[0]).toEqual(Buffer.from([0xff, 0x00]));
   });
   it('aborts the confined command when a downstream reader closes', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockReturnValue(false);
@@ -230,6 +246,32 @@ describe('qwen sandbox tool boundary', () => {
     expect(process.exitCode).toBe(141);
     expect(mocks.stderr.mock.calls.flat().join('\n')).not.toContain('EPIPE');
   });
+  it('preserves EPIPE exit status when the payload finishes before the final write fails', async () => {
+    const error = Object.assign(new Error('broken pipe'), { code: 'EPIPE' });
+    vi.spyOn(process.stdout, 'write').mockImplementation((_chunk, callback) => {
+      if (typeof callback === 'function')
+        queueMicrotask(() => {
+          (callback as (error?: Error | null) => void)(error);
+          process.stdout.emit('error', error);
+        });
+      return false;
+    });
+    mocks.execute.mockImplementationOnce(
+      async (_policy, _payload, onOutput: (event: object) => void) => {
+        onOutput({
+          type: 'raw_data',
+          stream: 'stdout',
+          chunk: Buffer.from('tail'),
+        });
+        return {
+          result: Promise.resolve({ exitCode: 0, error: null, aborted: false }),
+        };
+      },
+    );
+    await run({ '--': ['printf', 'tail'] });
+    expect(process.exitCode).toBe(141);
+  });
+
   it('waits for redirected output backpressure before completing', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockReturnValue(false);
     mocks.execute.mockImplementationOnce(
@@ -255,7 +297,10 @@ describe('qwen sandbox tool boundary', () => {
     await vi.waitFor(() => expect(write).toHaveBeenCalled());
     await Promise.resolve();
     expect(completed).toBe(false);
-    process.stdout.emit('drain');
+    const callback = write.mock.calls.at(-1)?.[1];
+    if (typeof callback !== 'function')
+      throw new Error('missing flush callback');
+    (callback as (error?: Error | null) => void)();
     await completion;
     expect(completed).toBe(true);
   });

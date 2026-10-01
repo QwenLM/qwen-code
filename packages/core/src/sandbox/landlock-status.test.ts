@@ -34,6 +34,7 @@ describe('Landlock execution receipts', () => {
     ['{"state":"prepared","abi":3}', 0],
     ['{"state":"prepared","abi":2}\n', 0],
     ['{"state":"prepared","abi":3}\n{}\n', 0],
+    ['{"state":"prepared","abi":3}\n{"state":"stdio-failed"}\n', 125],
     ['x'.repeat(16 * 1024 + 1), 0],
   ])('keeps malformed or partial evidence unknown', (wire, code) => {
     expect(parseLandlockStatus(wire, code)).toEqual({ state: 'unconfirmed' });

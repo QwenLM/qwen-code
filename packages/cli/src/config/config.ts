@@ -101,6 +101,7 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import {
   BWRAP_MIGRATION_MESSAGE,
+  normalizeSandboxArguments,
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
@@ -582,7 +583,14 @@ export async function parseArguments(): Promise<CliArgs> {
     rawArgv = rawArgv.slice(1);
   }
 
-  const yargsInstance = yargs(rawArgv)
+  const normalizedSandbox = normalizeSandboxArguments(rawArgv);
+  const yargsInstance = yargs(normalizedSandbox.argv)
+    .middleware((argv) => {
+      if (normalizedSandbox.sandbox !== undefined)
+        argv['sandbox'] = normalizedSandbox.sandbox;
+      if (normalizedSandbox.sandbox === 'bwrap')
+        throw new FatalConfigError(BWRAP_MIGRATION_MESSAGE);
+    }, true)
     .locale('en')
     .scriptName('qwen')
     .usage(TOP_LEVEL_USAGE)
@@ -746,26 +754,12 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('auth-type', DEFAULT_COMMAND_OPTIONS['auth-type'])
         // Ensure validation flows through .fail() for clean UX
         .fail((msg: string, err: Error | undefined, yargs: Argv) => {
+          if (err instanceof FatalConfigError) throw err;
           writeStderrLine(msg || err?.message || 'Unknown error');
           yargs.showHelp();
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
-          const optionArgs = rawArgv.slice(
-            0,
-            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
-          );
-          if (
-            optionArgs.some(
-              (arg, index) =>
-                arg === '--sandbox=bwrap' ||
-                arg === '-s=bwrap' ||
-                ((arg === '--sandbox' || arg === '-s') &&
-                  optionArgs[index + 1] === 'bwrap'),
-            )
-          ) {
-            return BWRAP_MIGRATION_MESSAGE;
-          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -908,7 +902,13 @@ export async function parseArguments(): Promise<CliArgs> {
     .help()
     .alias('h', 'help')
     .strict()
-    .demandCommand(0, 0); // Allow base command to run with no subcommands
+    .demandCommand(0, 0)
+    .fail((message, error, parser) => {
+      if (error instanceof FatalConfigError) throw error;
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      parser.showHelp();
+      process.exit(1);
+    }); // Allow base command to run with no subcommands
 
   yargsInstance.wrap(yargsInstance.terminalWidth());
   const result = await yargsInstance.parse();

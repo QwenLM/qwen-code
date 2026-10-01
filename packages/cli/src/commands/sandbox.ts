@@ -8,14 +8,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { once } from 'node:events';
 import type { CommandModule } from 'yargs';
+import { flushOutput } from '../utils/flush-output.js';
 import { DEFAULT_COMMAND_OPTIONS } from '../config/top-level-options.js';
 
 interface SandboxArgs {
   cmd?: string[];
   verify?: boolean;
-  sandbox?: boolean;
+  sandbox?: boolean | string;
   sandboxImage?: string;
   bare?: boolean;
   '--'?: string[];
@@ -73,8 +73,9 @@ export const sandboxCommand: CommandModule = {
           '../config/sandboxConfig.js'
         );
         const legacy = await loadSandboxConfig(settings, args);
+        const inherited = process.env['SANDBOX']?.trim();
         report(
-          `Tool execution sandbox: none${legacy ? ` (whole-CLI backend: ${legacy.command})` : ''}`,
+          `Tool execution sandbox: none${inherited ? ` (inherited whole-CLI marker: ${inherited})` : legacy ? ` (whole-CLI backend: ${legacy.command})` : ''}`,
         );
         report('Configure tools.executionSandbox in User or System settings.');
         if (command.length || args.verify)
@@ -124,14 +125,15 @@ export const sandboxCommand: CommandModule = {
       report(`Command network: ${policy.network}`);
       report('Model, authentication and session traffic stay on the host.');
       report('Host reads and pathname Unix sockets remain accessible.');
-      report('Backend probe: passed');
+      report(
+        'Backend probe: passed (admission only; full-session viability is not tested).',
+      );
       const env = Object.fromEntries(
         Object.entries(sanitizeChildEnv(process.env)).filter(
           (entry): entry is [string, string] => typeof entry[1] === 'string',
         ),
       );
       if (command.length) {
-        const pendingDrains = new Map<'stdout' | 'stderr', Promise<void>>();
         let outputError: NodeJS.ErrnoException | undefined;
         const handleOutputError = (error: NodeJS.ErrnoException) => {
           if (outputError || controller.signal.aborted) return;
@@ -154,31 +156,9 @@ export const sandboxCommand: CommandModule = {
             },
             (event) => {
               if (event.type === 'raw_data') {
-                const streamKey = event.stream;
                 const stream =
-                  streamKey === 'stderr' ? process.stderr : process.stdout;
-                if (
-                  !stream.write(event.chunk) &&
-                  !pendingDrains.has(streamKey)
-                ) {
-                  const drained = once(stream, 'drain').then(
-                    () => undefined,
-                    (error: unknown) => {
-                      if (
-                        error instanceof Error &&
-                        (error as NodeJS.ErrnoException).code === 'EPIPE'
-                      )
-                        return;
-                      throw error;
-                    },
-                  );
-                  pendingDrains.set(streamKey, drained);
-                  const clearDrain = () => {
-                    if (pendingDrains.get(streamKey) === drained)
-                      pendingDrains.delete(streamKey);
-                  };
-                  void drained.then(clearDrain, clearDrain);
-                }
+                  event.stream === 'stderr' ? process.stderr : process.stdout;
+                stream.write(event.chunk);
               }
             },
             controller.signal,
@@ -187,12 +167,16 @@ export const sandboxCommand: CommandModule = {
             { streamStdout: true, streamRawOutput: true },
           );
           const result = await handle.result;
-          await Promise.all([...pendingDrains.values()]);
+          await Promise.all([
+            flushOutput(process.stdout, controller.signal),
+            flushOutput(process.stderr, controller.signal),
+          ]);
           if (outputError && outputError.code !== 'EPIPE') throw outputError;
           if (result.error && !result.aborted) throw result.error;
-          process.exitCode = result.aborted
-            ? cancellationExitCode
-            : (result.exitCode ?? 1);
+          process.exitCode =
+            result.aborted || controller.signal.aborted
+              ? cancellationExitCode
+              : (result.exitCode ?? 1);
           return;
         } finally {
           process.stdout.removeListener('error', handleOutputError);
@@ -200,9 +184,16 @@ export const sandboxCommand: CommandModule = {
         }
       }
       if (!args.verify) return;
-      const fixture = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'qwen-sandbox-verify-'),
-      );
+      let fixture: string;
+      try {
+        fixture = fs.mkdtempSync(
+          path.join(os.tmpdir(), 'qwen-sandbox-verify-'),
+        );
+      } catch (error) {
+        throw new Error(
+          `Cannot create verification fixture in host temporary directory ${os.tmpdir()}: ${error instanceof Error ? error.message : String(error)}. Check TMPDIR and its permissions; this failure does not test the sandbox boundary.`,
+        );
+      }
       const outside = path.join(fixture, 'host-writable');
       const inside = path.join(
         policy.workspace,
@@ -279,6 +270,14 @@ export const sandboxCommand: CommandModule = {
         fs.rmSync(fixture, { recursive: true, force: true });
       }
     } catch (error) {
+      const { FatalError } = await import(
+        '@qwen-code/qwen-code-core/utils/errors.js'
+      );
+      if (error instanceof FatalError) {
+        writeStderrLine(error.message);
+        process.exitCode = error.exitCode;
+        return;
+      }
       writeStderrLine(
         `Sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );

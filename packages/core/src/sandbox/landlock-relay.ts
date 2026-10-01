@@ -8,7 +8,6 @@ import { spawn } from 'node:child_process';
 import {
   closeSync,
   constants,
-  createReadStream,
   fstatSync,
   openSync,
   readFileSync,
@@ -20,7 +19,7 @@ import type { Readable } from 'node:stream';
 import { parseLandlockStatus } from './landlock-status.js';
 import { MAX_STATUS_BYTES } from './sandbox-status.js';
 
-const [parentPid, statusPath, payloadEnvPath, runner, ...args] =
+const [parentPid, statusPath, payloadEnvPath, inputBridge, runner, ...args] =
   process.argv.slice(2);
 if (process.ppid !== Number(parentPid)) process.exit(1);
 const parentWatch = setInterval(() => {
@@ -63,24 +62,30 @@ if (input.isFIFO()) {
     shareInput = false;
   }
 }
+if (!shareInput && !inputBridge) {
+  writeFileSync(
+    fd,
+    JSON.stringify({ state: 'unconfirmed', payloadExitObserved: false }),
+  );
+  closeSync(fd);
+  process.stderr.write(
+    'Host-backed stdin requires the Linux x64/arm64 input helper.\n',
+  );
+  process.exit(125);
+}
 // Initialize Node's shared output descriptors before the helper restores blocking
 // mode; lazy initialization after spawn would race and re-enable O_NONBLOCK.
 void process.stdout;
 void process.stderr;
-const child = spawn(runner, args, {
-  stdio: [shareInput ? 'inherit' : 'pipe', 'inherit', 'inherit', 'pipe'],
-  env,
-});
-if (!shareInput && child.stdin) {
-  // Host-backed descriptors can bypass filesystem policy through fd operations.
-  // Copy their bytes through a relay-owned pipe instead of sharing the fd.
-  const sink = child.stdin;
-  const source = createReadStream('', { fd: 0, autoClose: false });
-  source.on('error', () => sink.end());
-  sink.on('error', () => source.destroy());
-  child.on('close', () => source.destroy());
-  source.pipe(sink);
-}
+const backendArgs = args;
+const child = spawn(
+  shareInput ? runner : inputBridge,
+  shareInput ? backendArgs : ['--relay-stdin', runner, ...backendArgs],
+  {
+    stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
+    env,
+  },
+);
 let wire = '';
 let bytes = 0;
 let failed = false;

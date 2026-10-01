@@ -406,7 +406,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -478,7 +480,9 @@ describe('Settings Loading and Merging', () => {
             return JSON.stringify(userSettingsContent);
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1388,7 +1392,9 @@ describe('Settings Loading and Merging', () => {
             return JSON.stringify(userSettingsContent);
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1525,7 +1531,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
             return JSON.stringify(userSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1544,7 +1552,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1564,7 +1574,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
             return JSON.stringify(userSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1588,7 +1600,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1619,7 +1633,9 @@ describe('Settings Loading and Merging', () => {
             return JSON.stringify(userSettingsContent);
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1656,7 +1672,9 @@ describe('Settings Loading and Merging', () => {
             return JSON.stringify(userSettingsContent);
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1760,7 +1778,9 @@ describe('Settings Loading and Merging', () => {
             return JSON.stringify(userSettingsContent);
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1811,7 +1831,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH)
             return JSON.stringify(userSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1840,7 +1862,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -1870,7 +1894,9 @@ describe('Settings Loading and Merging', () => {
         (p: fs.PathOrFileDescriptor) => {
           if (p === MOCK_WORKSPACE_SETTINGS_PATH)
             return JSON.stringify(workspaceSettingsContent);
-          return '';
+          throw Object.assign(new Error('missing fixture file'), {
+            code: 'ENOENT',
+          });
         },
       );
 
@@ -2267,6 +2293,49 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it('exposes Workspace recovery metadata while preserving the corrupted copy', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === MOCK_WORKSPACE_SETTINGS_PATH ? '{broken' : '{}',
+      );
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(loaded.corruptedPath).toBe(
+        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      );
+      expect(loaded.wasRecovered).toBe(false);
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        MOCK_WORKSPACE_SETTINGS_PATH,
+        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      );
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        MOCK_WORKSPACE_SETTINGS_PATH,
+        '{}',
+        'utf-8',
+      );
+    });
+
+    it('does not revive User recovery from inherited corruption metadata', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === `${USER_SETTINGS_PATH}.corrupted`,
+      );
+      process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+      process.env[ENV_WAS_RECOVERED] = '1';
+      try {
+        const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(loaded.corruptedPath).toBeUndefined();
+        expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+          `${USER_SETTINGS_PATH}.corrupted`,
+        );
+      } finally {
+        delete process.env[ENV_CORRUPTED_PATH];
+        delete process.env[ENV_WAS_RECOVERED];
+      }
+    });
+
     describe('corruption env var propagation', () => {
       afterEach(() => {
         delete process.env[ENV_CORRUPTED_PATH];
@@ -2275,23 +2344,31 @@ describe('Settings Loading and Merging', () => {
 
       it('should propagate corruptedPath/wasRecovered from env vars', () => {
         (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+          (p: fs.PathLike) =>
+            p === MOCK_WORKSPACE_SETTINGS_PATH ||
+            p === `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
         );
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
-        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_CORRUPTED_PATH] =
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`;
         process.env[ENV_WAS_RECOVERED] = '1';
 
         const result = loadSettings(MOCK_WORKSPACE_DIR);
-        expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+        expect(result.corruptedPath).toBe(
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+        );
         expect(result.wasRecovered).toBe(true);
       });
 
       it('should delete env vars after reading so subsequent calls do not re-trigger', () => {
         (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+          (p: fs.PathLike) =>
+            p === MOCK_WORKSPACE_SETTINGS_PATH ||
+            p === `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
         );
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
-        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_CORRUPTED_PATH] =
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`;
         process.env[ENV_WAS_RECOVERED] = '0';
 
         loadSettings(MOCK_WORKSPACE_DIR);
@@ -2299,18 +2376,22 @@ describe('Settings Loading and Merging', () => {
         expect(process.env[ENV_WAS_RECOVERED]).toBeUndefined();
       });
 
-      it('should only consume env vars for SettingScope.User', () => {
+      it('should only consume env vars for SettingScope.Workspace', () => {
         (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
           const s = p.toString();
-          return s === USER_SETTINGS_PATH || s === MOCK_WORKSPACE_SETTINGS_PATH;
+          return (
+            s === MOCK_WORKSPACE_SETTINGS_PATH ||
+            s === `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`
+          );
         });
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
-        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_CORRUPTED_PATH] =
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`;
         process.env[ENV_WAS_RECOVERED] = '1';
 
         const result = loadSettings(MOCK_WORKSPACE_DIR);
 
-        // env vars consumed in User scope — scope guard exercised
+        // env vars consumed in Workspace scope — scope guard exercised
         expect(process.env[ENV_CORRUPTED_PATH]).toBeUndefined();
         expect(process.env[ENV_WAS_RECOVERED]).toBeUndefined();
         expect(result.corruptedPath).toBeDefined();
@@ -2318,10 +2399,13 @@ describe('Settings Loading and Merging', () => {
 
       it('should map wasRecovered="0" to false', () => {
         (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+          (p: fs.PathLike) =>
+            p === MOCK_WORKSPACE_SETTINGS_PATH ||
+            p === `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
         );
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
-        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_CORRUPTED_PATH] =
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`;
         process.env[ENV_WAS_RECOVERED] = '0';
 
         const result = loadSettings(MOCK_WORKSPACE_DIR);
@@ -2330,23 +2414,28 @@ describe('Settings Loading and Merging', () => {
 
       it('should not consume env vars when consumeCorruptionEnvVars=false', () => {
         (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+          (p: fs.PathLike) =>
+            p === MOCK_WORKSPACE_SETTINGS_PATH ||
+            p === `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
         );
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
-        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_CORRUPTED_PATH] =
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`;
         process.env[ENV_WAS_RECOVERED] = '1';
 
         loadSettings(MOCK_WORKSPACE_DIR, false);
         // env vars should remain untouched so child processes can still read them
         expect(process.env[ENV_CORRUPTED_PATH]).toBe(
-          `${USER_SETTINGS_PATH}.corrupted`,
+          `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
         );
         expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
       });
 
       it('should reject mismatched ENV_CORRUPTED_PATH', () => {
         (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+          (p: fs.PathLike) =>
+            p === MOCK_WORKSPACE_SETTINGS_PATH ||
+            p === `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
         );
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
         process.env[ENV_CORRUPTED_PATH] = '/some/other/path.corrupted';
@@ -4600,6 +4689,30 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('reloadScopeFromDisk', () => {
+    it.each([
+      SettingScope.User,
+      SettingScope.System,
+      SettingScope.SystemDefaults,
+    ])('reloads BOM-prefixed %s policy without losing confinement', (scope) => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      let content = JSON.stringify({
+        $version: SETTINGS_VERSION,
+        tools: {
+          executionSandbox: { filesystem: 'read-only', network: 'closed' },
+        },
+      });
+      (fs.readFileSync as Mock).mockImplementation(() => content);
+      const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+      content = `\uFEFF${JSON.stringify({ $version: SETTINGS_VERSION, ui: { theme: 'light' }, tools: { executionSandbox: { filesystem: 'workspace-write', network: 'open' } } })}`;
+      expect(loaded.reloadScopeFromDisk(scope)).toBe(true);
+      expect(loaded.forScope(scope).settings.tools?.executionSandbox).toEqual({
+        filesystem: 'workspace-write',
+        network: 'open',
+      });
+      expect(loaded.forScope(scope).settings.ui?.theme).toBe('light');
+      expect(loaded.forScope(scope).rawJson).toBe(content);
+    });
+
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
         path.dirname(USER_SETTINGS_PATH),

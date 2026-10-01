@@ -199,6 +199,18 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     expect(launch.mock.calls[0][0].inheritStdin).toBe(true);
   });
 
+  it('retains bwrap admission on architectures without a bundled input helper', async () => {
+    vi.spyOn(process, 'arch', 'get').mockReturnValue('arm');
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    await expect(runToResult()).resolves.toMatchObject({
+      sandboxStatus: { state: 'confirmed', exitCode: 0 },
+    });
+    expect(launch.mock.calls[0][0].args.slice(4, 6)).toEqual([
+      '',
+      realpathSync(bwrap),
+    ]);
+  });
+
   it('rejects conflicting stdin modes before creating control state', async () => {
     const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');
     await expect(

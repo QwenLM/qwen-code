@@ -1,0 +1,141 @@
+/*
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <poll.h>
+#include <limits.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+
+static volatile sig_atomic_t relay_child;
+
+static void relay_signal(int signal_number) {
+  if (relay_child > 0) kill((pid_t)relay_child, signal_number);
+}
+
+/* Host-backed stdin must not reach the payload. Retain the private pipe's
+ * read end so queued bytes can be deducted from regular-file consumption. */
+static int relay_stdin(char **command) {
+  struct stat input;
+  if (fstat(STDIN_FILENO, &input) != 0) return 125;
+  int regular = S_ISREG(input.st_mode);
+  off_t initial = regular ? lseek(STDIN_FILENO, 0, SEEK_CUR) : 0;
+  if (regular && initial < 0) return 125;
+  int source = STDIN_FILENO;
+  if (S_ISFIFO(input.st_mode)) {
+#ifdef __linux__
+    source = open("/proc/self/fd/0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+#elif defined(__APPLE__)
+    char fifo_path[PATH_MAX];
+    if (fcntl(STDIN_FILENO, F_GETPATH, fifo_path) < 0) return 125;
+    source = open(fifo_path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+#else
+    return 125;
+#endif
+    if (source < 0) return 125;
+  }
+  int channel[2];
+  if (pipe(channel) != 0) return 125;
+  int flags = fcntl(channel[1], F_GETFL);
+  if (flags < 0 || fcntl(channel[1], F_SETFL, flags | O_NONBLOCK) != 0)
+    return 125;
+  pid_t parent = getppid();
+#ifdef __linux__
+  if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent)
+    return 125;
+#endif
+  pid_t bridge = getpid();
+  pid_t child = fork();
+  if (child < 0) return 125;
+  if (child == 0) {
+#ifdef __linux__
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != bridge)
+      _exit(125);
+#else
+    (void)bridge;
+#endif
+    if (dup2(channel[0], STDIN_FILENO) < 0) _exit(125);
+    close(channel[0]);
+    close(channel[1]);
+    if (source != STDIN_FILENO) close(source);
+    execvp(command[0], command);
+    _exit(125);
+  }
+  relay_child = child;
+  signal(SIGINT, relay_signal);
+  signal(SIGTERM, relay_signal);
+  signal(SIGHUP, relay_signal);
+  signal(SIGPIPE, SIG_IGN);
+  unsigned char buffer[4096];
+  size_t pending = 0;
+  off_t sent = 0;
+  int eof = !regular && !S_ISFIFO(input.st_mode);
+  int status = 0;
+  int failed = 0;
+  for (;;) {
+    pid_t observed = waitpid(child, &status, WNOHANG);
+    if (observed == child) break;
+    if (observed < 0 && errno != EINTR) { failed = 1; break; }
+    if (getppid() != parent) { failed = 1; break; }
+    if (pending == 0 && !eof) {
+      ssize_t length = regular
+        ? pread(source, buffer, sizeof(buffer), initial + sent)
+        : read(source, buffer, sizeof(buffer));
+      if (length > 0) pending = (size_t)length;
+      else if (length == 0) eof = 1;
+      else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        failed = 1; break;
+      }
+    }
+    if (pending > 0) {
+      ssize_t written = write(channel[1], buffer, pending);
+      if (written > 0) {
+        sent += written;
+        pending -= (size_t)written;
+        memmove(buffer, buffer + written, pending);
+      } else if (written < 0 && errno != EAGAIN && errno != EINTR) {
+        failed = 1; break;
+      }
+    }
+    if (eof && pending == 0 && channel[1] >= 0) {
+      close(channel[1]);
+      channel[1] = -1;
+    }
+    if (regular && !eof && pending == 0) continue;
+    struct pollfd ready[2] = {
+      {!regular && !eof && pending == 0 ? source : -1, POLLIN, 0},
+      {channel[1], pending > 0 ? POLLOUT : 0, 0},
+    };
+    /* Poll child completion even when a FIFO writer stays open and idle. */
+    if (poll(ready, 2, 20) < 0 && errno != EINTR) {
+      failed = 1; break;
+    }
+  }
+  if (failed) {
+    kill(child, SIGKILL);
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+  }
+  if (regular) {
+    int unread = 0;
+    if (ioctl(channel[0], FIONREAD, &unread) != 0 || unread > sent ||
+        lseek(STDIN_FILENO, initial + sent - unread, SEEK_SET) < 0)
+      failed = 1;
+  }
+  close(channel[0]);
+  if (channel[1] >= 0) close(channel[1]);
+  if (source != STDIN_FILENO) close(source);
+  if (failed) {
+    dprintf(3, "{\"state\":\"stdio-failed\"}\n");
+    fprintf(stderr, "qwen-landlock-run: stdin relay failed\n");
+    return 125;
+  }
+  if (WIFSIGNALED(status)) {
+    int signal_number = WTERMSIG(status);
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+    return 128 + signal_number;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 125;
+}
