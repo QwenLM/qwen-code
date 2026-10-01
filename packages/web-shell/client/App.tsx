@@ -399,7 +399,7 @@ import {
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
-import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import {
   createStatsMessageData,
   type StatsView,
@@ -13430,7 +13430,10 @@ export function App({
         .getContextUsage({ detail })
         .then((result) => {
           if (!owner.isCurrent()) return;
-          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
+          dispatchReadOnlyStatus(
+            t('contextUsage.title'),
+            createContextUsageMessageData(result),
+          );
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
@@ -13444,6 +13447,7 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       reportError,
+      t,
     ],
   );
   // Stable identity: ChatEditor is memoized and an inline closure would
