@@ -218,7 +218,6 @@ export interface ToolCallResponseInfo {
   contentLength?: number;
   persistedOutputFiles?: string[];
   modelOverride?: string;
-  newlyLoadedSkills?: string[];
   terminateTurn?: boolean;
   /**
    * Set only when the call was denied because it needed user approval and the

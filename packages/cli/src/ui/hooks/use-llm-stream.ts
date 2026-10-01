@@ -86,7 +86,6 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
-import { reconcileCodeModeSkillLoads } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
@@ -5085,13 +5084,6 @@ export const useLlmStream = (
         dualOutput?.emitToolResult(toolCall.request, toolCall.response);
       }
       if (secondaryTools.length > 0) {
-        reconcileCodeModeSkillLoads(
-          config,
-          secondaryTools.map((toolCall) => ({
-            responseParts: [],
-            newlyLoadedSkills: toolCall.response.newlyLoadedSkills,
-          })),
-        );
         const secondaryCallIds = new Set(
           secondaryTools.map((toolCall) => toolCall.request.callId),
         );
@@ -5125,7 +5117,6 @@ export const useLlmStream = (
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
-            newlyLoadedSkills: response.newlyLoadedSkills,
           })),
           new Map(
             llmTools.flatMap(({ request }) =>
@@ -5139,7 +5130,6 @@ export const useLlmStream = (
           role: 'user',
           parts: responses.flatMap((entry) => entry.responseParts),
         });
-        reconcileCodeModeSkillLoads(config, responses);
       };
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
@@ -5464,7 +5454,6 @@ export const useLlmStream = (
           responseParts: response.responseParts,
           persistedOutputFiles: response.persistedOutputFiles,
           artifacts: response.artifacts,
-          newlyLoadedSkills: response.newlyLoadedSkills,
         })),
         new Map(
           orderedResponses.flatMap(({ request }) =>
@@ -5477,17 +5466,6 @@ export const useLlmStream = (
       const responsesToSend = finalizedResponses.flatMap(
         (entry) => entry.responseParts,
       );
-      const reconcileSkillLoads = (retained = true) => {
-        reconcileCodeModeSkillLoads(
-          config,
-          retained
-            ? finalizedResponses
-            : finalizedResponses.map((response) => ({
-                ...response,
-                responseParts: [],
-              })),
-        );
-      };
       orderedResponses.forEach(({ request, response, status }, index) => {
         config.getChatRecordingService?.()?.recordToolResult?.(
           finalizedResponses[index].responseParts,
@@ -5520,7 +5498,6 @@ export const useLlmStream = (
         if (toolGoalBinding && llmClient) {
           llmClient.addHistory({ role: 'user', parts: responsesToSend });
         }
-        reconcileSkillLoads(Boolean(toolGoalBinding && llmClient));
         markToolsAsSubmitted(
           llmTools.map((toolCall) => toolCall.request.callId),
         );
@@ -5552,7 +5529,6 @@ export const useLlmStream = (
           // Report cancellation to arena (safety net — cancelOngoingRequest
           config.getArenaAgentClient()?.reportCancelled();
         }
-        reconcileSkillLoads(Boolean(llmClient));
 
         const callIdsToMarkAsSubmitted = llmTools.map(
           (toolCall) => toolCall.request.callId,
@@ -5574,8 +5550,6 @@ export const useLlmStream = (
         endToolInteraction('cancelled');
         return;
       }
-
-      reconcileSkillLoads();
 
       const callIdsToMarkAsSubmitted = llmTools.map(
         (toolCall) => toolCall.request.callId,
@@ -5784,7 +5758,6 @@ export const useLlmStream = (
             { pauseReason: goalPauseReasonForFailure('') },
           );
         }
-        reconcileSkillLoads(Boolean(toolGoalBinding && llmClient));
         endToolInteraction('cancelled');
         return;
       }
@@ -6013,7 +5986,6 @@ export const useLlmStream = (
             { userCancelled: true },
           );
         }
-        reconcileSkillLoads(Boolean(toolGoalBinding && llmClient));
         endToolInteraction('cancelled');
         return;
       }
@@ -6040,7 +6012,6 @@ export const useLlmStream = (
         onDelivered: () => submissionSettlement?.accept(),
         onAdmissionFailed: () => {
           submissionSettlement?.restore();
-          reconcileSkillLoads(false);
           endToolInteraction(
             'error',
             'tool continuation admission failed',

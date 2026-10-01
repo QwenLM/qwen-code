@@ -39707,166 +39707,6 @@ describe('Session', () => {
   });
 
   describe('runToolCalls', () => {
-    it.each([
-      { status: 'success', modelOverride: 'skill-model' },
-      { status: 'error', modelOverride: 'skill-model' },
-      { status: 'error', modelOverride: undefined },
-      { status: 'cancelled', modelOverride: 'skill-model' },
-    ])(
-      'propagates modelOverride=$modelOverride for an exec $status result',
-      async ({ status, modelOverride }) => {
-        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
-        const controller = new AbortController();
-        const execute = vi.fn().mockImplementation(async () => {
-          if (status === 'cancelled') controller.abort();
-          return {
-            llmContent: 'skill body\nScript error: after skill',
-            returnDisplay: 'script error',
-            modelOverride,
-            ...(status === 'error'
-              ? {
-                  error: {
-                    message: 'after skill',
-                    type: core.ToolErrorType.EXECUTION_FAILED,
-                  },
-                }
-              : {}),
-          };
-        });
-        mockToolRegistry.getTool.mockReturnValue(
-          mockAllowedTool(core.ToolNames.EXEC, execute),
-        );
-
-        const result = await (
-          session as unknown as {
-            runTool: (
-              signal: AbortSignal,
-              promptId: string,
-              call: FunctionCall,
-            ) => Promise<{ parts: Part[]; modelOverride?: string }>;
-          }
-        ).runTool(controller.signal, 'exec-skill-error', {
-          id: 'exec-skill-error',
-          name: core.ToolNames.EXEC,
-          args: { source: 'probe' },
-        });
-
-        if (status === 'cancelled') {
-          expect(result).not.toHaveProperty('modelOverride');
-        } else {
-          expect(result).toHaveProperty('modelOverride', modelOverride);
-        }
-        if (status === 'error') {
-          expect(
-            result.parts[0].functionResponse?.response?.['error'],
-          ).toContain('after skill');
-        }
-      },
-    );
-
-    it.each([
-      { budget: 10_000, retained: false },
-      { budget: 20_000, retained: true },
-    ])(
-      'reconciles skill delivery after the final ACP response budget=$budget',
-      async ({ budget, retained }) => {
-        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
-        const body = `Tool output was too large and has been truncated${'x'.repeat(7000)}`;
-        const forgetLoadedSkill = vi.fn();
-        const skill = {
-          getLoadedSkillContent: vi.fn().mockReturnValue(body),
-          forgetLoadedSkill,
-        };
-        const execute = vi.fn().mockResolvedValue({
-          llmContent: body,
-          returnDisplay: 'skill body',
-          newlyLoadedSkills: ['probe'],
-        });
-        const exec = mockAllowedTool(core.ToolNames.EXEC, execute);
-        mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.SKILL ? skill : exec,
-        );
-        mockConfig.getToolOutputBatchBudget = vi.fn().mockReturnValue(budget);
-        mockChatRecordingService.recordToolResult.mockImplementation(() => {
-          if (retained) expect(forgetLoadedSkill).not.toHaveBeenCalled();
-          else expect(forgetLoadedSkill).toHaveBeenCalledWith('probe');
-        });
-
-        const result = await (
-          session as unknown as ToolCallInternals
-        ).runToolCalls(new AbortController().signal, 'exec-skill-budget', [
-          { id: 'exec-budget-1', name: core.ToolNames.EXEC, args: {} },
-          { id: 'exec-budget-2', name: core.ToolNames.EXEC, args: {} },
-        ]);
-
-        if (retained) {
-          expect(forgetLoadedSkill).not.toHaveBeenCalled();
-          expect(JSON.stringify(result.parts)).toContain(body);
-        } else {
-          expect(forgetLoadedSkill).toHaveBeenCalledOnce();
-          expect(JSON.stringify(result.parts)).not.toContain(body);
-        }
-        for (const [, metadata] of mockChatRecordingService.recordToolResult
-          .mock.calls) {
-          expect(metadata).not.toHaveProperty('newlyLoadedSkills');
-        }
-      },
-    );
-
-    it.each(['cancellation', 'PostToolUse stop'])(
-      'rolls back a skill load when %s discards its body',
-      async (boundary) => {
-        const controller = new AbortController();
-        const body = 'Complete skill instructions';
-        const forgetLoadedSkill = vi.fn();
-        const skill = {
-          getLoadedSkillContent: vi.fn().mockReturnValue(body),
-          forgetLoadedSkill,
-        };
-        mockConfig.getDisableAllHooks = vi
-          .fn()
-          .mockReturnValue(boundary === 'cancellation');
-        if (boundary === 'PostToolUse stop') {
-          mockConfig.getMessageBus = vi.fn().mockReturnValue({
-            request: vi
-              .fn()
-              .mockImplementation(async (request: { eventName?: string }) => ({
-                success: true,
-                output:
-                  request.eventName === 'PostToolUse'
-                    ? { continue: false, stopReason: 'Skill output stopped' }
-                    : {},
-              })),
-          });
-        }
-        const execute = vi.fn().mockImplementation(async () => {
-          if (boundary === 'cancellation') controller.abort();
-          return {
-            llmContent: body,
-            returnDisplay: body,
-            newlyLoadedSkills: ['probe'],
-            modelOverride: 'skill-model',
-          };
-        });
-        const exec = mockAllowedTool(core.ToolNames.EXEC, execute);
-        mockToolRegistry.getTool.mockImplementation((name: string) =>
-          name === core.ToolNames.SKILL ? skill : exec,
-        );
-
-        const result = await (
-          session as unknown as ToolCallInternals
-        ).runToolCalls(controller.signal, 'exec-skill-discard', [
-          { id: 'exec-skill-discard', name: core.ToolNames.EXEC, args: {} },
-        ]);
-
-        expect(forgetLoadedSkill).toHaveBeenCalledExactlyOnceWith('probe');
-        expect(JSON.stringify(result.parts)).not.toContain(body);
-        expect(result.parts[0].functionResponse?.response).toHaveProperty(
-          'error',
-        );
-      },
-    );
-
     it.each([false, true])(
       'emits approved tool metadata before execution with preparation=%s',
       async (prepared) => {
@@ -40266,7 +40106,6 @@ describe('Session', () => {
           ],
           returnDisplay: 'nested ACP output',
           modelOverride: undefined,
-          newlyLoadedSkills: ['probe'],
           terminateTurn: true,
         };
       });
@@ -40365,7 +40204,6 @@ describe('Session', () => {
       expect(onResult).toHaveBeenCalledWith(
         expect.objectContaining({
           modelOverride: undefined,
-          newlyLoadedSkills: ['probe'],
           terminateTurn: true,
           responseParts: [
             expect.objectContaining({

@@ -7,8 +7,6 @@
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
-import type { SkillTool } from './skill.js';
-import { containsCompleteSkillBody } from './skill-utils.js';
 import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -31,39 +29,6 @@ export interface ToolResponseBudgetEntry {
   responseParts: Part[];
   persistedOutputFiles?: string[];
   artifacts?: ToolArtifact[];
-  newlyLoadedSkills?: string[];
-}
-
-export function reconcileCodeModeSkillLoads(
-  config: Config,
-  responses: ReadonlyArray<{
-    responseParts: Part[];
-    newlyLoadedSkills?: string[];
-  }>,
-): void {
-  const names = new Set(
-    responses.flatMap((entry) => entry.newlyLoadedSkills ?? []),
-  );
-  if (names.size === 0) return;
-  const skill = config.getToolRegistry().getTool(ToolNames.SKILL) as
-    | SkillTool
-    | undefined;
-  if (!skill?.getLoadedSkillContent) return;
-  const deliveredText = responses
-    .flatMap((entry) => entry.responseParts)
-    .flatMap((part) => [
-      part.text,
-      part.functionResponse?.response?.['output'],
-      part.functionResponse?.response?.['error'],
-    ])
-    .filter((text): text is string => typeof text === 'string')
-    .join('\n');
-  for (const name of names) {
-    const body = skill.getLoadedSkillContent(name);
-    if (body !== undefined && !containsCompleteSkillBody(deliveredText, body)) {
-      skill.forgetLoadedSkill(name);
-    }
-  }
 }
 
 const associatedFinalizerResponses = new WeakSet<Part[]>();

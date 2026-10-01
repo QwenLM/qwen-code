@@ -68,7 +68,6 @@ import { buildAdvisorReminder } from '../../core/advisor-policy.js';
 import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
-  reconcileCodeModeSkillLoads,
   type ToolResponseBudgetEntry,
 } from '../../tools/tool-response-finalizer.js';
 import {
@@ -1887,7 +1886,6 @@ export class AgentCore {
         responseParts: Part[];
         persistedOutputFiles?: string[];
         artifacts?: ToolArtifact[];
-        newlyLoadedSkills?: string[];
         durationMs?: number;
       }
     >();
@@ -2193,17 +2191,7 @@ export class AgentCore {
       onAllToolCallsComplete: async (completedCalls) => {
         clearApprovalDeliveries();
         for (const call of completedCalls) {
-          if (emittedCallIds.has(call.request.callId)) {
-            reconcileCodeModeSkillLoads(this.runtimeContext, [
-              {
-                responseParts:
-                  responseByCallId.get(call.request.callId)?.responseParts ??
-                  [],
-                newlyLoadedSkills: call.response.newlyLoadedSkills,
-              },
-            ]);
-            continue;
-          }
+          if (emittedCallIds.has(call.request.callId)) continue;
           emittedCallIds.add(call.request.callId);
 
           const toolName = call.request.name;
@@ -2256,7 +2244,6 @@ export class AgentCore {
             responseParts: call.response.responseParts,
             persistedOutputFiles: call.response.persistedOutputFiles,
             artifacts: call.response.artifacts,
-            newlyLoadedSkills: call.response.newlyLoadedSkills,
             durationMs: duration,
           });
         }
@@ -2549,7 +2536,6 @@ export class AgentCore {
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             artifacts: response.artifacts,
-            newlyLoadedSkills: response.newlyLoadedSkills,
           },
         ];
       });
@@ -2569,15 +2555,6 @@ export class AgentCore {
       this.runtimeContext,
       orderedResponses,
       new Map(orderedResponses.map((response) => [response.callId, promptId])),
-    );
-    reconcileCodeModeSkillLoads(
-      this.runtimeContext,
-      abortController.signal.aborted
-        ? finalizedResponses.map((response) => ({
-            ...response,
-            responseParts: [],
-          }))
-        : finalizedResponses,
     );
     const toolResponseParts = finalizedResponses.flatMap(
       (response) => response.responseParts,

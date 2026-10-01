@@ -386,7 +386,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
     await run(
       'exec-parent',
       'prompt-1',
-      'const result = await tools.read_probe({}); text(result.output);',
+      'const result = await tools.read_probe({}); return result.output;',
     );
 
     expect(nestedExecute).toHaveBeenCalledOnce();

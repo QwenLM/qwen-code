@@ -3,10 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
+import { describe, expect, it } from 'vitest';
 import { boundCodeModeOutput, EXEC_MAX_OUTPUT_CHARS } from './output.js';
 import { executeCodeMode, CodeModeExecutionError } from './host-client.js';
 import { ExecTool } from '../tools/exec.js';
@@ -15,7 +12,6 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 
 const plan = { bindings: [], collisions: [] };
-let outputDir: string;
 const runtime = {
   parentCallId: 'exec-test',
   dispatch: async () => {
@@ -25,7 +21,6 @@ const runtime = {
 
 async function exec(source: string) {
   const config = makeFakeConfig();
-  vi.spyOn(config.storage, 'getToolResultsDir').mockReturnValue(outputDir);
   const registry = new ToolRegistry(config);
   config.getToolRegistry = () => registry;
   return runWithToolCallRuntime(runtime, () =>
@@ -36,12 +31,6 @@ async function exec(source: string) {
 }
 
 describe('CodeMode output recovery', () => {
-  beforeEach(async () => {
-    outputDir = await mkdtemp(path.join(os.tmpdir(), 'exec-output-'));
-  });
-  afterEach(async () => {
-    await rm(outputDir, { recursive: true, force: true });
-  });
   it('keeps prior text and media with a script failure', async () => {
     try {
       await executeCodeMode(
@@ -88,27 +77,23 @@ describe('CodeMode output recovery', () => {
   });
 
   it.each([false, true])(
-    'bounds oversized output and preserves the full explicit text (failure %s)',
+    'bounds complete model output inline (failure %s)',
     async (failed) => {
       const result = await exec(
-        `text('BEGIN' + 'x'.repeat(40000) + 'END'); ${failed ? "throw new Error('LATER_ERROR');" : ''}`,
+        `text('BEGIN' + 'x'.repeat(110000) + 'END'); ${failed ? "throw new Error('LATER_ERROR');" : ''}`,
       );
-      expect(result.persistedOutputFiles).toHaveLength(1);
-      const fullOutput = await readFile(
-        result.persistedOutputFiles![0],
-        'utf8',
-      );
+      expect(result.persistedOutputFiles).toEqual([]);
       const text = (result.llmContent as Array<{ text: string }>)[0].text;
       expect(text.length).toBeLessThanOrEqual(EXEC_MAX_OUTPUT_CHARS);
       expect(text).toContain('BEGIN');
-      expect(fullOutput).toContain('END');
-      expect(text).toContain('Full output saved to:');
-      expect(fullOutput).toContain('x'.repeat(40000));
+      expect(text).toContain('END');
+      expect(text).toContain('code mode output truncated');
       if (failed) {
         expect(result.error?.message).toBe(text);
-        expect(fullOutput).toContain('Script error:');
-        expect(fullOutput).toContain('LATER_ERROR');
+        expect(text).toContain('Script error:');
+        expect(text).toContain('LATER_ERROR');
       } else expect(result.error).toBeUndefined();
+      expect(text).not.toMatch(/persisted|saved to|\.output/);
     },
   );
 
@@ -120,9 +105,7 @@ describe('CodeMode output recovery', () => {
       EXEC_MAX_OUTPUT_CHARS,
     );
     expect(error.error?.message).toContain('BEFORE');
-    expect(await readFile(error.persistedOutputFiles![0], 'utf8')).toContain(
-      'LAST',
-    );
+    expect(error.error?.message).toContain('LAST');
     const value = await exec("text('BEFORE'); return 'v'.repeat(100000);");
     expect(value.returnDisplay).toBe('BEFORE');
     expect((value.llmContent as Array<{ text: string }>)[0].text).toBe(
