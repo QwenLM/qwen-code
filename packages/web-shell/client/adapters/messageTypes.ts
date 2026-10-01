@@ -83,6 +83,17 @@ export interface DaemonMessageTodoItem {
 }
 
 /**
+ * Who wrote a message when a transcript has more than one assistant voice, as
+ * in a conversation several workspace agents work in. Absent in an ordinary
+ * session, where the assistant needs no name.
+ */
+export interface DaemonMessageAuthor {
+  name: string;
+  /** The agent's own color, when it has one. */
+  color?: string;
+}
+
+/**
  * Fields shared by every history message. Kept as a base interface so a new
  * cross-cutting field is declared once rather than on each role.
  */
@@ -107,6 +118,7 @@ export interface DaemonMessageMeta {
   timestamp?: number;
   /** Stable transcript blocks folded into this rendered message. */
   sourceBlockIds?: string[];
+  author?: DaemonMessageAuthor;
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {

@@ -53,6 +53,7 @@ export function createAgentCoreMock(): Record<string, unknown> {
   return {
     subagentId: 'mock-id',
     name: 'mock-agent',
+    runInHookFrame: <T>(fn: () => T): T => fn(),
     eventEmitter: emitter,
     stats: {
       start: vi.fn(),

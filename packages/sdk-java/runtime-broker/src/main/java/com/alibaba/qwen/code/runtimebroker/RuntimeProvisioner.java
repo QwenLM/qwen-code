@@ -60,6 +60,20 @@ public interface RuntimeProvisioner extends AutoCloseable {
                 RuntimeObservation.unknown(handle));
     }
 
+    /** Clears only physical holders of the saved generation after durable stop proof. */
+    default CompletionStage<Void> recoverResources(RuntimeBindingRecord binding) {
+        if (binding.getRequest().isManagedContext()) {
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(409,
+                    "runtime_broker_recovery_blocked", "Workspace recovery cleanup is unavailable.", false));
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /** Whether saved startup identity can be observed without relaunching it. */
+    default boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
+        return false;
+    }
+
     /**
      * Proves a lease this process already treats as ready still answers
      * attestation. The default accepts the in-memory lease.

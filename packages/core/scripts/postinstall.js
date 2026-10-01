@@ -15,6 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const packageRoot = path.join(__dirname, '..');
+const landlockVendorDir = path.join(packageRoot, 'vendor', 'landlock-run');
 
 const vendorBinaries = [
   ['ripgrep', 'rg'],
@@ -67,8 +68,29 @@ function setupVendorBinaries() {
   }
 }
 
+function setupLandlockBinary() {
+  if (process.platform !== 'linux') return;
+  if (process.arch !== 'x64' && process.arch !== 'arm64') return;
+  const binary = path.join(
+    landlockVendorDir,
+    `${process.arch}-linux`,
+    'qwen-landlock-run',
+  );
+  if (!fs.existsSync(binary)) return;
+  try {
+    fs.chmodSync(binary, 0o755);
+    console.log(`✓ Set executable permissions on ${binary}`);
+  } catch (error) {
+    console.log(
+      `⚠ Could not set Landlock helper permissions: ${error.message || 'Unknown error'}`,
+    );
+  }
+}
+
+// Wrap the entire execution to ensure no errors escape to npm
 try {
   setupVendorBinaries();
+  setupLandlockBinary();
 } catch {
   // Never block npm installation because of an optional permission repair.
   console.log('⚠ Vendor binary setup encountered an unexpected error');

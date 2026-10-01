@@ -298,6 +298,7 @@ const codeModeHostBuild = esbuild.build({
 const sandboxWorkersBuild = esbuild.build({
   entryPoints: {
     sandboxBwrapRelay: 'packages/core/src/sandbox/bwrap-relay.ts',
+    sandboxLandlockRelay: 'packages/core/src/sandbox/landlock-relay.ts',
     sandboxFileWorker: 'packages/core/src/sandbox/file-worker.ts',
   },
   bundle: true,
@@ -307,7 +308,29 @@ const sandboxWorkersBuild = esbuild.build({
   target: 'node22',
 });
 
-Promise.all([mainBuild, workerBuild, codeModeHostBuild, sandboxWorkersBuild])
+const mem0Build = esbuild.build({
+  entryPoints: {
+    main: 'integrations/external-context/src/bundled-mem0.ts',
+    'write-confirmation':
+      'integrations/external-context/src/write-confirmation.ts',
+  },
+  bundle: true,
+  outdir: 'dist/mem0',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  banner: {
+    js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
+  },
+});
+
+Promise.all([
+  mainBuild,
+  workerBuild,
+  codeModeHostBuild,
+  sandboxWorkersBuild,
+  mem0Build,
+])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

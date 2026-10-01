@@ -174,10 +174,12 @@ export interface ManagedHarnessHandle {
   /**
    * Commits safety point B: a requested approval as `await_action` with
    * `durable_wait`. The next model request stays blocked until
-   * `resolveDurableWait`.
+   * `resolveDurableWait`. With `turn`, an approval that starts a turn binds
+   * it to this activation, as `commitAwaitRuntimeBatch` does.
    */
   commitDurableWait(
     request: ManagedDurableWaitCommit,
+    turn?: { readonly turnId: string; readonly promptId: string },
   ): Promise<HarnessDurableWaitBoundary>;
   /**
    * Clears a durable approval wait so the turn may continue from
@@ -353,6 +355,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
 
   async commitDurableWait(
     request: ManagedDurableWaitCommit,
+    turn?: { readonly turnId: string; readonly promptId: string },
   ): Promise<HarnessDurableWaitBoundary> {
     return this.mutateCheckpoint(async () => {
       this.assertNotDetached();
@@ -378,7 +381,39 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         );
       }
 
-      const previous = await this.ensureRunnableUnlocked();
+      const runnable = await this.ensureRunnableUnlocked();
+      const startsTurn =
+        runnable.continuation.phase === 'before_model' ||
+        runnable.continuation.phase === 'turn_settled';
+      if (
+        turn &&
+        (turn.turnId !== runnable.identity.turnId ||
+          turn.promptId !== runnable.identity.promptId) &&
+        !startsTurn
+      ) {
+        throw new ManagedSessionConflictError(
+          'an approval cannot change the current unfinished turn.',
+        );
+      }
+      if (
+        turn &&
+        runnable.identity.activationId !== this.activation.activationId &&
+        !startsTurn
+      ) {
+        throw new ManagedSessionConflictError(
+          'an approval cannot continue a prior activation.',
+        );
+      }
+      const previous = turn
+        ? {
+            ...runnable,
+            identity: {
+              ...runnable.identity,
+              ...turn,
+              activationId: this.activation.activationId,
+            },
+          }
+        : runnable;
       if (request.source === 'tool_call') {
         await this.authority.requestToolAction(
           {
@@ -509,6 +544,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       ) {
         throw new ManagedSessionConflictError(
           'approval wait must resolve before Runtime dispatch.',
+        );
+      }
+      if (
+        turn &&
+        (turn.turnId !== previous.identity.turnId ||
+          turn.promptId !== previous.identity.promptId) &&
+        previous.continuation.phase !== 'before_model' &&
+        previous.continuation.phase !== 'turn_settled'
+      ) {
+        throw new ManagedSessionConflictError(
+          'Runtime work cannot change the current unfinished turn.',
         );
       }
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AutoMemoryScope } from './types.js';
+import { AUTO_MEMORY_SCOPES, type AutoMemoryScope } from './types.js';
 import {
   normalizeAutoMemoryKeyword,
   type ScannedAutoMemoryDocument,
@@ -15,7 +15,7 @@ const HIGH_FREQUENCY_BUDGET_RATIO = 0.7;
 const TRUNCATION_WARNING =
   '> WARNING: Keyword vocabulary snapshot was truncated.';
 
-const SCOPE_ORDER: readonly AutoMemoryScope[] = ['project', 'user', 'team'];
+const SCOPE_ORDER: readonly AutoMemoryScope[] = AUTO_MEMORY_SCOPES;
 
 interface KeywordStats {
   value: string;
@@ -129,8 +129,19 @@ export function renderWriterKeywordVocabularySnapshot(
       stats: collectKeywordStats(docs.filter((doc) => doc.scope === scope)),
     }))
     .filter(({ stats }) => stats.length > 0);
+  // Worst-case cost of the per-scope frame the loop below emits: every label
+  // present and `omitted` at its widest. This literal must mirror that frame —
+  // if the wording below drifts, the budget stops covering the render and the
+  // snapshot falls back to the raw slice at the end, cutting a scope mid-token.
+  const structuralOverhead = scopedStats.reduce(
+    (total, { scope, stats }) =>
+      total +
+      `\n\n${scope} scope:\nstable: \nrecent: \nomitted: ${stats.length} keywords due to budget`
+        .length,
+    0,
+  );
   const scopeBudget = Math.floor(
-    (DEFAULT_MAX_CHARS - lines.join('\n').length) /
+    (DEFAULT_MAX_CHARS - lines.join('\n').length - structuralOverhead) /
       Math.max(1, scopedStats.length),
   );
 
