@@ -316,6 +316,23 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // The bundled Mem0 runtime validates this same field with its own zod copy
+    // (mem0-settings.ts `int().min(1).max(30_000).default(5000)`, pinned by
+    // mem0-settings.test.ts). Neither copy is derived from the other, so both
+    // are asserted against the documented contract in
+    // docs/users/features/mem0.md: drifting either one turns a test red.
+    it('should bound memory.mem0.timeoutMs to the runtime contract', () => {
+      expect(
+        getSettingsSchema().memory.properties.mem0.jsonSchemaOverride
+          ?.properties.timeoutMs,
+      ).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 30_000,
+        default: 5000,
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');

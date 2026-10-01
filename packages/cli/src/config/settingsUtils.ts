@@ -277,6 +277,7 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'memory', key: 'mem0' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },

@@ -20,6 +20,10 @@ import {
   type ChatRecord,
 } from './chatRecordingService.js';
 import { SessionNotesService } from './session-notes-service.js';
+import {
+  findApiHistoryPromptIndex,
+  markApiHistoryPrompt,
+} from './session-api-history.js';
 import { SessionTranscriptReader } from './session-transcript-reader.js';
 import { SessionService } from './sessionService.js';
 import {
@@ -105,6 +109,52 @@ describe('local session notes', () => {
       compressedHistory,
     };
   }
+
+  it.each(['summary', 'notes'] as const)(
+    'preserves retained prompt identities through strict %s cold restore',
+    async (strategy) => {
+      const promptId = 'retained-prompt';
+      recorder.recordUserMessage(
+        'keep the constraint',
+        undefined,
+        undefined,
+        promptId,
+      );
+      const revision = await write();
+      const pending = createUserContent('keep the constraint');
+      markApiHistoryPrompt(pending, promptId);
+      const history: Content[] = [
+        createUserContent('Resume from this checkpoint.'),
+        { role: 'model', parts: [{ text: 'Acknowledged.' }] },
+        pending,
+      ];
+      const writing = recorder.recordChatCompressionStrict(
+        {
+          ...makeCheckpoint(history),
+          info: { ...makeCheckpoint(history).info, strategy },
+        },
+        strategy === 'notes' ? revision : undefined,
+        signal,
+        recorder.getSessionNotesState(),
+      );
+      history.push(
+        createUserContent('Later input must not alter the checkpoint.'),
+      );
+      await writing;
+      const record = (await jsonl.read<ChatRecord>(transcriptPath)).at(-1);
+      expect(record?.systemPayload).toMatchObject({
+        promptIds: [null, null, promptId],
+        compressedHistory: expect.any(Array),
+      });
+      const restored = (await reader.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }))!;
+      expect(restored.runtime.apiHistory).toHaveLength(3);
+      expect(
+        findApiHistoryPromptIndex(restored.runtime.apiHistory, promptId),
+      ).toBe(2);
+    },
+  );
 
   it('persists a bounded canonical revision before projecting Markdown and restores it cold', async () => {
     recorder.recordUserMessage('keep the constraint');

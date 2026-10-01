@@ -138,6 +138,11 @@ report the concrete reason once and use summary compression. Recheck readiness
 on resume, model/tool-policy changes, and before every rollover. A provider name
 or subscription must not determine eligibility.
 
+The managed execution engine currently lacks the notes record and active-history
+read capabilities. Its effective compression strategy falls back to summary at
+configuration construction, with one explanation; neither the notes tool bundle
+nor its controller is enabled. The saved strategy setting is left unchanged.
+
 Retain the recorder's two existing write modes. Normal CLI/headless sessions
 use their current single-writer assumption and await the strict append, which
 reaches `jsonl.writeLine()` and `appendFile({ flush: true })`. Leased ACP sessions

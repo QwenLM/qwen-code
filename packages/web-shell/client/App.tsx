@@ -203,6 +203,11 @@ import {
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
+import { LazyThreadsRoute } from './components/workspace-agents/LazyThreadsRoute';
+import {
+  conversationContext,
+  useAgentChatEntry,
+} from './components/workspace-agents/useAgentChatEntry';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -394,9 +399,9 @@ import {
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
-import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import {
-  serializeStatsMessage,
+  createStatsMessageData,
   type StatsView,
 } from './components/messages/StatsMessage';
 import {
@@ -1907,7 +1912,8 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
-    >;
+    >
+  | Extract<ArtifactPanelTab, { kind: 'agent_activity' }>;
 
 function parsePersistedArtifactPanelTab(
   value: unknown,
@@ -2110,6 +2116,18 @@ function parsePersistedArtifactPanelTab(
         sessionId: tab['sessionId'],
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
+    case 'agent_activity':
+      if (
+        typeof tab['threadId'] !== 'string' ||
+        typeof tab['workspaceCwd'] !== 'string'
+      )
+        return;
+      return {
+        ...common,
+        kind: 'agent_activity',
+        threadId: tab['threadId'],
+        workspaceCwd: tab['workspaceCwd'],
+      };
     case 'workflow':
       return {
         ...common,
@@ -2275,6 +2293,16 @@ function serializeArtifactPanelTabs(
               },
             ]
           : [];
+      case 'agent_activity':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            threadId: tab.threadId,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'pending': {
@@ -2750,7 +2778,9 @@ function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
   const subagentName =
     typeof rawOutput?.['subagentName'] === 'string'
       ? rawOutput['subagentName']
-      : undefined;
+      : typeof tool.args?.name === 'string'
+        ? tool.args.name
+        : undefined;
   const subagentType =
     typeof tool.args?.subagent_type === 'string'
       ? tool.args.subagent_type
@@ -2834,7 +2864,9 @@ export function getEnvironmentAgentTasks(
         const subagentName =
           typeof rawOutput?.['subagentName'] === 'string'
             ? rawOutput['subagentName']
-            : undefined;
+            : typeof tool.args?.name === 'string'
+              ? tool.args.name
+              : undefined;
         const taskId = taskIdsByToolUseId.get(tool.callId);
         const derivedTaskId = derivedTaskIdForTool(tool);
         // Completed background agents can lose their toolUseId / derived-id
@@ -4973,6 +5005,9 @@ export function App({
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
+  const collaborationAvailable =
+    workspace.capabilities?.features?.includes('agent_collaboration_v1') ===
+    true;
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -4995,6 +5030,23 @@ export function App({
       setArtifactPanelOpen(false);
     }
   }, [activeArtifactPanelTabId, artifactPanelTabs, workspaceContextActive]);
+  useEffect(() => {
+    if (collaborationAvailable) return;
+    const activityIds = artifactPanelTabs
+      .filter((tab) => tab.kind === 'agent_activity')
+      .map((tab) => tab.id);
+    if (activityIds.length === 0) return;
+    setArtifactPanelTabs((tabs) =>
+      tabs.filter((tab) => tab.kind !== 'agent_activity'),
+    );
+    if (
+      activeArtifactPanelTabId &&
+      activityIds.includes(activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
+  }, [activeArtifactPanelTabId, artifactPanelTabs, collaborationAvailable]);
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -6627,6 +6679,8 @@ export function App({
                   const { taskId: _taskId, ...rest } = tab;
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
                 }
+                case 'agent_activity':
+                  return collaborationAvailable ? tab : undefined;
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
                 case 'terminal':
@@ -6774,6 +6828,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    collaborationAvailable,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
@@ -9133,6 +9188,56 @@ export function App({
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
 
   const activePanelRef = useRef(activePanel);
+  const [collaborationThread, setCollaborationThread] = useState<
+    { id: string; cwd: string; server: string } | undefined
+  >(() => {
+    try {
+      const saved = JSON.parse(
+        sessionStorage.getItem('qwen:team-conversation') ?? 'null',
+      );
+      return saved &&
+        typeof saved.id === 'string' &&
+        typeof saved.cwd === 'string' &&
+        typeof saved.server === 'string'
+        ? saved
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  const collaborationThreadId =
+    workspace.capabilities?.features?.includes('agent_collaboration_v1') &&
+    collaborationThread !== undefined &&
+    collaborationThread.server === workspace.baseUrl
+      ? collaborationThread.id
+      : undefined;
+  const [collaborationTitle, setCollaborationTitle] = useState<{
+    id: string;
+    title: string;
+  }>();
+  const [collaborationHeaderActions, setCollaborationHeaderActions] =
+    useState<HTMLDivElement | null>(null);
+  const updateCollaborationTitle = useCallback((id: string, title: string) => {
+    setCollaborationTitle((current) =>
+      current?.id === id && current.title === title ? current : { id, title },
+    );
+  }, []);
+  const [agentsNav, setAgentsNav] = useState<{
+    view: 'agents' | 'tasks' | 'new-agent';
+    request: number;
+  }>({ view: 'agents', request: 0 });
+  useEffect(() => {
+    try {
+      if (collaborationThread)
+        sessionStorage.setItem(
+          'qwen:team-conversation',
+          JSON.stringify(collaborationThread),
+        );
+      else sessionStorage.removeItem('qwen:team-conversation');
+    } catch {
+      /* Storage may be unavailable in embedded hosts. */
+    }
+  }, [collaborationThread]);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
   // closePanel — several paths call setActivePanel directly (approval
@@ -10197,6 +10302,11 @@ export function App({
     connection.sessionContext?.kind === 'standalone'
       ? (sessionStatusDisplayName ?? connection.displayName)
       : (connection.displayName ?? sessionStatusDisplayName);
+  const chatHeaderTitle = collaborationThreadId
+    ? collaborationTitle?.id === collaborationThreadId
+      ? collaborationTitle.title
+      : t('collab.chat.title')
+    : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({
       sessionId: connection.sessionId,
@@ -11850,8 +11960,15 @@ export function App({
   // block mid-stream, which would split the streaming answer and orphan its
   // usage frames.
   const dispatchReadOnlyStatus = useCallback(
-    (text: string) => {
-      store.dispatch([{ type: 'status', text, clearActiveText: false }]);
+    (text: string, data?: unknown) => {
+      store.dispatch([
+        {
+          type: 'status',
+          text,
+          ...(data !== undefined ? { data } : {}),
+          clearActiveText: false,
+        },
+      ]);
       resumeChatBottomFollow('smooth');
     },
     [store, resumeChatBottomFollow],
@@ -12112,7 +12229,12 @@ export function App({
       modelSettingScope,
       'fastModel',
     );
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    // The CLI picker may persist `authType:id\0<baseUrl>` (#12760); decode
+    // like the vision sibling so the dialog highlights the pinned row
+    // instead of falling to the list head. The persisted value keeps the
+    // suffix — this is a read-side strip only.
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
   })();
   const currentAdvisorModel = readScopedModelSetting(
     workspaceSettings,
@@ -13308,7 +13430,10 @@ export function App({
         .getContextUsage({ detail })
         .then((result) => {
           if (!owner.isCurrent()) return;
-          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
+          dispatchReadOnlyStatus(
+            t('contextUsage.title'),
+            createContextUsageMessageData(result),
+          );
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
@@ -13322,6 +13447,7 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       reportError,
+      t,
     ],
   );
   // Stable identity: ChatEditor is memoized and an inline closure would
@@ -13587,6 +13713,7 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      setCollaborationThread(undefined);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -14597,6 +14724,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      setCollaborationThread(undefined);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -17048,7 +17176,8 @@ export function App({
               .then((result) => {
                 if (!owner.isCurrent()) return;
                 dispatchReadOnlyStatus(
-                  serializeStatsMessage(result, statsView),
+                  t('stats.title'),
+                  createStatsMessageData(result, statsView),
                 );
               })
               .catch((error: unknown) => {
@@ -18120,6 +18249,24 @@ export function App({
     (modelId: string) => {
       if (!projectFeaturesAvailable) return;
       if (!workspaceContextActive) {
+        // This picker cannot distinguish same-id rows by endpoint, so writing
+        // the bare id would erase a live `authType:id\0<baseUrl>` pin the CLI
+        // picker made (#12760). Confirming the already-pinned row leaves the
+        // setting untouched.
+        const existingFast = readScopedModelSetting(
+          workspaceSettings,
+          modelSettingScope,
+          'fastModel',
+        );
+        if (
+          typeof existingFast === 'string' &&
+          existingFast.includes('\0') &&
+          extractBareModelId(
+            decodeVisionModelForPicker(existingFast.trim()),
+          ) === modelId
+        ) {
+          return;
+        }
         void setWorkspaceSetting(modelSettingScope, 'fastModel', modelId)
           .then(() => {
             void reloadWorkspaceSettings().catch((error: unknown) => {
@@ -18198,6 +18345,7 @@ export function App({
       projectFeaturesAvailable,
       setWorkspaceSetting,
       workspaceContextActive,
+      workspaceSettings,
     ],
   );
 
@@ -18540,6 +18688,52 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const handleCollaborationThreadOpen = useCallback(
+    (id: string, cwd: string) => {
+      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+      setMainView('chat');
+      closePanel();
+    },
+    [closePanel, workspace.baseUrl],
+  );
+  const handleCollaborationThreadError = useCallback(
+    (message: string) => pushToast('error', message),
+    [pushToast],
+  );
+  const displayMessagesRef = useRef(displayMessages);
+  displayMessagesRef.current = displayMessages;
+  const getMentionContext = useCallback(
+    () => conversationContext(displayMessagesRef.current),
+    [],
+  );
+  const agentChatEntry = useAgentChatEntry({
+    enabled: Boolean(
+      workspace.capabilities?.features?.includes('agent_collaboration_v1'),
+    ),
+    getContext: getMentionContext,
+    t,
+    cwd: legacyWorkspaceContextCwd,
+    baseUrl: workspace.baseUrl,
+    token: workspace.token,
+    onSubmit: handleEditorSubmit,
+    onOpen: handleCollaborationThreadOpen,
+    onError: handleCollaborationThreadError,
+    onCreateAgent: () => {
+      setAgentsNav((current) => ({
+        view: 'new-agent',
+        request: current.request + 1,
+      }));
+      setAgentsCreateScope(null);
+      openPanel('agents');
+    },
+  });
+  const composerAtProviders = useMemo(
+    () =>
+      collaborationAvailable
+        ? [...(atProviders ?? []), ...agentChatEntry.providers]
+        : atProviders,
+    [atProviders, collaborationAvailable, agentChatEntry.providers],
+  );
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
@@ -18782,7 +18976,9 @@ export function App({
   const appClassName = [
     styles.app,
     styles.appChat,
-    isChatEmptyState ? styles.appChatEmpty : undefined,
+    isChatEmptyState && !collaborationThreadId
+      ? styles.appChatEmpty
+      : undefined,
     sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
@@ -19082,6 +19278,8 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
+    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) =>
+      void loadSidebarSession(sessionId, workspaceCwd),
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
@@ -19682,6 +19880,13 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
+                  selectedCollaborationId={collaborationThreadId}
+                  onOpenCollaboration={(id, cwd) => {
+                    closeMobileDrawer();
+                    setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+                    setMainView('chat');
+                    closePanel();
+                  }}
                   collapsed={
                     (sidebarCollapsed ||
                       (mainView === 'split' && !splitSidebarHasRoom)) &&
@@ -19692,6 +19897,19 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenAgents={
+                    collaborationAvailable
+                      ? (view = 'agents') => {
+                          setAgentsNav((current) => ({
+                            view,
+                            request: current.request + 1,
+                          }));
+                          closeMobileDrawer();
+                          setAgentsCreateScope(null);
+                          openPanel('agents');
+                        }
+                      : undefined
+                  }
                   onOpenPlugins={() => {
                     closeMobileDrawer();
                     openPanel('plugins');
@@ -19905,7 +20123,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                !isChatEmptyState &&
+                (!isChatEmptyState || Boolean(collaborationThreadId)) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -19940,7 +20158,7 @@ export function App({
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
-                        sessionName: sessionDisplayName,
+                        sessionName: chatHeaderTitle,
                         workspaceCwd: workspaceContextActive
                           ? connection.workspaceCwd
                           : undefined,
@@ -19978,7 +20196,7 @@ export function App({
                     <ChatContextHeader
                       content={
                         titleHeaderItemVisible
-                          ? (sessionDisplayName ?? t('session.new'))
+                          ? (chatHeaderTitle ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
@@ -20026,6 +20244,7 @@ export function App({
                       }
                     />
                   )}
+                  {collaborationThreadId && <div ref={setCollaborationHeaderActions} className="flex shrink-0 items-center pr-3" />}
                   {sessionWorkflowEnabled &&
                     (sessionWorkflowTodos.length > 0 ||
                       mainView === 'cockpit') && (
@@ -20069,14 +20288,14 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || isChatEmptyState) &&
+                (!chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
                     className={[
                       styles.hamburgerButton,
-                      !chatHeaderEnabled || isChatEmptyState
+                      !chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)
                         ? styles.hamburgerButtonFloating
                         : undefined,
                     ]
@@ -20359,11 +20578,25 @@ export function App({
                       />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
+                        key={agentsNav.request}
+                        initialAgentView={agentsNav.view}
+                        onOpenThreadChat={(threadId, cwd) => {
+                          setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });
+                          setMainView('chat');
+                          closePanel();
+                        }}
                         onClose={() => {
                           setAgentsCreateScope(null);
                           closePanel();
                         }}
                         initialCreateScope={agentsCreateScope}
+                        onOpenAgentSession={(sessionId) => {
+                          // An agent is its own session, so a run opens the
+                          // ordinary session view. `loadSidebarSession`
+                          // already closes this panel on its way there.
+                          setAgentsCreateScope(null);
+                          void loadSidebarSession(sessionId);
+                        }}
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
@@ -20809,7 +21042,22 @@ export function App({
                     : undefined
                 }
               >
-                {showMissingSessionState && (
+                {collaborationThreadId && (
+                  <LazyThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
+                    workspaceCwd={collaborationThread?.cwd}
+                    headerActionsContainer={collaborationHeaderActions}
+                    onTitleChange={updateCollaborationTitle}
+                    onOpenActivity={(threadId, workspaceCwd) => {
+                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: t('collab.team.title'), threadId, workspaceCwd };
+                      setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);
+                      setActiveArtifactPanelTabId(tab.id);
+                      setArtifactPanelWidth((width) => artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth());
+                      setArtifactPanelOpen(true);
+                    }}
+                    onOpenThreadChat={(id, cwd) => setCollaborationThread({ id, cwd, server: workspace.baseUrl })}
+                    onOpenAgentSession={(sessionId) => void loadSidebarSession(sessionId, collaborationThread?.cwd)} />
+                )}
+                {!collaborationThreadId && showMissingSessionState && (
                   <div className={styles.missingSessionState}>
                     <div className={styles.missingSessionMessage}>
                       {t('session.missing')}
@@ -20826,7 +21074,7 @@ export function App({
                 )}
                 <div
                   className={
-                    showMissingSessionState
+                    showMissingSessionState || collaborationThreadId
                       ? styles.chatSubtreeHidden
                       : styles.chatSubtree
                   }
@@ -21496,7 +21744,11 @@ export function App({
                         <ChatEditor
                           ref={setEditorHandle}
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={handleEditorSubmit}
+                          onSubmit={
+                            collaborationAvailable
+                              ? agentChatEntry.submit
+                              : handleEditorSubmit
+                          }
                           onInputTextChange={handleComposerTextChange}
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
@@ -21521,6 +21773,7 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
+                            (collaborationAvailable && agentChatEntry.pending) ||
                             isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
@@ -21559,7 +21812,7 @@ export function App({
                           builtinAtProviders={
                             workspaceContextActive ? builtinAtProviders : false
                           }
-                          atProviders={atProviders}
+                          atProviders={composerAtProviders}
                           composerTagIcons={composerTagIcons}
                           voiceTarget={
                             activePanel !== null || mainView !== 'chat'

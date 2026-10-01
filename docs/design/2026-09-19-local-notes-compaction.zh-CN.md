@@ -137,6 +137,10 @@ Controller 和工具绑定到真正拥有它们的 chat 与 recorder。
 这里的“本地”指运行 Qwen Code 的 runtime 所在机器。
 不得回退到父会话或 daemon 的 primary runtime。本提案不增加 daemon route。
 
+Managed 执行引擎目前尚不支持 notes 记录及有效历史读取。配置构造时，
+其实际压缩方式会回退为摘要，并说明一次原因；不会启用四个 notes 工具
+或 notes 控制器。用户保存的压缩方式设置保持不变。
+
 ### 4.2 权威 notes 与 Markdown 物化文件
 
 复用 transcript 所在目录：

@@ -11,8 +11,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -24,6 +26,8 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.time.Clock;
 import java.time.Duration;
@@ -35,6 +39,8 @@ import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 class HarnessCoordinatorTest {
@@ -71,8 +77,136 @@ class HarnessCoordinatorTest {
             }
             verify(store).failTurn(eq(tenantId), eq(sessionId), eq(turnId),
                     anyString(), eq("workspace_unavailable"), anyString());
-            verifyNoInteractions(harness, runtimeWarmer);
+            verify(harness).isWorkspaceFilesAvailable();
+            verifyNoMoreInteractions(harness);
+            verifyNoInteractions(runtimeWarmer);
         }
+    }
+
+    // Before submission, the only RuntimeBrokerException that reaches the
+    // coordinator is WorkspaceExecutionStore.unavailable() (409,
+    // workspace_unavailable, not retryable), raised by the connector's
+    // authorization in createOrLoad. Broker lease contention (workspace_busy)
+    // is raised inside the Broker's tool-execution transport and is consumed
+    // there: it ends the turn as a turn_error event and never reaches this arm.
+    @ParameterizedTest
+    @ValueSource(ints = {0, 5})
+    void failsOnWorkspaceAuthorizationRefusalBeforeSubmission(int retryCount) {
+        RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
+                false, retryCount);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("workspace_unavailable"),
+                eq(refusal.getMessage()));
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // A claim that already recorded a submission attempt may have been
+    // admitted, so even a permanent authorization refusal must not end it
+    // before the pre-admission retry budget (retryCount 5 would otherwise be
+    // terminal, see failsPreAdmissionTurnAfterRetryBudgetIsExhausted).
+    @Test
+    void retriesWorkspaceAuthorizationRefusalAfterARecordedSubmission() {
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(
+                WorkspaceExecutionStore.unavailable(), true, 5);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // Defensive coverage only: no current producer reaches the coordinator
+    // with a retryable RuntimeBrokerException before submission. This pins
+    // the isRetryable() clause so a future retryable refusal is retried, not
+    // failed; it does not model Broker lease contention.
+    @Test
+    void retriesARetryableBrokerRefusalBeforeSubmissionDefensively() {
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(
+                new RuntimeBrokerException(409, "defensive_retryable",
+                        "Retryable refusal with no current producer.", true),
+                false, 0);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // Pins the 409 cell of the DaemonHttpException arm: a conflict the Harness
+    // itself reports (hosted_turn_active, hosted_prompt_conflict,
+    // hosted_event_epoch_mismatch, ...) is transient, so it is retried rather
+    // than failed. A create-time 409 never reaches here: the connector answers
+    // it by loading the existing authority.
+    @Test
+    void retriesAConflictReportedByTheHarness() {
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(conflict,
+                false, 0);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // A permanent Harness rejection ends the Turn even after a recorded
+    // submission, where the pre-admission retry budget cannot end it. The code
+    // distinguishes this arm from retry exhaustion (hosted_harness_unavailable).
+    @Test
+    void failsAPermanentHarnessRejectionAfterSubmission() {
+        DaemonHttpException rejected = mock(DaemonHttpException.class);
+        when(rejected.getStatusCode()).thenReturn(400);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(rejected,
+                true, 5);
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_rejected"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // A 5xx from the Harness or a proxy is transient, so a Turn whose
+    // submission may have been admitted is retried, not failed.
+    @Test
+    void retriesATransientHarnessFailureAfterSubmission() {
+        DaemonHttpException unavailable = mock(DaemonHttpException.class);
+        when(unavailable.getStatusCode()).thenReturn(503);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(unavailable,
+                true, 5);
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    private AgentStateStore dispatchWithCreateOrLoadFailure(
+            RuntimeException failure, boolean submitted, int retryCount) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, submitted, retryCount);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                        new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1)));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenThrow(failure);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(harness, never()).submit(anyString(), anyString(), anyString(),
+                any(), anyString());
+        return store;
     }
 
     @Test
@@ -527,8 +661,17 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString());
     }
 
-    @Test
-    void doesNotExhaustAfterSubmissionMayHaveBeenAdmitted() {
+    // Protects the post-submission uncertainty invariant: once submit may
+    // have been admitted, neither a lost response nor a permanent Workspace
+    // refusal ends the Turn, even with the pre-admission retry budget spent.
+    // The refusal row is not redundant with the generic catch: deleting the
+    // RuntimeBrokerException arm keeps it green by design, so the negative
+    // control is weakening that arm's guard to drop !submissionAttempted,
+    // which would make this row terminal.
+    @ParameterizedTest(name = "workspace refusal = {0}")
+    @ValueSource(booleans = {false, true})
+    void neverTerminatesOnceSubmissionMayHaveBeenAdmitted(
+            boolean workspaceRefusal) {
         String tenantId = "tenant-retry-submitted";
         String sessionId = "session-retry-submitted";
         String turnId = "turn-retry-submitted";
@@ -554,7 +697,8 @@ class HarnessCoordinatorTest {
                 .thenReturn(new Attachment("boot-new", null, null, null));
         when(harness.submit(eq(tenantId), eq(sessionId), eq(promptId), any(),
                 anyString())).thenThrow(
-                        new IllegalStateException("response lost"));
+                        workspaceRefusal ? WorkspaceExecutionStore.unavailable()
+                                : new IllegalStateException("response lost"));
         when(runtimeWarmer.isEnabled()).thenReturn(false);
 
         HarnessCoordinator coordinator = new HarnessCoordinator(store,

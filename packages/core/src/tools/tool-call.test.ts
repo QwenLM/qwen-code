@@ -52,6 +52,60 @@ function makeRegistry(
   } as unknown as ToolRegistry;
 }
 
+const target = (name: string, shouldDefer = true) =>
+  new MockTool({ name, shouldDefer });
+
+type ResolveOpts = {
+  args?: Record<string, unknown>;
+  visible?: boolean;
+  worker?: boolean;
+  withToolSearch?: boolean;
+  reviewed?: ReadonlyMap<string, string>;
+  depth?: { maxSubagentDepth: number };
+};
+/**
+ * Resolves `{ name, arguments: args ?? {} }` through a registry of `targets`,
+ * each registered hidden unless `visible`; `worker` runs the call inside a
+ * subagent agent frame, `depth` is passed as the resolver's third argument.
+ */
+function resolveVia(targets: MockTool[], name: string, opts: ResolveOpts = {}) {
+  const hidden = new Set(opts.visible ? [] : targets.map((t) => t.name));
+  const registry = makeRegistry(targets, hidden, {
+    withToolSearch: opts.withToolSearch,
+    reviewed: opts.reviewed,
+  });
+  const call = () =>
+    resolveDeferredToolCall(
+      registry,
+      { name, arguments: opts.args ?? {} },
+      opts.depth,
+    );
+  return opts.worker ? runWithAgentContext('worker', call) : call();
+}
+
+/**
+ * `resolveVia` with one target `name`: deferred and hidden, or with `visible`
+ * non-deferred and registered visible (as real control-plane tools are).
+ * `as` is the spelling the call uses.
+ */
+const resolveOne = (name: string, opts: ResolveOpts & { as?: string } = {}) =>
+  resolveVia([target(name, !opts.visible)], opts.as ?? name, opts);
+
+/** A refusal: `errorType` plus an error whose message contains `text`. */
+const refusal = (errorType: ToolErrorType, text: string) => ({
+  errorType,
+  error: expect.objectContaining({ message: expect.stringContaining(text) }),
+});
+/** A resolution to the tool `name`, with exactly `args` when given. */
+const resolvedTo = (name: string, args?: Record<string, unknown>) => ({
+  tool: expect.objectContaining({ name }),
+  ...(args !== undefined ? { arguments: args } : {}),
+});
+const NOT_AVAILABLE = refusal(
+  ToolErrorType.EXECUTION_DENIED,
+  'not available to this agent',
+);
+
 describe('ToolCallTool', () => {
   it('is an always-visible bridge with a stable generic schema', () => {
     const tool = new ToolCallTool();
@@ -99,18 +153,14 @@ describe('ToolCallTool', () => {
   it.each([ToolNames.TOOL_CALL, ToolNames.TOOL_SEARCH])(
     'rejects recursive bridge target %s',
     async (name) => {
-      const result = await resolveDeferredToolCall(makeRegistry(), {
-        name,
-        arguments: {},
-      });
+      const result = await resolveVia([], name);
 
       expect(result).toMatchObject({
         errorType: ToolErrorType.INVALID_TOOL_PARAMS,
       });
-      // Pin the dedicated recursive-bridge guard by its message: the
-      // downstream isDeferredAndHidden rejection also returns
-      // INVALID_TOOL_PARAMS, so asserting on errorType alone would stay
-      // green if this guard were deleted (wenshao verification note 2).
+      // Pin the recursive-bridge guard by its message: the downstream
+      // isDeferredAndHidden rejection also returns INVALID_TOOL_PARAMS, so
+      // errorType alone survives deleting it (wenshao verification note 2).
       if ('error' in result) {
         expect(
           result.error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
@@ -121,45 +171,30 @@ describe('ToolCallTool', () => {
   );
 
   it('rejects an unknown deferred target', async () => {
-    const result = await resolveDeferredToolCall(makeRegistry(), {
-      name: 'missing_tool',
-      arguments: {},
-    });
-
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.TOOL_NOT_REGISTERED,
-      // Pin the present-side remedy: with tool_search registered the denial
-      // must point back at discovery. Mutation check: dropping the remedy
-      // suffix turns this red (the absent-side twin is pinned by the
-      // 'does not suggest tool_search...' case below) — round-5 deferred item.
-      error: expect.objectContaining({
-        message: expect.stringContaining('Run tool_search again'),
-      }),
-    });
+    // Present-side remedy: with tool_search registered the denial points back
+    // at discovery; dropping the suffix turns this red (absent-side twin:
+    // 'does not suggest tool_search...' below) — round-5 deferred item.
+    expect(await resolveVia([], 'missing_tool')).toMatchObject(
+      refusal(ToolErrorType.TOOL_NOT_REGISTERED, 'Run tool_search again'),
+    );
   });
 
   it('resolves a target case-insensitively like the discovery half', async () => {
-    // tool_search's select: resolves requested names case-insensitively;
-    // the invocation half must agree, otherwise a schema reviewed as e.g.
-    // `Read_File` is not callable through the bridge (round-5 deferred
-    // item). Mutation check: removing the case-insensitive fallback in
-    // resolveDeferredToolCall turns this red.
-    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
-    const result = await resolveDeferredToolCall(
-      makeRegistry([target], new Set([target.name])),
-      { name: 'Deferred_Target', arguments: { foo: 'baz' } },
-    );
-
-    expect(result).toMatchObject({
-      tool: expect.objectContaining({ name: 'deferred_target' }),
-      arguments: { foo: 'baz' },
+    // tool_search's select: resolves names case-insensitively; the invocation
+    // half must agree, or a schema reviewed as e.g. `Read_File` is not
+    // callable through the bridge (round-5 deferred item). Removing the
+    // case-insensitive fallback in resolveDeferredToolCall turns this red.
+    const result = await resolveOne('deferred_target', {
+      as: 'Deferred_Target',
+      args: { foo: 'baz' },
     });
+
+    expect(result).toMatchObject(resolvedTo('deferred_target', { foo: 'baz' }));
   });
 
   describe('names that differ only by case (#11321)', () => {
-    const first = new MockTool({ name: 'deferred_target', shouldDefer: true });
-    const second = new MockTool({ name: 'Deferred_Target', shouldDefer: true });
-    const hidden = new Set([first.name, second.name]);
+    const first = target('deferred_target');
+    const second = target('Deferred_Target');
 
     it.each([
       ['deferred_target', [first, second]],
@@ -172,31 +207,21 @@ describe('ToolCallTool', () => {
         // tool_search's select: applies the same rule, so the tool invoked is
         // the one whose schema was reviewed. The old last-match rule read
         // getAllToolNames() order, which ensureTool changes.
-        const result = await resolveDeferredToolCall(
-          makeRegistry([...order], hidden),
-          { name: requestedName, arguments: {} },
-        );
+        const result = await resolveVia([...order], requestedName);
 
-        expect(result).toMatchObject({
-          tool: expect.objectContaining({ name: requestedName }),
-        });
+        expect(result).toMatchObject(resolvedTo(requestedName));
       },
     );
 
     it('refuses a spelling that matches several tools only by case', async () => {
-      const result = await resolveDeferredToolCall(
-        makeRegistry([first, second], hidden),
-        { name: 'DEFERRED_TARGET', arguments: {} },
-      );
+      const result = await resolveVia([first, second], 'DEFERRED_TARGET');
 
-      expect(result).toMatchObject({
-        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-        error: expect.objectContaining({
-          message: expect.stringContaining(
-            'matches more than one registered tool by case (Deferred_Target, deferred_target)',
-          ),
-        }),
-      });
+      expect(result).toMatchObject(
+        refusal(
+          ToolErrorType.INVALID_TOOL_PARAMS,
+          'matches more than one registered tool by case (Deferred_Target, deferred_target)',
+        ),
+      );
       expect(result).not.toHaveProperty('tool');
     });
   });
@@ -207,141 +232,92 @@ describe('ToolCallTool', () => {
       properties: { id: { type: 'number' } },
       required: ['id'],
     };
-    const reviewedTool = new MockTool({
-      name: 'mcp_lookup',
-      description: 'Look up a record by id.',
-      shouldDefer: true,
-      params: reviewedParams,
-    });
+    const lookup = (description: string, params: object) =>
+      new MockTool({
+        name: 'mcp_lookup',
+        description,
+        shouldDefer: true,
+        params,
+      });
+    const reviewedTool = lookup('Look up a record by id.', reviewedParams);
     const reviewed = new Map([
       [reviewedTool.name, deferredDeclarationFingerprint(reviewedTool)],
     ]);
+    const resolveReviewed = (tool: MockTool, name: string, args = {}) =>
+      resolveVia([tool], name, { args, reviewed });
+    const CHANGED = {
+      ...refusal(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+        'changed since tool_search last returned it. Run tool_search with select:mcp_lookup',
+      ),
+      targetName: 'mcp_lookup',
+    };
 
     it('invokes the tool when its declaration is unchanged', async () => {
-      const result = await resolveDeferredToolCall(
-        makeRegistry([reviewedTool], new Set([reviewedTool.name]), {
-          reviewed,
-        }),
-        { name: 'mcp_lookup', arguments: { id: 1 } },
-      );
+      const result = await resolveReviewed(reviewedTool, 'mcp_lookup', {
+        id: 1,
+      });
 
       expect(result).toMatchObject({ arguments: { id: 1 } });
     });
 
     it('invokes the tool when only its description changed', async () => {
-      // Shipped deferred tools rebuild the model-facing description from
-      // mutable state on every `schema` access: WebSearchTool interpolates the
-      // current month/year (web-search.ts:997-1004) and ReadFileTool rebuilds
-      // from the model's CURRENT input modalities (read-file.ts:628-637). Both
-      // are intentional so a long-lived `qwen serve`/ACP process is not stale,
-      // so prose drift across a month boundary or a `/model` switch must not
-      // arm a false "changed" refusal against an identical parameter contract.
-      const sameContractNewProse = new MockTool({
-        name: 'mcp_lookup',
-        description: 'Look up a record by id. (October 2026)',
-        shouldDefer: true,
-        params: reviewedParams,
-      });
-      const result = await resolveDeferredToolCall(
-        makeRegistry(
-          [sameContractNewProse],
-          new Set([sameContractNewProse.name]),
-          { reviewed },
-        ),
-        { name: 'mcp_lookup', arguments: { id: 1 } },
+      // Deferred tools rebuild their description on every `schema` access
+      // (WebSearchTool: current month/year, web-search.ts:997-1004;
+      // ReadFileTool: CURRENT input modalities, read-file.ts:628-637) so a
+      // long-lived `qwen serve`/ACP process is not stale. Prose drift across a
+      // month boundary or a `/model` switch must not arm a false "changed"
+      // refusal against an identical parameter contract.
+      const sameContractNewProse = lookup(
+        'Look up a record by id. (October 2026)',
+        reviewedParams,
       );
-
-      expect(result).toMatchObject({
-        tool: expect.objectContaining({ name: 'mcp_lookup' }),
-        arguments: { id: 1 },
+      const result = await resolveReviewed(sameContractNewProse, 'mcp_lookup', {
+        id: 1,
       });
+
+      expect(result).toMatchObject(resolvedTo('mcp_lookup', { id: 1 }));
     });
 
     it('refuses and asks for a fresh review when the parameter contract changed', async () => {
-      const replaced = new MockTool({
-        name: 'mcp_lookup',
-        description: 'Delete a record by id.',
-        shouldDefer: true,
-        params: {
-          type: 'object',
-          properties: { id: { type: 'string' }, purge: { type: 'boolean' } },
-          required: ['id'],
-        },
+      const replaced = lookup('Delete a record by id.', {
+        type: 'object',
+        properties: { id: { type: 'string' }, purge: { type: 'boolean' } },
+        required: ['id'],
       });
-      const result = await resolveDeferredToolCall(
-        makeRegistry([replaced], new Set([replaced.name]), { reviewed }),
-        { name: 'mcp_lookup', arguments: { id: 1 } },
-      );
+      const result = await resolveReviewed(replaced, 'mcp_lookup', { id: 1 });
 
-      expect(result).toMatchObject({
-        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-        targetName: 'mcp_lookup',
-        error: expect.objectContaining({
-          message: expect.stringContaining(
-            'changed since tool_search last returned it. Run tool_search with select:mcp_lookup',
-          ),
-        }),
-      });
+      expect(result).toMatchObject(CHANGED);
     });
 
     it('refuses a case-variant spelling of a tool whose resolved declaration changed', async () => {
-      // tool_search records under the REGISTERED name (tool.name) while models
-      // invoke with a spelling that needs resolution, so the lookup must key on
-      // the resolved target. Keying it on the raw envelope name instead finds no
-      // recorded review and executes arguments written against the stale schema.
-      const replaced = new MockTool({
-        name: 'mcp_lookup',
-        description: 'Delete a record by id.',
-        shouldDefer: true,
-        params: {
-          type: 'object',
-          properties: { id: { type: 'string' } },
-          required: ['id'],
-        },
+      // tool_search records under the REGISTERED name while models may call a
+      // spelling that needs resolution, so the lookup keys on the resolved
+      // target; keyed on the raw envelope name it finds no review and runs
+      // arguments written against the stale schema.
+      const replaced = lookup('Delete a record by id.', {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
       });
-      const result = await resolveDeferredToolCall(
-        makeRegistry([replaced], new Set([replaced.name]), { reviewed }),
-        { name: 'MCP_LOOKUP', arguments: { id: 1 } },
-      );
+      const result = await resolveReviewed(replaced, 'MCP_LOOKUP', { id: 1 });
 
-      expect(result).toMatchObject({
-        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-        targetName: 'mcp_lookup',
-        error: expect.objectContaining({
-          message: expect.stringContaining(
-            'changed since tool_search last returned it. Run tool_search with select:mcp_lookup',
-          ),
-        }),
-      });
+      expect(result).toMatchObject(CHANGED);
     });
 
     it('keeps invoking a tool never reviewed in this session by name', async () => {
-      const unreviewed = new MockTool({ name: 'cron_list', shouldDefer: true });
-      const result = await resolveDeferredToolCall(
-        makeRegistry([unreviewed], new Set([unreviewed.name]), { reviewed }),
-        { name: 'cron_list', arguments: {} },
-      );
+      const result = await resolveReviewed(target('cron_list'), 'cron_list');
 
-      expect(result).toMatchObject({
-        tool: expect.objectContaining({ name: 'cron_list' }),
-      });
+      expect(result).toMatchObject(resolvedTo('cron_list'));
     });
   });
 
   it('rejects case-variant spellings of the bridge tools themselves', async () => {
     // Companion pin: the case-insensitive fallback must feed the recursive
     // guard, so `Tool_Call` cannot dodge it via casing.
-    const result = await resolveDeferredToolCall(makeRegistry(), {
-      name: 'Tool_Call',
-      arguments: {},
-    });
-
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.INVALID_TOOL_PARAMS,
-      error: expect.objectContaining({
-        message: expect.stringContaining('cannot invoke bridge tool'),
-      }),
-    });
+    expect(await resolveVia([], 'Tool_Call')).toMatchObject(
+      refusal(ToolErrorType.INVALID_TOOL_PARAMS, 'cannot invoke bridge tool'),
+    );
   });
 
   it('returns a tool error when a deferred target factory throws', async () => {
@@ -356,67 +332,49 @@ describe('ToolCallTool', () => {
         name: 'broken_tool',
         arguments: {},
       }),
-    ).resolves.toMatchObject({
-      errorType: ToolErrorType.TOOL_NOT_REGISTERED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('factory failed'),
-      }),
-    });
+    ).resolves.toMatchObject(
+      refusal(ToolErrorType.TOOL_NOT_REGISTERED, 'factory failed'),
+    );
   });
 
   it('enforces subagent plan-tool restrictions', async () => {
-    // The real enter_plan_mode is constructed shouldDefer=false
-    // (enterPlanMode.ts: "always visible so explicit plan-mode requests
-    // work"), so the fixture is registered NOT hidden: the denial must come
-    // from the plan-lifecycle check running AHEAD of the isDeferredAndHidden
-    // gate. Mutation checks: removing the plan-lifecycle check, or moving the
-    // exclusion check ahead of it, turns this red (round-5 review, R5-2/R5-4).
-    const target = new MockTool({
-      name: ToolNames.ENTER_PLAN_MODE,
-      shouldDefer: false,
+    // The real enter_plan_mode is shouldDefer=false (enterPlanMode.ts: "always
+    // visible so explicit plan-mode requests work"), so the fixture is NOT
+    // hidden: the denial must come from the plan-lifecycle check AHEAD of the
+    // isDeferredAndHidden gate. Removing that check, or moving the exclusion
+    // check ahead of it, turns this red (round-5 review, R5-2/R5-4).
+    const result = await resolveOne(ToolNames.ENTER_PLAN_MODE, {
+      visible: true,
+      worker: true,
     });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(makeRegistry([target], new Set()), {
-        name: target.name,
-        arguments: {},
-      }),
-    );
 
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      // Pin the dedicated plan-lifecycle message: the exclusion check also
-      // returns EXECUTION_DENIED for plan tools (they are exclusion-set
-      // members via SUBAGENT_PLAN_LIFECYCLE_TOOLS), so asserting errorType
-      // alone would stay green if the plan-lifecycle check were deleted or
-      // shadowed by the exclusion check and the behavior-shaping guidance
-      // silently changed to the generic denial (round-5 review, R5-4).
-      error: expect.objectContaining({
-        message: expect.stringContaining('Plan mode is owned by the caller'),
-      }),
-    });
+    // Pin the plan-lifecycle message: the exclusion check also denies plan
+    // tools (members via SUBAGENT_PLAN_LIFECYCLE_TOOLS), so errorType alone
+    // survives that check being deleted or shadowed and the guidance silently
+    // becoming the generic denial (round-5 review, R5-4).
+    expect(result).toMatchObject(
+      refusal(
+        ToolErrorType.EXECUTION_DENIED,
+        'Plan mode is owned by the caller',
+      ),
+    );
   });
 
   it('rejects a leader-only target bridged from a subagent context', async () => {
     // Registered NOT hidden: real control-plane tools are not deferred, so
     // the denial must come from the leader-only check ahead of the deferred
     // gate (round-5 review, R5-2).
-    const target = new MockTool({
-      name: ToolNames.TEAM_PLAN_APPROVAL,
-      shouldDefer: false,
+    const result = await resolveOne(ToolNames.TEAM_PLAN_APPROVAL, {
+      visible: true,
+      worker: true,
     });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(makeRegistry([target], new Set()), {
-        name: target.name,
-        arguments: {},
-      }),
-    );
 
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('only available to the team leader'),
-      }),
-    });
+    expect(result).toMatchObject(
+      refusal(
+        ToolErrorType.EXECUTION_DENIED,
+        'only available to the team leader',
+      ),
+    );
   });
 
   it.each([
@@ -430,32 +388,20 @@ describe('ToolCallTool', () => {
     'rejects an exclusion-set target (%s) bridged from a subagent context',
     async (toolName) => {
       // R4-1: the bridge must not bypass the subagent tool-exclusion set.
-      // prepareTools enforces it at declaration level, but the bridge makes
-      // invocation independent of declaration — without carrying the exclusion
-      // set over, a wildcard/general-purpose subagent could discover and
-      // execute control-plane tools it must not reach (team_delete, workflow).
-      // Mutation check: removing the exclusion check in resolveDeferredToolCall
-      // must turn this test red.
-      //
-      // Real shape witness (round-5 review, R5-2): the real team_delete/
-      // workflow/send_message default shouldDefer to false, so the fixture is
-      // registered NOT hidden — the denial must come from the exclusion check
-      // running ahead of the isDeferredAndHidden gate, not the factually-wrong
+      // prepareTools enforces it for declarations, but the bridge decouples
+      // invocation from declaration, so without it a wildcard/general-purpose
+      // subagent could run control-plane tools (team_delete, workflow).
+      // Removing the check in resolveDeferredToolCall must turn this red.
+      // Real shape (round-5 review, R5-2): these tools default shouldDefer to
+      // false, so the fixture is NOT hidden and the denial must come from the
+      // exclusion check ahead of the isDeferredAndHidden gate, not the wrong
       // "already visible — call it directly" INVALID_TOOL_PARAMS.
-      const target = new MockTool({ name: toolName, shouldDefer: false });
-      const result = await runWithAgentContext('worker', () =>
-        resolveDeferredToolCall(makeRegistry([target], new Set()), {
-          name: target.name,
-          arguments: {},
-        }),
-      );
-
-      expect(result).toMatchObject({
-        errorType: ToolErrorType.EXECUTION_DENIED,
-        error: expect.objectContaining({
-          message: expect.stringContaining('not available to this agent'),
-        }),
+      const result = await resolveOne(toolName, {
+        visible: true,
+        worker: true,
       });
+
+      expect(result).toMatchObject(NOT_AVAILABLE);
     },
   );
 
@@ -521,14 +467,6 @@ describe('ToolCallTool', () => {
     // R5-3: with only shared-set members tested, replacing the selector with
     // either raw set survives the suite. A teammate's send_message must
     // RESOLVE (teammate set allows it) while team_delete stays denied.
-    const allowed = new MockTool({
-      name: ToolNames.SEND_MESSAGE,
-      shouldDefer: true,
-    });
-    const denied = new MockTool({
-      name: ToolNames.TEAM_DELETE,
-      shouldDefer: true,
-    });
     const identity = {
       agentId: 'worker@test-team',
       agentName: 'worker',
@@ -537,31 +475,16 @@ describe('ToolCallTool', () => {
     };
 
     const resolved = await runWithTeammateIdentity(identity, () =>
-      resolveDeferredToolCall(
-        makeRegistry([allowed], new Set([allowed.name])),
-        {
-          name: allowed.name,
-          arguments: { to: 'lead' },
-        },
-      ),
+      resolveOne(ToolNames.SEND_MESSAGE, { args: { to: 'lead' } }),
     );
-    expect(resolved).toMatchObject({
-      tool: expect.objectContaining({ name: ToolNames.SEND_MESSAGE }),
-      arguments: { to: 'lead' },
-    });
+    expect(resolved).toMatchObject(
+      resolvedTo(ToolNames.SEND_MESSAGE, { to: 'lead' }),
+    );
 
     const refused = await runWithTeammateIdentity(identity, () =>
-      resolveDeferredToolCall(makeRegistry([denied], new Set([denied.name])), {
-        name: denied.name,
-        arguments: {},
-      }),
+      resolveOne(ToolNames.TEAM_DELETE),
     );
-    expect(refused).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('not available to this agent'),
-      }),
-    });
+    expect(refused).toMatchObject(NOT_AVAILABLE);
   });
 
   it('resolves a non-excluded deferred target from inside an agent frame', async () => {
@@ -569,18 +492,12 @@ describe('ToolCallTool', () => {
     // blanket "agent frame denies everything" — the bridge exists precisely
     // so subagents can reach deferred tools (MCP, tools.eager-demoted).
     // Mutation check: an agent-frame blanket denial turns this red.
-    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(makeRegistry([target], new Set([target.name])), {
-        name: target.name,
-        arguments: { foo: 'bar' },
-      }),
-    );
-
-    expect(result).toMatchObject({
-      tool: expect.objectContaining({ name: target.name }),
-      arguments: { foo: 'bar' },
+    const result = await resolveOne('deferred_target', {
+      args: { foo: 'bar' },
+      worker: true,
     });
+
+    expect(result).toMatchObject(resolvedTo('deferred_target', { foo: 'bar' }));
   });
 
   it('does not apply the exclusion gate to the leader session', async () => {
@@ -589,18 +506,9 @@ describe('ToolCallTool', () => {
     // team_delete to deferred+hidden still bridges it legitimately.
     // Mutation check: removing the isSubagentLikeExecutionContext() gate (or
     // applying the check unconditionally) turns this red.
-    const target = new MockTool({
-      name: ToolNames.TEAM_DELETE,
-      shouldDefer: true,
-    });
-    const result = await resolveDeferredToolCall(
-      makeRegistry([target], new Set([target.name])),
-      { name: target.name, arguments: {} },
-    );
+    const result = await resolveOne(ToolNames.TEAM_DELETE);
 
-    expect(result).toMatchObject({
-      tool: expect.objectContaining({ name: ToolNames.TEAM_DELETE }),
-    });
+    expect(result).toMatchObject(resolvedTo(ToolNames.TEAM_DELETE));
   });
 
   it('rejects an exclusion-set target bridged via its legacy alias', async () => {
@@ -609,131 +517,78 @@ describe('ToolCallTool', () => {
     // 'agent' (tool-names.ts), and 'agent' is in both exclusion sets.
     // Mutation check: keying the membership test on invocation.params.name
     // turns this red ('task' is not a set member and would resolve).
-    const target = new MockTool({ name: ToolNames.AGENT, shouldDefer: true });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(makeRegistry([target], new Set([target.name])), {
-        name: 'task',
-        arguments: {},
-      }),
-    );
-
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('not available to this agent'),
-      }),
+    const result = await resolveOne(ToolNames.AGENT, {
+      as: 'task',
+      worker: true,
     });
+
+    expect(result).toMatchObject(NOT_AVAILABLE);
   });
 
   it('re-admits agent to a subagent while the nesting depth permits', async () => {
-    // Round-5 review, R4-1 follow-up: prepareTools depth-gates AgentTool
-    // (re-admitted while spawnBlockReason === null); the bridge must mirror
-    // that re-admission instead of flatly denying. A depth-0 subagent under
-    // the default max depth 5 may spawn to level 2, so a deferred+hidden
-    // agent resolves. Mutation check: the flat exclusion (no AGENT special
-    // case) turns this red.
-    const target = new MockTool({ name: ToolNames.AGENT, shouldDefer: true });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(
-        makeRegistry([target], new Set([target.name])),
-        { name: target.name, arguments: { prompt: 'nested' } },
-        { maxSubagentDepth: DEFAULT_MAX_SUBAGENT_DEPTH },
-      ),
-    );
-
-    expect(result).toMatchObject({
-      tool: expect.objectContaining({ name: ToolNames.AGENT }),
-      arguments: { prompt: 'nested' },
+    // Round-5 review, R4-1 follow-up: prepareTools re-admits AgentTool while
+    // spawnBlockReason === null and the bridge must mirror that, not flatly
+    // deny: a depth-0 subagent under the default max depth 5 may spawn to
+    // level 2, so a deferred+hidden agent resolves. The flat exclusion (no
+    // AGENT special case) turns this red.
+    const result = await resolveOne(ToolNames.AGENT, {
+      args: { prompt: 'nested' },
+      worker: true,
+      depth: { maxSubagentDepth: DEFAULT_MAX_SUBAGENT_DEPTH },
     });
+
+    expect(result).toMatchObject(
+      resolvedTo(ToolNames.AGENT, { prompt: 'nested' }),
+    );
   });
 
   it('still denies agent when the nesting depth is exhausted', async () => {
     // Companion to the re-admission case: with maxSubagentDepth=1 a depth-0
     // subagent's child would sit at level 2 > 1, so the denial stands.
-    const target = new MockTool({ name: ToolNames.AGENT, shouldDefer: true });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(
-        makeRegistry([target], new Set([target.name])),
-        { name: target.name, arguments: {} },
-        { maxSubagentDepth: 1 },
-      ),
-    );
-
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('not available to this agent'),
-      }),
+    const result = await resolveOne(ToolNames.AGENT, {
+      worker: true,
+      depth: { maxSubagentDepth: 1 },
     });
+
+    expect(result).toMatchObject(NOT_AVAILABLE);
   });
 
   it('fails closed on agent when maxSubagentDepth is unknown', async () => {
     // The raw-set floor: without the configured depth threaded through, the
     // bridge cannot verify the spawn policy and keeps AgentTool excluded —
     // the documented fail-closed floor of EXCLUDED_TOOLS_FOR_SUBAGENTS.
-    const target = new MockTool({ name: ToolNames.AGENT, shouldDefer: true });
-    const result = await runWithAgentContext('worker', () =>
-      resolveDeferredToolCall(makeRegistry([target], new Set([target.name])), {
-        name: target.name,
-        arguments: {},
-      }),
-    );
+    const result = await resolveOne(ToolNames.AGENT, { worker: true });
 
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('not available to this agent'),
-      }),
-    });
+    expect(result).toMatchObject(NOT_AVAILABLE);
   });
 
   it('resolves a hidden deferred target while both bridge tools are registered', async () => {
-    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
-    const result = await resolveDeferredToolCall(
-      makeRegistry([target], new Set([target.name])),
-      { name: target.name, arguments: { foo: 'bar' } },
-    );
-
-    expect(result).toMatchObject({
-      tool: expect.objectContaining({ name: target.name }),
-      arguments: { foo: 'bar' },
+    const result = await resolveOne('deferred_target', {
+      args: { foo: 'bar' },
     });
+
+    expect(result).toMatchObject(resolvedTo('deferred_target', { foo: 'bar' }));
   });
 
   it('rejects a hidden deferred target when tool_search is not registered', async () => {
-    const target = new MockTool({ name: 'deferred_target', shouldDefer: true });
-    const result = await resolveDeferredToolCall(
-      makeRegistry([target], new Set([target.name]), {
-        withToolSearch: false,
-      }),
-      { name: target.name, arguments: {} },
-    );
-
-    expect(result).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining('unreachable'),
-      }),
+    const result = await resolveOne('deferred_target', {
+      withToolSearch: false,
     });
+
+    expect(result).toMatchObject(
+      refusal(ToolErrorType.EXECUTION_DENIED, 'unreachable'),
+    );
   });
 
   it('rejects a registered-but-undeclared target via the capability gate', async () => {
-    // R27-3: isToolDeclared (the registry's capability gate — propose_goal is
-    // registered but undeclared until a turn with a responder) is enforced by
-    // every other reachability reader, including tool_search's select:; the
-    // invocation half must agree, or tool_call executes a target the model
-    // was never offered. Mutation check: removing the isToolDeclared gate in
-    // resolveDeferredToolCall turns this red. The same stub leaves ordinary
-    // declared tools resolvable, so the gate cannot degrade into a blanket
-    // denial.
-    const gated = new MockTool({
-      name: ToolNames.PROPOSE_GOAL,
-      shouldDefer: true,
-    });
-    const ordinary = new MockTool({
-      name: 'deferred_target',
-      shouldDefer: true,
-    });
+    // R27-3: every other reachability reader (tool_search's select: too)
+    // enforces isToolDeclared, the capability gate (propose_goal is registered
+    // but undeclared until a turn with a responder); the invocation half must
+    // agree, or tool_call runs a target the model was never offered. Removing
+    // the gate turns this red; ordinary declared tools stay resolvable, so it
+    // cannot degrade into a blanket denial.
+    const gated = target(ToolNames.PROPOSE_GOAL);
+    const ordinary = target('deferred_target');
     const registry = makeRegistry(
       [gated, ordinary],
       new Set([gated.name, ordinary.name]),
@@ -744,28 +599,21 @@ describe('ToolCallTool', () => {
       name: gated.name,
       arguments: {},
     });
-    expect(denied).toMatchObject({
-      errorType: ToolErrorType.EXECUTION_DENIED,
-      error: expect.objectContaining({
-        message: expect.stringContaining(ToolNames.PROPOSE_GOAL),
-      }),
-    });
+    expect(denied).toMatchObject(
+      refusal(ToolErrorType.EXECUTION_DENIED, ToolNames.PROPOSE_GOAL),
+    );
 
     const allowed = await resolveDeferredToolCall(registry, {
       name: ordinary.name,
       arguments: { foo: 'bar' },
     });
-    expect(allowed).toMatchObject({
-      tool: expect.objectContaining({ name: ordinary.name }),
-      arguments: { foo: 'bar' },
-    });
+    expect(allowed).toMatchObject(resolvedTo(ordinary.name, { foo: 'bar' }));
   });
 
   it('does not suggest tool_search for unknown targets when it is absent', async () => {
-    const result = await resolveDeferredToolCall(
-      makeRegistry([], new Set(), { withToolSearch: false }),
-      { name: 'missing_tool', arguments: {} },
-    );
+    const result = await resolveVia([], 'missing_tool', {
+      withToolSearch: false,
+    });
 
     expect(result).toMatchObject({
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,

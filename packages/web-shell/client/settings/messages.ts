@@ -301,6 +301,11 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.modelFallbacks': '模型回退',
   'settings.description.modelFallbacks':
     '主模型遇到容量错误（429/503/529）时按序尝试的回退模型 ID 列表（逗号分隔，最多 3 个）。例如“qwen-plus,qwen-turbo”。可用 CLI --fallback-model 设置。',
+  'settings.label.model.chatCompression.strategy': '上下文压缩方式',
+  'settings.description.model.chatCompression.strategy':
+    '选择摘要压缩，或使用本地笔记与历史记录。重启 Qwen Code 后生效。',
+  'settings.option.model.chatCompression.strategy.summary': '摘要',
+  'settings.option.model.chatCompression.strategy.notes': '笔记与历史',
   'settings.label.model.reasoningEffort': '推理强度',
   'settings.description.model.reasoningEffort':
     '推理型模型的思考强度，对所有服务商生效。用 /effort 设置。各服务商会把它映射并收敛到当前模型支持的范围（例如 Gemini 最高到“high”；Anthropic 会裁掉模型不支持的档位）。留空则使用模型/服务商默认值。',
@@ -393,6 +398,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.agentTeam': '启用 Agent Team',
   'settings.description.experimental.agentTeam':
     '启用 agent 团队协作工具（实验性）。启用后，模型可以创建 agent 团队，并用 team_create、team_delete、send_message、task_create、task_update 和 task_list 协调工作。也可通过 QWEN_CODE_ENABLE_AGENT_TEAM=1 环境变量启用。',
+  'settings.label.experimental.agentCollaboration': '启用 Agent 协作',
+  'settings.description.experimental.agentCollaboration':
+    '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',

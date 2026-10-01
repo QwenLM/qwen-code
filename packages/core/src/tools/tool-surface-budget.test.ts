@@ -41,6 +41,7 @@ import { RequestShutdownTool } from './request-shutdown.js';
 import { RipGrepTool } from './ripGrep.js';
 import { SearchMemoryTool } from './search-memory.js';
 import { SendMessageTool } from './send-message.js';
+import { SessionContextTool } from './session-context.js';
 import { SkillTool } from './skill.js';
 import { TaskCreateTool } from './task-create.js';
 import { TaskListTool } from './task-list.js';
@@ -162,7 +163,18 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['grep_search (ripgrep)', (c) => new RipGrepTool(c), 1_200],
   ['list_directory', (c) => new LSTool(c), 1_100],
   ['grep_search (fallback)', (c) => new GrepTool(c), 1_050],
+  [
+    'session_history',
+    (c) => new SessionContextTool(c, ToolNames.SESSION_HISTORY),
+    950,
+  ],
+  [
+    'session_notes',
+    (c) => new SessionContextTool(c, ToolNames.SESSION_NOTES),
+    900,
+  ],
   ['glob', (c) => new GlobTool(c), 800],
+  ['new_context', (c) => new SessionContextTool(c, ToolNames.NEW_CONTEXT), 750],
   ['task_create', (c) => new TaskCreateTool(c), 650],
   ['tool_call', () => new ToolCallTool(), 650],
   ['team_plan_approval', (c) => new TeamPlanApprovalTool(c), 600],
@@ -171,6 +183,11 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
   ['display_image', (c) => new DisplayImageTool(c), 550],
   ['get_goal', (c) => new GetGoalTool(c), 550],
   ['task_list', (c) => new TaskListTool(c), 500],
+  [
+    'get_context_remaining',
+    (c) => new SessionContextTool(c, ToolNames.GET_CONTEXT_REMAINING),
+    400,
+  ],
   ['team_delete', (c) => new TeamDeleteTool(c), 300],
 ];
 
@@ -200,6 +217,8 @@ const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
 ];
 
 /** Built-in tool names that are measured elsewhere, or not measurable here. */
+const COLLABORATION_ONLY =
+  'agent-collaboration runs only (config.ts gates on the flag plus session sourceType); never on the general request surface';
 const NOT_BUDGETED_HERE: Readonly<Record<string, string>> = {
   [ToolNames.AGENT]: 'agent-description-budget.test.ts',
   [ToolNames.SHELL]: 'shell.test.ts, per shell shape',
@@ -208,6 +227,15 @@ const NOT_BUDGETED_HERE: Readonly<Record<string, string>> = {
     'code mode declares exec with every bound tool folded into its description (tool-registry.ts), not this class schema',
   [ToolNames.STRUCTURED_OUTPUT]: 'its schema is the user-supplied JSON Schema',
   [ToolNames.MEMORY]: 'legacy name, no longer registered as a tool',
+  // The six thread tools exist only inside agent-collaboration runs — the
+  // config.ts gate requires the opt-in flag AND session sourceType 'agent' —
+  // so they never join the general request surface this file budgets.
+  [ToolNames.THREAD_POST]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_WAIT]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_BLOCK]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_REVIEW]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_CREATE]: COLLABORATION_ONLY,
+  [ToolNames.THREAD_READ]: COLLABORATION_ONLY,
 };
 
 /** Media-policy tools are generated from settings, so their size is not fixed. */

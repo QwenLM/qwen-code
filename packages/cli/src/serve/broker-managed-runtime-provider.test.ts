@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ManagedToolInvocationReference } from '@qwen-code/qwen-code-core';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
   BrokerManagedRuntimeProvider,
   MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
@@ -72,6 +73,103 @@ describe('BrokerManagedRuntimeProvider', () => {
     ).toThrow('token is required');
   });
 
+  it.each([
+    ['File path must be absolute', ' File path must be absolute'],
+    ['', ''],
+    ['x'.repeat(4096), ` ${'x'.repeat(4096)}`],
+    ['x'.repeat(4097), ''],
+    ['invalid\0reason', ''],
+    [null, ''],
+  ])('preserves bounded Broker error reasons (%#)', async (reason, suffix) => {
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: vi.fn<typeof fetch>(async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return body['operation']
+          ? new Response(
+              JSON.stringify({
+                code: 'managed_runtime_tool_invalid',
+                error: reason,
+                retryable: false,
+              }),
+              { status: 400, headers: { 'content-type': 'application/json' } },
+            )
+          : json(envelope({ acquired: true }));
+      }),
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(client.manifest()).rejects.toMatchObject({
+      message: `Managed Runtime Broker returned HTTP 400.${suffix}`,
+      status: 400,
+      code: 'managed_runtime_tool_invalid',
+      retryable: false,
+    });
+  });
+
+  it.each<[Record<string, unknown>, string]>([
+    [{ error: 'untrusted' }, 'application/json'],
+    [{ code: '', error: 'untrusted', retryable: false }, 'application/json'],
+    [
+      {
+        code: 'managed_runtime_tool_invalid',
+        error: 'untrusted',
+        retryable: 'false',
+      },
+      'application/json',
+    ],
+    [
+      {
+        code: 'managed_runtime_tool_invalid',
+        error: 'untrusted',
+        retryable: false,
+        extra: true,
+      },
+      'application/json',
+    ],
+    [
+      {
+        code: 'managed_runtime_tool_invalid',
+        error: 'untrusted',
+        retryable: false,
+      },
+      'text/plain',
+    ],
+    ...['not an object', null, []].map(
+      (details): [Record<string, unknown>, string] => [
+        {
+          code: 'managed_runtime_tool_invalid',
+          error: 'untrusted',
+          retryable: false,
+          details,
+        },
+        'application/json',
+      ],
+    ),
+  ])(
+    'does not display a reason outside the Broker error envelope (%#)',
+    async (body, contentType) => {
+      const provider = new BrokerManagedRuntimeProvider({
+        baseUrl: 'http://127.0.0.1:8080',
+        token: 'secret',
+        fetch: vi.fn<typeof fetch>(
+          async () =>
+            new Response(JSON.stringify(body), {
+              status: 400,
+              headers: { 'content-type': contentType },
+            }),
+        ),
+      });
+      await expect(
+        provider.getToolV2Client(request(), { harnessSessionId }),
+      ).rejects.toMatchObject({
+        message: 'Managed Runtime Broker returned HTTP 400.',
+      });
+    },
+  );
+
   it('acquires by Harness identity without forwarding tenant or workspace claims', async () => {
     const bodies: unknown[] = [];
     const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
@@ -129,7 +227,7 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(acquisitions).toBe(2);
     await provider.release(runtimeSessionId, request(), { terminal: true });
     const requests = fetchImpl.mock.calls.length;
-    expect(() => client.manifest()).toThrow('closed');
+    await expect(client.manifest()).rejects.toThrow('closed');
     await expect(client.execute(reference())).rejects.toThrow('closed');
     expect(fetchImpl).toHaveBeenCalledTimes(requests);
     provider.dispose();
@@ -202,7 +300,7 @@ describe('BrokerManagedRuntimeProvider', () => {
           envelope({
             result: {
               tools: [],
-              capabilityDigest: 'a'.repeat(64),
+              capabilityDigest: managedToolDigest([]),
               policyRevision: 'policy-1',
             },
           }),
@@ -319,6 +417,128 @@ describe('BrokerManagedRuntimeProvider', () => {
     ).rejects.toThrow('response identity changed');
   });
 
+  it('rejects foreign control identities before contacting the Broker', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json(envelope({ acquired: true })),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    const {
+      invocationId: _invocationId,
+      argsDigest: _argsDigest,
+      ...identity
+    } = reference();
+    await expect(
+      client.beginTurn({ ...identity, sessionId: harnessSessionId }),
+    ).rejects.toThrow('Session identity conflicts');
+    await expect(
+      client.confirmation({ ...reference(), sessionId: harnessSessionId }),
+    ).rejects.toThrow('Session identity conflicts');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    provider.dispose();
+  });
+
+  it('rejects malformed execution references before reserving them', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      json(envelope({ acquired: true })),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await expect(
+      client.execute({ ...reference(), argsDigest: 'b'.repeat(63) }),
+    ).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    provider.dispose();
+  });
+
+  it('requires a null acknowledgement for void provider controls', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (url) =>
+      json(
+        envelope(
+          String(url).endsWith('tool-sessions:acquire')
+            ? { acquired: true }
+            : {},
+        ),
+      ),
+    );
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    const {
+      invocationId: _invocationId,
+      argsDigest: _argsDigest,
+      ...identity
+    } = reference();
+    await expect(client.beginTurn(identity)).rejects.toThrow();
+    provider.dispose();
+  });
+
+  it('reserves replacement prepared invocations independently', async () => {
+    const keys: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith('tool-sessions:acquire'))
+        return json(envelope({ acquired: true }));
+      if (target.endsWith(':release'))
+        return json(envelope({ released: true }));
+      const body = JSON.parse(String(init?.body)) as { idempotencyKey: string };
+      keys.push(body.idempotencyKey);
+      return json(
+        envelope({
+          executionCallId: `execution-${keys.length}`,
+          status: {
+            state: 'prepared',
+            cancelRequested: false,
+            lastSeq: 0,
+            firstAvailableSeq: 1,
+            progressGap: false,
+            progress: [],
+          },
+        }),
+      );
+    });
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: fetchImpl,
+    });
+    const client = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await client.prepareExecution!(reference());
+    await client.prepareExecution!({
+      ...reference(),
+      invocationId: 'replacement-invocation',
+    });
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(2);
+    await provider.release(runtimeSessionId, request());
+    const reconnected = await provider.getToolV2Client(request(), {
+      harnessSessionId,
+    });
+    await reconnected.prepareExecution!(reference());
+    expect(keys).toHaveLength(3);
+    expect(keys[2]).toBe(keys[0]);
+    provider.dispose();
+  });
+
   it('inspects a durable execution without recreating a process-local Runtime entry', async () => {
     let unknown = false;
     const status = {
@@ -372,6 +592,38 @@ describe('BrokerManagedRuntimeProvider', () => {
       outcome: 'unknown',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the reason of an error that carries details, such as a terminal answer', async () => {
+    const provider = new BrokerManagedRuntimeProvider({
+      baseUrl: 'http://127.0.0.1:8080',
+      token: 'secret',
+      fetch: vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: 'Runtime execution outcome is permanently unknown.',
+              code: 'runtime_broker_execution_unknown',
+              retryable: false,
+              details: {
+                terminal: true,
+                reason: 'runtime_lost',
+                executionCallId: 'abandoned',
+              },
+            }),
+            { status: 409, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    });
+    await expect(
+      provider.getToolV2Client(request(), { harnessSessionId }),
+    ).rejects.toMatchObject({
+      message:
+        'Managed Runtime Broker returned HTTP 409. Runtime execution outcome is permanently unknown.',
+      code: 'runtime_broker_execution_unknown',
+      retryable: false,
+      abandoned: true,
+    });
   });
 
   it.each([

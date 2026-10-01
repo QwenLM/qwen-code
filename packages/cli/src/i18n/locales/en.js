@@ -245,6 +245,12 @@ export default {
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.ThreadPost': 'toolDisplayName.ThreadPost',
+  'toolDisplayName.ThreadWait': 'toolDisplayName.ThreadWait',
+  'toolDisplayName.ThreadBlock': 'toolDisplayName.ThreadBlock',
+  'toolDisplayName.ThreadReview': 'toolDisplayName.ThreadReview',
+  'toolDisplayName.ThreadCreate': 'toolDisplayName.ThreadCreate',
+  'toolDisplayName.ThreadRead': 'toolDisplayName.ThreadRead',
   'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
   'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
   'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
@@ -450,6 +456,8 @@ export default {
     'Rewinding does not affect files edited manually or via shell commands.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
