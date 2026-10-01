@@ -113,16 +113,12 @@ function runUpdate(
   installDir: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
+  args: string[] = ['update', '--target-version', TARGET_VERSION],
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      [
-        path.join(installDir, 'lib', 'cli.js'),
-        'update',
-        '--target-version',
-        TARGET_VERSION,
-      ],
+      [path.join(installDir, 'lib', 'cli.js'), ...args],
       { cwd, env, stdio: 'pipe' },
     );
     let stdout = '';
@@ -179,6 +175,17 @@ describe.skipIf(process.platform === 'win32')(
         path.join(installDir, 'lib', 'locales'),
         { recursive: true },
       );
+      // Real archives ship lib/package.json (DIST_ALLOWED_ENTRIES in
+      // create-standalone-package.js); without it updateCheck's discovery
+      // short-circuits on "package metadata unavailable" and no npm view
+      // subprocess ever runs, leaving the registry sink unexercised.
+      fs.writeFileSync(
+        path.join(installDir, 'lib', 'package.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          version: INSTALLED_VERSION,
+        }),
+      );
       fs.writeFileSync(
         path.join(installDir, 'manifest.json'),
         JSON.stringify({
@@ -203,7 +210,8 @@ describe.skipIf(process.platform === 'win32')(
     // outranks the fixture's language setting, so an ambient zh turns the
     // asserted English output Chinese; and QWEN_HOME must point at the
     // isolated home or the child refills cleared variables from the host's
-    // settings.json.
+    // settings.json. The proxy pins stop an npm discovery subprocess from
+    // routing around the loopback sink through a host-exported proxy.
     function updateEnv(): NodeJS.ProcessEnv {
       const releasePort = (releaseServer.address() as { port: number }).port;
       const sinkPort = (registrySink.address() as { port: number }).port;
@@ -218,6 +226,11 @@ describe.skipIf(process.platform === 'win32')(
         QWEN_REQUIRE_SIGNATURE: '',
         QWEN_CODE_LANG: 'en',
         QWEN_HOME: path.join(homeDir, '.qwen'),
+        HTTPS_PROXY: '',
+        https_proxy: '',
+        HTTP_PROXY: '',
+        http_proxy: '',
+        NO_PROXY: '',
       };
     }
 
@@ -271,6 +284,15 @@ describe.skipIf(process.platform === 'win32')(
       fs.writeFileSync(
         path.join(fixtureDir, 'qwen-code', 'lib', 'cli.js'),
         `// fixture ${TARGET_VERSION}\n`,
+      );
+      // Official archives ship an executable launcher
+      // (create-standalone-package.js writeShims), and the updater's identity
+      // gate rejects archives without one before activation.
+      fs.mkdirSync(path.join(fixtureDir, 'qwen-code', 'bin'));
+      fs.writeFileSync(
+        path.join(fixtureDir, 'qwen-code', 'bin', 'qwen'),
+        '#!/bin/sh\nexec "$(dirname "$0")/../node/bin/node" "$(dirname "$0")/../lib/cli.js" "$@"\n',
+        { mode: 0o755 },
       );
       const archivePath = path.join(tmpRoot, 'release.tar.gz');
       await execFileAsync('tar', [
@@ -382,6 +404,10 @@ describe.skipIf(process.platform === 'win32')(
         fs.readFileSync(path.join(installDir, 'lib', 'cli.js'), 'utf-8'),
       ).toBe(`// fixture ${TARGET_VERSION}\n`);
 
+      // The activated tree still classifies as a managed standalone install:
+      // the launcher the classifier requires survived the update.
+      expect(fs.existsSync(path.join(installDir, 'bin', 'qwen'))).toBe(true);
+
       // The previous installation is retained for rollback.
       const oldManifest = JSON.parse(
         fs.readFileSync(`${installDir}.old/manifest.json`, 'utf-8'),
@@ -402,6 +428,27 @@ describe.skipIf(process.platform === 'win32')(
           `/v${TARGET_VERSION}/SHA256SUMS.sig`,
         ]).toContain(url);
       }
+    }, 180_000);
+
+    it('reaches the registry sink when checking without a target version', async () => {
+      // Control for the zero-registry-access assertions above: discovery
+      // spawns `npm view`, the sink fails it, and the run reports the check
+      // failure. Without lib/package.json or the registry pin this run would
+      // fail before (or without) ever reaching the sink, which is exactly
+      // the blind spot the control exists to catch.
+      const result = await runUpdate(
+        installDir,
+        path.join(tmpRoot, 'cwd'),
+        updateEnv(),
+        ['update'],
+      );
+
+      expect(
+        result.code,
+        `update check unexpectedly succeeded\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      ).not.toBe(0);
+      expect(result.stderr).toContain('Failed to check for updates');
+      expect(registryRequests.length).toBeGreaterThan(0);
     }, 180_000);
 
     it('re-runs the update cleanly after a previous activation', async () => {

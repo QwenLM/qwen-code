@@ -429,10 +429,10 @@ describe('standalone-update', () => {
       );
     });
 
-    function expectInstallationPreserved() {
+    function expectInstallationPreserved(expectedManifest = originalManifest) {
       expect(
         fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
-      ).toBe(originalManifest);
+      ).toBe(expectedManifest);
       expect(fs.existsSync(`${standaloneDir}.old`)).toBe(false);
       expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
         false,
@@ -451,16 +451,22 @@ describe('standalone-update', () => {
         reportedVersion?: string;
         manifestVersion?: string;
         nameless?: boolean;
+        target?: string;
+        runtime?: string;
+        binless?: boolean;
       } = {},
     ) {
       const fixture = path.join(tempDir, 'fixture');
       fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
       const manifest: Record<string, string> = {
-        target: 'linux-x64',
+        target: options.target ?? 'linux-x64',
         version: options.manifestVersion ?? '1.2.3',
       };
       if (!options.nameless) {
         manifest['name'] = '@qwen-code/qwen-code';
+      }
+      if (options.runtime) {
+        manifest['runtime'] = options.runtime;
       }
       fs.writeFileSync(
         path.join(fixture, 'qwen-code', 'manifest.json'),
@@ -481,6 +487,16 @@ describe('standalone-update', () => {
           { mode: 0o755 },
         );
         fs.writeFileSync(path.join(fixture, 'qwen-code', 'lib', 'cli.js'), '');
+        // Official archives ship an executable launcher; `binless` stages a
+        // repacked archive without one.
+        if (!options.binless) {
+          fs.mkdirSync(path.join(fixture, 'qwen-code', 'bin'));
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'bin', 'qwen'),
+            '#!/bin/sh\nexec "$(dirname "$0")/../node/bin/node" "$(dirname "$0")/../lib/cli.js" "$@"\n',
+            { mode: 0o755 },
+          );
+        }
       }
       const archivePath = path.join(tempDir, 'release.tar.gz');
       await tar.c({ gzip: true, cwd: fixture, file: archivePath }, [
@@ -530,18 +546,31 @@ describe('standalone-update', () => {
     );
 
     it.skipIf(process.platform === 'win32')(
-      'preserves the installation when the archive manifest version disagrees with the requested version',
+      'preserves the installation when the smoke-tested binary reports a build-metadata version',
       async () => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-        await serveArchive({ runnable: true, manifestVersion: '9.9.9' });
+        // semver.valid accepts build metadata; only the strict regex rejects
+        // it, so this case pins that half of the version predicate here.
+        await serveArchive({ reportedVersion: '1.2.3+build.5' });
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
         ).rejects.toThrow(
-          'Archive manifest does not match the requested release',
+          'Smoke test failed: unexpected version output "1.2.3+build.5"',
         );
         expectInstallationPreserved();
       },
     );
+
+    it('preserves the installation when the archive manifest version disagrees with the requested version', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      await serveArchive({ runnable: true, manifestVersion: '9.9.9' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved();
+    });
 
     it('preserves the installation when the archive manifest omits the package name', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
@@ -556,7 +585,53 @@ describe('standalone-update', () => {
       expectInstallationPreserved();
     });
 
-    it.each(['01.2.3', '1.2.3-01'])(
+    it('preserves the installation when the archive targets a different platform', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // Runnable so that only the target predicate can reject the archive.
+      await serveArchive({ runnable: true, target: 'darwin-arm64' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved();
+    });
+
+    it('preserves the installation when the archive runtime differs from the installed runtime', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      const bunManifest = JSON.stringify({
+        target: 'linux-x64',
+        version: '0.1.0',
+        runtime: 'bun',
+      });
+      fs.writeFileSync(path.join(standaloneDir, 'manifest.json'), bunManifest);
+      // A Node-flavor archive must not replace an OpenTUI-preview (bun)
+      // install: every other check passes because flavors share name,
+      // target and version.
+      await serveArchive({ runnable: true, runtime: 'node' });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved(bunManifest);
+    });
+
+    it('preserves the installation when the archive ships no launcher', async () => {
+      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+      // Runnable but without bin/qwen: isStandaloneInstallDir would stop
+      // recognising the tree after activation, and the PATH wrapper would
+      // point at a file that does not exist.
+      await serveArchive({ runnable: true, binless: true });
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
+      expectInstallationPreserved();
+    });
+
+    it.each(['01.2.3', '1.2.3-01', '1.2.3+build.5'])(
       'preserves the installation when the archive manifest version is not valid semver: %s',
       async (manifestVersion) => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
@@ -672,22 +747,31 @@ describe('standalone-update', () => {
           manifestVersion: '0.0.9',
           reportedVersion: '0.0.9',
         });
+        // Nested two levels so the bin wrapper the update writes lands in
+        // <tempDir>/bin instead of leaking into the shared os.tmpdir().
+        const installed = path.join(tempDir, 'install', 'qwen-code');
+        fs.mkdirSync(installed, { recursive: true });
+        fs.writeFileSync(
+          path.join(installed, 'manifest.json'),
+          originalManifest,
+        );
 
-        await expect(
-          performStandaloneUpdate(standaloneDir, '0.0.9'),
-        ).resolves.toBe('done');
+        await expect(performStandaloneUpdate(installed, '0.0.9')).resolves.toBe(
+          'done',
+        );
 
         expect(
           JSON.parse(
-            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+            fs.readFileSync(path.join(installed, 'manifest.json'), 'utf8'),
           ),
         ).toMatchObject({ version: '0.0.9' });
         expect(
           fs.readFileSync(
-            path.join(`${standaloneDir}.old`, 'manifest.json'),
+            path.join(`${installed}.old`, 'manifest.json'),
             'utf8',
           ),
         ).toBe(originalManifest);
+        expect(fs.existsSync(path.join(tempDir, 'bin', 'qwen'))).toBe(true);
       },
     );
 
@@ -700,22 +784,27 @@ describe('standalone-update', () => {
           manifestVersion: '0.1.0',
           reportedVersion: '0.1.0',
         });
+        const installed = path.join(tempDir, 'install', 'qwen-code');
+        fs.mkdirSync(installed, { recursive: true });
+        fs.writeFileSync(
+          path.join(installed, 'manifest.json'),
+          originalManifest,
+        );
 
-        await expect(
-          performStandaloneUpdate(standaloneDir, '0.1.0'),
-        ).resolves.toBe('done');
+        await expect(performStandaloneUpdate(installed, '0.1.0')).resolves.toBe(
+          'done',
+        );
 
         // The version alone cannot distinguish a reinstall from a no-op; the
         // archive's lib/cli.js only exists if the replacement really ran.
-        expect(fs.existsSync(path.join(standaloneDir, 'lib', 'cli.js'))).toBe(
-          true,
-        );
+        expect(fs.existsSync(path.join(installed, 'lib', 'cli.js'))).toBe(true);
         expect(
           fs.readFileSync(
-            path.join(`${standaloneDir}.old`, 'manifest.json'),
+            path.join(`${installed}.old`, 'manifest.json'),
             'utf8',
           ),
         ).toBe(originalManifest);
+        expect(fs.existsSync(path.join(tempDir, 'bin', 'qwen'))).toBe(true);
       },
     );
 
@@ -742,7 +831,9 @@ describe('standalone-update', () => {
 
         const failed = await prepareStandaloneUpdate(standaloneDir, '1.2.3');
         pending = failed;
-        await expect(failed.activate()).rejects.toThrow('Smoke test failed');
+        await expect(failed.activate()).rejects.toThrow(
+          'Archive manifest does not match the requested release',
+        );
         expect(cachedArchives()).toHaveLength(0);
         expectInstallationPreserved();
 
@@ -763,11 +854,14 @@ describe('standalone-update', () => {
         vi.stubEnv('QWEN_UPDATE_BASE_URL', configured);
         await serveArchive();
 
-        // The verified archive deliberately has no runtime, so it cannot replace
-        // the fixture installation even if the download and checksum succeed.
+        // The verified archive deliberately has no runtime, so it cannot
+        // replace the fixture installation even if the download and checksum
+        // succeed: the manifest gate requires the standalone runtime layout.
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
-        ).rejects.toThrow('Smoke test failed: node binary not found');
+        ).rejects.toThrow(
+          'Archive manifest does not match the requested release',
+        );
 
         expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
           `${baseUrl}/v1.2.3/${filename}`,
@@ -792,7 +886,9 @@ describe('standalone-update', () => {
 
       await expect(
         performStandaloneUpdate(standaloneDir, 'v1.2.3'),
-      ).rejects.toThrow('Smoke test failed: node binary not found');
+      ).rejects.toThrow(
+        'Archive manifest does not match the requested release',
+      );
       expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
         `${baseUrl}/v1.2.3/${filename}`,
         `${baseUrl}/v1.2.3/SHA256SUMS`,

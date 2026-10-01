@@ -17,6 +17,7 @@ import * as tar from 'tar';
 import type { ReadEntry } from 'tar';
 import semver from 'semver';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { hasStandaloneRuntimeLayout } from '../utils/installationInfo.js';
 import { loadUndici } from '../utils/load-undici.js';
 import { verifySignature } from '../utils/standalone-update-verify.js';
 import { updateEventEmitter } from '../utils/updateEventEmitter.js';
@@ -40,10 +41,17 @@ const VALID_TARGETS = new Set([
 
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
+// True for a concrete version this updater can route: no dist-tags, no build
+// metadata, no leading zeros. normalizeVersion throws on anything else, so
+// every comparison against an untrusted version must gate on this first.
+function isConcreteVersion(version: string): boolean {
+  return SEMVER_RE.test(version) && semver.valid(version) !== null;
+}
+
 type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
 export function normalizeVersion(version: string): string {
-  if (!SEMVER_RE.test(version) || !semver.valid(version)) {
+  if (!isConcreteVersion(version)) {
     throw new Error(`Invalid version format: ${version}`);
   }
   return version.startsWith('v') ? version : `v${version}`;
@@ -499,7 +507,7 @@ async function smokeTest(
     );
   }
   const version = stdout.trim();
-  if (!SEMVER_RE.test(version) || !semver.valid(version)) {
+  if (!isConcreteVersion(version)) {
     throw new Error(
       `Smoke test failed: unexpected version output "${version}"`,
     );
@@ -1107,10 +1115,13 @@ function detectTarget(): string {
 function standaloneUpdateTarget(standaloneDir: string): {
   target: string;
   version?: string;
+  runtime: string;
   isFirstTimeMigration: boolean;
 } {
   let target: string;
   let version: string | undefined;
+  // writeManifest defaults a missing runtime to 'node'; mirror that here.
+  let runtime = 'node';
   let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
@@ -1118,9 +1129,11 @@ function standaloneUpdateTarget(standaloneDir: string): {
     const manifest = JSON.parse(manifestRaw) as {
       target?: string;
       version?: string;
+      runtime?: string;
     };
     target = manifest.target ?? detectTarget();
     version = manifest.version;
+    runtime = manifest.runtime ?? 'node';
   } else if (fs.existsSync(standaloneDir)) {
     // Directory exists but has no manifest — not a managed Qwen install.
     // Refuse to overwrite to avoid data loss.
@@ -1133,7 +1146,7 @@ function standaloneUpdateTarget(standaloneDir: string): {
     isFirstTimeMigration = true;
   }
   validateTarget(target);
-  return { target, version, isFirstTimeMigration };
+  return { target, version, runtime, isFirstTimeMigration };
 }
 
 export async function prepareStandaloneUpdate(
@@ -1198,8 +1211,11 @@ async function applyStandaloneUpdate(
 ): Promise<'done' | 'deferred'> {
   const versionPath = normalizeVersion(newVersion);
   const baseUrl = preparedArchive ? undefined : resolveUpdateBaseUrl();
-  const { target, isFirstTimeMigration } =
-    standaloneUpdateTarget(standaloneDir);
+  const {
+    target,
+    runtime: installedRuntime,
+    isFirstTimeMigration,
+  } = standaloneUpdateTarget(standaloneDir);
   const filename = archiveFilename(target);
   const parentDir = path.dirname(standaloneDir);
 
@@ -1286,24 +1302,27 @@ async function applyStandaloneUpdate(
     }
     // The smoke test pins the version the executable reports; the manifest
     // is what isStandaloneInstallDir reads back to keep recognising the
-    // directory as a managed standalone install (name and target) and what
-    // the prepared-update gate compares against (version) — installation
-    // does not rewrite it, so the archive must carry all three. The version
-    // predicates mirror normalizeVersion's own so the comparison can only
-    // evaluate, never throw.
+    // directory as a managed standalone install — installation does not
+    // rewrite it, so the archive must carry the requested release's name,
+    // target, version and runtime flavor, plus the executable layout
+    // (bin/qwen, node/bin/node) that classification requires.
     const manifest = JSON.parse(fs.readFileSync(newManifestPath, 'utf-8')) as {
       name?: unknown;
       target?: unknown;
       version?: unknown;
+      runtime?: unknown;
     };
     const manifestVersion = manifest.version;
+    const manifestRuntime =
+      typeof manifest.runtime === 'string' ? manifest.runtime : 'node';
     if (
       manifest.name !== '@qwen-code/qwen-code' ||
       manifest.target !== target ||
       typeof manifestVersion !== 'string' ||
-      !SEMVER_RE.test(manifestVersion) ||
-      !semver.valid(manifestVersion) ||
-      normalizeVersion(manifestVersion) !== normalizeVersion(newVersion)
+      !isConcreteVersion(manifestVersion) ||
+      normalizeVersion(manifestVersion) !== normalizeVersion(newVersion) ||
+      manifestRuntime !== installedRuntime ||
+      !hasStandaloneRuntimeLayout(newInstallDir, target)
     ) {
       throw new Error(
         `Archive manifest does not match the requested release: ${JSON.stringify(manifest)}`,

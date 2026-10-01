@@ -433,25 +433,38 @@ function isStandaloneInstallDir(installDir: string): boolean {
       return false;
     }
 
-    const qwenBin =
-      process.platform === 'win32'
-        ? path.join(installDir, 'bin', 'qwen.cmd')
-        : path.join(installDir, 'bin', 'qwen');
-    const nodeBin =
-      process.platform === 'win32'
-        ? path.join(installDir, 'node', 'node.exe')
-        : path.join(installDir, 'node', 'bin', 'node');
-
-    return (
-      fs.existsSync(qwenBin) &&
-      fs.existsSync(nodeBin) &&
-      isStandaloneRuntimeFile(qwenBin) &&
-      isStandaloneRuntimeFile(nodeBin)
-    );
+    return hasStandaloneRuntimeLayout(installDir, manifest.target);
   } catch (err) {
     debugLogger.error('Standalone detection failed:', installDir, err);
     return false;
   }
+}
+
+/**
+ * Checks the executable layout every standalone archive must ship: the
+ * launcher and the bundled runtime for the given target. Keyed on the target
+ * rather than the host platform so update verification can validate an
+ * archive before activation regardless of where the check runs.
+ */
+export function hasStandaloneRuntimeLayout(
+  installDir: string,
+  target: string,
+): boolean {
+  const isWindowsTarget = target.startsWith('win');
+  const qwenBin = path.join(
+    installDir,
+    'bin',
+    isWindowsTarget ? 'qwen.cmd' : 'qwen',
+  );
+  const nodeBin = isWindowsTarget
+    ? path.join(installDir, 'node', 'node.exe')
+    : path.join(installDir, 'node', 'bin', 'node');
+  return (
+    fs.existsSync(qwenBin) &&
+    fs.existsSync(nodeBin) &&
+    isStandaloneRuntimeFile(qwenBin) &&
+    isStandaloneRuntimeFile(nodeBin)
+  );
 }
 
 function isStandaloneTargetForCurrentPlatform(target: string): boolean {
