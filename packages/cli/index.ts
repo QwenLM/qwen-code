@@ -8,15 +8,17 @@
 
 // --- Global Entry Point ---
 
-if (
-  process.argv.length === 3 &&
-  process.argv[2] === '--workspace-recovery-worker'
-) {
-  void import('./src/serve/workspace-recovery-worker.js').then(
-    ({ runWorkspaceRecoveryWorker }) => runWorkspaceRecoveryWorker(),
+// Java's private stdio worker bypasses the normal CLI module graph.
+const startup =
+  process.argv.length === 3 && process.argv[2] === '--workspace-recovery-worker'
+    ? import('./src/serve/workspace-recovery-worker.js').then(
+        ({ runWorkspaceRecoveryWorker }) => runWorkspaceRecoveryWorker(),
+      )
+    : import('./src/cli.js').then(({ runCliEntryPoint }) => runCliEntryPoint());
+
+void startup.catch((error: unknown) => {
+  process.stderr.write(
+    `${error instanceof Error ? error.message : 'CLI startup failed.'}\n`,
+    () => process.exit(1),
   );
-} else {
-  void import('./src/cli.js').then(({ runCliEntryPoint }) =>
-    runCliEntryPoint(),
-  );
-}
+});

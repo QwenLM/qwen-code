@@ -99,6 +99,12 @@ request/response at a time over pipes; record/object bounds follow the existing
 protocol limits. Child failure or an unexpected response cannot seal an
 operation. No public writer token or production Harness is created.
 
+The npm wrapper dispatches the private worker before importing the normal CLI
+module graph. The bundled executable enters the CLI bootstrap directly and
+therefore retains its own dispatch. The private flag is for Java's stdio child,
+not a public help command. Wrapper import or startup failures report a diagnostic
+and exit nonzero regardless of Node's unhandled-rejection policy.
+
 The packaged maintenance artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`.
 Run `java -jar <artifact> capture <request.json> --offline-confirmed`,
 `java -jar <artifact> verify <request.json> --offline-confirmed`, or

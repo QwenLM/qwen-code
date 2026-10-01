@@ -76,6 +76,11 @@ Java 负责 JDBC、作用域校验、来源快照、分页、冲突检查和条�
 JSON 请求和响应，record/object 大小沿用已有协议限制。子进程失败或异常响应
 不能封存操作；不创建公开 writer token 或生产 Harness。
 
+npm wrapper 在导入普通 CLI 模块图前分派私有 Worker；打包可执行文件直接进入
+CLI bootstrap，因此保留自己的分派。私有 flag 用于 Java 的 stdio 子进程，不属于
+公开 help 命令。Wrapper 导入或启动失败会输出诊断并非零退出，不依赖 Node 的
+未处理 rejection 策略。
+
 打包后的维护制品为 `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`。
 运行 `java -jar <artifact> capture <request.json> --offline-confirmed`、
 `java -jar <artifact> verify <request.json> --offline-confirmed` 或

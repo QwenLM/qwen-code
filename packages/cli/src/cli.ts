@@ -510,6 +510,7 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
   if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
     const { runWorkspaceRecoveryWorker } = await import(
       './serve/workspace-recovery-worker.js'
