@@ -116,23 +116,23 @@ materializer 用数据库租约和 fencing token 领取有界工作。首片验�
 
 历史回执按每个保留 journal 的固定高水位分批扫描，插入同样的源身份；按 Session 恢复进度，不能用可能漏掉并发事务的全局时间戳游标。兼容扫描必须覆盖普通 `not_started` 回执，仅扫描 `REFERENCED` publication 不完整。先接入新回执捕获，再启动回填。原 binding/resource 缺失时阻塞该源，不猜测映射。
 
-将回填高水位和上次扫描的私有 journal revision 保存到小型 per-Session checkpoint，每页源记录插入与 checkpoint 推进同事务提交。这是扫描进度，不是第三张资源引用表；不能用公开 Snapshot 的 `covered_sequence` 充当此游标。
+将回填高水位和上次扫描的私有 journal revision 保存到小型 per-Session checkpoint，每次 tick 最多推进 50 个 journal 事务，每个事务的源记录插入与 checkpoint 推进同事务提交，后续无效记录不会回滚之前的进度。这是扫描进度，不是第三张资源引用表；不能用公开 Snapshot 的 `covered_sequence` 充当此游标。
 
 结果可以晚于 `turn.completed` 才公开。reducer 把它应用到已结算 Item，不重启 Turn，也不产生第二个终态事件。消费者可接受后续 revision，但当前切片不产生第二次投影。回执 sequence、公开事件 sequence、manifest revision 和投影 revision 是不同计数器。
 
 ### 评审后续：实际队列与读取边界
 
-当前回执与 extension record 共用一次解析，在 journal 事务内批量查找和插入源；公开投影关闭时仍记录源。新建 journal head 从历史回填已完成的状态开始。O3 之前的 head 进入带索引的 pending 队列；每页同事务推进固定高水位 checkpoint，在排空或隔离后清除 pending 标记。认领分别读取 PENDING、RETRYABLE 与过期 LEASED 的一个可用索引头，避免排序整个可用积压。当前认领租约过期后进入有界退避；已被替代的 generation 不能修改新认领。
+当前回执与 extension record 共用一次解析，在 journal 事务内批量查找和插入源；公开投影关闭时仍记录源。新建 journal head 从历史回填已完成的状态开始。O3 之前的 head 进入带索引的 pending 队列；每个 journal 事务同事务推进固定高水位 checkpoint，在排空或隔离后清除 pending 标记。认领分别读取 PENDING、RETRYABLE 与过期 LEASED 的一个可用索引头，避免排序整个可用积压。当前认领租约过期后进入有界退避；已被替代的 generation 不能修改新认领。
 
 投影使用独立单线程调度器，已有 Harness、生命周期和消息任务保留默认调度器。READY 源不会再次认领：当前实现仅产生一次 projection_revision 1。重放消费者保留单调 revision 检查以拒绝重复或过期事件；第二次策略投影需要前文所述另行评审的表示 migration。公开 delivery pending 为预留值；已接受回执目前只公开 committed 或 blocked。缺失公开 Turn 映射有独立的 unsupported 诊断。
 
 元数据每请求评估一次当前原始读取策略，按 Session scope 批量查询 publication 可用性。内容读取仍在每个 chunk 边界重新检查权限与 catalog。初始 guard 和 range 边界先于元数据闭包读取。固定 revision 的读取仍验证完整不可变元数据闭包；本次不减少闭包验证，也不节流当前权限检查。审计区分 denied、rejected、interrupted 与 completed，包含成功的零字节流。
 
-预览源窗口最多 8 KiB，另受 UTF-8 字节和 200 行上限约束。WebShell 保留包含 lookback bytes 的四页缓存，同 Session 刷新期间保持输出面板打开，在当前 Turn 新增结果行前结算 assistant 文本。临时 429/503 内容读取按 Retry-After 对同一请求最多重试一次，等待上限五秒，超过上限的 Retry-After 直接返回错误而不提前重试；取消也会终止等待。每次普通测试运行都比较 Java 产生的契约 fixture，仅规范化时间戳和随机分配的 event ID。
+预览源窗口最多 8 KiB，另受 UTF-8 字节和 200 行上限约束。自动预览复用每个 artifact 已校验的元数据句柄；若校验相交分段需要读取超过 1 MiB，则省略预览。artifact 元数据与用户主动请求的内容仍可读取。WebShell 保留包含 lookback bytes 的四页缓存，同 Session 刷新期间保持输出面板打开，在当前 Turn 新增结果行前结算 assistant 文本。临时 429/503 内容读取按 Retry-After 对同一请求最多重试一次，等待上限五秒，超过上限的 Retry-After 直接返回错误而不提前重试；取消也会终止等待。每次普通测试运行都比较 Java 产生的契约 fixture，仅规范化时间戳和随机分配的 event ID。
 
 ## 5. 公开契约与事件恢复
 
-canonical OpenAPI 继续作为 Java 契约测试和 WebShell 类型生成的来源。本改动变基到 main 后，以 OpenAPI v1.24.0 和 Flyway V23 实现下列七条路由及其 handler/一致性测试。版本编号已对齐合入的 O2 migration 和并行契约工作，包括 [#12998](https://github.com/QwenLM/qwen-code/pull/12998) 。
+canonical OpenAPI 继续作为 Java 契约测试和 WebShell 类型生成的来源。本改动变基到 main 后，以 OpenAPI v1.27.0 和 Flyway V26 实现下列七条路由及其 handler/一致性测试。版本编号已对齐合入的 O2 migration 和并行契约工作，包括 [#12998](https://github.com/QwenLM/qwen-code/pull/12998) 。
 
 | 入口           | 操作                                                                                  |
 | -------------- | ------------------------------------------------------------------------------------- |

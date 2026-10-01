@@ -302,6 +302,8 @@ it('rejects every documented malformed result identity/status arm', () => {
     { projection_revision: 1.5 },
     { projection_revision: 9007199254740992 },
     { execution_status: 'unknown' },
+    { execution_status: ['success'] },
+    { execution_status: ['cancelled'] },
     { artifacts: {} },
   ];
   for (const change of invalid) {
@@ -326,3 +328,24 @@ it('rejects every documented malformed result identity/status arm', () => {
     ).toEqual([]);
   }
 });
+
+it.each([{}, 'abc', { truncated: true }, { text: 1 }])(
+  'ignores malformed preview text %j',
+  (preview) => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_result_updated', {
+          itemId: 'item-1',
+          result: { ...result, session_id: 's1', turn_id: 'p1', preview },
+        }),
+      ],
+      '[truncated]',
+    );
+    const tools = messages.flatMap((message) =>
+      'tools' in message ? (message.tools ?? []) : [],
+    );
+    expect(tools).toHaveLength(1);
+    expect(tools[0].rawOutput).toBeUndefined();
+    expect(tools[0].toolResult).toBeDefined();
+  },
+);

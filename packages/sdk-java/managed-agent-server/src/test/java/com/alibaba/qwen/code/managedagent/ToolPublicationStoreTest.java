@@ -785,6 +785,12 @@ class ToolPublicationStoreTest {
                 "stdout", 3, 0)).isEmpty();
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 2, 2)).hasMessageContaining("Invalid publication range");
+        var absentManifest = manifestRef.deepCopy();
+        ((ObjectNode) absentManifest).put("resourceId", "absent-manifest");
+        for (long[] range : new long[][] {{-1, 1}, {0, -1}, {0, 16 * 1024 * 1024 + 1}}) {
+            assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, absentManifest,
+                    identity, "stdout", range[0], (int) range[1])).hasMessageContaining("Invalid publication range");
+        }
         if (quarantineBeforeProjection) {
             jdbc.update("UPDATE qwen_tool_publication SET quarantined = TRUE WHERE publication_id = 'pub-1'");
         }
@@ -905,7 +911,7 @@ class ToolPublicationStoreTest {
 
     private ManagedToolResultStore.Artifact preparePublicReader() {
         keepApiFixture = true;
-        publishesImmutableSegmentAndResourceUnderOriginalAuthorization();
+        publishesImmutableSegmentAndResourceUnderOriginalAuthorization("intact");
         return publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts().stream()
                 .filter(artifact -> artifact.streamId().equals("stdout")).findFirst().orElseThrow();
     }
@@ -1665,7 +1671,8 @@ class ToolPublicationStoreTest {
                         sessions,
                         bucket,
                         Duration.ofMinutes(2),
-                        Duration.ofSeconds(30));
+                        Duration.ofSeconds(30),
+                        VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
         byte[] segment = "A".repeat(total / 2).getBytes(StandardCharsets.UTF_8);
         data.publishSegment(
@@ -1930,10 +1937,128 @@ class ToolPublicationStoreTest {
 
     private static ApiFixture apiFixture(ToolPublicationStoreTest fixture) {
         fixture.keepApiFixture = true;
-        fixture.publishesImmutableSegmentAndResourceUnderOriginalAuthorization();
+        fixture.publishesImmutableSegmentAndResourceUnderOriginalAuthorization("intact");
         return new ApiFixture(fixture.jdbc, fixture.manager, fixture.publicResults, fixture.publicSessions,
                 fixture.apiReader, fixture.projectionProperties, publicationPolicy(), fixture.publicWorkspaces,
                 fixture.apiPublications);
+    }
+
+    @Test
+    void skipsAutomaticPreviewWhenItsSegmentVerificationExceedsOneMiB() throws Exception {
+        var fixture = largeApiFixture(2 * 1024 * 1024 + 2);
+        var row = fixture.jdbc().queryForMap("SELECT work_state, descriptor_json FROM managed_agent_tool_result");
+        assertThat(row.get("work_state")).isEqualTo("READY");
+        var descriptor = JSON.readTree((String) row.get("descriptor_json"));
+        assertThat(descriptor.has("preview")).isFalse();
+        assertThat(descriptor.path("artifacts")).hasSize(2);
+    }
+
+    @Test
+    void verifiesEachArtifactOnceIncludingItsPreviewRead() {
+        var fixture = apiFixture();
+        var data = org.mockito.Mockito.spy(fixture.publications());
+        var beans = new org.springframework.beans.factory.support.StaticListableBeanFactory();
+        beans.addBean("publication", data);
+        var provider = beans.getBeanProvider(ToolPublicationDataStore.class);
+        fixture.jdbc().update("DELETE FROM managed_agent_artifact");
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state='PENDING', next_attempt_at=0");
+        new ManagedToolResultProjector(fixture.results(), fixture.jdbc(), provider,
+                new ManagedArtifactReader(provider), fixture.policy(), fixture.properties())
+                .project(fixture.results().claim().orElseThrow());
+        assertThat(fixture.jdbc().queryForObject("SELECT work_state FROM managed_agent_tool_result", String.class))
+                .isEqualTo("READY");
+        assertThat(org.mockito.Mockito.mockingDetails(data).getInvocations().stream()
+                .filter(call -> call.getMethod().getName().equals("openReferencedStream")).count()).isEqualTo(2);
+    }
+
+    @Test
+    void quarantineDuringCommitRetriesThenPublishesOnlyMetadata() throws Exception {
+        var fixture = apiFixture();
+        fixture.jdbc().update("DELETE FROM managed_agent_artifact");
+        fixture.jdbc().update("DELETE FROM managed_agent_event");
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state='PENDING', next_attempt_at=0");
+        var policy = org.mockito.Mockito.spy(fixture.policy());
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.doAnswer(call -> {
+            if (calls.incrementAndGet() == 2) {
+                fixture.jdbc().update("UPDATE qwen_tool_publication SET quarantined=TRUE");
+            }
+            return fixture.policy().version();
+        }).when(policy).version();
+        var beans = new org.springframework.beans.factory.support.StaticListableBeanFactory();
+        beans.addBean("publication", fixture.publications());
+        var provider = beans.getBeanProvider(ToolPublicationDataStore.class);
+        new ManagedToolResultProjector(fixture.results(), fixture.jdbc(), provider, fixture.reader(), policy,
+                fixture.properties()).project(fixture.results().claim().orElseThrow());
+        assertThat(fixture.jdbc().queryForMap("SELECT work_state, failure_code FROM managed_agent_tool_result"))
+                .containsEntry("work_state", "RETRYABLE").containsEntry("failure_code", "tool_result_source_unavailable");
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM managed_agent_artifact", Long.class)).isZero();
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isZero();
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET next_attempt_at=0");
+        new ManagedToolResultProjector(fixture.results(), fixture.jdbc(), provider, fixture.reader(), fixture.policy(),
+                fixture.properties()).project(fixture.results().claim().orElseThrow());
+        var row = fixture.jdbc().queryForMap("SELECT work_state, descriptor_json FROM managed_agent_tool_result");
+        assertThat(row.get("work_state")).isEqualTo("READY");
+        var descriptor = JSON.readTree((String) row.get("descriptor_json"));
+        assertThat(descriptor.path("artifacts")).isEmpty();
+        assertThat(descriptor.has("preview")).isFalse();
+    }
+
+    @Test
+    void policyChangeDuringCommitRetriesWithoutPublishing() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        var policy = org.mockito.Mockito.spy(publicationPolicy());
+        org.mockito.Mockito.doReturn("policy-before", "policy-after").when(policy).version();
+        var provider = publicationProvider(null);
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider), policy,
+                projectionProperties).project(publicResults.claim().orElseThrow());
+        assertThat(jdbc.queryForMap("SELECT work_state, failure_code FROM managed_agent_tool_result"))
+                .containsEntry("work_state", "RETRYABLE").containsEntry("failure_code", "publication_policy_changed");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_artifact", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isZero();
+    }
+
+    @Test
+    void missingPublicationIsAnUnsupportedProducer() {
+        ordinaryNotStartedReceipt();
+        insertPublicSession();
+        jdbc.update("DELETE FROM qwen_tool_publication");
+        var provider = publicationProvider(null);
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider),
+                publicationPolicy(), projectionProperties).project(publicResults.claim().orElseThrow());
+        assertThat(jdbc.queryForMap("SELECT work_state, failure_code FROM managed_agent_tool_result"))
+                .containsEntry("work_state", "UNSUPPORTED").containsEntry("failure_code", "unsupported_receipt_producer");
+    }
+
+    @Test
+    void oneBackfillPageCapturesTwoJournalTransactions() {
+        twoHistoricalReceipts();
+        publicResults.backfillOnePage();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM qwen_managed_session_journal_head", Boolean.class)).isFalse();
+    }
+
+    @Test
+    void invalidLaterBackfillRecordPreservesEarlierCheckpoint() {
+        twoHistoricalReceipts();
+        long last = jdbc.queryForObject("SELECT MAX(journal_revision) FROM qwen_managed_session_journal_tx", Long.class);
+        jdbc.update("UPDATE qwen_managed_session_journal_tx SET record_digest=? WHERE journal_revision=?", "0".repeat(64), last);
+        assertThatThrownBy(publicResults::backfillOnePage).hasMessageContaining("Backfill journal digest changed");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_tool_result", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForMap("SELECT o3_backfill_revision, o3_backfill_error FROM qwen_managed_session_journal_head"))
+                .containsEntry("o3_backfill_revision", last - 1).containsEntry("o3_backfill_error", "invalid_journal");
+    }
+
+    private void twoHistoricalReceipts() {
+        ordinaryNotStartedReceipt();
+        var outcome = publicResults.claim().orElseThrow().source().outcomeRef();
+        var receipt = JSON.createObjectNode().put("executionCallId", "execution-2").putNull("resultRef");
+        receipt.set("toolOutcomeRef", outcome);
+        receipt.putArray("resources");
+        append("recordToolResult", event(sequence + 1, "tool.receipt", receipt) + "{}\n", 1, List.of(), null);
+        jdbc.update("DELETE FROM managed_agent_tool_result");
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_revision=0, o3_backfill_pending=TRUE, o3_backfill_through=NULL");
     }
 
     @Test

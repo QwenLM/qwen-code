@@ -1287,8 +1287,9 @@ public final class ToolPublicationDataStore {
     private byte[] readRangeInternal(JsonNode key, String publicationId,
             JsonNode manifestRef, JsonNode expectedIdentity, String streamId,
             long offset, int length, boolean requireFinished, Runnable heartbeat) {
+        require(offset >= 0 && length >= 0 && length <= MAX_SEGMENT, "Invalid publication range");
         return verifiedStream(key, publicationId, manifestRef, expectedIdentity,
-                streamId, requireFinished).readRange(offset, length, heartbeat);
+                streamId, requireFinished, heartbeat).readRange(offset, length, heartbeat);
     }
 
     VerifiedStream openReferencedStream(JsonNode key, String publicationId,
@@ -1300,7 +1301,7 @@ public final class ToolPublicationDataStore {
         require("committed".equals(text(outcome, "decision"))
                 && manifestRef.equals(outcome.path("manifestRef")),
                 "Publication did not commit this representation");
-        return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true);
+        return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, () -> {});
     }
 
     void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
@@ -1341,7 +1342,8 @@ public final class ToolPublicationDataStore {
     }
 
     private VerifiedStream verifiedStream(JsonNode key, String publicationId,
-            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished) {
+            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished,
+            Runnable heartbeat) {
         String scope = scope(key);
         var publication = jdbc.queryForMap("SELECT binding_json, producer_phase,"
                 + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM qwen_tool_publication"
@@ -1457,6 +1459,12 @@ public final class ToolPublicationDataStore {
         }
 
         long size() { return size; }
+
+        long rangeVerificationBytes(long offset, int length) {
+            return parts.stream().filter(part -> part.offset() < offset + length
+                            && part.offset() + part.resource().length() > offset)
+                    .mapToLong(part -> part.resource().length()).sum();
+        }
 
         InputStream open(Runnable guard) {
             return new InputStream() {

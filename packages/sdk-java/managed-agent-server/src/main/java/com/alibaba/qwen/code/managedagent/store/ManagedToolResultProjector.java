@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -28,8 +29,12 @@ import org.springframework.stereotype.Component;
 public class ManagedToolResultProjector {
     private static final Logger LOG = LoggerFactory.getLogger(ManagedToolResultProjector.class);
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Pattern ANSI = Pattern.compile("\\x1B\\[[0-?]*[ -/]*[@-~]");
-    private static final Pattern CONTROLS = Pattern.compile("[\\p{Cntrl}&&[^\\n\\t]]");
+    private static final Pattern ANSI = Pattern.compile(
+            "(?:\\x1B\\[|\\x9B)[0-?]*[ -/]*[@-~]"
+                    + "|(?:\\x1B\\]|\\x9D)[^\\x07\\x1B\\x9C]*(?:\\x07|\\x1B\\\\|\\x9C|$)"
+                    + "|(?:\\x1B[P^_X]|[\\x90\\x98\\x9E\\x9F])[^\\x1B\\x9C]*(?:\\x1B\\\\|\\x9C|$)"
+                    + "|\\x1B[ -/]*[0-~]");
+    private static final Pattern CONTROLS = Pattern.compile("[\\p{Cc}&&[^\\n\\t]]");
     private final ManagedToolResultStore store;
     private final JdbcTemplate jdbc;
     private final ObjectProvider<ToolPublicationDataStore> publications;
@@ -83,12 +88,18 @@ public class ManagedToolResultProjector {
                 store.complete(claim, projection, policy.version());
             }
         } catch (NoSuchElementException error) {
-            store.fail(claim, "UNSUPPORTED", "public_turn_mapping_missing");
+            fail(claim, "UNSUPPORTED", "public_turn_mapping_missing", error);
         } catch (IllegalArgumentException error) {
-            store.fail(claim, "QUARANTINED", "tool_result_source_invalid");
+            fail(claim, "QUARANTINED", "tool_result_source_invalid", error);
         } catch (RuntimeException | IOException error) {
-            store.fail(claim, "RETRYABLE", "tool_result_source_unavailable");
+            fail(claim, "RETRYABLE", "tool_result_source_unavailable", error);
         }
+    }
+
+    private void fail(Claim claim, String state, String code, Exception error) {
+        LOG.warn("Managed tool result projection failed result={} code={} cause={}",
+                claim.source().id(), code, error.getClass().getSimpleName());
+        store.fail(claim, state, code);
     }
 
     private Projection resolve(Source source) throws IOException {
@@ -181,6 +192,7 @@ public class ManagedToolResultProjector {
                 && policy.publishOriginal(source.tenantId(), source.workspaceId(), source.sessionId());
         long createdAt = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).getTime();
         List<Artifact> artifacts = new ArrayList<>();
+        Map<String, ToolPublicationDataStore.VerifiedStream> verified = new HashMap<>();
         if (publish && "committed".equals(decision)) {
             require(manifest != null, "Committed capture has no manifest");
             for (JsonNode stream : manifest.path("contents")) {
@@ -197,9 +209,7 @@ public class ManagedToolResultProjector {
                         .put("sha256", stream.path("digest").asText()).put("media_type", "application/octet-stream")
                         .put("availability", "available").put("created_at", createdAt);
                 Artifact artifact = new Artifact(descriptor, source, publicationId, binding, manifestRef, streamId, 0);
-                try (var verified = reader.open(artifact)) {
-                    // Opening verifies the immutable metadata closure before publication.
-                }
+                verified.put(id, reader.verified(artifact));
                 artifacts.add(artifact);
             }
         }
@@ -223,19 +233,25 @@ public class ManagedToolResultProjector {
                     .findFirst().orElse(artifacts.getFirst());
             long size = selected.descriptor().path("byte_length").asLong();
             int length = (int) Math.min(8192, size);
-            byte[] bytes = reader.readRange(selected, 0, length);
-            String text = CONTROLS.matcher(ANSI.matcher(new String(bytes, StandardCharsets.UTF_8))
-                    .replaceAll("")).replaceAll("");
-            String bounded = boundPreview(text);
-            boolean truncated = size > length || bounded.length() < text.length();
-            text = bounded;
-            descriptor.set("preview", JSON.createObjectNode().put("text", text).put("truncated", truncated)
-                    .put("stream_id", selected.streamId()).put("source_start", 0).put("source_end", length));
+            var stream = verified.get(selected.descriptor().path("id").asText());
+            if (stream.rangeVerificationBytes(0, length) <= 1024 * 1024) {
+                byte[] bytes = reader.readRange(selected, stream, 0, length, () -> {});
+                String text = sanitizePreview(new String(bytes, StandardCharsets.UTF_8));
+                String bounded = boundPreview(text);
+                boolean truncated = size > length || bounded.length() < text.length();
+                text = bounded;
+                descriptor.set("preview", JSON.createObjectNode().put("text", text).put("truncated", truncated)
+                        .put("stream_id", selected.streamId()).put("source_start", 0).put("source_end", length));
+            }
         }
         if (descriptor.toString().getBytes(StandardCharsets.UTF_8).length > 15 * 1024) {
             descriptor.remove("preview");
         }
         return new Projection(descriptor, publicationId, binding, manifestRef, List.copyOf(artifacts), policyVersion);
+    }
+
+    static String sanitizePreview(String text) {
+        return CONTROLS.matcher(ANSI.matcher(text).replaceAll("")).replaceAll("");
     }
 
     static String boundPreview(String text) {

@@ -5,8 +5,8 @@ type Schemas = components['schemas'];
 
 export type ManagedToolResult = Schemas['PublicToolResult'];
 export type ManagedArtifact = Schemas['PublicArtifact'];
-export type ManagedToolResultResponse = Schemas['WebShellToolResultResponse'];
-export type ManagedArtifactResponse = Schemas['WebShellArtifactResponse'];
+export type ManagedToolResultResponse = Schemas['ToolResultResponse'];
+export type ManagedArtifactResponse = Schemas['ArtifactResponse'];
 export type ManagedArtifactPage = Schemas['WebShellArtifactPage'];
 
 export type ManagedArtifactSave = (

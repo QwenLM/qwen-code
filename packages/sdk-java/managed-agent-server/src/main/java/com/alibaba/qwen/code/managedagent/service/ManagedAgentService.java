@@ -56,7 +56,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.beans.factory.annotation.Autowired;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
@@ -97,12 +96,17 @@ public class ManagedAgentService {
                 && !"yolo".equals(actions.approvalMode(session.tenantId(), session.sessionId()));
     }
 
-    private BooleanSupplier artifactReads = () -> false;
+    private BooleanSupplier artifactReadsEnabled = () -> false;
 
     @Autowired
     void configureArtifacts(ManagedAgentProperties properties,
             ManagedArtifactReader reader) {
-        artifactReads = () -> properties.getArtifacts().isEnabled() && reader.supported();
+        artifactReadsEnabled = () -> properties.getArtifacts().isEnabled() && reader.supported();
+    }
+
+    private boolean hasArtifacts(SessionRecord session) {
+        return session.workspace() != null && !"DELETING".equals(session.status())
+                && artifactReadsEnabled.getAsBoolean();
     }
 
     public ManagedAgentService(AgentStateStore store,
@@ -508,7 +512,7 @@ public class ManagedAgentService {
                 new SessionCapabilities(
                         true,
                         true,
-                        session.workspace() != null && !"DELETING".equals(session.status()) && artifactReads.getAsBoolean(),
+                        hasArtifacts(session),
                         true,
                         session.workspace() == null,
                         true,
@@ -534,7 +538,7 @@ public class ManagedAgentService {
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true, session.workspace() != null && !"DELETING".equals(session.status()) && artifactReads.getAsBoolean(), hasActions(session)));
+                new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

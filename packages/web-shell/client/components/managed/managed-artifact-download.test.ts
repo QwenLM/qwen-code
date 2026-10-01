@@ -68,4 +68,52 @@ describe('browser artifact saving', () => {
     ).rejects.toBe(failure);
     expect(abort).toHaveBeenCalledWith(failure);
   });
+  it('aborts the file and source when cancellation arrives after the first chunk', async () => {
+    const controller = new AbortController();
+    const abort = vi.fn();
+    const cancel = vi.fn();
+    const close = vi.fn();
+    const write = vi.fn(() => controller.abort());
+    Object.defineProperty(window, 'showSaveFilePicker', {
+      configurable: true,
+      value: async () => ({
+        createWritable: async () => new WritableStream({ write, close, abort }),
+      }),
+    });
+    await expect(
+      browserArtifactSave()!(artifact, {
+        signal: controller.signal,
+        openStream: async () =>
+          new ReadableStream({
+            start(source) {
+              source.enqueue(new Uint8Array([1]));
+            },
+            cancel,
+          }),
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(write).toHaveBeenCalledOnce();
+    expect(abort).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('creates no file when already cancelled before the picker returns', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const createWritable = vi.fn(async () => new WritableStream());
+    const openStream = vi.fn(async () => new ReadableStream());
+    Object.defineProperty(window, 'showSaveFilePicker', {
+      configurable: true,
+      value: async () => ({ createWritable }),
+    });
+    await expect(
+      browserArtifactSave()!(artifact, {
+        signal: controller.signal,
+        openStream,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(createWritable).not.toHaveBeenCalled();
+    expect(openStream).not.toHaveBeenCalled();
+  });
 });

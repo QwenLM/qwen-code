@@ -369,7 +369,10 @@ export interface components {
             media_type: string;
             /** @enum {string} */
             availability: "available" | "unavailable";
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds, unlike the seconds that the public Session, Turn, Event and Item resources report.
+             */
             created_at: number;
         };
         WebShellListRequest: {
@@ -875,16 +878,16 @@ export interface components {
         ArtifactAccess: {
             can_read_content: boolean;
         };
-        WebShellToolResultResponse: {
+        ToolResultResponse: {
             result: components["schemas"]["PublicToolResult"];
             access: components["schemas"]["ArtifactAccess"];
         };
-        WebShellArtifactResponse: {
+        ArtifactResponse: {
             artifact: components["schemas"]["PublicArtifact"];
             access: components["schemas"]["ArtifactAccess"];
         };
         WebShellArtifactPage: {
-            data: components["schemas"]["WebShellArtifactResponse"][];
+            data: components["schemas"]["ArtifactResponse"][];
             nextCursor: string | null;
             hasMore: boolean;
         };
@@ -904,7 +907,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
+        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -1492,10 +1495,11 @@ export interface operations {
             /** @description Authorized persisted tool result resource. */
             200: {
                 headers: {
+                    "Cache-Control"?: "private, no-store";
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellToolResultResponse"];
+                    "application/json": components["schemas"]["ToolResultResponse"];
                 };
             };
             /** @description Invalid request. */
@@ -1516,15 +1520,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Authenticated actor scope mismatch. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
+            403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable resource. */
             404: {
                 headers: {
@@ -1561,10 +1557,11 @@ export interface operations {
             /** @description Authorized persisted artifact metadata. */
             200: {
                 headers: {
+                    "Cache-Control"?: "private, no-store";
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebShellArtifactResponse"];
+                    "application/json": components["schemas"]["ArtifactResponse"];
                 };
             };
             /** @description Invalid request. */
@@ -1585,15 +1582,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Authenticated actor scope mismatch. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
+            403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable resource. */
             404: {
                 headers: {
@@ -1630,6 +1619,7 @@ export interface operations {
             /** @description Authorized artifact metadata page. */
             200: {
                 headers: {
+                    "Cache-Control"?: "private, no-store";
                     [name: string]: unknown;
                 };
                 content: {
@@ -1654,15 +1644,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Authenticated actor scope mismatch. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
+            403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable resource. */
             404: {
                 headers: {

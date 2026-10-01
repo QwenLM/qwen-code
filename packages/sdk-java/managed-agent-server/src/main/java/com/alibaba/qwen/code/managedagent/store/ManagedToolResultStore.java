@@ -99,15 +99,23 @@ public class ManagedToolResultStore {
     }
 
     public void backfillOnePage() {
+        for (int index = 0; index < 50; index++) {
+            if (!backfillOneTransaction()) {
+                return;
+            }
+        }
+    }
+
+    private boolean backfillOneTransaction() {
         String[] selected = new String[2];
         try {
-            transactions.executeWithoutResult(status -> {
+            return Boolean.TRUE.equals(transactions.execute(status -> {
                 var heads = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, journal_revision,"
                         + " o3_backfill_revision, o3_backfill_through FROM qwen_managed_session_journal_head"
                         + " WHERE o3_backfill_pending = TRUE AND o3_backfill_error IS NULL"
                         + " ORDER BY tenant_id, session_id LIMIT 1 FOR UPDATE");
                 if (heads.isEmpty()) {
-                    return;
+                    return false;
                 }
                 var head = heads.getFirst();
                 String tenant = (String) head.get("tenant_id");
@@ -136,7 +144,8 @@ public class ManagedToolResultStore {
                 jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_revision = ?,"
                                 + " o3_backfill_through = ?, o3_backfill_pending = ? WHERE tenant_id = ? AND session_id = ?",
                         after, through, after < through, tenant, session);
-            });
+                return true;
+            }));
         } catch (IllegalArgumentException error) {
             if (selected[0] != null) {
                 jdbc.update("UPDATE qwen_managed_session_journal_head SET o3_backfill_error = 'invalid_journal', o3_backfill_pending = FALSE"

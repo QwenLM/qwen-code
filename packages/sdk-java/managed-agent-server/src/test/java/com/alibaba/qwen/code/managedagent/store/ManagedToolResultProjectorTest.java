@@ -51,6 +51,18 @@ class ManagedToolResultProjectorTest {
     }
 
     @Test
+    void stripsTerminalEscapeFamiliesWithoutRemovingVisibleTextOrLineBreaks() {
+        assertThat(ManagedToolResultProjector.sanitizePreview("\u001b]8;;https://example.com\u0007link\u001b]8;;\u0007"))
+                .isEqualTo("link");
+        assertThat(ManagedToolResultProjector.sanitizePreview("\u001b]0;title\u001b\\body\n\t"))
+                .isEqualTo("body\n\t");
+        assertThat(ManagedToolResultProjector.sanitizePreview("\u001bP1$rpayload\u001b\\\u001b7body\u001b(B"))
+                .isEqualTo("body");
+        assertThat(ManagedToolResultProjector.sanitizePreview("\u009b31mred\u009b0m\u009d0;title\u009c"))
+                .isEqualTo("red");
+    }
+
+    @Test
     void boundsLinesIndependentlyOfBytes() {
         String output = "line\n".repeat(300);
         String preview = ManagedToolResultProjector.boundPreview(output);

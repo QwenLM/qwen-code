@@ -90,15 +90,19 @@ it('aborts an already open real HTTP artifact download stream', async () => {
 it.each([429, 503])(
   'retries %s only once with the identical fixed-revision range',
   async (status) => {
+    const seen: Array<{ url: string; headers: Array<[string, string]> }> = [];
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(
-        async () =>
-          new Response(
-            JSON.stringify({ error: { code: 'busy', message: 'busy' } }),
-            { status, headers: { 'retry-after': '0' } },
-          ),
-      );
+      .mockImplementation(async (url, init) => {
+        seen.push({
+          url: String(url),
+          headers: [...new Headers(init?.headers)],
+        });
+        return new Response(
+          JSON.stringify({ error: { code: 'busy', message: 'busy' } }),
+          { status, headers: { 'retry-after': '0' } },
+        );
+      });
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
@@ -107,7 +111,11 @@ it.each([429, 503])(
       client.readArtifactRange(artifact, 0, 5),
     ).rejects.toMatchObject({ status });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[1]).toEqual(fetchImpl.mock.calls[0]);
+    expect(seen[1]).toEqual(seen[0]);
+    expect(Object.fromEntries(seen[0].headers)).toMatchObject({
+      range: 'bytes=0-4',
+      'if-match': expect.any(String),
+    });
   },
 );
 it('aborts the Retry-After wait without issuing a second request', async () => {

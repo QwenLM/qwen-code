@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -57,7 +59,7 @@ class ManagedArtifactSchedulingTest {
                             + " next_attempt_at=0");
         var state = mock(AgentStateStore.class);
         AtomicInteger materialized = new AtomicInteger();
-        when(state.findMaterializationTargets(32))
+        when(state.findMaterializationTargets(anyInt()))
                 .thenReturn(List.of(new MaterializationTarget("tenant-1", "other-live-session")));
         doAnswer(
                         invocation -> {
@@ -65,7 +67,7 @@ class ManagedArtifactSchedulingTest {
                             return null;
                         })
                 .when(state)
-                .materializeNextBatch("tenant-1", "other-live-session", 200);
+                .materializeNextBatch(eq("tenant-1"), eq("other-live-session"), anyInt());
         var context = new AnnotationConfigApplicationContext();
         context.register(
                 SchedulingHarness.class,

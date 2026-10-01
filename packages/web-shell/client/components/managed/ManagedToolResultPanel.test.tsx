@@ -280,6 +280,67 @@ describe('ManagedToolResultPanel', () => {
     expect(document.body.textContent).not.toContain('wrong session');
   });
 
+  it('discards late reads without repainting or poisoning the page cache', async () => {
+    const large = { ...artifact, byte_length: 2 * MANAGED_OUTPUT_PAGE_BYTES };
+    const finishes: Array<(bytes: Uint8Array) => void> = [];
+    vi.mocked(reader.readRange).mockImplementation(
+      () => new Promise((resolve) => finishes.push(resolve)),
+    );
+    vi.mocked(reader.getArtifact).mockImplementation(async () => ({
+      artifact: { ...large },
+      access: { can_read_content: true },
+    }));
+    vi.mocked(reader.listArtifacts)
+      .mockResolvedValueOnce({
+        data: [{ artifact: large, access: { can_read_content: true } }],
+        hasMore: true,
+        nextCursor: 'next',
+      })
+      .mockResolvedValueOnce({
+        data: [{ artifact: { ...large }, access: { can_read_content: true } }],
+        hasMore: false,
+        nextCursor: null,
+      });
+    await render('session-1', null);
+    const signal = vi.mocked(reader.readRange).mock.calls[0][3].signal!;
+    await click('Load more');
+    expect(signal.aborted).toBe(true);
+    expect(finishes.length).toBeGreaterThanOrEqual(2);
+    const stale = finishes.slice(0, -1);
+    await act(async () => {
+      finishes.at(-1)!(new Uint8Array(MANAGED_OUTPUT_PAGE_BYTES).fill(70));
+      await flush();
+    });
+    await act(async () => {
+      for (const finish of stale)
+        finish(new Uint8Array(MANAGED_OUTPUT_PAGE_BYTES).fill(83));
+      await flush();
+    });
+    const output = () =>
+      document.body.querySelector('[data-managed-output-bytes]')?.textContent;
+    expect(output()).toBe('F'.repeat(MANAGED_OUTPUT_PAGE_BYTES));
+    await click('Next page');
+    await act(async () => {
+      finishes.at(-1)!(new Uint8Array(MANAGED_OUTPUT_PAGE_BYTES).fill(78));
+      await flush();
+    });
+    await click('Previous page');
+    expect(output()).toBe('F'.repeat(MANAGED_OUTPUT_PAGE_BYTES));
+  });
+
+  it('reuses decoded page text during an unrelated parent render', async () => {
+    const decode = vi.spyOn(TextDecoder.prototype, 'decode');
+    try {
+      await render();
+      const count = decode.mock.calls.length;
+      expect(count).toBeGreaterThan(0);
+      await render();
+      expect(decode).toHaveBeenCalledTimes(count);
+    } finally {
+      decode.mockRestore();
+    }
+  });
+
   it('retains four full pages while returning to the first page', async () => {
     const large = { ...artifact, byte_length: 8 * MANAGED_OUTPUT_PAGE_BYTES };
     vi.mocked(reader.getResult).mockResolvedValue({

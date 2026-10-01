@@ -163,10 +163,13 @@ export function managedEventsToMessages(
         tool.status =
           result.execution_status === 'success' ? 'completed' : 'failed';
         tool.wasCancelled = result.execution_status === 'cancelled';
-        if (result.preview && tool.rawOutput === undefined) {
+        if (
+          typeof result.preview?.text === 'string' &&
+          tool.rawOutput === undefined
+        ) {
           tool.rawOutput =
             result.preview.text +
-            (result.preview.truncated ? `\n${truncatedLabel}` : '');
+            (result.preview.truncated === true ? `\n${truncatedLabel}` : '');
         }
         tool.endTime ??= event.at;
       }
@@ -241,8 +244,9 @@ function readResult(
     result['item_id'] !== record(event.data)['itemId'] ||
     !Number.isSafeInteger(result['projection_revision']) ||
     Number(result['projection_revision']) < 1 ||
+    typeof result['execution_status'] !== 'string' ||
     !['success', 'error', 'cancelled', 'not_started'].includes(
-      String(result['execution_status']),
+      result['execution_status'],
     ) ||
     !Array.isArray(result['artifacts'])
   )

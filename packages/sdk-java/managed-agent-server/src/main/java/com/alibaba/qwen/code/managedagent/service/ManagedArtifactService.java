@@ -159,6 +159,13 @@ public class ManagedArtifactService {
     }
 
     private void requireContent(TenantContext tenant, Artifact artifact) {
+        requireContentAccess(tenant, artifact);
+        if (!reader.available(artifact)) {
+            throw unavailable();
+        }
+    }
+
+    private void requireContentAccess(TenantContext tenant, Artifact artifact) {
         var source = artifact.source();
         SessionRecord session = session(tenant, source.sessionId());
         if (!source.workspaceId().equals(session.workspace().getWorkspaceId())) {
@@ -167,9 +174,6 @@ public class ManagedArtifactService {
         if (!policy.readOriginal(tenant.tenantId(), tenant.actorId(), source.workspaceId(), source.sessionId())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "artifact_content_forbidden",
                     "The current actor cannot read original artifact bytes.");
-        }
-        if (!reader.available(artifact)) {
-            throw unavailable();
         }
     }
 
@@ -222,7 +226,7 @@ public class ManagedArtifactService {
                 if (System.nanoTime() - started > timeout) {
                     throw unavailable();
                 }
-                requireContent(tenant, artifact);
+                requireContentAccess(tenant, artifact);
             };
             try {
                 if (selection.partial()) {
@@ -308,7 +312,7 @@ public class ManagedArtifactService {
                 start = Long.parseLong(matcher.group(1));
                 end = matcher.group(2).isEmpty() ? size - 1 : Long.parseLong(matcher.group(2));
                 if (!matcher.group(2).isEmpty() && end < start) {
-                    throw new NumberFormatException();
+                    throw badRequest("invalid_range", "Invalid byte range.");
                 }
                 end = Math.min(size - 1, end);
             }

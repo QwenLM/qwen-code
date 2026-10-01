@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
 import { sanitizeControlChars } from '../messages/toolFormatting';
 import { Button } from '../ui/button';
@@ -362,14 +362,16 @@ function ManagedArtifactContent({
     }
   };
 
-  let text = '';
-  if (page) {
+  const text = useMemo(() => {
+    if (!page) return '';
     const decoder = new TextDecoder();
     decoder.decode(page.prefix, { stream: true });
-    text = decoder.decode(page.bytes, {
-      stream: offset + page.bytes.byteLength < artifact.byte_length,
-    });
-  }
+    return sanitizeControlChars(
+      decoder.decode(page.bytes, {
+        stream: offset + page.bytes.byteLength < artifact.byte_length,
+      }),
+    );
+  }, [page, offset, artifact.byte_length]);
   return (
     <section className="min-w-0 space-y-3" aria-label={artifact.stream_role}>
       {loading && <p role="status">{t('managed.result.reading')}</p>}
@@ -395,7 +397,7 @@ function ManagedArtifactContent({
           >
             {artifact.byte_length === 0
               ? t('managed.result.emptyStream')
-              : sanitizeControlChars(text)}
+              : text}
           </pre>
         </>
       )}

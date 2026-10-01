@@ -80,6 +80,8 @@ class ManagedArtifactApiIntegrationTest {
                 fixture::properties);
         context.registerBean(com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader.class,
                 fixture::reader);
+        context.registerBean(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class,
+                () -> mock(com.alibaba.qwen.code.managedagent.store.ManagedActionStore.class));
         context.registerBean(ManagedAgentService.class, () -> sessions);
         context.refresh();
         context.close();
@@ -97,7 +99,50 @@ class ManagedArtifactApiIntegrationTest {
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver())
                 .setControllerAdvice(new ApiExceptionHandler())
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(JSON))
-                .addFilters(new RequestIdFilter(), new TenantContextFilter(JSON)).build();
+                .addFilters(new RequestIdFilter(), new TenantContextFilter(JSON))
+                .alwaysDo(exchange -> {
+                    var response = exchange.getResponse();
+                    if (response.getStatus() == 200 && response.getContentType() != null
+                            && response.getContentType().startsWith("application/json")) {
+                        assertThat(response.getHeader("Cache-Control")).isEqualTo("private, no-store");
+                    }
+                }).build();
+    }
+
+    @Test
+    void unboundReadableSessionHasNoArtifactCapabilityOrRoutes() throws Exception {
+        fixture.jdbc().update("UPDATE managed_agent_session SET workspace_id=NULL, workspace_generation=NULL, workspace_storage_id=NULL, cwd_relative=NULL, context_config_ref=NULL, context_revision=NULL, workspace_config_ref=NULL, workspace_policy_ref=NULL");
+        assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
+        assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
+        for (String path : new String[] {"/items/" + itemId + "/tool-result", "/artifacts",
+                "/artifacts/" + stdout.path("id").asText(), "/artifacts/" + stdout.path("id").asText() + "/content"}) {
+            mvc.perform(asReader(get(ROOT + path))).andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error.code").value("artifact_not_found"));
+        }
+        for (String route : new String[] {"tool-results/get", "artifacts/get", "artifacts/query"}) {
+            var body = JSON.createObjectNode().put("sessionId", "session-1");
+            if (route.equals("tool-results/get")) {
+                body.put("itemId", itemId);
+            } else if (route.equals("artifacts/get")) {
+                body.put("artifactId", stdout.path("id").asText());
+            }
+            mvc.perform(asReader(post("/api/agent/web-shell/v1/" + route))
+                    .contentType(MediaType.APPLICATION_JSON).content(body.toString()))
+                    .andExpect(status().isNotFound()).andExpect(jsonPath("$.error.code").value("artifact_not_found"));
+        }
+    }
+
+    @Test
+    void contentAdmissionChecksCatalogOnceAndChunkGuardsStillRun() throws Exception {
+        var reader = org.mockito.Mockito.spy(fixture.reader());
+        var policy = org.mockito.Mockito.spy(fixture.policy());
+        var service = new ManagedArtifactService(sessions, fixture.results(), reader, policy, fixture.properties());
+        var response = new org.springframework.mock.web.MockHttpServletResponse();
+        service.content(new com.alibaba.qwen.code.managedagent.api.TenantContext("tenant-1", "reader"),
+                "session-1", stdout.path("id").asText(), stdout.path("revision").asText(), "bytes=0-2", null, null, response);
+        assertThat(response.getContentAsByteArray()).isEqualTo("abc".getBytes(StandardCharsets.UTF_8));
+        org.mockito.Mockito.verify(reader, org.mockito.Mockito.times(1)).available(org.mockito.ArgumentMatchers.any());
+        org.mockito.Mockito.verify(policy, org.mockito.Mockito.atLeast(2)).readOriginal("tenant-1", "reader", "workspace-1", "session-1");
     }
 
     @Test
@@ -119,7 +164,7 @@ class ManagedArtifactApiIntegrationTest {
         assertThat(fixture.sessions().requireSession("tenant-1", "session-1").status()).isEqualTo("CLOSED");
 
         var result = mvc.perform(asReader(get(ROOT + "/items/" + itemId + "/tool-result")))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.result.turn_id").value("turn_public_1"))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store")).andExpect(jsonPath("$.result.turn_id").value("turn_public_1"))
                 .andExpect(jsonPath("$.result.execution_status").value("success"))
                 .andExpect(jsonPath("$.result.capture_status").value("complete"))
                 .andExpect(jsonPath("$.result.delivery_status").value("committed"))
@@ -127,10 +172,10 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(response ->
                                         contract(
                                                 "getToolResult",
-                                                "WebShellToolResultResponse", response.getResponse().getContentAsString()))
+                                                "ToolResultResponse", response.getResponse().getContentAsString()))
                 .andReturn().getResponse().getContentAsString();
         assertThat(result).doesNotContain("publicationId", "manifestRef", "object_key", "writerToken", "runtime-call-1");
-        var list = mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk())
+        var list = mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.data.length()").value(2))
                 .andExpect(response ->
                                         contract(
@@ -194,7 +239,7 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(response ->
                                 contract(
                                         "getArtifact",
-                                        "WebShellArtifactResponse", response.getResponse().getContentAsString()));
+                                        "ArtifactResponse", response.getResponse().getContentAsString()));
         mvc.perform(asActor(bytes(stdout), "tenant-1", "metadata-reader").header("Range", "malformed"))
                 .andExpect(status().isForbidden()).andExpect(jsonPath("$.error.code").value("artifact_content_forbidden"))
                 .andExpect(header().doesNotExist("Content-Range"));
@@ -212,7 +257,7 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(response ->
                                 contract(
                                         "getWebShellToolResult",
-                                        "WebShellToolResultResponse", response.getResponse().getContentAsString()));
+                                        "ToolResultResponse", response.getResponse().getContentAsString()));
         mvc.perform(asReader(post("/api/agent/web-shell/v1/artifacts/get"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(JSON.writeValueAsString(java.util.Map.of("sessionId", "session-1", "artifactId", stdout.path("id").asText()))))
@@ -220,7 +265,7 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(response ->
                                 contract(
                                         "getWebShellArtifact",
-                                        "WebShellArtifactResponse", response.getResponse().getContentAsString()));
+                                        "ArtifactResponse", response.getResponse().getContentAsString()));
         var first = mvc.perform(asReader(post("/api/agent/web-shell/v1/artifacts/query"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"sessionId\":\"session-1\",\"limit\":1}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.hasMore").value(true))
@@ -254,7 +299,7 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(jsonPath("$.result.artifacts").isEmpty())
                 .andExpect(jsonPath("$.result.preview").doesNotExist())
                 .andExpect(jsonPath("$.access.can_read_content").value(false));
-        mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk())
+        mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.data").isEmpty());
         assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class))
                 .isTrue();

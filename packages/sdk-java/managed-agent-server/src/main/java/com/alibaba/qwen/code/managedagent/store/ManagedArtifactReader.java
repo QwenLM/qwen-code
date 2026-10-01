@@ -67,13 +67,19 @@ public class ManagedArtifactReader {
                         && length <= artifact.descriptor().path("byte_length").asLong() - offset,
                 "Artifact range is invalid");
         guard.run();
-        return verified(artifact).readRange(offset, length, () -> {
+        return readRange(artifact, verified(artifact), offset, length, guard);
+    }
+
+    byte[] readRange(Artifact artifact, ToolPublicationDataStore.VerifiedStream stream,
+            long offset, int length, Runnable guard) {
+        guard.run();
+        return stream.readRange(offset, length, () -> {
             guard.run();
             check(artifact);
         });
     }
 
-    private ToolPublicationDataStore.VerifiedStream verified(Artifact artifact) {
+    ToolPublicationDataStore.VerifiedStream verified(Artifact artifact) {
         var source = artifact.source();
         var binding = artifact.binding();
         var identity = JSON.createObjectNode();
