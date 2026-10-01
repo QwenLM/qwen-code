@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import type {
+  RawFileHistoryOperation,
+  HostedFileHistoryState,
+} from './hosted-file-history-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -41,9 +46,22 @@ export class HostedWorkspaceBrokerRejection extends Error {
     readonly status: number,
     readonly code: unknown,
     readonly details?: Record<string, unknown>,
+    readonly reason?: string,
   ) {
     super(`Runtime Broker returned HTTP ${status} (${String(code)}).`);
   }
+}
+
+export function isHostedFileHistoryRefusal(
+  cause: unknown,
+): cause is HostedWorkspaceBrokerRejection {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    ((cause.status === 409 &&
+      cause.code === 'managed_runtime_provider_operation_failed') ||
+      (cause.status === 400 &&
+        cause.code === 'runtime_control_operation_invalid'))
+  );
 }
 
 export class HostedWorkspaceBroker {
@@ -69,6 +87,37 @@ export class HostedWorkspaceBroker {
   ) {
     this.baseUrl = resolveManagedRuntimeBrokerBaseUrl(options.baseUrl);
     this.identity = { harnessSessionId: key.sessionId, runtimeSessionId };
+  }
+
+  async fileHistory(
+    operation: Exclude<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<HostedFileHistoryState>;
+  async fileHistory(
+    operation: Extract<RawFileHistoryOperation, { action: 'rewind' }>,
+  ): Promise<{
+    state: HostedFileHistoryState;
+    filesChanged: string[];
+    filesFailed: string[];
+    conflict: boolean;
+  }>;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<
+    | HostedFileHistoryState
+    | {
+        state: HostedFileHistoryState;
+        filesChanged: string[];
+        filesFailed: string[];
+        conflict: boolean;
+      }
+  >;
+  async fileHistory(operation: RawFileHistoryOperation): Promise<unknown> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    });
   }
 
   async warm(): Promise<void> {
@@ -536,6 +585,7 @@ export class HostedWorkspaceBroker {
         details && typeof details === 'object' && !Array.isArray(details)
           ? (details as Record<string, unknown>)
           : undefined,
+        typeof parsed['error'] === 'string' ? parsed['error'] : undefined,
       );
     }
     if (

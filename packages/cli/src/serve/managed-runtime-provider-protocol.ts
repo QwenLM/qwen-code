@@ -22,6 +22,11 @@ import {
   parseManagedToolFileHistoryState,
   type ManagedToolFileHistoryBinding,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js';
+import {
+  historyPath,
+  parseHostedFileHistoryState,
+  type RawFileHistoryOperation,
+} from './hosted-file-history-protocol.js';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/utils/shell-result.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
@@ -45,6 +50,7 @@ export interface ManagedRuntimeProviderSession {
 }
 
 export type ManagedRuntimeProviderControl =
+  | RawFileHistoryOperation
   | { kind: 'manifest' | 'history' }
   | { kind: 'begin-turn'; identity: ManagedToolCallIdentity }
   | {
@@ -194,6 +200,25 @@ export function parseManagedRuntimeProviderOperation(
   if (!boundedByCaller)
     managedToolDigest(value, managedRuntimeProviderLimit(kind));
   switch (kind) {
+    case 'raw-file-history': {
+      const action = op['action'];
+      if (action === 'bind') {
+        keys(op, ['kind', 'action', 'state']);
+        if (op['state'] !== null)
+          parseHostedFileHistoryState(op['state'], session.harnessSessionId);
+      } else if (action === 'prepare') {
+        keys(op, ['kind', 'action', 'promptId', 'paths']);
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+        if (!Array.isArray(op['paths']) || !op['paths'].length)
+          throw new ManagedRuntimeProviderProtocolError();
+        op['paths'].forEach(historyPath);
+      } else if (action === 'rewind') {
+        keys(op, ['kind', 'action', 'promptId']);
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+      } else if (action === 'snapshot') keys(op, ['kind', 'action']);
+      else throw new ManagedRuntimeProviderProtocolError();
+      break;
+    }
     case 'acquire':
     case 'release':
     case 'manifest':
@@ -342,6 +367,21 @@ export function parseManagedRuntimeProviderResult(
   }
   const result = object(value);
   switch (operation.kind) {
+    case 'raw-file-history': {
+      if (operation.action !== 'rewind')
+        return parseHostedFileHistoryState(value, session.harnessSessionId);
+      keys(result, ['state', 'filesChanged', 'filesFailed', 'conflict']);
+      parseHostedFileHistoryState(result['state'], session.harnessSessionId);
+      if (
+        !Array.isArray(result['filesChanged']) ||
+        !Array.isArray(result['filesFailed']) ||
+        typeof result['conflict'] !== 'boolean'
+      )
+        throw new ManagedRuntimeProviderProtocolError();
+      result['filesChanged'].forEach(historyPath);
+      result['filesFailed'].forEach(historyPath);
+      break;
+    }
     case 'bind-history':
     case 'checkpoint':
     case 'history': {

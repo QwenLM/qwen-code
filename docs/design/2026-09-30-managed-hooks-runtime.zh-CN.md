@@ -99,6 +99,18 @@ turn。此前 SessionStart 的取消不能结算后来的 turn。Load 同样修�
 ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn 共存；未知工作阻塞新准入
 并保留 Runtime hold。
 
+trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认真实回调 Promise
+已结束后再给出终态失败回执；回调从未开始时也可安全结算。回调 resolve 或 reject
+是结束证据，仅有 abort signal 不是。超过宽限期仍未结束的回调保留 unknown 结果和
+原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
+
+Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
+快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
+及 snapshot 并行；撤销和释放 owner 仍要求全部 Hook 执行结束。撤销也排除 Hook
+目录/模型操作和非 active activation。冷加载时，先用匹配 checkpoint 工具输入中
+保存的原 Runtime owner 观察未决文件历史，再释放此前的 Hook owner。缺失或冲突的
+owner 证据继续阻塞恢复，不增加新的持久化字段。
+
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
 执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。单项回执和聚合输出上限均为 60 KiB。
@@ -126,6 +138,10 @@ Notification、扩展和关闭事件可以领取 `hook_operation` activation，�
 epoch。即使 provider 忽略超时取消，scope 也会保持占用直到调用实际结束。
 释放旧 activation 后若安装 Hook activation 失败，控制器仍会恢复 Session activation。
 如果恢复也失败，则在 activation 恢复前拒绝接收新的 prompt。
+HTTP journal 提交遇到临时传输失败、429 或 5xx 时，最多尝试三次，间隔 250 ms，
+保持事务身份、记录字节、资源和 writer scope 完全相同。重放必须返回匹配的原回执，
+本地 authority 才能推进。永久拒绝、回执不匹配或重试耗尽仍会停止写入并要求 journal
+恢复；不会清除写入屏障或尝试安装另一个未经确认的 activation。
 
 模型尝试和用量关联原 Hook operation，并在存在时关联原 turn。预算记账沿用 Session
 与 turn 的现有语义；Hook operation 不得重置原预算。本变更不增加金额预算策略或独立

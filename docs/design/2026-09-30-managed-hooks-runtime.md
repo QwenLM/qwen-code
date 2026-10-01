@@ -130,6 +130,22 @@ recipe entries. Async admission waits for the Runtime acknowledgement; it is not
 a completion receipt. Normal acknowledged async work may coexist with later
 turns; unknown work blocks new admission and retains its Runtime hold.
 
+For a cancelled or timed-out trusted function Hook, Runtime waits up to one second
+for its actual callback Promise to settle before issuing a terminal failure receipt.
+A callback that never started is also safe to settle. Callback resolution or
+rejection is completion evidence; an abort signal alone is not. A callback still
+pending after the grace period keeps its unknown outcome and original Runtime
+hold, with no replay. Native Legacy function-Hook cancellation remains unchanged.
+
+Workspace Write/Edit backups and explicit rewind share the Session's Hook Runtime
+owner, while snapshots retain the actual prompt identity. Acknowledged async Hooks
+may coexist with history bind, prepare and snapshot; rewind and owner release still
+require all Hook executions to settle. Rewind also excludes Hook catalog/model
+operations and inactive activations. On cold load, pending file history is observed
+through the original Runtime owner saved in the matching checkpoint tool inputs,
+before earlier Hook owners are released. Missing or conflicting owner evidence
+keeps recovery blocked; no new durable field is needed.
+
 HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
 refused. A local runner-construction failure before dispatch is a settled failure
 under the saved fail policy. A received failure response can settle; a lost response after sending
@@ -169,6 +185,12 @@ The scope remains held until the provider call actually settles, even if the
 provider ignores timeout cancellation. If installing a Hook activation fails after
 release, the controller still restores the Session activation. If restoration
 also fails, new prompts are rejected before admission until activation recovery.
+HTTP journal commits retry a transient transport failure, 429 or 5xx response up
+to three attempts, 250 ms apart, using the identical transaction identity, record
+bytes, resources and writer scope. A replay must return the matching original
+receipt before local authority advances. Permanent rejection, a mismatched
+receipt or exhausted retries still stops writes and requires journal recovery;
+no failure clears the write fence or installs a different speculative activation.
 
 Model attempts and usage are associated with the original Hook operation and
 originating turn when present. Budget accounting follows the existing Session

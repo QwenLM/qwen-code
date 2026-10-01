@@ -358,6 +358,13 @@ export class HostedHookSession {
     });
   }
 
+  get hasUnsettledExecutions(): boolean {
+    return this.executions().some(
+      (record) =>
+        !record.resultRef && record.run.execution !== 'not_started_proven',
+    );
+  }
+
   hasCompletedOccurrence(event: HookEventName, occurrenceId: string): boolean {
     const saved = this.session.authority.extensionRecord(
       'hook_execution',
