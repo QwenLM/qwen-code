@@ -36,7 +36,14 @@ function makeRegistry(
     reviewed?: ReadonlyMap<string, string>;
   } = {},
 ): ToolRegistry {
-  const { withToolSearch = true, reviewed } = options;
+  const { withToolSearch = true } = options;
+  // Unless a test says otherwise, every tool it passes counts as reviewed:
+  // tool_call refuses a hidden tool whose schema is not in context (#12569).
+  const reviewed =
+    options.reviewed ??
+    new Map(
+      tools.map((tool) => [tool.name, deferredDeclarationFingerprint(tool)]),
+    );
   const allTools = new Map<string, AnyDeclarativeTool>([
     [ToolNames.TOOL_CALL, new ToolCallTool()],
     ...(withToolSearch
@@ -54,7 +61,7 @@ function makeRegistry(
     getTool: (name: string) => allTools.get(name),
     getAllToolNames: () => [...allTools.keys()],
     isDeferredAndHidden: (name: string) => hidden.has(name),
-    getReviewedDeclaration: (name: string) => reviewed?.get(name),
+    getReviewedDeclaration: (name: string) => reviewed.get(name),
   } as unknown as ToolRegistry;
 }
 
@@ -311,10 +318,42 @@ describe('ToolCallTool', () => {
       expect(result).toMatchObject(CHANGED);
     });
 
-    it('keeps invoking a tool never reviewed in this session by name', async () => {
-      const result = await resolveReviewed(target('cron_list'), 'cron_list');
+    it('refuses a tool whose schema is not in context instead of running it by name (#12569)', async () => {
+      // Never returned by tool_search, or returned before a compaction,
+      // /clear or rewind cleared the review: either way the model is writing
+      // arguments without the schema.
+      const unreviewed = new MockTool({ name: 'cron_list', shouldDefer: true });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([unreviewed], new Set([unreviewed.name]), { reviewed }),
+        { name: 'cron_list', arguments: {} },
+      );
 
-      expect(result).toMatchObject(resolvedTo('cron_list'));
+      expect(result).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        targetName: 'cron_list',
+        error: expect.objectContaining({
+          message: expect.stringContaining(
+            'has no verified schema review in the current context. Run tool_search with select:cron_list',
+          ),
+        }),
+      });
+      expect(result).not.toHaveProperty('tool');
+    });
+
+    it('runs the same tool once its unchanged schema is reviewed', async () => {
+      const unreviewed = new MockTool({ name: 'cron_list', shouldDefer: true });
+      const result = await resolveDeferredToolCall(
+        makeRegistry([unreviewed], new Set([unreviewed.name]), {
+          reviewed: new Map([
+            [unreviewed.name, deferredDeclarationFingerprint(unreviewed)],
+          ]),
+        }),
+        { name: 'cron_list', arguments: {} },
+      );
+
+      expect(result).toMatchObject({
+        tool: expect.objectContaining({ name: 'cron_list' }),
+      });
     });
   });
 
