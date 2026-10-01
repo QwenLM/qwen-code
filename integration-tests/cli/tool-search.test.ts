@@ -77,33 +77,33 @@ describe('tool-search / deferred tools', () => {
     // The tool_search response is a synthetic <functions>...</functions>
     // block; we check the ARGS the model sent (a keyword query, not select:)
     // and trust the schema-loading behavior covered above.
-    const result = await rig.run(
+    const capture = await rig.runWithToolCapture(
       'Use the tool_search tool with the keyword query "cron schedule" ' +
         '(no select: prefix). Then reply with just the word "ok".',
     );
+    const result = capture.result;
 
-    const foundSearch = await rig.waitForToolCall('tool_search');
-    expect(foundSearch, 'expected tool_search to be called').toBeTruthy();
-
-    const searchCalls = rig
-      .readToolLogs()
-      .filter((l) => l.toolRequest.name === 'tool_search');
+    const searchCalls = capture.toolCalls.filter(
+      (call) => call.name === 'tool_search',
+    );
     expect(searchCalls.length).toBeGreaterThan(0);
 
     // At least one tool_search call must have used a keyword query.
     const usedKeyword = searchCalls.some((c) => {
-      try {
-        const args = JSON.parse(c.toolRequest.args || '{}');
-        const q = String(args.query ?? '');
-        return q.length > 0 && !q.toLowerCase().startsWith('select:');
-      } catch {
+      if (typeof c.args !== 'object' || c.args === null) {
         return false;
       }
+      const query = (c.args as Record<string, unknown>)['query'];
+      return (
+        typeof query === 'string' &&
+        query.length > 0 &&
+        !query.toLowerCase().startsWith('select:')
+      );
     });
     expect(
       usedKeyword,
       `expected at least one keyword tool_search; saw args: ${searchCalls
-        .map((c) => c.toolRequest.args)
+        .map((c) => JSON.stringify(c.args))
         .join(' | ')}`,
     ).toBeTruthy();
 
