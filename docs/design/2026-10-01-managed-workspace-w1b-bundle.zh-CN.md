@@ -2,9 +2,9 @@
 
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
-状态：已实现，本地验证通过，部署验收待完成。已整合 main `a4bf0026c`，直接整合文件历史依赖
-[#13110](https://github.com/QwenLM/qwen-code/pull/13110) 的原提交 `fee8f8763`，
-包含主干整合 `560752cad` 及恢复测试更新 `80f8cfe3f`。
+状态：已实现，本地验证通过，部署验收待完成。已整合 main `0a5f518b4`，包含已合并的
+文件历史依赖 [#13110](https://github.com/QwenLM/qwen-code/pull/13110) `e083d6a6b`。
+保留其最终的准备失败回滚修复及恢复测试。
 属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。完成
 [W1 恢复设计](2026-09-29-managed-workspace-w1-recovery.zh-CN.md) 的 W1b 切片，
 不实现 W1c 挂载提升。
@@ -99,7 +99,7 @@ operation/tenant/storage ID，可选 `afterSessionId`，每页 32 个固定 Sess
 和 Session 校验器。共享生产代码只增加纯 Session Store 解析器导出和类型化只读
 W1a guard 查询，以及 npm 入口和打包 CLI bootstrap 的精确私有 flag 分派；分派先于
 普通 CLI/model 或继承的更新启动。现有 HTTP Session 读写、Hosted Turn 路由和 Runtime Worker 派发
-继续使用既有路径。V26 派生队列索引支持 asset key 分页及 Session/state 引用选择。
+继续使用既有路径。V27 派生队列索引支持 asset key 分页及 Session/state 引用选择。
 
 Session 分页和引用队列持久保存并限制批次大小，每次读取一个 journal 事务或
 资源，复用协议解析和摘要链校验，不累积整个 Session log。文件按 1 MiB 块计算
@@ -206,4 +206,5 @@ asset 和 56 个文件系统条目；同 ID 完成重试保持回执与全部制
 来源丢失路径；修复保留持久失效并复查固定来源。定向已打包 Java/H2 和 Node 回归
 探针与此前完整 MySQL 测试分别记录。这些 fixture 不证明实时
 Harness/Worker/Broker 或外部 OSS 部署验收。真实 Linux 身份、完整部署的 O2
-捕获、全部物理中断边界及压力规模证据仍待完成，#13110 合入主干也尚待完成。
+捕获、全部物理中断边界及压力规模证据仍待完成。
+#13110 已合入主干；本次整合保留主干 V26 工具结果投影迁移，将新增恢复元数据安排为 V27。

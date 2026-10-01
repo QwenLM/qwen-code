@@ -54,6 +54,40 @@ Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queri
 Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
 [简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
 
+## Managed tool results (O3)
+
+O3 publishes durable Hosted foreground Shell outcomes to Items, events and
+Managed WebShell. Downloads read immutable stdout/stderr after the writer is
+sealed, without reviving a Harness. The API requires a trusted actor and a
+current Workspace read grant; a tenant header alone cannot authorize it.
+
+O3 requires O2 publication to be configured, including
+`qwen.managed-agent.tool-publication.verification-bytes-per-second` and
+`qwen.managed-agent.tool-publication.max-verification-timeout`. These required
+O2 verification settings are separate from the O3 content-read timeout below.
+
+All settings below use the `qwen.managed-agent.artifacts` prefix:
+
+| Setting                | Default | Meaning                                                                                                                    |
+| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled. |
+| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                     |
+| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                    |
+| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                 |
+| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks; storage requests also use the storage client's timeouts.                |
+
+A product can replace `ManagedArtifactPolicy` for narrower publication or
+actor rules. Published previews persist in shared events. Policy changes do
+not automatically reproject historical results; content requests always use
+the current read policy. Configure the policy before enabling projection.
+Original reads are capped at 1 MiB per Range request; full downloads use
+bounded segment buffers and stream with backpressure. Deployments must retain
+O2 roots and validate real OSS and slow-reader limits before enabling this
+feature. O3 does not enable public Shell execution or garbage collection.
+
+Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-projection.md) |
+[简体中文](../../../docs/design/2026-09-29-managed-tool-result-public-projection.zh-CN.md).
+
 ## Prerequisites
 
 - Java 21

@@ -134,12 +134,13 @@ it.each(['prompt'])(
   },
 );
 
-it.each(['content', 'mode', 'delete'])(
+const posix = process.platform !== 'win32';
+it.each(posix ? ['content', 'mode', 'delete'] : ['content', 'delete'])(
   'accepts %s drift only after a new prompt backs it up',
   async (change) => {
     const file = path.join(workspace, 'a');
     await writeFile(file, 'before');
-    await chmod(file, 0o600);
+    if (posix) await chmod(file, 0o600);
     await history.prepare('prompt', ['a']);
     await history.execute('a', () => writeFile(file, 'tracked'));
     const original = history.state().snapshots[0];
@@ -158,14 +159,89 @@ it.each(['content', 'mode', 'delete'])(
       expect(await readFile(file, 'utf8')).toBe(
         change === 'content' ? 'external' : 'tracked',
       );
-      expect((await stat(file)).mode & 0o777).toBe(
-        change === 'mode' ? 0o700 : 0o600,
-      );
+      if (posix)
+        expect((await stat(file)).mode & 0o777).toBe(
+          change === 'mode' ? 0o700 : 0o600,
+        );
     }
     expect((await history.rewind('prompt')).conflict).toBe(false);
     expect(await readFile(file, 'utf8')).toBe('before');
   },
 );
+
+it.each(['prompt', 'next-prompt'])(
+  'restores the complete history after a mixed-path verification failure in %s',
+  async (promptId) => {
+    const file = path.join(workspace, 'a');
+    await writeFile(file, 'before');
+    await history.prepare('prompt', ['a']);
+    await history.execute('a', () => writeFile(file, 'tracked'));
+    const before = history.state();
+    const checkpoint = history.history.checkpoint.bind(history.history);
+    vi.spyOn(history.history, 'checkpoint').mockImplementationOnce(
+      async (id) => {
+        await checkpoint(id);
+        await writeFile(file, 'changed during preparation');
+      },
+    );
+    await expect(history.prepare(promptId, ['a', 'b'])).rejects.toThrow(
+      'changed during backup preparation',
+    );
+    expect(history.state()).toEqual(before);
+    expect(parseHostedFileHistoryState(history.state(), owner)).toEqual(before);
+    expect((await history.rewind('prompt')).conflict).toBe(true);
+    await expect(history.execute('b', vi.fn())).rejects.toThrow(
+      'no prepared backup',
+    );
+    await writeFile(file, 'tracked');
+    await history.execute('a', () => writeFile(file, 'tracked'));
+    await history.prepare(promptId, ['c']);
+    const retried = parseHostedFileHistoryState(history.state(), owner);
+    expect(Object.keys(retried.files).sort()).toEqual(['a', 'c']);
+    expect(retried.snapshots).toHaveLength(promptId === 'prompt' ? 1 : 2);
+    await history.execute('c', () =>
+      writeFile(path.join(workspace, 'c'), 'new'),
+    );
+    expect(await history.rewind('prompt')).toMatchObject({
+      conflict: false,
+      filesFailed: [],
+    });
+    expect(await readFile(file, 'utf8')).toBe('before');
+    await expect(readFile(path.join(workspace, 'c'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  },
+);
+
+it('retries a narrower batch after a partial backup failure without retaining unprepared paths', async () => {
+  const file = path.join(workspace, 'b');
+  await writeFile(file, 'before');
+  const before = history.state();
+  const copy = vi
+    .spyOn(fsPromises, 'copyFile')
+    .mockRejectedValueOnce(new Error('disk full'));
+  await expect(history.prepare('prompt', ['a', 'b'])).rejects.toThrow(
+    'backup failed',
+  );
+  expect(copy).toHaveBeenCalled();
+  expect(history.state()).toEqual(before);
+  expect(parseHostedFileHistoryState(history.state(), owner)).toEqual(before);
+  await expect(history.execute('a', vi.fn())).rejects.toThrow(
+    'no prepared backup',
+  );
+  copy.mockRestore();
+  await history.prepare('prompt', ['b']);
+  expect(
+    Object.keys(parseHostedFileHistoryState(history.state(), owner).files),
+  ).toEqual(['b']);
+  await history.execute('b', () => writeFile(file, 'after'));
+  expect(await history.rewind('prompt')).toMatchObject({
+    conflict: false,
+    filesFailed: [],
+    filesChanged: ['b'],
+  });
+  expect(await readFile(file, 'utf8')).toBe('before');
+});
 
 it('does not accept drift if any backup or verification fails', async () => {
   const file = path.join(workspace, 'a');
@@ -188,6 +264,37 @@ it('does not accept drift if any backup or verification fails', async () => {
   });
   await expect(history.prepare('third-prompt', ['a'])).rejects.toThrow();
   expect(history.state().files).toEqual(expected);
+});
+
+it('keeps refused preparation retryable after backup access recovers', async () => {
+  const file = path.join(workspace, 'a');
+  await writeFile(file, 'before');
+  await history.prepare('prompt', ['a']);
+  const before = history.state();
+  const fault = Object.assign(new Error('backup temporarily unavailable'), {
+    code: 'EACCES',
+  });
+  const backupStat = vi.spyOn(fsPromises, 'stat');
+  const checkpoint = history.history.checkpoint.bind(history.history);
+  vi.spyOn(history.history, 'checkpoint').mockImplementationOnce(async (id) => {
+    await checkpoint(id);
+    backupStat.mockRejectedValue(fault);
+  });
+  await expect(history.prepare('next-prompt', ['a'])).rejects.toThrow(fault);
+  await expect(history.ready()).rejects.toThrow(fault);
+  expect(history.state()).toEqual(before);
+  backupStat.mockRestore();
+  await expect(history.ready()).resolves.toBeUndefined();
+  await history.prepare('next-prompt', ['a']);
+  expect(
+    parseHostedFileHistoryState(history.state(), owner).snapshots,
+  ).toHaveLength(2);
+  await history.execute('a', () => writeFile(file, 'after'));
+  expect(await history.rewind('prompt')).toMatchObject({
+    conflict: false,
+    filesFailed: [],
+  });
+  expect(await readFile(file, 'utf8')).toBe('before');
 });
 
 it('requires successful backups and refuses missing persisted backups', async () => {

@@ -3,10 +3,9 @@
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
 Status: implemented; local validation passed, deployment acceptance pending.
-Integrated with main `a4bf0026c` and the original
-file-history dependency [#13110](https://github.com/QwenLM/qwen-code/pull/13110)
-at `fee8f8763`, including main integration `560752cad` and recovery-test
-update `80f8cfe3f`.
+Integrated with main `0a5f518b4`, including the merged file-history dependency
+[#13110](https://github.com/QwenLM/qwen-code/pull/13110) at `e083d6a6b`.
+Its final preparation rollback fixes and recovery tests are preserved.
 Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 Completes the W1b slice of the [W1 recovery design](2026-09-29-managed-workspace-w1-recovery.md),
 without implementing W1c placement promotion.
@@ -127,7 +126,7 @@ CLI worker, local provider and Session validator. The only shared production
 changes are pure Session Store parser exports and a typed read-only W1a guard
 query, plus exact private-flag dispatch in the npm entry and bundled CLI bootstrap
 before normal CLI/model or inherited update startup. Existing HTTP Session readers, writers, Hosted turn routes and Runtime
-worker dispatch remain on their established paths. The additive V26 work queue
+worker dispatch remain on their established paths. The additive V27 work queue
 indexes support asset-key paging and Session/state reference selection.
 
 Session pages and reference queues are persisted and bounded. Read one journal
@@ -270,5 +269,6 @@ partial-inventory source-loss path; fixes now preserve the durable invalidation
 and recheck pinned originals. Focused packaged/H2 and Node regression probes are
 reported separately from the earlier full MySQL run. These fixtures do not prove live Harness/Worker/Broker or external OSS
 deployment acceptance. Real Linux identity, full deployed O2 capture, exhaustive
-physical interruption boundaries and stress-scale evidence remain pending,
-along with #13110's main-branch merge.
+physical interruption boundaries and stress-scale evidence remain pending.
+#13110 has merged into main; this integration also preserves main's V26 tool
+result projection migration and assigns the new recovery metadata to V27.

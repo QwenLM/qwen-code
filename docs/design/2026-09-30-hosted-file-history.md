@@ -48,7 +48,10 @@ files, creates and validates a new snapshot, then verifies the samples again
 before accepting the new expected state. This retains external/Shell bytes and
 modes in that prompt's preimage without changing older snapshots. Same-prompt
 retries and undo still refuse drift. Other writers must be quiescent during
-preparation; a failed backup or changed sample cannot refresh expected state. A definite
+preparation; a failed backup or changed sample cannot refresh expected state.
+A refused preparation restores the last successful snapshots and prompt bookkeeping,
+retaining the expected file state and allowing a narrower retry of the same prompt.
+A definite
 preparation refusal becomes a persisted tool error for the batch's Write/Edit
 calls; other admitted calls may continue. A definite bind refusal in a new turn
 ends it with an error after confirmed runtime release. Neither case blocks the Session

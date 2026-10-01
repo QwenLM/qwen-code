@@ -16,7 +16,7 @@ import {
 } from './hosted-file-history-protocol.js';
 
 export class ManagedRuntimeFileHistory {
-  readonly history: ManagedToolFileHistory;
+  history: ManagedToolFileHistory;
   private readonly files: HostedFileHistoryState['files'];
   private readonly prepared = new Set<string>();
 
@@ -95,28 +95,41 @@ export class ManagedRuntimeFileHistory {
       )
         throw new Error('Hosted file changed outside tracked mutations.');
     }
-    await this.history.checkpoint(promptId);
-    await this.history.run(async () => {
-      for (const file of paths) {
-        const absolute = await this.resolve(file);
-        await this.history.service.trackEdit(absolute);
-        const backups = this.history.service
-          .getSnapshots()
-          .at(-1)?.trackedFileBackups;
-        const key = file.split('/').join(path.sep);
-        if (!backups || !Object.hasOwn(backups, key) || backups[key].failed)
-          throw new Error(
-            'Hosted file backup failed; mutation was not started.',
-          );
-      }
-      await this.ready();
-      for (const [file, expected] of Object.entries(observed))
-        if (!isDeepStrictEqual(await this.fingerprint(file), expected))
-          throw new Error('Hosted file changed during backup preparation.');
-      Object.assign(this.files, observed);
-      if (newPrompt) this.prepared.clear();
-      for (const file of paths) this.prepared.add(file);
-    });
+    // Initialize before preparation can fail while backup storage is unavailable.
+    const previous = new ManagedToolFileHistory(
+      this.ownerSessionId,
+      this.directory,
+      snapshots,
+    );
+    await previous.ready();
+    try {
+      await this.history.checkpoint(promptId);
+      await this.history.run(async () => {
+        for (const file of paths) {
+          const absolute = await this.resolve(file);
+          await this.history.service.trackEdit(absolute);
+          const backups = this.history.service
+            .getSnapshots()
+            .at(-1)?.trackedFileBackups;
+          const key = file.split('/').join(path.sep);
+          if (!backups || !Object.hasOwn(backups, key) || backups[key].failed)
+            throw new Error(
+              'Hosted file backup failed; mutation was not started.',
+            );
+        }
+        await this.ready();
+        for (const [file, expected] of Object.entries(observed))
+          if (!isDeepStrictEqual(await this.fingerprint(file), expected))
+            throw new Error('Hosted file changed during backup preparation.');
+        Object.assign(this.files, observed);
+        if (newPrompt) this.prepared.clear();
+        for (const file of paths) this.prepared.add(file);
+      });
+    } catch (error) {
+      // Restore prompt bookkeeping too, so the refused prompt can be retried.
+      this.history = previous;
+      throw error;
+    }
   }
 
   async execute<T>(file: string, action: () => Promise<T>): Promise<T> {
