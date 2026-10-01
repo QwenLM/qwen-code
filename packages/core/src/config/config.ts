@@ -1259,6 +1259,17 @@ export interface ConfigParameters {
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
   proxy?: string;
+  /**
+   * Whether construction installs the process-global undici proxy
+   * dispatcher (and the runtime-fetch proxy slot) when `proxy` resolves.
+   * Defaults to `true`. Throwaway Configs that exist only to route
+   * telemetry events must pass `false`: they still expose the proxy via
+   * `getProxy()` for the RUM logger's own agent, but must not rewrite the
+   * host process's global network state — in `qwen serve` one long-lived
+   * process hosts many workspaces, and nothing ever restores the
+   * dispatcher (#12770).
+   */
+  installProxyDispatcher?: boolean;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
   includeDirectories?: string[];
@@ -3700,7 +3711,7 @@ export class Config {
     }
 
     const proxyUrl = this.getProxy();
-    if (proxyUrl) {
+    if (proxyUrl && (params.installProxyDispatcher ?? true)) {
       // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
       // honored. A bare ProxyAgent tunnels EVERY request — including local
       // MCP servers reached over `http://localhost:...` — through the proxy,
@@ -3762,6 +3773,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
       locale: params.locale,
+      usageStatisticsEnabled: this.usageStatisticsEnabled,
+      proxy: this.proxy,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
@@ -3843,6 +3856,10 @@ export class Config {
         skipSkillManager: true,
         skipFileCheckpointing: true,
       };
+    }
+    // MCP servers run in the host process; a Managed session has none.
+    if (this.sessionExecutionEngine === 'managed') {
+      options = { ...options, skipMcpDiscovery: true };
     }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
@@ -5828,6 +5845,10 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  getSessionExecutionEngine(): SessionExecutionEngine | undefined {
+    return this.sessionExecutionEngine;
   }
 
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
@@ -8210,7 +8231,13 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.executionEnvironment || this.shellExecutionSandbox) return {};
+    if (
+      this.executionEnvironment ||
+      this.shellExecutionSandbox ||
+      this.sessionExecutionEngine === 'managed'
+    ) {
+      return {};
+    }
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -8458,7 +8485,12 @@ export class Config {
   }
 
   private async refreshMcpServers(): Promise<void> {
-    if (this.shellExecutionSandbox) return;
+    if (
+      this.shellExecutionSandbox ||
+      this.sessionExecutionEngine === 'managed'
+    ) {
+      return;
+    }
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -12100,6 +12132,12 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
+    // The registry refuses every tool of a Managed session, but its manager
+    // still connects a runtime-added server.
+    if (this.sessionExecutionEngine === 'managed') {
+      this.applyPendingMcpBudgetCallback(registry);
+      return registry;
+    }
 
     const registerLazy = (
       toolName: ToolName,
@@ -12817,26 +12855,7 @@ export class Config {
     // mode). Either way the manager has its callback wired at the
     // moment the first discovery pass fires, so end-of-pass events
     // for that pass are routed through the SDK push channel.
-    if (this.pendingMcpBudgetCallback) {
-      const mgr = registry.getMcpClientManager();
-      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
-        mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
-      }
-      // clear after consumption so a
-      // subsequent `createToolRegistry` call (e.g. subagent override
-      // via `createApprovalModeOverride` /
-      // `buildSubagentContextOverride`) doesn't re-apply the parent
-      // session's callback to a fresh manager. Subagent contexts run
-      // their own MCP clients but should NOT push budget events
-      // through the parent's ACP session — that would route subagent
-      // telemetry to the wrong subscriber.
-      //
-      // Late-call setter (`setMcpBudgetEventCallback` after
-      // `initialize()`) is unaffected: it dispatches directly to the
-      // existing manager via the `if (this.toolRegistry)` branch,
-      // not through `pendingMcpBudgetCallback`.
-      this.pendingMcpBudgetCallback = undefined;
-    }
+    this.applyPendingMcpBudgetCallback(registry);
 
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();
@@ -12845,6 +12864,28 @@ export class Config {
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );
     return registry;
+  }
+
+  private applyPendingMcpBudgetCallback(registry: ToolRegistry): void {
+    if (!this.pendingMcpBudgetCallback) return;
+    const mgr = registry.getMcpClientManager();
+    if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+      mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
+    }
+    // clear after consumption so a
+    // subsequent `createToolRegistry` call (e.g. subagent override
+    // via `createApprovalModeOverride` /
+    // `buildSubagentContextOverride`) doesn't re-apply the parent
+    // session's callback to a fresh manager. Subagent contexts run
+    // their own MCP clients but should NOT push budget events
+    // through the parent's ACP session — that would route subagent
+    // telemetry to the wrong subscriber.
+    //
+    // Late-call setter (`setMcpBudgetEventCallback` after
+    // `initialize()`) is unaffected: it dispatches directly to the
+    // existing manager via the `if (this.toolRegistry)` branch,
+    // not through `pendingMcpBudgetCallback`.
+    this.pendingMcpBudgetCallback = undefined;
   }
 
   /**
