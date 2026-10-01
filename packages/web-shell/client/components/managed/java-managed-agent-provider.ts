@@ -10,6 +10,8 @@ import {
   toTimestamp,
 } from './java-managed-agent-event-projector';
 import { managedRequestId } from './managed-session-storage';
+import { browserArtifactSave } from './managed-artifact-download';
+import type { ManagedArtifactSave } from './managed-tool-result-types';
 import type {
   ManagedAgentProvider,
   ManagedAgentRuntimeState,
@@ -21,14 +23,18 @@ export interface JavaManagedAgentProviderOptions
   extends JavaManagedAgentClientOptions {
   agentId?: string;
   environmentId?: string;
+  /** Include tenant and actor identity; replace this scope/provider when either changes. Token refresh alone can use getHeaders. */
   productScope?: string;
   enableWorkspaceBinding?: boolean;
+  /** Acquire a streaming save target during the user gesture, then call openStream. */
+  saveArtifact?: ManagedArtifactSave;
 }
 
 export function createJavaManagedAgentProvider(
   options: JavaManagedAgentProviderOptions,
 ): ManagedAgentProvider {
   const client = new JavaManagedAgentClient(options);
+  const saveArtifact = options.saveArtifact ?? browserArtifactSave();
   const agentId = options.agentId ?? 'qwen-code';
   if (options.enableWorkspaceBinding && !options.productScope?.trim()) {
     throw new Error('Workspace binding requires an explicit productScope');
@@ -38,6 +44,29 @@ export function createJavaManagedAgentProvider(
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    toolResults: {
+      canDownload: saveArtifact !== undefined,
+      getResult: (sessionId, itemId, request) =>
+        client.getToolResult(sessionId, itemId, request.signal),
+      listArtifacts: (sessionId, request) =>
+        client.listArtifacts(
+          { sessionId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
+      getArtifact: (sessionId, artifactId, request) =>
+        client.getArtifact(sessionId, artifactId, request.signal),
+      readRange: (artifact, offset, length, request) =>
+        client.readArtifactRange(artifact, offset, length, request.signal),
+      async downloadArtifact(artifact, request) {
+        if (!saveArtifact) {
+          throw new Error('This host does not support streaming downloads');
+        }
+        await saveArtifact(artifact, {
+          signal: request.signal,
+          openStream: () => client.openArtifactStream(artifact, request.signal),
+        });
+      },
+    },
     ...(options.enableWorkspaceBinding
       ? {
           workspaceBinding: {
@@ -220,6 +249,7 @@ function toSessionSummary(
     runtimeReady: runtimeState === 'ready',
     runtimeState,
     capabilities: {
+      ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
         sessionActive && !active && (!session.workspace || workspaceTurns),
       canCancel:

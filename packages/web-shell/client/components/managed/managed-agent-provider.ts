@@ -1,3 +1,5 @@
+import type { ManagedToolResultReader } from './managed-tool-result-types';
+
 export type ManagedAgentSessionPhase =
   | 'created'
   | 'admitted'
@@ -31,6 +33,7 @@ export interface ManagedAgentSessionSummary {
   capabilities: {
     canSend: boolean;
     canCancel: boolean;
+    artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
   };
@@ -49,6 +52,7 @@ export type ManagedAgentSessionEventType =
   | 'tool_requested'
   | 'tool_started'
   | 'tool_completed'
+  | 'tool_result_updated'
   | 'completed'
   | 'failed'
   | 'cancelling'
@@ -89,6 +93,7 @@ export interface ManagedAgentProvider {
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  readonly toolResults?: ManagedToolResultReader;
   readonly workspaceBinding?: {
     readonly agentId: string;
     list(

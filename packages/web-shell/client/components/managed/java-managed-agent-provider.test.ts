@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { artifact } from './managed-tool-result.test-fixtures';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
 
 function jsonResponse(value: unknown): Response {
@@ -505,5 +506,40 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
     ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
+  });
+
+  it('passes download cancellation through the host sink to the content fetch', async () => {
+    const abort = new AbortController();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async (_url, init) => {
+        expect(init?.signal).toBe(abort.signal);
+        return new Response('hello', {
+          status: 200,
+          headers: { etag: `"${artifact.sha256}"`, 'content-length': '5' },
+        });
+      });
+    const saveArtifact = vi.fn(async (_artifact, options) => {
+      expect(options.signal).toBe(abort.signal);
+      const stream = await options.openStream();
+      expect(await stream.getReader().read()).toMatchObject({ done: false });
+    });
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+      saveArtifact,
+    });
+    await provider.toolResults!.downloadArtifact(artifact, {
+      clientId: 'client',
+      signal: abort.signal,
+    });
+    expect(saveArtifact).toHaveBeenCalledWith(
+      artifact,
+      expect.objectContaining({
+        signal: abort.signal,
+        openStream: expect.any(Function),
+      }),
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
