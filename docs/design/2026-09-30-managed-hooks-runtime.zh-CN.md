@@ -89,11 +89,23 @@ launcher 先进入独立 unit，再启动命令。`setsid` 和 detached 子进�
 
 隔离能力不可用时（包括 macOS 和 Windows），在命令启动前返回
 `managed_hook_command_isolation_unavailable`。日志记录 `not_started_proven` 和
-`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 SessionStart 和
-UserPromptSubmit，若准入后没有 model attempt、tool intent/receipt 或非 user 消息，
+`handler_unavailable`，可通过取消关闭被阻塞的 occurrence。对于 SessionStart、
+UserPromptSubmit 和模型执行前的原生 InstructionsLoaded，若准入后没有 model
+attempt、tool intent/receipt 或非 user 消息，
 且没有未决 Hook，显式取消还会持久化结算 Hook 持久化输入 `prompt_id` 对应的已准入
-turn。此前 SessionStart 的取消不能结算后来的 turn。Load 同样修复此前已取消的记录；取消不会丢弃
-模型或工具 continuation。单个进程组消失不能作为
+turn。此前 SessionStart 的取消不能结算后来的 turn。对于被拒绝且显式取消后具有
+`not_started_proven` 的 PreToolUse child，恢复还可关闭首个已提交的工具调用批次：
+所有模型 attempt 必须已结束，至少一个已提交输出，不得有 tool intent/receipt、
+未决审批、文件历史工作或 Hook，且取消 child 的 occurrence 与输入必须匹配唯一
+未结算 turn 的原始调用。恢复先为每个缺失的调用持久化匹配的拒绝结果，再将 turn
+结算为 cancelled。响应按包含元数据的完整记录实际 UTF-8 大小分批，遵守 64 KiB
+inline 上限；每条成功记录作为下一条的 parent。单条响应仍超限时保留恢复屏障，
+不截断调用身份。
+新批次在提交 assistant 消息前检查每个取消响应的大小，超限调用在工具 acquire
+或派发前即被拒绝。
+部分批次已提交的响应保持不变；写入失败保留屏障，重试不会重复响应。
+恢复与 turn、控制操作准入串行化；Load 同样修复此前已取消的记录。其他模型或
+工具 continuation 仍保持阻塞。单个进程组消失不能作为
 进程树排空证明。环境继承限于执行必需变量和 recipe 显式条目。Async 准入等待 Runtime
 ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn 共存；未知工作阻塞新准入
 并保留 Runtime hold。
@@ -180,12 +192,20 @@ Dispatcher 不在 Managed Config 中加载或执行环境中的 Legacy Hooks。H
 设置。显式 after/batch Hook stop 结束编排，同时保留物理回执和未被模型消费的状态，
 Session 仍可开始下一轮。
 
+已加载目录包含 Stop 或 MessageDisplay 时，模型文本在两者完成决策前保持缓冲。
+丢弃或隐藏的草稿不会成为持久化 text delta。没有这两类输出策略的 Session 保留增量流式输出。
+
 ## 接口与兼容性
 
 Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, definitionDigest}`，
 同时需要 Hosted Workspace tool profile 和 Broker。加载时省略初始 pin 会恢复保存值，
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
+
+Runtime-only 接管标志仍让 Hook Session 使用现有的 Hook 感知加载与核对路径。
+Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
+`hosted_hook_recovery_required` 拒绝 Hook Session；不能忽略待结算 Hook 副作用或
+模型 scope 来结束回合。
 
 私有 Session/client scope 路由提供 `GET /session/:id/hooks`、注册更新、Notification/
 扩展操作和 operation status/cancel。修改操作不能与 turn 或另一控制操作重叠。Hook
@@ -217,3 +237,5 @@ command 排空。
 回归。运行 `npm run build`、`npm run typecheck`、`npm run bundle`、包内定向测试与 Java
 契约测试。集成验证后进行两轮无新问题的自审及独立评审。未知物理或模型结果保留原证据并
 阻塞；仅模拟事件的测试通过，不代表缺少生产者的能力已经受支持。
+
+显式 Runtime 恢复与取消保留原始持久工具输入证明的 owner（包括共用 MCP owner），不默认替换为 prompt ID。所有权证据缺失或冲突时，在任何 Broker 调用之前拒绝恢复。Raw Shell intent 缺少路由证据时，仅在保存定义没有共用 Hook 或 MCP owner 的情况下使用 prompt owner。

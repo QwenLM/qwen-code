@@ -15,6 +15,7 @@ import {
 import type { ManagedHookDispatcher } from '@qwen-code/qwen-code-core/hooks/hookEventHandler.js';
 import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
@@ -431,7 +432,16 @@ describe('Hosted Harness model boundary', () => {
       { type: LlmEventType.Content, value: 'answer' },
       { type: LlmEventType.Finished },
     ]);
-    const hooks = hostedHooks();
+    const hooks = hostedHooks([HookEventName.MessageDisplay]);
+    const getCatalog = hooks.session.getCatalog;
+    let ready = false;
+    vi.spyOn(hooks.session, 'getCatalog').mockImplementation(() =>
+      ready ? getCatalog() : undefined,
+    );
+    vi.mocked(hooks.session.ensureReady).mockImplementation(async () => {
+      ready = true;
+    });
+    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
     hooks.fire.mockImplementation(async (event) =>
       event === HookEventName.MessageDisplay
         ? { suppressOutput: true }
@@ -444,8 +454,14 @@ describe('Hosted Harness model boundary', () => {
       setPromptHookRunner: vi.fn(),
     };
     await expect(
-      runHostedHarnessTextTurn({ ...input, hooks: hooks.session, toolTurn }),
+      runHostedHarnessTextTurn({
+        ...input,
+        hooks: hooks.session,
+        toolTurn,
+        textDeltas,
+      }),
     ).resolves.toMatchObject({ text: '', parts: [] });
+    expect(textDeltas.delta).not.toHaveBeenCalled();
     expect(
       hooks.fire.mock.calls.find(
         ([event]) => event === HookEventName.MessageDisplay,
@@ -455,6 +471,46 @@ describe('Hosted Harness model boundary', () => {
       displayed_text: 'answer',
       is_final: true,
     });
+  });
+
+  it('buffers discarded Stop drafts until the final answer is accepted', async () => {
+    const model = config([]);
+    const hooks = hostedHooks([HookEventName.Stop]);
+    let attempts = 0;
+    model.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: LlmEventType.Content,
+        value: ++attempts === 1 ? 'discarded draft' : 'accepted answer',
+      };
+      yield { type: LlmEventType.Finished };
+    });
+    let stops = 0;
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.Stop && ++stops === 1
+        ? { decision: 'block', reason: 'Continue' }
+        : undefined,
+    );
+    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, hooks: hooks.session, textDeltas }),
+    ).resolves.toMatchObject({ text: 'accepted answer' });
+    expect(textDeltas.delta).not.toHaveBeenCalled();
+    expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('streams text when the Hook catalog has no output policy', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    const hooks = hostedHooks([HookEventName.Notification]);
+    const textDeltas = { delta: vi.fn(), published: vi.fn(() => false) };
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hooks.session,
+      textDeltas,
+    });
+    expect(textDeltas.delta).toHaveBeenCalledExactlyOnceWith('answer');
   });
 
   it('reconstructs after-Hook tool results after installing the authorized prompt runner', async () => {
@@ -874,3 +930,165 @@ it.each(['decision', 'continue'] as const)(
     ).toEqual([false, true]);
   },
 );
+
+describe('Hosted Harness resume and retraction', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function configWithTools(
+    events: Array<{
+      type: LlmEventType;
+      value?: unknown;
+      isContinuation?: boolean;
+    }>,
+    modelParts: unknown[],
+  ) {
+    const tools = new Set(['run_shell_command']);
+    const requests: unknown[] = [];
+    const types: unknown[] = [];
+    state.config = {
+      initialize: vi.fn(async () => undefined),
+      getModelsConfig: () => ({ getCurrentAuthType: () => 'test-auth' }),
+      refreshAuth: vi.fn(async () => undefined),
+      getToolRegistry: () => ({
+        warmAll: vi.fn(async () => undefined),
+        getAllTools: () => [...tools].map((name) => ({ name })),
+        unregisterTool: vi.fn((name: string) => tools.delete(name)),
+        getFunctionDeclarations: () => [...tools],
+      }),
+      getLlmClient: () => ({
+        setTools: vi.fn(async () => undefined),
+        getChat: () => ({
+          setHistory: vi.fn(),
+          setTools: vi.fn(async () => undefined),
+        }),
+        getHistory: () => [{ role: 'model', parts: modelParts }],
+        async *sendMessageStream(
+          request: unknown,
+          _signal: unknown,
+          _promptId: unknown,
+          options: unknown,
+        ) {
+          requests.push(request);
+          types.push(options);
+          for (const event of events) yield event;
+        },
+      }),
+      getModel: () => 'test-model',
+      shutdown: vi.fn(async () => undefined),
+    };
+    return { requests, types };
+  }
+
+  it('resumes from journaled tool results as a tool-result request', async () => {
+    const resumeParts = [
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'write_file',
+          response: { ok: true },
+        },
+      },
+    ];
+    const { requests, types } = configWithTools(
+      [
+        { type: LlmEventType.Content, value: 'recovered' },
+        { type: LlmEventType.Finished },
+      ],
+      [{ text: 'recovered' }],
+    );
+    const toolTurn = {
+      execute: vi.fn(),
+      consumeResults: vi.fn(async () => undefined),
+      declarations: async () => [],
+      setPromptHookRunner: vi.fn(),
+    };
+    const result = await runHostedHarnessTextTurn({
+      ...input,
+      toolTurn,
+      resumeFromToolResults: resumeParts,
+    });
+    expect(result.text).toBe('recovered');
+    expect(requests[0]).toStrictEqual(resumeParts);
+    expect(types[0]).toMatchObject({
+      type: SendMessageType.ToolResult,
+    });
+    expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+    expect(toolTurn.execute).not.toHaveBeenCalled();
+  });
+
+  it('fails the turn rather than retracting a published model attempt', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'leaked prefix' },
+      { type: LlmEventType.Retry, isContinuation: false },
+      { type: LlmEventType.Content, value: 'second attempt' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => true,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).rejects.toThrow('cannot retract a published model attempt');
+  });
+
+  it('fails the turn rather than retracting a published model fallback', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'leaked prefix' },
+      { type: LlmEventType.ModelFallback },
+      { type: LlmEventType.Content, value: 'second attempt' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => true,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).rejects.toThrow('cannot retract a published model attempt');
+  });
+
+  it('still discards an unpublished abandoned attempt', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'first attempt' },
+      { type: LlmEventType.Retry, isContinuation: false },
+      { type: LlmEventType.Content, value: 'final answer' },
+      { type: LlmEventType.Finished },
+    ]);
+    const textDeltas = {
+      delta: vi.fn(async () => undefined),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => false,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).resolves.toMatchObject({ text: 'final answer' });
+  });
+
+  it('commits every Content chunk through the delta stream as it arrives', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'chunk one' },
+      { type: LlmEventType.Content, value: ' and two' },
+      { type: LlmEventType.Finished },
+    ]);
+    // Track the durable-prefix contract the way the real stream does: a
+    // chunk is published the moment delta() commits it.
+    let prefix = '';
+    const textDeltas = {
+      delta: vi.fn(async (text: string) => {
+        prefix += text;
+      }),
+      messageComplete: vi.fn(async () => undefined),
+      published: () => prefix.length > 0,
+    };
+    await expect(
+      runHostedHarnessTextTurn({ ...input, textDeltas }),
+    ).resolves.toMatchObject({ text: 'chunk one and two' });
+    expect(textDeltas.delta.mock.calls.map((call) => call[0])).toEqual([
+      'chunk one',
+      ' and two',
+    ]);
+  });
+});

@@ -1587,7 +1587,10 @@ it.each([false, true])(
     const resolve = vi.spyOn(harness, 'resolveAwaitRuntime');
     const publish = vi.spyOn(session.resources, 'publish');
     messageFitsInline.mockImplementation(
-      (...args: unknown[]) => args[0] !== 'tool_result' || !rejectHistory,
+      (type, content) =>
+        type !== 'tool_result' ||
+        !rejectHistory ||
+        !content.some((part) => part.functionResponse?.response?.['capture']),
     );
     const call = {
       ...calls[0],
@@ -2302,11 +2305,13 @@ it('reports an answer that loses the race to the expiry as expired', async () =>
   expect(broker.prepare).not.toHaveBeenCalled();
 });
 
-it('blocks recovery when the refusals do not fit durably', async () => {
+it('blocks recovery when a refusal record write fails', async () => {
   turn = createTurn(false, { mode: 'default' });
-  messageFitsInline.mockImplementation(
-    (...args: unknown[]) => args[0] !== 'tool_result',
-  );
+  const write = session.sink.write.bind(session.sink);
+  vi.spyOn(session.sink, 'write').mockImplementation(async (record) => {
+    if (record.type === 'tool_result') throw new Error('resource unavailable');
+    return write(record);
+  });
   const running = turn.execute(
     [calls[1]],
     [parts[1]],

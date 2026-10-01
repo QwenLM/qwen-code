@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
+import { ToolApproval } from '../messages/ToolApproval';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Textarea } from '../ui/textarea';
@@ -10,6 +18,9 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
+import { useManagedActions } from './use-managed-actions';
+import { toManagedPermissionRequest } from './managed-approval';
+import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
@@ -55,20 +66,6 @@ function persistPending(key: string, value: PendingPrompt | undefined): void {
   } catch {
     // The in-memory attempt still preserves retries when storage is disabled.
   }
-}
-
-function isNonRetryableClientError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('status' in error)) {
-    return false;
-  }
-  const status = (error as { status?: unknown }).status;
-  return (
-    typeof status === 'number' &&
-    status >= 400 &&
-    status < 500 &&
-    status !== 408 &&
-    status !== 429
-  );
 }
 
 export function ManagedSessionsPage({
@@ -160,6 +157,31 @@ function ManagedSessionsContent({
     () => managedEventsToMessages(detail.events, t('managed.truncated')),
     [detail.events, t],
   );
+  // The caveat sits beside the card rather than inside the panel, so the panel
+  // is told about it: without this the dialog describes only the tool name and
+  // a screen-reader user confirms an approval whose arguments are missing.
+  const argumentsCaveatId = useId();
+  const approvals = useManagedActions(
+    provider,
+    enabled ? sessionId : undefined,
+    clientId,
+    // Unknown while the summary reloads, so the shown approval is kept.
+    detail.summary ? detail.summary.capabilities.actions === true : undefined,
+    detail.events,
+  );
+  const pendingApproval = useMemo(
+    () =>
+      approvals.action
+        ? toManagedPermissionRequest(approvals.action, messages)
+        : null,
+    [approvals.action, messages],
+  );
+  const approvalCause = approvals.answerError;
+  const approvalForbidden =
+    typeof approvalCause === 'object' &&
+    approvalCause !== null &&
+    'code' in approvalCause &&
+    approvalCause.code === 'action_forbidden';
 
   useEffect(() => {
     const abort = new AbortController();
@@ -490,7 +512,7 @@ function ManagedSessionsContent({
                     ? openResult
                     : undefined
                 }
-                pendingApproval={null}
+                pendingApproval={pendingApproval}
                 sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
                 loadingTranscript={detail.loading}
                 isResponding={Boolean(active)}
@@ -512,6 +534,58 @@ function ManagedSessionsContent({
           {pending && !busy && (
             <p role="status" className="text-sm text-muted-foreground">
               {t('managed.uncertain')}
+            </p>
+          )}
+          {pendingApproval && (
+            <div className="shrink-0" data-testid="managed-approval">
+              <ToolApproval
+                request={pendingApproval}
+                variant="floating"
+                keyboardActive={false}
+                extraDescriptionId={
+                  pendingApproval.rawInput === undefined
+                    ? argumentsCaveatId
+                    : undefined
+                }
+                onConfirm={(actionId, optionId) =>
+                  approvals.respond(actionId, optionId)
+                }
+              />
+              {pendingApproval.rawInput === undefined && (
+                <p
+                  id={argumentsCaveatId}
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                >
+                  {t('managed.approval.argumentsUnavailable')}
+                </p>
+              )}
+            </div>
+          )}
+          {approvals.loadError !== undefined && (
+            <div
+              role="alert"
+              className="flex items-center gap-2 text-sm text-destructive"
+            >
+              <span>
+                {t(
+                  approvals.loaded
+                    ? 'managed.approval.refreshFailed'
+                    : 'managed.approval.loadFailed',
+                )}
+              </span>
+              <Button variant="outline" size="sm" onClick={approvals.retry}>
+                {t('managed.approval.retry')}
+              </Button>
+            </div>
+          )}
+          {approvals.answerError !== undefined && (
+            <p role="alert" className="text-sm text-destructive">
+              {t(
+                approvalForbidden
+                  ? 'managed.approval.forbidden'
+                  : 'managed.approval.failed',
+              )}
             </p>
           )}
           <ManagedSessionProgress
