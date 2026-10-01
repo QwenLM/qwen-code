@@ -1804,8 +1804,9 @@ describe('AgentTool', () => {
   // provisioning calls, on a real repo (execute() would mock most runtime).
   describe('isolation — round-7 parent-dirty guard', () => {
     const hasWorktreeChanges = async (repo: string) => {
-      const { GitWorktreeService } =
-        await import('../../services/gitWorktreeService.js');
+      const { GitWorktreeService } = await import(
+        '../../services/gitWorktreeService.js'
+      );
       return new GitWorktreeService(repo).hasWorktreeChanges(repo);
     };
 
@@ -1871,8 +1872,9 @@ describe('AgentTool', () => {
         headCommit: string;
       }>,
     ) => {
-      const { GitWorktreeService } =
-        await import('../../services/gitWorktreeService.js');
+      const { GitWorktreeService } = await import(
+        '../../services/gitWorktreeService.js'
+      );
       const proto = GitWorktreeService.prototype;
       return [
         vi
@@ -3364,7 +3366,8 @@ describe('AgentTool', () => {
       await runFork(forkParams('some task', { fork_turns: 'all' }));
 
       const promptConfig = createArgs()?.[2] as
-        { initialMessages?: Content[] } | undefined;
+        | { initialMessages?: Content[] }
+        | undefined;
       const initialMessages = promptConfig?.initialMessages ?? [];
       expect(JSON.stringify(initialMessages)).not.toContain(
         'SIBLING_SECRET_DIRECTIVE',
@@ -4242,7 +4245,8 @@ describe('AgentTool', () => {
 
     it('should clear pendingConfirmation via onConfirm callback (terminal UI path)', async () => {
       let capturedOnConfirm:
-        ((outcome: ToolConfirmationOutcome) => Promise<void>) | undefined;
+        | ((outcome: ToolConfirmationOutcome) => Promise<void>)
+        | undefined;
       const snapshots: Array<{ hasPendingConfirmation: boolean }> = [];
 
       const invocation = createInvocationWithEventDrivenAgent((emitter) => {
@@ -4324,7 +4328,8 @@ describe('AgentTool', () => {
       });
     const resident = () =>
       mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
-        ResidentBackgroundAgent | undefined;
+        | ResidentBackgroundAgent
+        | undefined;
     const registeredAgentId = () =>
       mockRegistry.register.mock.calls[0][0].agentId as string;
     const expectForegroundRegistration = () =>
@@ -4385,7 +4390,8 @@ describe('AgentTool', () => {
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1];
       const callback = owned(monitors.setAgentNotificationCallback) as
-        ((displayText: string, modelText: string) => void) | undefined;
+        | ((displayText: string, modelText: string) => void)
+        | undefined;
       expect(callback).toBeDefined();
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');
       expect(mockRegistry.queueExternalInput).toHaveBeenCalledWith(agentId, {
@@ -4393,7 +4399,8 @@ describe('AgentTool', () => {
         text: '<task-notification />',
       });
       const lifecycleCallback = owned(monitors.setAgentLifecycleCallback) as
-        (() => void) | undefined;
+        | (() => void)
+        | undefined;
       expect(lifecycleCallback).toBeDefined();
       lifecycleCallback?.();
       expect(mockRegistry.wakeExternalInputWaiters).toHaveBeenCalledWith(
@@ -5085,7 +5092,8 @@ describe('AgentTool', () => {
 
     it('waits for a background slot before hooks and subagent setup', async () => {
       let releaseSlot:
-        ((reservation: { readonly id: symbol }) => void) | undefined;
+        | ((reservation: { readonly id: symbol }) => void)
+        | undefined;
       const slotReservation = { id: Symbol('background-slot') };
       mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
       mockRegistry.tryReserveBackgroundSlot.mockReturnValue(undefined);

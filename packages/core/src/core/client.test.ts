@@ -7881,8 +7881,9 @@ Other open files:
 
       // Force the next-speaker check to recurse so we hit `return continueTurn`.
       // The recursion call passes through this same mock stream and returns.
-      const { checkNextSpeaker } =
-        await import('../utils/nextSpeakerChecker.js');
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
       vi.mocked(checkNextSpeaker)
         .mockResolvedValueOnce({
           reasoning: 'forced',
@@ -8048,8 +8049,9 @@ Other open files:
     });
 
     it('runs tool-result migration after a next-speaker continuation', async () => {
-      const { checkNextSpeaker } =
-        await import('../utils/nextSpeakerChecker.js');
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
       vi.mocked(checkNextSpeaker)
         .mockResolvedValueOnce({
           reasoning: 'continue',
@@ -8174,7 +8176,8 @@ Other open files:
       ).activatePreparedMemoryRecallTransition();
 
       const installedPrompt = setSystemInstruction.mock.calls.at(-1)?.[0] as
-        string | undefined;
+        | string
+        | undefined;
       const installedTools = JSON.stringify(setTools.mock.calls.at(-1)?.[0]);
       expect(installedPrompt).toContain('STRUCTURED_COMPLETE_TREE');
       expect(installedPrompt).not.toContain('LEGACY_MEMORY_INDEX');
@@ -9030,8 +9033,9 @@ Other open files:
 
     /** checkNextSpeaker always hands the turn back to the model. */
     const alwaysModelNextSpeaker = async () => {
-      const { checkNextSpeaker } =
-        await import('../utils/nextSpeakerChecker.js');
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
       const mockCheckNextSpeaker = vi.mocked(checkNextSpeaker);
       mockCheckNextSpeaker.mockResolvedValue({
         next_speaker: 'model',

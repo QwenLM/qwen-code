@@ -4337,7 +4337,8 @@ describe('ShellTool', () => {
         const { promise, setPromoteAc } = executeWithPromote(build('sleep 1'));
         await Promise.resolve();
         const promoteAc = setPromoteAc.mock.calls[0]?.[0] as
-          AbortController | undefined;
+          | AbortController
+          | undefined;
         expect(promoteAc).toBeInstanceOf(AbortController);
         promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
         resolveShellExecution({

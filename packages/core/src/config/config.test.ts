@@ -1207,8 +1207,9 @@ describe('Server Config (config.ts)', () => {
     // direct (#12770 follow-up).
     const { getGlobalDispatcher, setGlobalDispatcher, EnvHttpProxyAgent } =
       await import('undici');
-    const { resetDispatcherCache } =
-      await import('../utils/runtimeFetchOptions.js');
+    const { resetDispatcherCache } = await import(
+      '../utils/runtimeFetchOptions.js'
+    );
     const originalDispatcher = getGlobalDispatcher();
     try {
       const config = new Config({
@@ -5659,7 +5660,8 @@ describe('Server Config (config.ts)', () => {
     it('defers cwd-sensitive initialization for a provisional workspace', async () => {
       const config = makeConfig({ provisionalWorkspace: true });
       const llmClient = vi.mocked(LlmClient).mock.results.at(-1)?.value as
-        { initialize: Mock } | undefined;
+        | { initialize: Mock }
+        | undefined;
       const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
 
       await config.initialize();
@@ -6289,8 +6291,9 @@ describe('Server Config (config.ts)', () => {
 
     /** The session source service factory the CLI would wire for `config`. */
     const sourceServiceFactory = async (config: Config) => {
-      const { SessionSourceService } =
-        await import('../services/session-sources.js');
+      const { SessionSourceService } = await import(
+        '../services/session-sources.js'
+      );
       return () =>
         new SessionSourceService({
           sessionId: config.getSessionId(),
@@ -8792,7 +8795,8 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory('session_start', signal);
 
     const options = lastMemoryLoad()?.at(-1) as
-      LoadServerHierarchicalMemoryOptions | undefined;
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     const related = {
@@ -11261,8 +11265,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const parentGenerator = generator();
       const parentGeneratorConfig: ContentGeneratorConfig = {
         model: 'parent-model',
@@ -11306,8 +11311,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = configWithInstanceFields(generator(), {
         model: 'parent-model',
         authType: AuthType.QWEN_OAUTH,
