@@ -68,8 +68,13 @@ class ManagedSessionOperationStoreTest {
                 first.claimGeneration(), 0);
         assertThat(operation(store, sessionId, operationId)).isEqualTo(second);
 
+        long retryDelay = Duration.ofDays(1).toMillis();
+        long before = databaseTime();
         store.retryOperation(TENANT, sessionId, operationId, "worker",
-                second.claimGeneration(), now.get() + 500);
+                second.claimGeneration(), now.get() + retryDelay);
+        long after = databaseTime();
+        assertThat(jdbc.queryForObject("SELECT available_at FROM managed_agent_operation WHERE operation_id = ?",
+                Long.class, operationId)).isBetween(before + retryDelay, after + retryDelay);
         OperationRecord waiting = operation(store, sessionId, operationId);
         assertThat(waiting.deliveryState()).isEqualTo("PENDING");
         assertThat(waiting.attemptCount()).isEqualTo(1);
@@ -77,7 +82,7 @@ class ManagedSessionOperationStoreTest {
         assertThat(store.claimOperation(TENANT, sessionId, operationId,
                 "worker", Duration.ofSeconds(30))).isEmpty();
 
-        now.addAndGet(500);
+        now.addAndGet(retryDelay);
         assertThat(targets(store)).isEmpty();
         jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE operation_id = ?", operationId);
         OperationRecord third = store.claimOperation(TENANT, sessionId,
@@ -92,6 +97,11 @@ class ManagedSessionOperationStoreTest {
         assertThat(store.requireSession(TENANT, sessionId).status())
                 .isEqualTo("CLOSED");
         assertThat(targets(store)).isEmpty();
+    }
+
+    private long databaseTime() {
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
     }
 
     // Lifecycle requests carry only their Session and kind, which the domain

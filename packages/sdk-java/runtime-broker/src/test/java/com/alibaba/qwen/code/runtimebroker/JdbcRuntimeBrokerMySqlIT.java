@@ -88,17 +88,22 @@ class JdbcRuntimeBrokerMySqlIT {
                 for (Future<Object> pending : List.of(fence, warm, acquire, execute)) {
                     assertThrows(TimeoutException.class, () -> pending.get(100, TimeUnit.MILLISECONDS));
                 }
+                try (var insert = lock.prepareStatement("INSERT INTO qwen_runtime_harness_drain"
+                        + " (tenant_key, harness_key, tenant_id, harness_session_id) VALUES (?, ?, ?, ?)")) {
+                    insert.setString(1, JdbcRepositorySupport.valueKey(prefix));
+                    insert.setString(2, JdbcRepositorySupport.valueKey("harness"));
+                    insert.setString(3, prefix);
+                    insert.setString(4, "harness");
+                    assertEquals(1, insert.executeUpdate());
+                }
             } finally {
                 lock.commit();
             }
             assertNull(fence.get(5, TimeUnit.SECONDS));
             for (Future<Object> admission : List.of(warm, acquire, execute)) {
                 Object outcome = admission.get(5, TimeUnit.SECONDS);
-                if (outcome instanceof RuntimeBrokerException rejected) {
-                    assertEquals("runtime_admission_closed", rejected.getCode());
-                } else {
-                    assertNotNull(outcome);
-                }
+                assertTrue(outcome instanceof RuntimeBrokerException);
+                assertEquals("runtime_admission_closed", ((RuntimeBrokerException) outcome).getCode());
             }
         }
         var restored = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
@@ -111,6 +116,41 @@ class JdbcRuntimeBrokerMySqlIT {
         assertEquals(receipt.getExecutionCallId(), restored.admitExecution(sessions, executions, receipt).getExecutionCallId());
         assertEquals(List.of(ready.getBindingId()), restored.findByHarnessSession(prefix, "harness", null, 50)
                 .stream().map(RuntimeBindingRecord::getBindingId).toList());
+    }
+
+    @Test
+    void absentCloseFenceDoesNotBlockAnotherTenantsFence() throws Exception {
+        String schema = "broker_close_" + UUID.randomUUID().toString().replace("-", "");
+        DataSource admin = dataSource();
+        try (var connection = admin.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE " + schema);
+        }
+        try {
+            DataSource source = new DriverManagerDataSource(
+                    required("mysql.url").replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema),
+                    required("mysql.user"), System.getProperty("mysql.password", ""));
+            JdbcRuntimeBrokerSchema.initialize(source);
+            var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("close", new byte[32]));
+            var probe = JdbcRuntimeBindingRepository.class.getDeclaredMethod("hasHarnessDrain",
+                    Connection.class, String.class, String.class);
+            probe.setAccessible(true);
+            try (var admission = source.getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+                admission.setAutoCommit(false);
+                try {
+                    JdbcRuntimeBindingRepository.lockPlacementDomain(admission, "tenant-a");
+                    assertFalse((Boolean) probe.invoke(null, admission, "tenant-a", "harness"));
+                    Future<?> fence = pool.submit(() -> bindings.requestHarnessDrain("tenant-b", "harness"));
+                    fence.get(5, TimeUnit.SECONDS);
+                    assertTrue(bindings.isHarnessDraining("tenant-b", "harness"));
+                } finally {
+                    admission.rollback();
+                }
+            }
+        } finally {
+            try (var connection = admin.getConnection(); var statement = connection.createStatement()) {
+                statement.execute("DROP DATABASE IF EXISTS " + schema);
+            }
+        }
     }
 
     @Test

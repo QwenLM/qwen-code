@@ -16,9 +16,13 @@ D4 持久接纳生命周期操作，但拒绝 Workspace 绑定。Embedded Broker
 
 新增可选能力 `session_close` / `sessionClose`，缺省 false。绑定 close 仅对支持持久 local-process 停机证明的 files/1 开放；`session_lifecycle` 保持 false。完成时将 CLOSING 改为 CLOSED，发出既有 close 事件并确认 operation。已接纳的清理使用保存的身份，权限或挂载变化不影响继续处理。
 
+能力位表示部署支持，不代表 actor 已获授权；创建者和读权限在接纳时检查。不支持关闭的实例接管已接纳的绑定 close 时，返回 recovery_blocked 和 workspace_close_identity_unverified，并保留 CLOSING，等待能够核对原停机证明的实例继续处理。
+
 ## Broker 栅栏与释放
 
 在既有 tenant placement 锁下持久保存永久 tenant/Harness-Session drain 栅栏。binding 创建及新 Session/execution 准入在同一锁域检查栅栏。栅栏在资源退休后仍保留，阻止延迟 warm 创建新代际。既有 receipt 仍可读。close 同时预约已有的进程内 binding operation 槽，避免复用同一 Broker 正在 provisioning 的 claim。
+
+栅栏查询在取得 placement 锁后进行普通读取，避免缺失行上的 InnoDB 间隙锁阻塞其他租户插入栅栏。Execution 准入在准入事务之外读取不可变的 binding tenant；事务的首次一致性读发生在取得锁之后，避免 REPEATABLE READ 隐藏等待期间已提交的栅栏。
 
 按 tenant、Session isolation class 和 isolation key 分页枚举保存的 binding 代际；身份按字节精确匹配，不依赖数据库排序规则。标记 draining 时不重新授权当前 Workspace 执行。按精确 binding/generation 枚举 Runtime Sessions，使用保存的记录按顺序释放：provider release、activation=false 确认、条件释放原 holder、持久 RELEASED。close 不进行 acquire、安装、执行重放或模型调用。未知执行或启动身份阻止完成。原 worker 不可用时返回身份失败并阻塞，不进入通用租约恢复。共享存储上的新 holder 必须保留。
 
@@ -39,5 +43,7 @@ Managed Agent lifecycle service/store/coordinator、capabilities、权威 OpenAP
 覆盖正常关闭、无 Runtime、重复幂等键、actor 隔离、两个入口、活跃和待审批 Turn 拒绝、延迟纯文本 warm、启动中关闭、多 Runtime Sessions、release/stop 响应丢失、完成前崩溃、第二服务接管、权限撤销和挂载失效、旧 claim/callback、未知结果及保留新 holder。运行 build/typecheck/bundle、定向 TS/Java 测试、SQL 并发测试；有可信 Linux 身份的环境中运行真实持久 worker 测试。如实记录环境限制。
 
 只有准入已永久封闭，原 writer、Sessions、worker 和 holder 全部结算，close 才算完成；历史数据保留。没有未决产品问题。
+
+MySQL close 测试为每个测试使用独立数据库，不能提前迁移共享库而破坏旧数据的分级升级测试。并发回归要求栅栏提交后所有等待中的准入均被拒绝，并要求无栅栏记录的查询尚在事务内时，其他租户仍可完成栅栏写入。移除数据库隔离、placement 锁或取得锁后的快照顺序，都必须让这些检查失败。
 
 本地已通过 build/typecheck/bundle、定向 TS/Java 测试、真实 MySQL 准入与 claim 并发，以及注入测试主机身份的真实 POSIX worker 停机。既有 Hosted 文件与审批 E2E 通过。持久 close E2E 在 macOS 本地实际跳过；后续 Linux CI 已通过包含生产 host/boot/PID namespace 校验的正常 close 验收。完整物理恢复故障矩阵仍未执行。上游 #13037 已实现公开 Artifact 读取，其 API 回归验证 writer seal 且 Session CLOSED 后仍能读取已提交内容；close 路径保留这些行和对象。这些读取回归补充原有 close 对历史、resources 和文件的保留断言。命令与详细结果记录在 `.qwen/e2e-tests/workspace-session-reliable-close.md`。

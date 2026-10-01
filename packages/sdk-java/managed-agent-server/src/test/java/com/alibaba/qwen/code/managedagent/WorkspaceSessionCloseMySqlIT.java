@@ -31,6 +31,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -41,11 +43,35 @@ class WorkspaceSessionCloseMySqlIT {
     private static final String OWNER = "owner";
     private static final String ACTOR_DIGEST = "a".repeat(64);
     private static final String TOKEN = "mysql-close-writer-token-00000000";
-    private final DriverManagerDataSource source = new DriverManagerDataSource(
-            required("mysql.url"), required("mysql.user"), System.getProperty("mysql.password", ""));
-    private final JdbcTemplate jdbc = new JdbcTemplate(source);
-    private final TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+    private DriverManagerDataSource source;
+    private JdbcTemplate jdbc;
+    private JdbcTemplate admin;
+    private String schema;
+    private TransactionTemplate transactions;
     private final ObjectMapper mapper = new ObjectMapper();
+
+    @BeforeEach
+    void setup() {
+        String url = required("mysql.url");
+        if (!url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
+            throw new IllegalArgumentException("A MySQL test database URL is required");
+        }
+        String user = required("mysql.user");
+        String password = System.getProperty("mysql.password", "");
+        admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        schema = "workspace_close_" + UUID.randomUUID().toString().replace("-", "");
+        admin.execute("CREATE DATABASE " + schema);
+        source = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
+        jdbc = new JdbcTemplate(source);
+        transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+    }
+
+    @AfterEach
+    void removeTestSchema() {
+        if (admin != null && schema != null) {
+            admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
+    }
 
     @Test
     void closeSerializesNewWriterAndPreservesAnAlreadyAcquiredWriter() throws Exception {

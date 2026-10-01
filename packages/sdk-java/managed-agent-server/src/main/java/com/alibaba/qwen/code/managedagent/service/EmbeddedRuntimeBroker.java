@@ -189,9 +189,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     /**
-     * Marks the Harness Session closed for later warm calls. The merged
-     * broker releases one Runtime Session at a time and has no harness-level
-     * drain, so this does not tear the worker down.
+     * Marks an unbound Harness Session closed for later warm calls without
+     * tearing down the worker. Workspace-bound close uses the durable fence
+     * and harness-level drain through requestWorkspaceClose and closeWorkspace.
      */
     @Override
     public CompletionStage<Void> drain(String sessionId) {

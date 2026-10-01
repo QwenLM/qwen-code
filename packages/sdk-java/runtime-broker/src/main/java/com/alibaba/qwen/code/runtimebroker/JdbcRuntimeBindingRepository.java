@@ -194,11 +194,11 @@ public final class JdbcRuntimeBindingRepository
             return existing;
         }
         try {
+            RuntimeBindingRecord original = findById(candidate.getBindingId());
+            if (original == null) {
+                throw new IllegalArgumentException("Binding is unavailable");
+            }
             return JdbcRepositorySupport.transaction(dataSource, connection -> {
-                RuntimeBindingRecord original = selectById(connection, candidate.getBindingId(), false);
-                if (original == null) {
-                    throw new IllegalArgumentException("Binding is unavailable");
-                }
                 lockPlacementDomain(connection, original.getRequest().getScope().getTenantId());
                 RuntimeBindingRecord binding = selectById(connection,
                         candidate.getBindingId(), true);
@@ -256,7 +256,7 @@ public final class JdbcRuntimeBindingRepository
     private static boolean hasHarnessDrain(Connection connection, String tenantId, String harnessSessionId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("SELECT tenant_id, harness_session_id"
-                + " FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ? FOR UPDATE")) {
+                + " FROM qwen_runtime_harness_drain WHERE tenant_key = ? AND harness_key = ?")) {
             statement.setString(1, JdbcRepositorySupport.valueKey(tenantId));
             statement.setString(2, JdbcRepositorySupport.valueKey(harnessSessionId));
             try (ResultSet result = statement.executeQuery()) {

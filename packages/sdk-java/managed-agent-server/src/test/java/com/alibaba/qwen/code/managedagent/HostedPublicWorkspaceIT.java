@@ -139,8 +139,12 @@ class HostedPublicWorkspaceIT {
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
-        Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
-                PosixFilePermissions.fromString("rwx------")));
+        if (durableClose) {
+            Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
+                    PosixFilePermissions.fromString("rwx------")));
+        } else {
+            Files.createDirectory(temporary.resolve("broker"));
+        }
         List<Path> roots = List.of(Files.createDirectory(temporary.resolve("workspace-a")),
                 Files.createDirectory(temporary.resolve("workspace-b")));
         for (Path root : roots) Files.createDirectory(root.resolve("child"));

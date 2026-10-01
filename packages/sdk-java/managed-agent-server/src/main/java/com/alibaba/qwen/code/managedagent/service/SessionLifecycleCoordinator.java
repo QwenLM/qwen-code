@@ -166,6 +166,10 @@ public class SessionLifecycleCoordinator {
         boolean harnessConfirmed = false;
         boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
         if (bound) {
+            if (!runtimeWarmer.supportsWorkspaceClose()) {
+                throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409,
+                        "workspace_close_identity_unverified", "This instance cannot verify the original worker stop", false);
+            }
             runtimeWarmer.requestWorkspaceClose(operation.tenantId(), operation.sessionId());
         }
         if ("ACTIVE".equals(operation.sessionStatusBefore())) {
