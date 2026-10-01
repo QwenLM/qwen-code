@@ -7,6 +7,10 @@ import {
 
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
+  COLLAB_MESSAGES_EN,
+  COLLAB_MESSAGES_ZH,
+} from './components/workspace-agents/messages.js';
+import {
   SETTINGS_MESSAGES_EN,
   SETTINGS_MESSAGES_ZH,
 } from './settings/messages.js';
@@ -3228,7 +3232,15 @@ const EN: Messages = {
     `Timeline of ${plural(v?.spans, 'timed record')}, ${v?.busy ?? ''} of activity`,
   'trajectory.overview.busy': (v) => `${v?.duration ?? ''} active`,
   'trajectory.range.status': (v) =>
-    `Showing ${v?.shown ?? 0} of ${v?.total ?? 0} rows in the selected time`,
+    `Visible records ${v?.shown ?? 0} / window records ${v?.total ?? 0} (including context)`,
+  'trajectory.collapsed': (v) => `${v?.count ?? 0} records collapsed`,
+  'trajectory.expand': (v) => `Expand ${v?.name ?? ''}`,
+  'trajectory.collapse': (v) => `Collapse ${v?.name ?? ''}`,
+  'trajectory.parentUnresolved': 'Parent call not located',
+  'trajectory.contextRow': 'Context',
+  'trajectory.inspector.hiddenByCollapse':
+    'The group containing this record is collapsed.',
+  'trajectory.reveal': 'Expand and locate',
   'trajectory.range.clear': 'Clear time selection',
   'trajectory.range.empty': 'No request or tool ran in the selected time.',
   'trajectory.mode.clock': 'Real time, idle included',
@@ -4200,6 +4212,7 @@ const EN: Messages = {
   'welcome.titlePrefix': 'Welcome to',
   'welcome.tipLabel': 'Tips:',
   ...LIVE_MESSAGES_EN,
+  ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
 };
 
@@ -7244,7 +7257,14 @@ const ZH: Messages = {
     `时间轴：${v?.spans ?? 0} 条有计时的记录，活跃 ${v?.busy ?? ''}`,
   'trajectory.overview.busy': (v) => `活跃 ${v?.duration ?? ''}`,
   'trajectory.range.status': (v) =>
-    `已筛选：区间内 ${v?.shown ?? 0} / ${v?.total ?? 0} 行`,
+    `当前可见记录 ${v?.shown ?? 0} / 窗口记录 ${v?.total ?? 0}（含上下文）`,
+  'trajectory.collapsed': (v) => `已折叠 ${v?.count ?? 0} 条记录`,
+  'trajectory.expand': (v) => `展开${v?.name ?? ''}`,
+  'trajectory.collapse': (v) => `折叠${v?.name ?? ''}`,
+  'trajectory.parentUnresolved': '父调用未定位',
+  'trajectory.contextRow': '上下文',
+  'trajectory.inspector.hiddenByCollapse': '记录所在分组已折叠。',
+  'trajectory.reveal': '展开并定位',
   'trajectory.range.clear': '清除时间区间',
   'trajectory.range.empty': '所选区间内没有请求或工具运行。',
   'trajectory.mode.clock': '真实时间（含空闲）',
@@ -8140,6 +8160,7 @@ const ZH: Messages = {
   'welcome.titlePrefix': '欢迎使用',
   'welcome.tipLabel': '提示：',
   ...LIVE_MESSAGES_ZH,
+  ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
 };
 

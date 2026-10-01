@@ -34,6 +34,13 @@ describe('rulesDiscovery', () => {
     return fullPath;
   }
 
+  // Writes each `files` entry (name → body), in order, under <root>/.qwen/rules.
+  async function writeRules(files: Record<string, string>, root = projectRoot) {
+    for (const [name, body] of Object.entries(files)) {
+      await createTestFile(path.join(root, QWEN_DIR, 'rules', name), body);
+    }
+  }
+
   beforeEach(async () => {
     testRootDir = await fsPromises.mkdtemp(
       path.join(os.tmpdir(), 'rules-discovery-test-'),
@@ -60,10 +67,6 @@ describe('rulesDiscovery', () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // parseRuleFile
-  // ─────────────────────────────────────────────────────────────────────────
-
   describe('parseRuleFile', () => {
     it('parses a rule with paths frontmatter', async () => {
       const content = `---
@@ -82,11 +85,8 @@ Use React functional components.
     });
 
     it('parses a baseline rule without paths', async () => {
-      const content = `---
-description: General coding standards
----
-Always write tests.
-`;
+      const content =
+        '---\ndescription: General coding standards\n---\nAlways write tests.\n';
       const rule = parseRuleFile(content, '/test/rule.md');
       expect(rule!.paths).toBeUndefined();
       expect(rule!.content).toBe('Always write tests.');
@@ -113,13 +113,10 @@ Also visible.
     });
 
     it('strips adjacent and residual HTML comment markers', async () => {
-      // Defensive cases that previously left residual <!-- in the output,
-      // flagged by CodeQL as incomplete multi-character sanitization.
-      const content = `---
-description: Test
----
-A<!-- one --><!-- two -->B<!--unclosed
-`;
+      // Cases that once left a residual <!-- in the output (CodeQL:
+      // incomplete multi-character sanitization).
+      const content =
+        '---\ndescription: Test\n---\nA<!-- one --><!-- two -->B<!--unclosed\n';
       const rule = parseRuleFile(content, '/test/rule.md');
       expect(rule!.content).not.toContain('<!--');
       expect(rule!.content).toContain('A');
@@ -127,30 +124,17 @@ A<!-- one --><!-- two -->B<!--unclosed
     });
 
     it('returns null for empty body after stripping', async () => {
-      const content = `---
-paths:
-  - "*.ts"
----
-<!-- Only a comment -->
-`;
+      const content = '---\npaths:\n  - "*.ts"\n---\n<!-- Only a comment -->\n';
       expect(parseRuleFile(content, '/test/rule.md')).toBeNull();
     });
 
     it('handles empty paths array as baseline', async () => {
-      const content = `---
-paths:
----
-Some content.
-`;
+      const content = '---\npaths:\n---\nSome content.\n';
       expect(parseRuleFile(content, '/t.md')!.paths).toBeUndefined();
     });
 
     it('handles paths as a single string', async () => {
-      const content = `---
-paths: "src/**/*.ts"
----
-Rule.
-`;
+      const content = '---\npaths: "src/**/*.ts"\n---\nRule.\n';
       expect(parseRuleFile(content, '/t.md')!.paths).toEqual(['src/**/*.ts']);
     });
 
@@ -162,19 +146,12 @@ Rule.
     });
 
     it('treats non-array/non-string paths as baseline', async () => {
-      const content = `---
-paths: 42
----
-Body.
-`;
+      const content = '---\npaths: 42\n---\nBody.\n';
       expect(parseRuleFile(content, '/t.md')!.paths).toBeUndefined();
     });
   });
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // loadRules — baseline vs conditional split
-  // ─────────────────────────────────────────────────────────────────────────
-
+  // loadRules: baseline vs conditional split.
   describe('loadRules', () => {
     it('returns empty when no rules directory exists', async () => {
       const result = await loadRules(projectRoot, true);
@@ -190,14 +167,9 @@ Body.
     });
 
     it('loads baseline rules into content', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(rulesDir, 'general.md'),
-        `---
-description: General
----
-Always write tests.`,
-      );
+      await writeRules({
+        'general.md': '---\ndescription: General\n---\nAlways write tests.',
+      });
 
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(1);
@@ -206,15 +178,9 @@ Always write tests.`,
     });
 
     it('puts conditional rules in conditionalRules, not in content', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(rulesDir, 'fe.md'),
-        `---
-paths:
-  - "src/**/*.tsx"
----
-Use hooks.`,
-      );
+      await writeRules({
+        'fe.md': '---\npaths:\n  - "src/**/*.tsx"\n---\nUse hooks.',
+      });
 
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(0);
@@ -224,19 +190,11 @@ Use hooks.`,
     });
 
     it('splits baseline and conditional correctly', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(rulesDir, '01-general.md'),
-        'Write clean code.',
-      );
-      await createTestFile(
-        path.join(rulesDir, '02-py.md'),
-        `---\npaths:\n  - "**/*.py"\n---\nUse type hints.`,
-      );
-      await createTestFile(
-        path.join(rulesDir, '03-ts.md'),
-        `---\npaths:\n  - "**/*.ts"\n---\nUse strict.`,
-      );
+      await writeRules({
+        '01-general.md': 'Write clean code.',
+        '02-py.md': `---\npaths:\n  - "**/*.py"\n---\nUse type hints.`,
+        '03-ts.md': `---\npaths:\n  - "**/*.ts"\n---\nUse strict.`,
+      });
 
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(1);
@@ -245,16 +203,11 @@ Use hooks.`,
     });
 
     it('recursively scans subdirectories', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(rulesDir, 'frontend', 'react.md'),
-        'Use hooks.',
-      );
-      await createTestFile(
-        path.join(rulesDir, 'backend', 'api.md'),
-        'Validate inputs.',
-      );
-      await createTestFile(path.join(rulesDir, 'general.md'), 'Write tests.');
+      await writeRules({
+        [path.join('frontend', 'react.md')]: 'Use hooks.',
+        [path.join('backend', 'api.md')]: 'Validate inputs.',
+        'general.md': 'Write tests.',
+      });
 
       const result = await loadRules(projectRoot, true);
       expect(result.ruleCount).toBe(3);
@@ -264,41 +217,28 @@ Use hooks.`,
     });
 
     it('skips project rules when folder is untrusted', async () => {
-      await createTestFile(
-        path.join(projectRoot, QWEN_DIR, 'rules', 'r.md'),
-        'Untrusted.',
-      );
+      await writeRules({ 'r.md': 'Untrusted.' });
       const result = await loadRules(projectRoot, false);
       expect(result.ruleCount).toBe(0);
     });
 
     it('loads global rules even when folder is untrusted', async () => {
-      await createTestFile(
-        path.join(homedir, QWEN_DIR, 'rules', 'g.md'),
-        'Global.',
-      );
+      await writeRules({ 'g.md': 'Global.' }, homedir);
       const result = await loadRules(projectRoot, false);
       expect(result.ruleCount).toBe(1);
       expect(result.content).toContain('Global.');
     });
 
     it('does not duplicate rules when projectRoot equals homedir', async () => {
-      await createTestFile(
-        path.join(homedir, QWEN_DIR, 'rules', 's.md'),
-        'Shared.',
-      );
+      await writeRules({ 's.md': 'Shared.' }, homedir);
       const result = await loadRules(homedir, true);
       expect(result.ruleCount).toBe(1);
       expect((result.content.match(/Shared\./g) || []).length).toBe(1);
     });
 
     it('excludes rules matching exclude patterns', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(path.join(rulesDir, 'keep.md'), 'Keep.');
-      const skipped = await createTestFile(
-        path.join(rulesDir, 'skip.md'),
-        'Skip.',
-      );
+      await writeRules({ 'keep.md': 'Keep.', 'skip.md': 'Skip.' });
+      const skipped = path.join(projectRoot, QWEN_DIR, 'rules', 'skip.md');
 
       const result = await loadRules(projectRoot, true, [skipped]);
       expect(result.ruleCount).toBe(1);
@@ -307,12 +247,10 @@ Use hooks.`,
     });
 
     it('excludes rules in subdirectories by glob', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(rulesDir, 'other-team', 'r.md'),
-        'Their rule.',
-      );
-      await createTestFile(path.join(rulesDir, 'mine.md'), 'My rule.');
+      await writeRules({
+        [path.join('other-team', 'r.md')]: 'Their rule.',
+        'mine.md': 'My rule.',
+      });
 
       const result = await loadRules(projectRoot, true, ['**/other-team/**']);
       expect(result.ruleCount).toBe(1);
@@ -320,10 +258,7 @@ Use hooks.`,
     });
 
     it('formats rules with source markers', async () => {
-      await createTestFile(
-        path.join(projectRoot, QWEN_DIR, 'rules', 'test.md'),
-        'Content.',
-      );
+      await writeRules({ 'test.md': 'Content.' });
       const result = await loadRules(projectRoot, true);
       expect(result.content).toContain(
         `--- Rule from: ${QWEN_DIR}/rules/test.md ---`,
@@ -332,42 +267,23 @@ Use hooks.`,
 
     it('reads global rules from QWEN_HOME when set', async () => {
       const customQwenHome = path.join(testRootDir, 'custom-qwen-home');
-      const originalQwenHome = process.env['QWEN_HOME'];
-      process.env['QWEN_HOME'] = customQwenHome;
-      try {
-        await createTestFile(
-          path.join(customQwenHome, 'rules', 'fromCustomHome.md'),
-          'CustomHome rule.',
-        );
-        // A stale rule in the legacy ~/.qwen/rules location should NOT be
-        // loaded once QWEN_HOME points elsewhere.
-        await createTestFile(
-          path.join(homedir, QWEN_DIR, 'rules', 'fromLegacyHome.md'),
-          'LegacyHome rule.',
-        );
+      vi.stubEnv('QWEN_HOME', customQwenHome); // restored in afterEach
+      await createTestFile(
+        path.join(customQwenHome, 'rules', 'fromCustomHome.md'),
+        'CustomHome rule.',
+      );
+      // A stale rule in the legacy ~/.qwen/rules must NOT load once
+      // QWEN_HOME points elsewhere.
+      await writeRules({ 'fromLegacyHome.md': 'LegacyHome rule.' }, homedir);
 
-        const result = await loadRules(projectRoot, true);
+      const result = await loadRules(projectRoot, true);
 
-        expect(result.content).toContain('CustomHome rule.');
-        expect(result.content).not.toContain('LegacyHome rule.');
-      } finally {
-        if (originalQwenHome === undefined) {
-          delete process.env['QWEN_HOME'];
-        } else {
-          process.env['QWEN_HOME'] = originalQwenHome;
-        }
-      }
+      expect(result.content).toContain('CustomHome rule.');
+      expect(result.content).not.toContain('LegacyHome rule.');
     });
   });
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // ConditionalRulesRegistry
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // ───────────────────────────────────────────────────────────────────────
-  // Extension-contributed rules (#12030)
-  // ───────────────────────────────────────────────────────────────────────
-
+  // Extension-contributed rules (#12030).
   describe('extension rules', () => {
     async function writeExtensionRule(
       extensionName: string,
@@ -378,17 +294,14 @@ Use hooks.`,
       await createTestFile(path.join(dir, fileName), content);
       return { name: extensionName, dir };
     }
+    const paletteRule = (glob: string) =>
+      `---\npaths:\n  - '${glob}'\n---\n\nUse the chart palette.`;
 
     it('takes a conditional rule from an extension', async () => {
       const source = await writeExtensionRule(
         'charts',
         'charting.md',
-        `---
-paths:
-  - 'src/**/*.tsx'
----
-
-Use the chart palette.`,
+        paletteRule('src/**/*.tsx'),
       );
 
       const result = await loadRules(projectRoot, true, [], [source]);
@@ -403,12 +316,10 @@ Use the chart palette.`,
       expect(result.ignoredExtensionRules).toEqual([]);
     });
 
-    /**
-     * The whole point of the mechanism: a baseline rule is resident on every
-     * request, which is the cost an extension's context file already imposes.
-     * Accepting one here would recreate #12030 inside its own fix, so it is
-     * dropped — and reported, or the author sees nothing happen.
-     */
+    // The whole point of the mechanism: a baseline rule is resident on every
+    // request, the cost an extension's context file already imposes.
+    // Accepting one would recreate #12030 inside its own fix, so it is
+    // dropped — and reported, or the author sees nothing happen.
     it('drops an extension rule with no paths, and names it', async () => {
       const source = await writeExtensionRule(
         'charts',
@@ -428,12 +339,7 @@ Use the chart palette.`,
       const source = await writeExtensionRule(
         'charts',
         'charting.md',
-        `---
-paths:
-  - 'src/**/*.tsx'
----
-
-Use the chart palette.`,
+        paletteRule('src/**/*.tsx'),
       );
 
       const result = await loadRules(projectRoot, true, [], [source]);
@@ -466,12 +372,7 @@ Use the chart palette.`,
       const source = await writeExtensionRule(
         'charts',
         'charting.md',
-        `---
-paths:
-  - 'src/**'
----
-
-Use the chart palette.`,
+        paletteRule('src/**'),
       );
 
       const result = await loadRules(
@@ -491,42 +392,33 @@ Use the chart palette.`,
       paths: pats,
       content: body,
     });
+    // A registry rooted at /project over `rules`.
+    const projectReg = (...rules: Array<ReturnType<typeof rule>>) =>
+      new ConditionalRulesRegistry(rules, '/project');
 
     it('matches a file and returns formatted content', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.')],
-        '/project',
-      );
+      const reg = projectReg(rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.'));
       const result = await reg.matchAndConsume('/project/src/App.tsx');
       expect(result).toContain('Use hooks.');
     });
 
     it('returns undefined when no patterns match', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.')],
-        '/project',
-      );
+      const reg = projectReg(rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.'));
       expect(
         await reg.matchAndConsume('/project/lib/utils.py'),
       ).toBeUndefined();
     });
 
     it('injects each rule at most once', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.')],
-        '/project',
-      );
+      const reg = projectReg(rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.'));
       expect(await reg.matchAndConsume('/project/src/A.tsx')).toBeDefined();
       expect(await reg.matchAndConsume('/project/src/B.tsx')).toBeUndefined();
     });
 
     it('matches multiple rules for one file', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [
-          rule('/r/ts.md', ['**/*.tsx'], 'Strict.'),
-          rule('/r/react.md', ['src/**/*.tsx'], 'Hooks.'),
-        ],
-        '/project',
+      const reg = projectReg(
+        rule('/r/ts.md', ['**/*.tsx'], 'Strict.'),
+        rule('/r/react.md', ['src/**/*.tsx'], 'Hooks.'),
       );
       const result = await reg.matchAndConsume('/project/src/App.tsx');
       expect(result).toContain('Strict.');
@@ -535,9 +427,9 @@ Use the chart palette.`,
     });
 
     it('tracks totalCount and injectedCount', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/a.md', ['**/*.ts'], 'A'), rule('/r/b.md', ['**/*.py'], 'B')],
-        '/project',
+      const reg = projectReg(
+        rule('/r/a.md', ['**/*.ts'], 'A'),
+        rule('/r/b.md', ['**/*.py'], 'B'),
       );
       expect(reg.totalCount).toBe(2);
       expect(reg.injectedCount).toBe(0);
@@ -551,64 +443,45 @@ Use the chart palette.`,
     });
 
     it('does not match files outside the project root', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/ts.md', ['**/*.ts'], 'Strict.')],
-        '/project',
-      );
+      const reg = projectReg(rule('/r/ts.md', ['**/*.ts'], 'Strict.'));
       expect(await reg.matchAndConsume('/etc/passwd')).toBeUndefined();
       expect(await reg.matchAndConsume('/other/foo.ts')).toBeUndefined();
     });
 
     it('rejects the exact `..` relative path (parent of projectRoot)', async () => {
-      // Pattern matches literal '..' — pathological but defensive
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/dot.md', ['..'], 'Parent rule.')],
-        '/project',
-      );
-      // Exact parent directory (unlikely but possible input)
+      // A pattern matching literal '..' is pathological but defensive; the
+      // input is the exact parent directory (unlikely but possible).
+      const reg = projectReg(rule('/r/dot.md', ['..'], 'Parent rule.'));
       expect(await reg.matchAndConsume('/')).toBeUndefined();
     });
 
     it('resolves relative paths against projectRoot', async () => {
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/ts.md', ['src/**/*.ts'], 'Strict.')],
-        '/project',
-      );
-      // A relative file_path should be resolved against the project root
-      // so "src/foo.ts" matches "src/**/*.ts".
+      const reg = projectReg(rule('/r/ts.md', ['src/**/*.ts'], 'Strict.'));
+      // A relative file_path resolves against the project root, so
+      // "src/foo.ts" matches "src/**/*.ts".
       const result = await reg.matchAndConsume('src/foo.ts');
       expect(result).toContain('Strict.');
     });
 
     it('activates on dotfiles when glob covers them (dot: true semantics)', async () => {
       // **/*.yml must match .github/workflows/ci.yml, .prettierrc.yml, etc.
-      // Regression: previously picomatch used { dot: false } so hidden paths
-      // were silently excluded.
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/yml.md', ['**/*.yml'], 'YAML rule.')],
-        '/project',
-      );
+      // Regression: picomatch used { dot: false }, silently excluding
+      // hidden paths.
+      const reg = projectReg(rule('/r/yml.md', ['**/*.yml'], 'YAML rule.'));
       expect(
         await reg.matchAndConsume('/project/.github/workflows/ci.yml'),
       ).toContain('YAML rule.');
     });
 
     it('rejects Windows cross-drive paths (shared cross-drive guard)', async () => {
-      // Regression: ConditionalRulesRegistry historically only checked
-      // `..` / `../` and accepted the absolute string that
-      // `path.win32.relative('C:\\proj', 'D:\\elsewhere')` produces. The
-      // shared `resolveProjectRelativePath` helper (now used by both the
-      // skill and rules registries) catches the cross-drive case via
-      // `pathModule.isAbsolute(rawRelativePath)`. Direct unit cover for
-      // the helper lives in skill-activation.test.ts via the
-      // `path.win32`-parameterized test; this case asserts the rules
-      // registry calls into the hardened path. On POSIX runners the
-      // input shape exercises the existing `..` branch — either
-      // platform must return undefined for off-project paths.
-      const reg = new ConditionalRulesRegistry(
-        [rule('/r/broad.md', ['**/*.ts'], 'Broad rule.')],
-        '/project',
-      );
+      // Regression: the registry only checked `..` / `../` and accepted the
+      // absolute string `path.win32.relative('C:\\proj', 'D:\\elsewhere')`
+      // yields. The shared `resolveProjectRelativePath` helper (skill and
+      // rules registries) now catches it via `pathModule.isAbsolute`; its
+      // direct win32 cover is in skill-activation.test.ts. This case pins
+      // that the rules registry uses it; on POSIX the input exercises the
+      // `..` branch. Either platform must return undefined off-project.
+      const reg = projectReg(rule('/r/broad.md', ['**/*.ts'], 'Broad rule.'));
       expect(
         await reg.matchAndConsume('/totally/other/place/file.ts'),
       ).toBeUndefined();
@@ -619,9 +492,8 @@ Use the chart palette.`,
       async () => {
         // On Windows, unescapePath is a no-op (backslash is a path
         // separator, not a shell escape character).
-        const reg = new ConditionalRulesRegistry(
-          [rule('/r/ts.md', ['src/**/*.tsx'], 'Use hooks.')],
-          '/project',
+        const reg = projectReg(
+          rule('/r/ts.md', ['src/**/*.tsx'], 'Use hooks.'),
         );
         const escapedPath = 'src/App\\ file.tsx';
         const normalizedPath = unescapePath(escapedPath.trim());
@@ -636,24 +508,21 @@ Use the chart palette.`,
     it.skipIf(process.platform === 'win32')(
       'activates rules when file is reached via symlinked directory',
       async () => {
-        // Create a real src/ directory and a symlink to it
         const srcDir = path.join(projectRoot, 'src');
         await fsPromises.mkdir(srcDir, { recursive: true });
         const symlinkDir = path.join(projectRoot, 'symlink-to-src');
         await fsPromises.symlink(srcDir, symlinkDir);
-
-        // Create the actual file so realpath can resolve it
-        const realFile = path.join(srcDir, 'foo.ts');
-        await fsPromises.writeFile(realFile, '// test');
+        // The real file must exist so realpath can resolve it.
+        await fsPromises.writeFile(path.join(srcDir, 'foo.ts'), '// test');
 
         const reg = new ConditionalRulesRegistry(
           [rule('/r/ts.md', ['src/**/*.ts'], 'Strict.')],
           projectRoot,
         );
 
-        // Access file via symlinked path
-        const symlinkedFile = path.join(symlinkDir, 'foo.ts');
-        const result = await reg.matchAndConsume(symlinkedFile);
+        const result = await reg.matchAndConsume(
+          path.join(symlinkDir, 'foo.ts'),
+        );
         expect(result).toContain('Strict.');
       },
     );
@@ -661,17 +530,14 @@ Use the chart palette.`,
     it.skipIf(process.platform === 'win32')(
       'activates rules when project root itself is a symlink',
       async () => {
-        // Create a real project directory and a symlink to it
         const realProject = path.join(testRootDir, 'real-project');
         await fsPromises.mkdir(realProject, { recursive: true });
         const srcDir = path.join(realProject, 'src');
         await fsPromises.mkdir(srcDir, { recursive: true });
         const symlinkProject = path.join(testRootDir, 'symlink-project');
         await fsPromises.symlink(realProject, symlinkProject);
-
-        // Create the actual file so realpath can resolve it
-        const realFile = path.join(srcDir, 'foo.ts');
-        await fsPromises.writeFile(realFile, '// test');
+        // The real file must exist so realpath can resolve it.
+        await fsPromises.writeFile(path.join(srcDir, 'foo.ts'), '// test');
 
         const reg = new ConditionalRulesRegistry(
           [rule('/r/ts.md', ['src/**/*.ts'], 'Strict.')],

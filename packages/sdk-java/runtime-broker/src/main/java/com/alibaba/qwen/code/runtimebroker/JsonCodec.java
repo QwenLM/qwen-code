@@ -11,7 +11,7 @@ final class JsonCodec {
     }
 
     static byte[] encode(Object value) {
-        return JSON.toJSONString(value, JSONWriter.Feature.WriteNulls).getBytes(StandardCharsets.UTF_8);
+        return JSON.toJSONBytes(value, JSONWriter.Feature.WriteNulls);
     }
 
     static Map<String, Object> parseObject(byte[] bytes, String context) {
