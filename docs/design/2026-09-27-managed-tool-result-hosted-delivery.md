@@ -10,6 +10,8 @@ Implement a private OSS-backed publication service inside the existing Java Mana
 
 The selected first backend is a dedicated private OSS bucket. A shared persistent volume has a different durability profile and does not prove survival of Runtime host loss. The private Shell profile stays disabled by default. If real OSS or replacement-host evidence is unavailable, submit the unified implementation as a Draft PR and retain that validation gap before Ready for review. General orphan-worker adoption remains outside O2.
 
+Publication expiry classification and fixed byte-aware scan windows are specified in [the R15-1 recovery design](2026-09-30-managed-tool-publication-expiry-recovery.md). That follow-up leaves O2 disabled by default and requires an explicit deployment verification budget.
+
 ## 2. Findings and dependencies
 
 | Source at the pinned baseline                                                                                                                                                                                                       | Observed behavior                                                                                                                                    | Consequence                                                                                              |

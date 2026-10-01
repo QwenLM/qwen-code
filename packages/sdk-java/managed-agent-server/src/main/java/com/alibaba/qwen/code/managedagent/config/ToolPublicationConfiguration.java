@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
@@ -76,11 +77,17 @@ public class ToolPublicationConfiguration {
             ManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
-        if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null) {
-            throw new IllegalStateException("Tool publication operation deadlines are required");
+        if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null
+                || settings.getMaxVerificationTimeout() == null) {
+            throw new IllegalStateException("Tool publication operation and verification deadlines are required");
         }
+        var budget = new ToolPublicationDataStore.VerificationBudget(
+                required(settings.getVerificationBytesPerSecond(), "verification throughput floor"),
+                settings.getMaxVerificationTimeout());
+        budget.timeout(settings.getOperationTimeout(), Math.addExact(
+                required(settings.getExecutionBytes(), "execution byte capacity"), ToolPublicationContract.PRODUCER_BYTES));
         return new ToolPublicationDataStore(jdbc, manager, grants, sessions, objects,
-                settings.getOperationTimeout(), settings.getClaimTimeout());
+                settings.getOperationTimeout(), settings.getClaimTimeout(), budget);
     }
 
     @Bean

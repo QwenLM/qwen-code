@@ -42,7 +42,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta and item.tool_call.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
+        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -297,6 +297,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/tool-results/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellToolResult"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/artifacts/get": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["getWebShellArtifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/artifacts/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellArtifacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -305,6 +353,27 @@ export interface components {
             /** @enum {string} */
             type: "input_text";
             text: string;
+        };
+        PublicArtifact: {
+            /** @constant */
+            object: "agent.artifact";
+            id: string;
+            session_id: string;
+            result_id: string;
+            revision: string;
+            /** @enum {string} */
+            stream_role: "stdout" | "stderr";
+            /** Format: int64 */
+            byte_length: number;
+            sha256: string;
+            media_type: string;
+            /** @enum {string} */
+            availability: "available" | "unavailable";
+            /**
+             * Format: int64
+             * @description Unix epoch milliseconds, unlike the seconds that the public Session, Turn, Event and Item resources report.
+             */
+            created_at: number;
         };
         WebShellListRequest: {
             cursor?: string | null;
@@ -408,6 +477,7 @@ export interface components {
             /** @default false */
             actions: boolean;
             tasks: boolean;
+            artifacts: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -771,9 +841,73 @@ export interface components {
             sessionId: string;
             taskId: string;
         };
+        ToolResultPreview: {
+            text: string;
+            truncated: boolean;
+            /** @enum {string} */
+            stream_id: "stdout" | "stderr";
+            /** Format: int64 */
+            source_start: number;
+            /** Format: int64 */
+            source_end: number;
+        };
+        PublicToolResult: {
+            id: string;
+            session_id: string;
+            turn_id: string;
+            item_id: string;
+            /** @description This implementation projects each result once at revision 1. Monotonic consumers reject duplicate or stale replay events; reprojection requires a separately reviewed migration and producer. */
+            projection_revision: number;
+            /** @enum {string} */
+            execution_status: "success" | "error" | "cancelled" | "not_started";
+            /** @enum {string|null} */
+            capture_status: "complete" | "partial" | "unavailable" | null;
+            /**
+             * @description O3 emits committed or blocked from the durable receipt. Pending is reserved for future producers and is not emitted by this implementation.
+             * @enum {string}
+             */
+            delivery_status: "pending" | "committed" | "blocked";
+            /** @enum {string|null} */
+            capture_scope: "process_pty" | "process_pipes" | "tool_native" | null;
+            upstream_truncated: boolean | null;
+            /** @enum {string|null} */
+            reason_code?: "quota_exhausted" | "size_limit" | "producer_lost" | "storage_failed" | "cancelled" | null;
+            preview?: components["schemas"]["ToolResultPreview"] | null;
+            artifacts: components["schemas"]["PublicArtifact"][];
+        };
+        ArtifactAccess: {
+            can_read_content: boolean;
+        };
+        ToolResultResponse: {
+            result: components["schemas"]["PublicToolResult"];
+            access: components["schemas"]["ArtifactAccess"];
+        };
+        ArtifactResponse: {
+            artifact: components["schemas"]["PublicArtifact"];
+            access: components["schemas"]["ArtifactAccess"];
+        };
+        WebShellArtifactPage: {
+            data: components["schemas"]["ArtifactResponse"][];
+            nextCursor: string | null;
+            hasMore: boolean;
+        };
+        WebShellToolResultRequest: {
+            sessionId: string;
+            itemId: string;
+        };
+        WebShellArtifactRequest: {
+            sessionId: string;
+            artifactId: string;
+        };
+        WebShellArtifactQueryRequest: {
+            sessionId: string;
+            cursor?: string | null;
+            /** @default 20 */
+            limit?: number;
+        };
     };
     responses: {
-        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. */
+        /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -1343,6 +1477,192 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getWebShellToolResult: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellToolResultRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized persisted tool result resource. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "private, no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolResultResponse"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    getWebShellArtifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellArtifactRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized persisted artifact metadata. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "private, no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactResponse"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    queryWebShellArtifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellArtifactQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized artifact metadata page. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "private, no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellArtifactPage"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }
