@@ -22,7 +22,8 @@ export const RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV =
 
 export function isSkipSelectorOnUniqueStrongHitEnabled(): boolean {
   const raw =
-    process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV]?.trim()
-      .toLowerCase();
+    process.env[
+      RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV
+    ]?.trim().toLowerCase();
   return raw === '1' || raw === 'true';
 }
