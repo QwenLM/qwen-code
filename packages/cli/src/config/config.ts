@@ -631,17 +631,7 @@ export async function parseArguments(): Promise<CliArgs> {
           DEFAULT_COMMAND_OPTIONS['append-system-prompt'],
         )
         .option('output-style', DEFAULT_COMMAND_OPTIONS['output-style'])
-        .option('sandbox', {
-          ...DEFAULT_COMMAND_OPTIONS.sandbox,
-          coerce: (raw: string | boolean | Array<string | boolean>) => {
-            const value = Array.isArray(raw) ? raw.at(-1) : raw;
-            if (typeof value === 'boolean') return value;
-            const selection = (value ?? '').trim().toLowerCase();
-            if (['', 'true', '1'].includes(selection)) return true;
-            if (['false', '0'].includes(selection)) return false;
-            return selection;
-          },
-        })
+        .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
         .middleware((argv) => {
           if (argv['sandbox'] === 'bwrap')
             throw new FatalConfigError(BWRAP_MIGRATION_MESSAGE);

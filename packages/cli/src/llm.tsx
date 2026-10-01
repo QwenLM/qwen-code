@@ -580,7 +580,7 @@ export async function main() {
   // check corruptedPath directly to keep stderr visible in relaunch.
   if (settings.corruptedPath) {
     writeStderrLine(
-      'Warning: Settings file had invalid JSON and was reset. ' +
+      'Warning: Workspace settings had invalid JSON. ' +
         'A copy of the corrupted file has been saved at: ' +
         settings.corruptedPath,
     );

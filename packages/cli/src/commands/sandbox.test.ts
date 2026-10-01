@@ -89,6 +89,30 @@ afterEach(() => {
   process.exitCode = undefined;
 });
 describe('qwen sandbox tool boundary', () => {
+  it.each([
+    [[], undefined],
+    [['--sandbox'], true],
+    [['-s'], true],
+    [['--sandbox', 'Docker'], 'docker'],
+    [['-s', 'PODMAN'], 'podman'],
+    [['--sandbox=FALSE'], false],
+    [['--sandbox', '1'], true],
+    [['--sandbox', '0'], false],
+    [['--sandbox', 'docker', '-s', 'PODMAN'], 'podman'],
+  ])('normalizes diagnostic selections %j to %s', async (flags, expected) => {
+    mocks.settings.mockReturnValue({ merged: {} });
+    await yargs(['sandbox', ...flags])
+      .command(sandboxCommand)
+      .exitProcess(false)
+      .parseAsync();
+    expect(mocks.legacy).toHaveBeenCalledOnce();
+    expect(mocks.legacy.mock.calls[0]?.[0]).toEqual({});
+    expect(mocks.legacy.mock.calls[0]?.[1].sandbox).toBe(expected);
+    expect(process.exitCode).toBeUndefined();
+    expect(mocks.probe).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
   it('reports actual scope and probes without running a user payload', async () => {
     await run();
     expect(mocks.stdout.mock.calls.flat().join('\n')).toContain(

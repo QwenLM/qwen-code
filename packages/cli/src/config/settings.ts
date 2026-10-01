@@ -1234,6 +1234,14 @@ function readSettingsLayers(
             `Workspace settings ${filePath} have invalid JSON (${getErrorMessage(parseError)}).`,
           );
           try {
+            if (
+              fs.existsSync(corruptedPath) &&
+              fs.realpathSync(filePath) === fs.realpathSync(corruptedPath)
+            )
+              throw new Error(
+                'The corruption copy resolves to the original settings file.',
+              );
+            fs.rmSync(corruptedPath, { force: true });
             fs.copyFileSync(filePath, corruptedPath);
           } catch (copyError) {
             throw new Error(
