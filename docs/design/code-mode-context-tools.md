@@ -1,5 +1,7 @@
 # Context tools in code mode
 
+Partly superseded by [Lazy Code Mode](lazy-code-mode.md): `tool_search` is now a top-level direct control; `tool_call` stays hidden.
+
 Port the tool exposure and context delivery changes from dragon/code-mode-only onto the QuickJS implementation on dragon/code-mode-only-10377. Preserve the target branch's media helpers, timeout accounting, inline output limits, scheduler batching, explicit per-agent allowlist, and output recovery.
 
 Only eleven registered tools remain direct: ask_user_question, agent, enter_plan_mode, exit_plan_mode, structured_output, create_sub_session, enter_worktree, exit_worktree, send_message, speak_to_user, and wait_threads. Exec is the top-level entry point; tool_search and tool_call stay hidden. Other registered tools are eligible subject to existing agent restrictions and approvals. Worktree approval behavior is unchanged.

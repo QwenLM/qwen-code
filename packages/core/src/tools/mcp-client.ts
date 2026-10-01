@@ -479,19 +479,25 @@ export function getMcpAppResourceUri(tool: {
     : undefined;
 }
 
+function getMcpAppVisibility(tool: {
+  _meta?: Record<string, unknown>;
+}): readonly string[] | undefined {
+  const ui = tool._meta?.['ui'];
+  if (typeof ui !== 'object' || ui === null || Array.isArray(ui))
+    return undefined;
+  const visibility = (ui as Record<string, unknown>)['visibility'];
+  if (visibility === undefined) return undefined;
+  return Array.isArray(visibility)
+    ? visibility.filter((value): value is string => typeof value === 'string')
+    : [];
+}
+
 /** SEP-1865: omit tools whose visibility does not include `"model"`. */
 export function isMcpToolVisibleToModel(tool: {
   _meta?: Record<string, unknown>;
 }): boolean {
-  const ui = tool._meta?.['ui'];
-  if (typeof ui !== 'object' || ui === null || Array.isArray(ui)) {
-    return true;
-  }
-  const visibility = (ui as Record<string, unknown>)['visibility'];
-  if (visibility === undefined || visibility === null) {
-    return true;
-  }
-  return Array.isArray(visibility) && visibility.includes('model');
+  const visibility = getMcpAppVisibility(tool);
+  return visibility === undefined || visibility.includes('model');
 }
 
 /**
@@ -1690,9 +1696,10 @@ async function discoverToolsWithMetadata(
         const listed = listedTools.find(
           (mcpTool) => mcpTool.name === funcDecl.name,
         );
+        const appVisibility = listed ? getMcpAppVisibility(listed) : undefined;
         if (listed && !isMcpToolVisibleToModel(listed)) {
           hadVisibilityFilteredTools = true;
-          continue;
+          if (!appVisibility?.includes('app')) continue;
         }
 
         discoveredTools.push(
@@ -1712,6 +1719,14 @@ async function discoverToolsWithMetadata(
             mcpServerConfig.alwaysLoadTools === true,
             invocationContextClients.has(mcpClient),
             appResourceUriMap.get(funcDecl.name!),
+            undefined,
+            {
+              appResourceMaxBytes: mcpServerConfig.appResourceMaxBytes,
+              appResourceTimeoutMs: mcpServerConfig.appResourceTimeoutMs,
+              extensionName: mcpServerConfig.extensionName,
+              scope: mcpServerConfig.scope,
+            },
+            appVisibility,
           ),
         );
       } catch (error) {

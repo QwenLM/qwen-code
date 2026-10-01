@@ -75,6 +75,7 @@ import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
   buildStartupWorktreeNotice,
+  WorktreeOwnershipConflictError,
   type StartupWorktreeContext,
 } from './startup/worktreeStartup.js';
 import { startEarlyStartupPrefetches } from './startup/startup-prefetch.js';
@@ -98,6 +99,7 @@ import {
   recordAcpConfigStartupEvent,
 } from './utils/acp-startup-profiler.js';
 import {
+  exitWhenSupervisorExits,
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -428,6 +430,7 @@ export async function main() {
   // that never completes — reach no other scrub, so it happens here for
   // all of them. A session that does bind one re-exports its own pair.
   clearInheritedPeerMessagingEnv();
+  exitWhenSupervisorExits();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -1146,6 +1149,7 @@ export async function main() {
           ),
         );
       } catch (error) {
+        if (error instanceof WorktreeOwnershipConflictError) throw error;
         debugLogger.warn(
           `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
         );

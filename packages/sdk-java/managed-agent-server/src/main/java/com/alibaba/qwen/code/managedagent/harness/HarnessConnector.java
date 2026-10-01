@@ -7,6 +7,10 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
+    default boolean isWorkspaceFilesAvailable() {
+        return false;
+    }
+
     Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting);
 
@@ -38,7 +42,11 @@ public interface HarnessConnector extends AutoCloseable {
 
     void rename(String tenantId, String sessionId, String title);
 
-    void closeSession(String tenantId, String sessionId);
+    /**
+     * Closes the Session and returns the boot ID of the Harness that
+     * answered. A Harness that does not hold the Session answers too.
+     */
+    String closeSession(String tenantId, String sessionId);
 
     @Override
     default void close() {

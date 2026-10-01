@@ -1,0 +1,1839 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwenlm.github.io/qwen-code/contracts/managed-extension-record-v1.schema.json",
+  "title": "Managed extension records v1 (managed-extension-record/1) conformance fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "definitionPin",
+    "deliveryTargets",
+    "domains",
+    "grant",
+    "grantCases",
+    "grantSuccessorCases",
+    "kinds",
+    "limits",
+    "monitorRun",
+    "monitorRunCases",
+    "monitorRunSuccessorCases",
+    "monitorStopReasons",
+    "pinCases",
+    "pinConsistencyCases",
+    "reasons",
+    "run",
+    "runCases",
+    "runSuccessorCases",
+    "stateLines"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": 1
+    },
+    "domains": {
+      "const": [
+        "config_install",
+        "workspace_initialization",
+        "skill_activation",
+        "mcp_configuration",
+        "mcp_operation",
+        "hook_registration",
+        "hook_execution",
+        "tool_stage",
+        "resource",
+        "publication",
+        "workspace_operation",
+        "history_rewind",
+        "history_copy",
+        "history_maintenance",
+        "channel_route",
+        "channel_delivery",
+        "schedule",
+        "automation_run",
+        "child_run",
+        "child_acceptance",
+        "memory_job",
+        "monitor_run",
+        "goal_state",
+        "todo_state",
+        "plan_mode",
+        "team_state",
+        "team_task",
+        "team_message",
+        "team_plan",
+        "session_message",
+        "session_metadata",
+        "file_history",
+        "session_source"
+      ]
+    },
+    "limits": {
+      "const": {
+        "maxIdBytes": 512,
+        "minLeaseDurationMs": 1000,
+        "maxLeaseDurationMs": 300000,
+        "maxGrantPhases": 16,
+        "maxPhaseLength": 64,
+        "maxMonitorEvents": 10000,
+        "maxMonitorIdleTimeoutMs": 600000,
+        "maxMonitorDebounceMs": 600000
+      }
+    },
+    "kinds": {
+      "const": {
+        "monitorRun": "managed-monitor_run",
+        "monitorOutput": "managed-tool-result-manifest"
+      }
+    },
+    "stateLines": {
+      "const": {
+        "run": {
+          "states": [
+            "reserved",
+            "admitted",
+            "running",
+            "waiting",
+            "settled",
+            "failed",
+            "cancelled",
+            "recovery_blocked"
+          ],
+          "transitions": {
+            "reserved": ["admitted", "failed", "cancelled"],
+            "admitted": [
+              "running",
+              "waiting",
+              "failed",
+              "cancelled",
+              "recovery_blocked"
+            ],
+            "running": [
+              "waiting",
+              "settled",
+              "failed",
+              "cancelled",
+              "recovery_blocked"
+            ],
+            "waiting": [
+              "running",
+              "settled",
+              "failed",
+              "cancelled",
+              "recovery_blocked"
+            ],
+            "settled": [],
+            "failed": [],
+            "cancelled": [],
+            "recovery_blocked": [
+              "running",
+              "waiting",
+              "settled",
+              "failed",
+              "cancelled"
+            ]
+          }
+        },
+        "execution": {
+          "states": [
+            "intent",
+            "dispatch_started",
+            "running_attached",
+            "settled",
+            "not_started_proven",
+            "outcome_unknown",
+            "corrupt"
+          ],
+          "transitions": {
+            "intent": [
+              "dispatch_started",
+              "not_started_proven",
+              "outcome_unknown",
+              "corrupt"
+            ],
+            "dispatch_started": [
+              "running_attached",
+              "settled",
+              "not_started_proven",
+              "outcome_unknown",
+              "corrupt"
+            ],
+            "running_attached": ["settled", "outcome_unknown", "corrupt"],
+            "settled": [],
+            "not_started_proven": [],
+            "outcome_unknown": [
+              "running_attached",
+              "settled",
+              "not_started_proven",
+              "corrupt"
+            ],
+            "corrupt": []
+          }
+        },
+        "delivery": {
+          "states": [
+            "planned",
+            "sending",
+            "partial",
+            "delivered",
+            "accepting",
+            "accepted",
+            "consumed",
+            "unknown",
+            "rejected",
+            "cancelled"
+          ],
+          "transitions": {
+            "planned": ["sending", "accepting", "cancelled"],
+            "sending": ["delivered", "partial", "unknown", "rejected"],
+            "partial": ["sending", "unknown"],
+            "delivered": [],
+            "accepting": ["accepted", "unknown", "rejected"],
+            "accepted": ["consumed"],
+            "consumed": [],
+            "unknown": ["delivered", "partial", "accepted", "rejected"],
+            "rejected": [],
+            "cancelled": []
+          }
+        }
+      }
+    },
+    "deliveryTargets": {
+      "const": {
+        "channel": [
+          "planned",
+          "sending",
+          "partial",
+          "delivered",
+          "unknown",
+          "rejected",
+          "cancelled"
+        ],
+        "session": [
+          "planned",
+          "accepting",
+          "accepted",
+          "consumed",
+          "unknown",
+          "rejected",
+          "cancelled"
+        ]
+      }
+    },
+    "reasons": {
+      "const": {
+        "recovery": [
+          "outcome_unknown",
+          "execution_corrupt",
+          "runtime_lost",
+          "dispatch_unknown",
+          "handler_unavailable"
+        ],
+        "quota": [
+          "count_limit",
+          "rate_limit",
+          "depth_limit",
+          "byte_limit",
+          "budget_exhausted",
+          "duration_limit"
+        ]
+      }
+    },
+    "monitorStopReasons": {
+      "const": {
+        "settled": ["exited", "max_events", "idle_timeout"],
+        "failed": ["start_failed", "watch_failed", "quota_exceeded"],
+        "cancelled": ["stop_requested"]
+      }
+    },
+    "grant": {
+      "$ref": "#/$defs/operationGrant"
+    },
+    "definitionPin": {
+      "$ref": "#/$defs/definitionPin"
+    },
+    "run": {
+      "$ref": "#/$defs/extensionRun"
+    },
+    "monitorRun": {
+      "$ref": "#/$defs/monitorRun"
+    },
+    "grantCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["grant", "id", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "grant": true
+        }
+      }
+    },
+    "grantSuccessorCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next", "previous", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "previous": true,
+          "next": true
+        }
+      }
+    },
+    "pinCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "pin", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "pin": true
+        }
+      }
+    },
+    "pinConsistencyCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["first", "id", "second", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "first": true,
+          "second": true
+        }
+      }
+    },
+    "runCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "run", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "run": true
+        }
+      }
+    },
+    "runSuccessorCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next", "previous", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "previous": true,
+          "next": true
+        }
+      }
+    },
+    "monitorRunCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "monitorRun", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "monitorRun": true
+        }
+      }
+    },
+    "monitorRunSuccessorCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "next", "previous", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "previous": true,
+          "next": true
+        }
+      }
+    }
+  },
+  "$defs": {
+    "caseId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740990
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740990
+    },
+    "time": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8640000000000000
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,18}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "phase": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "durableRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byteLength",
+        "digest",
+        "kind",
+        "resourceId",
+        "schemaVersion"
+      ],
+      "properties": {
+        "resourceId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "$ref": "#/$defs/id"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/count"
+        },
+        "byteLength": {
+          "$ref": "#/$defs/count"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "sessionKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "tenantId", "workspaceId"],
+      "properties": {
+        "tenantId": {
+          "$ref": "#/$defs/id"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/id"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "domain": {
+      "enum": [
+        "config_install",
+        "workspace_initialization",
+        "skill_activation",
+        "mcp_configuration",
+        "mcp_operation",
+        "hook_registration",
+        "hook_execution",
+        "tool_stage",
+        "resource",
+        "publication",
+        "workspace_operation",
+        "history_rewind",
+        "history_copy",
+        "history_maintenance",
+        "channel_route",
+        "channel_delivery",
+        "schedule",
+        "automation_run",
+        "child_run",
+        "child_acceptance",
+        "memory_job",
+        "monitor_run",
+        "goal_state",
+        "todo_state",
+        "plan_mode",
+        "team_state",
+        "team_task",
+        "team_message",
+        "team_plan",
+        "session_message",
+        "session_metadata",
+        "file_history",
+        "session_source"
+      ]
+    },
+    "resourceScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phases", "recordRef"],
+      "properties": {
+        "recordRef": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/durableRef"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "schemaVersion": {
+                  "const": 1
+                }
+              },
+              "required": ["schemaVersion"]
+            }
+          ]
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/phase"
+          }
+        }
+      }
+    },
+    "operationGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "domain",
+        "expiresAt",
+        "leaseDurationMs",
+        "operationId",
+        "operationRevision",
+        "ownerId",
+        "resourceScope",
+        "sessionKey",
+        "workspaceGeneration"
+      ],
+      "properties": {
+        "sessionKey": {
+          "$ref": "#/$defs/sessionKey"
+        },
+        "operationId": {
+          "$ref": "#/$defs/id"
+        },
+        "domain": {
+          "$ref": "#/$defs/domain"
+        },
+        "operationRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "ownerId": {
+          "$ref": "#/$defs/id"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/generation"
+        },
+        "resourceScope": {
+          "$ref": "#/$defs/resourceScope"
+        },
+        "leaseDurationMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "definitionPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["definitionDigest", "definitionId", "definitionRevision"],
+      "properties": {
+        "definitionId": {
+          "$ref": "#/$defs/id"
+        },
+        "definitionRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "definitionDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "runState": {
+      "enum": [
+        "reserved",
+        "admitted",
+        "running",
+        "waiting",
+        "settled",
+        "failed",
+        "cancelled",
+        "recovery_blocked"
+      ]
+    },
+    "executionState": {
+      "enum": [
+        "intent",
+        "dispatch_started",
+        "running_attached",
+        "settled",
+        "not_started_proven",
+        "outcome_unknown",
+        "corrupt"
+      ]
+    },
+    "recoveryReason": {
+      "enum": [
+        "outcome_unknown",
+        "execution_corrupt",
+        "runtime_lost",
+        "dispatch_unknown",
+        "handler_unavailable"
+      ]
+    },
+    "quotaReason": {
+      "enum": [
+        "count_limit",
+        "rate_limit",
+        "depth_limit",
+        "byte_limit",
+        "budget_exhausted",
+        "duration_limit"
+      ]
+    },
+    "runtimeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "runtimeBindingId"],
+      "properties": {
+        "runtimeBindingId": {
+          "$ref": "#/$defs/id"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        }
+      }
+    },
+    "delivery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "target"],
+          "properties": {
+            "target": {
+              "const": "channel"
+            },
+            "state": {
+              "enum": [
+                "planned",
+                "sending",
+                "partial",
+                "delivered",
+                "unknown",
+                "rejected",
+                "cancelled"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "target"],
+          "properties": {
+            "target": {
+              "const": "session"
+            },
+            "state": {
+              "enum": [
+                "planned",
+                "accepting",
+                "accepted",
+                "consumed",
+                "unknown",
+                "rejected",
+                "cancelled"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "extensionRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition",
+        "delivery",
+        "deliveryId",
+        "dispatchId",
+        "effectId",
+        "execution",
+        "executionCallId",
+        "reason",
+        "runtime",
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/runState"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/recoveryReason"
+                },
+                {
+                  "$ref": "#/$defs/quotaReason"
+                }
+              ]
+            }
+          ]
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/definitionPin"
+            }
+          ]
+        },
+        "executionCallId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        },
+        "effectId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        },
+        "dispatchId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        },
+        "deliveryId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        },
+        "execution": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/executionState"
+            }
+          ]
+        },
+        "runtime": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runtimeBinding"
+            }
+          ]
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/delivery"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "type": "object",
+            "properties": {
+              "executionCallId": {
+                "type": "string"
+              },
+              "effectId": {
+                "type": "string"
+              }
+            },
+            "required": ["effectId", "executionCallId"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "type": "string"
+              }
+            },
+            "required": ["execution"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "executionCallId": {
+                    "type": "string"
+                  }
+                },
+                "required": ["executionCallId"]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "effectId": {
+                    "type": "string"
+                  }
+                },
+                "required": ["effectId"]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "runtime": {
+                "type": "object"
+              }
+            },
+            "required": ["runtime"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "type": "string"
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "delivery": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "const": "channel"
+                  }
+                },
+                "required": ["target"]
+              }
+            },
+            "required": ["delivery"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "deliveryId": {
+                "type": "string"
+              }
+            },
+            "required": ["deliveryId"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "deliveryId": {
+                "type": "null"
+              }
+            },
+            "required": ["deliveryId"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "reserved"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "type": "null"
+              },
+              "delivery": {
+                "type": "null"
+              }
+            },
+            "required": ["delivery", "execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "enum": ["outcome_unknown", "corrupt"]
+              }
+            },
+            "required": ["execution"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "recovery_blocked"
+              }
+            },
+            "required": ["state"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["failed", "cancelled"]
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "enum": [null, "settled", "not_started_proven"]
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "settled"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "enum": [null, "settled"]
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["running", "waiting"]
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "not": {
+                  "const": "not_started_proven"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "delivery": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "const": "session"
+                  },
+                  "state": {
+                    "not": {
+                      "enum": ["planned", "cancelled"]
+                    }
+                  }
+                },
+                "required": ["state", "target"]
+              }
+            },
+            "required": ["delivery"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["settled", "failed", "cancelled"]
+              }
+            },
+            "required": ["state"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "recovery_blocked"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/recoveryReason"
+              }
+            },
+            "required": ["reason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["running", "waiting"]
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/recoveryReason"
+                  }
+                ]
+              }
+            },
+            "required": ["reason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/quotaReason"
+                  }
+                ]
+              }
+            },
+            "required": ["reason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["reserved", "admitted", "settled", "cancelled"]
+              }
+            },
+            "required": ["state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["reason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "outcome_unknown"
+              }
+            },
+            "required": ["reason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "const": "outcome_unknown"
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "execution_corrupt"
+              }
+            },
+            "required": ["reason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "const": "corrupt"
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "const": "corrupt"
+              }
+            },
+            "required": ["execution"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "execution_corrupt"
+              }
+            },
+            "required": ["reason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "runtime_lost"
+              }
+            },
+            "required": ["reason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "runtime": {
+                "type": "object"
+              }
+            },
+            "required": ["runtime"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "runtime_lost"
+              },
+              "state": {
+                "const": "recovery_blocked"
+              }
+            },
+            "required": ["reason", "state"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "execution": {
+                "not": {
+                  "const": "running_attached"
+                }
+              }
+            },
+            "required": ["execution"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "const": "dispatch_unknown"
+              }
+            },
+            "required": ["reason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "dispatchId": {
+                "type": "string"
+              }
+            },
+            "required": ["dispatchId"]
+          }
+        }
+      ]
+    },
+    "stopReason": {
+      "enum": [
+        "exited",
+        "max_events",
+        "idle_timeout",
+        "start_failed",
+        "watch_failed",
+        "quota_exceeded",
+        "stop_requested"
+      ]
+    },
+    "monitorRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commandRef",
+        "debounceMs",
+        "idleTimeoutMs",
+        "lastObservationRef",
+        "maxEvents",
+        "monitorId",
+        "notifiedThrough",
+        "observationSequence",
+        "outputRef",
+        "ownerScopeId",
+        "run",
+        "startReceiptRef",
+        "stopReason"
+      ],
+      "properties": {
+        "monitorId": {
+          "$ref": "#/$defs/id"
+        },
+        "ownerScopeId": {
+          "$ref": "#/$defs/id"
+        },
+        "commandRef": {
+          "$ref": "#/$defs/durableRef"
+        },
+        "maxEvents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "idleTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        },
+        "debounceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "startReceiptRef": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/durableRef"
+            }
+          ]
+        },
+        "observationSequence": {
+          "$ref": "#/$defs/count"
+        },
+        "lastObservationRef": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/durableRef"
+            }
+          ]
+        },
+        "notifiedThrough": {
+          "$ref": "#/$defs/count"
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/stopReason"
+            }
+          ]
+        },
+        "outputRef": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/durableRef"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "managed-tool-result-manifest"
+                    },
+                    "schemaVersion": {
+                      "const": 1
+                    }
+                  },
+                  "required": ["kind", "schemaVersion"]
+                }
+              ]
+            }
+          ]
+        },
+        "run": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/extensionRun"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "executionCallId": {
+                  "type": "string"
+                },
+                "effectId": {
+                  "type": "null"
+                },
+                "dispatchId": {
+                  "type": "null"
+                },
+                "deliveryId": {
+                  "type": "null"
+                },
+                "delivery": {
+                  "type": "null"
+                },
+                "definition": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "definition",
+                "delivery",
+                "deliveryId",
+                "dispatchId",
+                "effectId",
+                "executionCallId"
+              ]
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "observationSequence": {
+                "const": 0
+              }
+            },
+            "required": ["observationSequence"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "lastObservationRef": {
+                "type": "null"
+              }
+            },
+            "required": ["lastObservationRef"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "lastObservationRef": {
+                "type": "object"
+              }
+            },
+            "required": ["lastObservationRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "observationSequence": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": ["observationSequence"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "startReceiptRef": {
+                "type": "object"
+              }
+            },
+            "required": ["startReceiptRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "execution": {
+                    "const": "running_attached"
+                  }
+                },
+                "required": ["execution"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "startReceiptRef": {
+                "type": "object"
+              }
+            },
+            "required": ["startReceiptRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "execution": {
+                    "enum": [
+                      null,
+                      "intent",
+                      "dispatch_started",
+                      "not_started_proven"
+                    ]
+                  }
+                },
+                "required": ["execution"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "startReceiptRef": {
+                "type": "null"
+              }
+            },
+            "required": ["startReceiptRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "startReceiptRef": {
+                "type": "object"
+              }
+            },
+            "required": ["startReceiptRef"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "type": "object"
+                  }
+                },
+                "required": ["runtime"]
+              }
+            },
+            "required": ["run"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "enum": ["settled", "failed", "cancelled"]
+                  }
+                },
+                "required": ["state"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "$ref": "#/$defs/stopReason"
+              }
+            },
+            "required": ["stopReason"]
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "type": "null"
+              }
+            },
+            "required": ["stopReason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "settled"
+                  }
+                },
+                "required": ["state"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "enum": ["exited", "max_events", "idle_timeout"]
+              }
+            },
+            "required": ["stopReason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "failed"
+                  }
+                },
+                "required": ["state"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "enum": ["start_failed", "watch_failed", "quota_exceeded"]
+              }
+            },
+            "required": ["stopReason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "cancelled"
+                  }
+                },
+                "required": ["state"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "enum": ["stop_requested"]
+              }
+            },
+            "required": ["stopReason"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "const": "settled"
+                  }
+                },
+                "required": ["state"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "execution": {
+                    "const": "settled"
+                  }
+                },
+                "required": ["execution"]
+              },
+              "startReceiptRef": {
+                "type": "object"
+              }
+            },
+            "required": ["run", "startReceiptRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "const": "start_failed"
+              }
+            },
+            "required": ["stopReason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "startReceiptRef": {
+                "type": "null"
+              },
+              "run": {
+                "type": "object",
+                "properties": {
+                  "execution": {
+                    "type": "string"
+                  }
+                },
+                "required": ["execution"]
+              }
+            },
+            "required": ["run", "startReceiptRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "const": "watch_failed"
+              }
+            },
+            "required": ["stopReason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "startReceiptRef": {
+                "type": "object"
+              }
+            },
+            "required": ["startReceiptRef"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "const": "quota_exceeded"
+              }
+            },
+            "required": ["stopReason"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "$ref": "#/$defs/quotaReason"
+                  }
+                },
+                "required": ["reason"]
+              }
+            },
+            "required": ["run"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "run": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "$ref": "#/$defs/quotaReason"
+                  }
+                },
+                "required": ["reason"]
+              }
+            },
+            "required": ["run"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "stopReason": {
+                "const": "quota_exceeded"
+              }
+            },
+            "required": ["stopReason"]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -20,6 +20,8 @@ public final class ApiModels {
     public record CreateSessionRequest(
             @JsonProperty("agent_id") @NotBlank @Size(max = 128)
                     String agentId,
+            @JsonProperty("agent_revision") @Size(max = 128)
+                    String agentRevision,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
             Boolean stream,
@@ -47,6 +49,7 @@ public final class ApiModels {
     public record PublicTurn(@JsonProperty("id") String turnId,
             @JsonProperty("object") String object,
             @JsonProperty("session_id") String sessionId,
+            @JsonProperty("input_item_id") String inputItemId,
             String status,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("completed_at") Long completedAt,
@@ -55,26 +58,49 @@ public final class ApiModels {
 
     public record PublicWorkspace(
             @JsonProperty("workspace_id") String workspaceId,
-            @JsonProperty("cwd_relative") String cwdRelative) {
+            @JsonProperty("cwd_relative") String cwdRelative,
+            @JsonProperty("context_revision") long contextRevision,
+            String state) {
     }
 
-    public record WebShellWorkspace(String workspaceId, String cwdRelative) {
+    public record WebShellWorkspace(String workspaceId, String cwdRelative,
+            long contextRevision, String state) {
+    }
+
+    public record SessionCapabilities(boolean items, boolean snapshots,
+            boolean artifacts, boolean resync,
+            @JsonProperty("session_lifecycle") boolean sessionLifecycle,
+            boolean tasks) {
+    }
+
+    public record WebShellSessionCapabilities(boolean tasks) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicSession(String id, String object,
             @JsonProperty("agent_id") String agentId,
+            @JsonProperty("agent_revision") String agentRevision,
             String status,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt,
             Map<String, Object> metadata,
             @JsonProperty("active_turn") PublicTurn activeTurn,
             @JsonProperty("last_event_id") long lastEventId,
+            @JsonProperty("replay_floor_sequence") long replayFloorSequence,
+            @JsonProperty("snapshot_through_sequence")
+                    long snapshotThroughSequence,
+            SessionCapabilities capabilities,
             @JsonProperty("workspace") PublicWorkspace workspace) {
     }
 
-    public record DeletedSession(String id, String object,
-            boolean deleted) {
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicCommandOperation(String id,
+            @JsonProperty("session_id") String sessionId, String type,
+            String status,
+            @JsonProperty("admission_stage") String admissionStage,
+            @JsonProperty("delivery_state") String deliveryState,
+            @JsonProperty("receipt_id") String receiptId,
+            boolean replayed) {
     }
 
     public record PublicList<T>(String object, List<T> data,
@@ -83,14 +109,27 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record PublicEvent(@JsonProperty("sequence") long sequence,
+    public record PublicEvent(
+            @JsonProperty("schema_version") int schemaVersion,
+            @JsonProperty("projection_version") int projectionVersion,
+            @JsonProperty("sequence") long sequence,
             @JsonProperty("event_id") String eventId,
             @JsonProperty("session_id") String sessionId,
             @JsonProperty("turn_id") String turnId,
+            @JsonProperty("item_id") String itemId,
+            @JsonProperty("content_part_id") String contentPartId,
             String type,
             @JsonProperty("created_at") long createdAt,
             Map<String, Object> data,
             boolean terminal) {
+    }
+
+    public record SessionResyncRequired(String type,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("replay_floor_sequence") long replayFloorSequence,
+            @JsonProperty("snapshot_through_sequence")
+                    long snapshotThroughSequence,
+            String action) {
     }
 
     public record PublicContentPart(@JsonProperty("part_id") String partId,
@@ -129,10 +168,10 @@ public final class ApiModels {
     }
 
     public record WebShellStreamRequest(@NotBlank String sessionId,
-            Long afterSequence, Integer limit) {
+            Long afterSequence) {
     }
 
-    public record WebShellCreateRequest(String requestId,
+    public record WebShellCreateRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey,
             @NotBlank @Size(max = 128) String agentId,
             String environmentId, String title,
@@ -141,13 +180,13 @@ public final class ApiModels {
             JsonNode workspace) {
     }
 
-    public record WebShellSubmitRequest(String requestId,
+    public record WebShellSubmitRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata) {
     }
 
-    public record WebShellCancelRequest(String requestId,
+    public record WebShellCancelRequest(@Size(max = 128) String requestId,
             @NotBlank String idempotencyKey, @NotBlank String sessionId,
             @NotBlank String turnId) {
     }
@@ -155,6 +194,21 @@ public final class ApiModels {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record WebShellAdmission(String sessionId, String turnId,
             String status, boolean replayed) {
+    }
+
+    public record WebShellLifecycleRequest(@NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey) {
+    }
+
+    public record WebShellOperationRequest(@NotBlank String sessionId,
+            @NotBlank @Size(max = 64) String operationId) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellCommandOperation(String operationId,
+            String sessionId, String type, String status,
+            String admissionStage, String deliveryState, String receiptId,
+            boolean replayed) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -167,7 +221,37 @@ public final class ApiModels {
     public record WebShellSession(String sessionId, String title,
             String agentId, String status, long createdAt, long updatedAt,
             WebShellTurn activeTurn, Object environment, long lastSequence,
-            WebShellWorkspace workspace) {
+            WebShellWorkspace workspace,
+            WebShellSessionCapabilities capabilities) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicTask(String id, String object,
+            @JsonProperty("session_id") String sessionId, String kind,
+            String state,
+            @JsonProperty("definition_revision") Long definitionRevision,
+            @JsonProperty("runtime_state") String runtimeState,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("started_at") Long startedAt,
+            @JsonProperty("settled_at") Long settledAt,
+            @JsonProperty("artifact_refs") List<String> artifactRefs,
+            @JsonProperty("action_capabilities")
+                    List<String> actionCapabilities) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellTask(String taskId, String sessionId, String kind,
+            String state, Long definitionRevision, String runtimeState,
+            long createdAt, Long startedAt, Long settledAt,
+            List<String> artifactRefs, List<String> actionCapabilities) {
+    }
+
+    public record WebShellTaskQueryRequest(@NotBlank String sessionId,
+            String cursor, Integer limit) {
+    }
+
+    public record WebShellTaskGetRequest(@NotBlank String sessionId,
+            @NotBlank String taskId) {
     }
 
     public record WebShellPage<T>(List<T> data, String nextCursor,
@@ -175,9 +259,15 @@ public final class ApiModels {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record WebShellEvent(long sequence, String eventId,
-            String sessionId, String turnId, String type, long createdAt,
+    public record WebShellEvent(int schemaVersion, int projectionVersion,
+            long sequence, String eventId, String sessionId, String turnId,
+            String itemId, String contentPartId, String type, long createdAt,
             Map<String, Object> data, boolean terminal) {
+    }
+
+    public record WebShellResyncRequired(String type, String sessionId,
+            long replayFloorSequence, long snapshotThroughSequence,
+            String action) {
     }
 
     public record WebShellContentPart(String partId, String type, String text,

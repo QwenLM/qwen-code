@@ -16,9 +16,12 @@ import type {
 } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
 import {
   managedToolDigest,
+  parseManagedToolInvocationReference,
   type ManagedToolInvocationReference,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { isLoopbackBind } from './loopback-binds.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
+
+export { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import {
   ManagedRuntimeProviderError,
   type ManagedRuntimeExecutionIdentity,
@@ -33,6 +36,11 @@ import {
   sameManagedRuntimeIdentity,
   type ManagedRuntimePrepareRequest,
 } from './managed-runtime-protocol.js';
+import {
+  parseManagedRuntimeProviderOperation,
+  parseManagedRuntimeProviderResult,
+  type ManagedRuntimeProviderControl,
+} from './managed-runtime-provider-protocol.js';
 
 export const MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = 1 as const;
 export const MANAGED_RUNTIME_BROKER_ROUTE_PREFIX =
@@ -91,8 +99,12 @@ class BrokerResponseError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly retryable?: boolean,
+    reason?: string,
+    readonly abandoned = false,
   ) {
-    super(`Managed Runtime Broker returned HTTP ${status}.`);
+    super(
+      `Managed Runtime Broker returned HTTP ${status}.${reason ? ` ${reason}` : ''}`,
+    );
     this.name = 'BrokerResponseError';
   }
 }
@@ -101,32 +113,6 @@ export interface ManagedRuntimeBrokerClientOptions {
   readonly baseUrl: string;
   readonly token: string;
   readonly fetch?: typeof fetch;
-}
-
-export function resolveManagedRuntimeBrokerBaseUrl(raw: string): URL {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error('Managed Runtime Broker URL is invalid.');
-  }
-  if (
-    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    (url.pathname !== '/' && url.pathname !== '')
-  ) {
-    throw new Error('Managed Runtime Broker URL must be an HTTP(S) origin.');
-  }
-  if (url.protocol === 'http:' && !isLoopbackBind(url.hostname)) {
-    throw new Error(
-      'Managed Runtime Broker URL must use HTTPS outside the loopback interface.',
-    );
-  }
-  url.pathname = '/';
-  return url;
 }
 
 async function readBoundedResponseText(
@@ -239,6 +225,8 @@ function executionIdempotencyKey(
     .update(reference.callId)
     .update('\0')
     .update(reference.argsDigest)
+    .update('\0')
+    .update(reference.invocationId)
     .digest('hex');
 }
 
@@ -558,6 +546,8 @@ export class ManagedRuntimeBrokerClient {
     if (!response.ok) {
       let code: string | undefined;
       let retryable: boolean | undefined;
+      let reason: string | undefined;
+      let abandoned = false;
       try {
         const text = await readBoundedResponseText(
           response,
@@ -572,13 +562,49 @@ export class ManagedRuntimeBrokerClient {
         ) {
           code = body['code'];
         }
+        // The Broker's envelope is error, code and retryable, plus details
+        // when there are any (a terminal ABANDONED answer carries them).
+        const details = body['details'];
+        if (
+          code !== undefined &&
+          typeof body['retryable'] === 'boolean' &&
+          Object.keys(body).filter((key) => key !== 'details').length === 3 &&
+          (details === undefined ||
+            (details !== null &&
+              typeof details === 'object' &&
+              !Array.isArray(details))) &&
+          response.headers
+            .get('content-type')
+            ?.split(';')[0]
+            .trim()
+            .toLowerCase() === 'application/json' &&
+          typeof body['error'] === 'string' &&
+          body['error'].length > 0 &&
+          body['error'].length <= 4096 &&
+          !body['error'].includes('\0')
+        ) {
+          reason = body['error'];
+        }
         if (typeof body['retryable'] === 'boolean') {
           retryable = body['retryable'];
+        }
+        if (body['details'] !== undefined) {
+          const details = record(body['details']);
+          abandoned =
+            code === 'runtime_broker_execution_unknown' &&
+            details['terminal'] === true &&
+            details['reason'] === 'runtime_lost';
         }
       } catch {
         await response.body?.cancel().catch(() => undefined);
       }
-      throw new BrokerResponseError(response.status, code, retryable);
+      throw new BrokerResponseError(
+        response.status,
+        code,
+        retryable,
+        reason,
+        abandoned,
+      );
     }
     const contentLength = Number(response.headers.get('content-length'));
     if (
@@ -719,7 +745,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -765,7 +793,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -811,7 +841,9 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         error instanceof BrokerResponseError &&
         error.code === 'runtime_broker_execution_unknown'
       ) {
-        return { outcome: 'unknown' };
+        return error.abandoned
+          ? { outcome: 'unknown', terminal: true, reason: 'runtime_lost' }
+          : { outcome: 'unknown' };
       }
       throw error;
     }
@@ -917,16 +949,26 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
         );
       }
     };
-    const control = (operation: Record<string, unknown>) => {
-      assertEntry(operation['kind'] === 'history');
-      return this.client.control(
-        entry.request.sessionId,
-        entry.harnessSessionId,
-        operation,
-        AbortSignal.any([
-          this.lifetime.signal,
-          AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
-        ]),
+    const control = async (operation: ManagedRuntimeProviderControl) => {
+      assertEntry(operation.kind === 'history');
+      const session = {
+        harnessSessionId: entry.harnessSessionId,
+        runtimeSessionId: entry.request.sessionId,
+        turnKind: entry.request.turnKind,
+      };
+      const parsed = parseManagedRuntimeProviderOperation(operation, session);
+      return parseManagedRuntimeProviderResult(
+        parsed,
+        await this.client.control(
+          entry.request.sessionId,
+          entry.harnessSessionId,
+          parsed,
+          AbortSignal.any([
+            this.lifetime.signal,
+            AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
+          ]),
+        ),
+        session,
       );
     };
     const ensureExecution = (
@@ -1079,6 +1121,7 @@ export class BrokerManagedRuntimeProvider implements ManagedRuntimeProvider {
     entry: BrokerEntry,
     reference: ManagedToolInvocationReference,
   ): void {
+    parseManagedToolInvocationReference(reference);
     if (reference.sessionId !== entry.request.sessionId) {
       throw new ManagedRuntimeProviderError(
         'managed_runtime_identity_conflict',
