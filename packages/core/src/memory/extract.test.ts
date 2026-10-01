@@ -431,7 +431,7 @@ describe('auto-memory extraction', () => {
       history.slice(0, CACHE_SAFE_HISTORY_TAIL_ENTRIES),
       { windowAsOf: expect.any(String) },
     );
-    // No genuine progress, but the windowed arm must still advance: holding
+    // No genuine progress, but the capped window must still advance: holding
     // the cursor at startOffset recomputes a byte-identical slice next turn
     // (endOffset is capped relative to startOffset), freezing the window for
     // the rest of the session and never arming the no-op cooldown.
@@ -444,9 +444,17 @@ describe('auto-memory extraction', () => {
       history.slice(CACHE_SAFE_HISTORY_TAIL_ENTRIES),
     );
     expect(secondWindow).toContainEqual(lateFact);
-    // Caught up: processedOffset === history.length is the condition the
-    // no-op cooldown in MemoryManager arms on.
-    expect(second.cursor.processedOffset).toBe(history.length);
+    expect(second.cursor.processedOffset).toBe(CACHE_SAFE_HISTORY_TAIL_ENTRIES);
+
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    });
+    const verified = await runAutoMemoryExtract({ ...params, history });
+    expect(verified.cursor.processedOffset).toBe(history.length);
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {
@@ -963,51 +971,59 @@ describe('auto-memory extraction', () => {
       );
       expect(result.cursor.processedOffset).toBe(compressedHistory.length);
     });
-    it('BUG #6311: should NOT advance cursor when agent makes zero tool calls (hallucination)', async () => {
-      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-        touchedTopics: [],
-        touchedProjectScope: false,
-        touchedUserScope: false,
-        hasToolActivity: false,
-        systemMessage: undefined,
-      });
+    it.each([false, true])(
+      'BUG #6311: should NOT advance cursor when agent makes zero tool calls (preserve history: %s)',
+      async (preserveUnprocessedHistory) => {
+        vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+          touchedTopics: [],
+          touchedProjectScope: false,
+          touchedUserScope: false,
+          hasToolActivity: false,
+          systemMessage: undefined,
+        });
 
-      const history = [
-        {
-          role: 'user' as const,
-          parts: [{ text: 'Remember that I prefer pnpm over npm.' }],
-        },
-      ];
+        const history = [
+          {
+            role: 'user' as const,
+            parts: [{ text: 'Remember that I prefer pnpm over npm.' }],
+          },
+        ];
 
-      const result = await runAutoMemoryExtract({
-        projectRoot,
-        sessionId: 'session-1',
-        config: mockConfig,
-        history: [...history],
-      });
+        const result = await runAutoMemoryExtract({
+          projectRoot,
+          sessionId: 'session-1',
+          config: mockConfig,
+          preserveUnprocessedHistory,
+          history: [...history],
+        });
 
-      expect(result.cursor.processedOffset).toBe(0);
-    });
-    it('should advance cursor on legitimate noop (agent checked memory, found nothing new)', async () => {
-      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-        touchedTopics: [],
-        touchedProjectScope: false,
-        touchedUserScope: false,
-        hasToolActivity: true,
-        systemMessage: undefined,
-      });
+        expect(result.cursor.processedOffset).toBe(0);
+      },
+    );
+    it.each([false, true])(
+      'should advance cursor on legitimate noop (preserve history: %s)',
+      async (preserveUnprocessedHistory) => {
+        vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+          touchedTopics: [],
+          touchedProjectScope: false,
+          touchedUserScope: false,
+          hasToolActivity: true,
+          systemMessage: undefined,
+        });
 
-      const history = [{ role: 'user' as const, parts: [{ text: 'hello' }] }];
+        const history = [{ role: 'user' as const, parts: [{ text: 'hello' }] }];
 
-      const result = await runAutoMemoryExtract({
-        projectRoot,
-        sessionId: 'session-1',
-        config: mockConfig,
-        history: [...history],
-      });
+        const result = await runAutoMemoryExtract({
+          projectRoot,
+          sessionId: 'session-1',
+          config: mockConfig,
+          preserveUnprocessedHistory,
+          history: [...history],
+        });
 
-      expect(result.cursor.processedOffset).toBe(1);
-      expect(result.extractorRan).toBe(true);
-    });
+        expect(result.cursor.processedOffset).toBe(1);
+        expect(result.extractorRan).toBe(true);
+      },
+    );
   });
 });

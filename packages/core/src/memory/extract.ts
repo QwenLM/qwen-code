@@ -321,16 +321,12 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    // The windowed arm must advance even without genuine progress:
-    // endOffset is capped relative to startOffset, so holding the cursor at
-    // startOffset recomputes a byte-identical slice next turn — the pending
-    // window freezes for the rest of the session, facts past the cap are
-    // never extracted, and the no-op cooldown (which arms only at
-    // processedOffset === history.length) can never engage. The
-    // whole-history arm keeps the #6311 hold-back: its retried slice grows
-    // with new turns, so nothing unprocessed is permanently dropped there.
+    // A capped window must advance even without genuine progress, or the
+    // same slice freezes next turn. At the live end, keep the #6311 hold-back:
+    // new turns grow this slice, and a zero-tool completion must not consume
+    // it or arm the no-op cooldown.
     processedOffset:
-      madeGenuineProgress || params.preserveUnprocessedHistory
+      madeGenuineProgress || endOffset < params.history.length
         ? endOffset
         : startOffset,
     updatedAt: now.toISOString(),
