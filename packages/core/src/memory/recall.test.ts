@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_FAST_RECALL_DOCS,
+  RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
   resolveRelevantAutoMemoryPromptForQuery,
   selectRelevantAutoMemoryDocuments,
 } from './recall.js';
@@ -947,6 +948,136 @@ describe('auto-memory relevant recall', () => {
     expect(onFastResult.mock.calls[0]?.[0].focusedPrompt).toContain(
       '[内容已更新，需要重新读取] [project:reference.md]',
     );
+  });
+
+  describe('selector skip on a unique strong hit (#13003)', () => {
+    const exact = { ...docs[0]!, keywords: ['provider fallback'] };
+    const query = 'We hit provider fallback again.';
+
+    beforeEach(() => {
+      process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = '1';
+      vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    });
+
+    afterEach(() => {
+      delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+    });
+
+    it('returns the one strong, current fast hit without the selector', async () => {
+      // docs[1] is a weaker candidate the selector could have added; the skip
+      // narrows proactive injection to the unique strong hit on purpose.
+      mockSnapshot([exact, docs[1]!]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+      expect(result.selectedDocs).toEqual([exact]);
+      expect(result.strategy).toBe('heuristic');
+      expect(result.selectorSkipped).toBe(true);
+      expect(result.treeSnapshot).toBe(
+        onFastResult.mock.calls[0]?.[0].treeSnapshot,
+      );
+      expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({
+          strategy: 'heuristic',
+          selector_skipped: true,
+          selector_duration_ms: 0,
+        }),
+      );
+    });
+
+    it('keeps the selector when the knob is off', async () => {
+      delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+      mockSnapshot([exact, docs[1]!]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+      expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({ selector_skipped: false }),
+      );
+    });
+
+    it('keeps the selector when the unique strong fast document has a stale body', async () => {
+      const stale = {
+        ...exact,
+        mtimeMs: 42,
+      };
+      mockSnapshot([stale]);
+      bodyPresentVersions.set('project:reference.md', 41);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([stale]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when two strong matches compete', async () => {
+      const second = { ...docs[1]!, keywords: ['provider fallback'] };
+      mockSnapshot([exact, second]);
+      const onFastResult = vi.fn();
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult,
+      });
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toHaveLength(2);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when nothing matches strongly', async () => {
+      mockSnapshot(docs);
+
+      await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'unrelated weather',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector on the legacy path', async () => {
+      vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([exact]);
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult: vi.fn(),
+      });
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when no fast result is delivered', async () => {
+      mockSnapshot([exact]);
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+      });
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
   });
 
   it('does not include selected document rereads in selector duration', async () => {

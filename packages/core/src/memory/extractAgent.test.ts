@@ -87,9 +87,13 @@ describe('auto-memory extraction with agent planner', () => {
     });
 
     expect(result.touchedTopics).toEqual(['user']);
+    // The cached-tail path passes no window stamp: history stays undefined
+    // and the planner keeps the current-tail prompt wording.
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
       mockConfig,
       projectRoot,
+      undefined,
+      undefined,
     );
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);

@@ -21,6 +21,10 @@ import {
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
+import {
+  isSkipSelectorOnUniqueStrongHitEnabled,
+  RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
+} from './recall-experiment.js';
 import { AUTO_MEMORY_SCOPES } from './types.js';
 import {
   createAutoMemoryTreeSnapshot,
@@ -480,7 +484,19 @@ export interface RelevantAutoMemoryPromptResult {
   prompt: string;
   selectedDocs: ScannedAutoMemoryDocument[];
   strategy: 'none' | 'heuristic' | 'model';
+  /**
+   * Set only when the model selector was skipped because the fast result was
+   * a unique, strong, current match: this result IS the fast result, so the
+   * consumer delivers it as the fast phase rather than as a refined one.
+   */
+  selectorSkipped?: true;
 }
+
+// The flag name and its predicate are defined in './recall-experiment.js', a
+// module with no imports, so `telemetry/loggers.ts` can read the same
+// definition without joining the memory → telemetry → memory cycle. The name
+// stays exported here because this module owns the experiment.
+export { RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV };
 
 function createRecallResult(
   treeSnapshot: AutoMemoryTreeSnapshot | undefined,
@@ -559,6 +575,7 @@ function logRecallResult(
       scan_duration_ms: timings.scanDurationMs,
       fast_duration_ms: timings.fastDurationMs,
       selector_duration_ms: timings.selectorDurationMs,
+      selector_skipped: result.selectorSkipped === true,
     }),
   );
 }
@@ -675,6 +692,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
       // Publish the deterministic candidates before blocking on the selector
       // round trip. `fallbackDocs` is already lexically ranked and already has
       // active-tool noise filtered out by selectModelCandidateDocuments.
+      let publishedFast: RelevantAutoMemoryPromptResult | undefined;
+      let fastCandidateCount = 0;
       if (options.onFastResult && !options.abortSignal?.aborted) {
         const fastDocs = legacy
           ? fallbackDocs.slice(0, MAX_FAST_RECALL_DOCS)
@@ -688,18 +707,56 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
                   isStrongFastMatch(query, doc),
               ),
             ].slice(0, MAX_FAST_RECALL_DOCS);
-        if (!legacy || fastDocs.length > 0)
-          options.onFastResult(
-            createRecallResult(
-              treeSnapshot,
-              fastDocs,
-              fastDocs.length > 0 ? 'heuristic' : 'none',
-              bodyPresentVersions,
-              legacy,
-            ),
+        fastCandidateCount = fastDocs.length;
+        if (!legacy || fastDocs.length > 0) {
+          publishedFast = createRecallResult(
+            treeSnapshot,
+            fastDocs,
+            fastDocs.length > 0 ? 'heuristic' : 'none',
+            bodyPresentVersions,
+            legacy,
           );
+          options.onFastResult(publishedFast);
+        }
       }
       fastDurationMs = Date.now() - fastStartedAt;
+      // #13003: when the delivered fast result is one strong, current match,
+      // its answer is already in front of the model and the selector round
+      // trip buys nothing. Test strength and freshness, not count: the fast
+      // list is stale-body-first and a stale-body document is published
+      // without passing isStrongFastMatch, so a single delivered document
+      // may be a reread candidate that must keep the selector. One document
+      // that is strong and not stale also means no stale candidate and no
+      // second strong one. The count is taken before rendering, which may
+      // trim trailing documents to fit its budget. Proactive injection
+      // narrows from up to MAX_RELEVANT_DOCS to this one; the router, and
+      // search_memory through it, are unchanged.
+      const uniqueStrongHit = publishedFast?.selectedDocs[0];
+      if (
+        !legacy &&
+        isSkipSelectorOnUniqueStrongHitEnabled() &&
+        fastCandidateCount === 1 &&
+        publishedFast?.selectedDocs.length === 1 &&
+        uniqueStrongHit !== undefined &&
+        isStrongFastMatch(query, uniqueStrongHit) &&
+        !hasStaleBodyInHistory(uniqueStrongHit, bodyPresentVersions) &&
+        !options.abortSignal?.aborted
+      ) {
+        const result: RelevantAutoMemoryPromptResult = {
+          ...publishedFast,
+          selectorSkipped: true,
+        };
+        logRecallResult(
+          options.config,
+          options.abortSignal,
+          query.length,
+          docs.length,
+          result,
+          t0,
+          timings(),
+        );
+        return result;
+      }
       selectorStartedAt = Date.now();
       const modelSelectedDocs = await selectRelevantAutoMemoryDocumentsByModel(
         options.config,

@@ -176,6 +176,35 @@ describe('Telemetry Metrics', () => {
     });
   });
 
+  describe('recordMemoryRecallMetrics', () => {
+    it('omits the selector_skipped dimension unless the caller sets it', () => {
+      init();
+
+      m.recordMemoryRecallMetrics(mockConfig, 42, {
+        strategy: 'heuristic',
+        docs_selected: 1,
+      });
+      m.recordMemoryRecallMetrics(mockConfig, 7, {
+        strategy: 'heuristic',
+        docs_selected: 0,
+        selector_skipped: true,
+      });
+
+      // An existing series must not gain the dimension — not even as a
+      // constant `false` — or every deployment with the experiment off
+      // splits the time series. Exact-attribute assertions, since a spy on
+      // this public API is what replaces it for logger-level tests.
+      expectCalls(mockCounterAddFn, [
+        [1, { strategy: 'heuristic' }],
+        [1, { strategy: 'heuristic', selector_skipped: true }],
+      ]);
+      expectCalls(mockHistogramRecordFn, [
+        [42, { strategy: 'heuristic' }],
+        [7, { strategy: 'heuristic', selector_skipped: true }],
+      ]);
+    });
+  });
+
   describe('recordGoalStateMetrics', () => {
     const histogramSpies = new Map<string, Mock>();
     beforeEach(() => {

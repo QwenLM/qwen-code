@@ -8,12 +8,16 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  ExtractResult,
-  ScheduleSkillReviewParams,
-  MemoryTaskRecord,
+import {
+  EXTRACT_NOOP_COOLDOWN_TURNS_ENV,
+  globalMemoryManager,
+  MAX_COOLDOWN_PENDING_HISTORY_ENTRIES,
+  MemoryManager,
+  resolveExtractNoopCooldownTurns,
+  type ExtractResult,
+  type MemoryTaskRecord,
+  type ScheduleSkillReviewParams,
 } from './manager.js';
-import { globalMemoryManager, MemoryManager } from './manager.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   getAutoMemoryMetadataPath,
@@ -28,6 +32,7 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import * as metadataMigration from './metadata-migration.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -1599,6 +1604,281 @@ describe('MemoryManager', () => {
       } finally {
         process.off('unhandledRejection', unhandled);
       }
+    });
+
+    describe('no-op cooldown (#13004)', () => {
+      const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
+      const completedNoop = (sessionId = 'sess-1') => ({
+        touchedTopics: [],
+        extractorRan: true as const,
+        cursor: {
+          sessionId,
+          processedOffset: history.length,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      const turn = (
+        mgr: MemoryManager,
+        extra: {
+          isBelowCompactionWarn?: () => boolean;
+          config?: Config;
+          sessionId?: string;
+          history?: Content[];
+        } = {
+          isBelowCompactionWarn: () => true,
+        },
+      ) =>
+        mgr.scheduleExtract({
+          projectRoot: tmp.projectRoot,
+          sessionId: 'sess-1',
+          history,
+          ...extra,
+        });
+
+      afterEach(() => {
+        delete process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV];
+      });
+
+      const grownBy = (entries: number): Content[] => [
+        ...history,
+        ...Array.from(
+          { length: entries },
+          (): Content => ({ role: 'model', parts: [{ text: 'step' }] }),
+        ),
+      ];
+
+      it('still skips while the turns since the no-op fit half the extractor window', async () => {
+        expect(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES * 2).toBeLessThanOrEqual(
+          CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+        );
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const next = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES),
+        });
+
+        expect(next.skippedReason).toBe('cooldown');
+        expect(next.cursor.processedOffset).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+        expect(runAutoMemoryExtract).toHaveBeenCalledWith(
+          expect.objectContaining({ preserveUnprocessedHistory: true }),
+        );
+      });
+
+      it.each([
+        [
+          'grow past half the extractor window',
+          () => grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES + 1),
+        ],
+        ['shrink, as after a compaction', (): Content[] => []],
+      ] as const)(
+        'runs once the turns since the no-op %s',
+        async (_label, nextHistory) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+          vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+          const mgr = new MemoryManager();
+
+          await turn(mgr);
+          const next = await turn(mgr, {
+            isBelowCompactionWarn: () => true,
+            history: nextHistory(),
+          });
+
+          expect(next.skippedReason).toBeUndefined();
+          expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        },
+      );
+
+      it('keeps the once-per-turn cadence when the knob is unset', async () => {
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+        const mgr = new MemoryManager();
+
+        for (let i = 0; i < 3; i++) await turn(mgr);
+
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+        // The knob-OFF half is the PR's core promise ("default sessions keep
+        // the current history.length cursor and cached-tail input"): the flag
+        // must be absent from the call, not merely falsy, so making the
+        // windowed arm unconditional reds this assertion.
+        for (const call of vi.mocked(runAutoMemoryExtract).mock.calls) {
+          expect(call[0]).not.toHaveProperty('preserveUnprocessedHistory');
+        }
+      });
+
+      it('skips the configured turns after a completed no-op, then runs again', async () => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+        const mgr = new MemoryManager();
+        const config = makeMockConfig();
+
+        await turn(mgr);
+        const first = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          config,
+        });
+        const second = await turn(mgr);
+        await turn(mgr);
+
+        expect(first.skippedReason).toBe('cooldown');
+        expect(second.skippedReason).toBe('cooldown');
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+          config,
+          expect.objectContaining({
+            status: 'skipped',
+            skipped_reason: 'cooldown',
+          }),
+        );
+        expect(
+          mgr
+            .listTasksByType('extract', tmp.projectRoot)
+            .filter((t) => t.metadata?.['skippedReason'] === 'cooldown'),
+        ).toHaveLength(2);
+      });
+
+      it.each([false, true])(
+        "does not inherit another session's cooldown (completion after switch: %s)",
+        async (completeAfterSwitch) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+          let complete!: (result: ReturnType<typeof completedNoop>) => void;
+          vi.mocked(runAutoMemoryExtract)
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  complete = resolve;
+                }),
+            )
+            .mockResolvedValue(completedNoop('sess-2'));
+          const mgr = new MemoryManager();
+          const config = makeMockConfig({
+            getSessionId: vi.fn().mockReturnValue('sess-1'),
+          });
+          const first = turn(mgr, { config });
+
+          if (!completeAfterSwitch) {
+            complete(completedNoop());
+            await first;
+          }
+          vi.mocked(config.getSessionId).mockReturnValue('sess-2');
+          if (completeAfterSwitch) {
+            complete(completedNoop());
+            await first;
+          }
+          const next = await turn(mgr, {
+            config,
+            sessionId: 'sess-2',
+            isBelowCompactionWarn: () => true,
+          });
+
+          expect(next.skippedReason).toBeUndefined();
+          expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        },
+      );
+
+      it.each([
+        [
+          'a write',
+          () => ({ ...completedNoop(), touchedTopics: ['user' as const] }),
+        ],
+        [
+          'a cursor held back by the zero-tool-call guard',
+          () => ({
+            ...completedNoop(),
+            cursor: { ...completedNoop().cursor, processedOffset: 0 },
+          }),
+        ],
+        [
+          'an early return with no extractor run',
+          () => ({ touchedTopics: [], cursor: completedNoop().cursor }),
+        ],
+      ] as const)('does not arm after %s', async (_label, result) => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(result());
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const next = await turn(mgr);
+
+        expect(next.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not arm after a failed run, so the next turn retries', async () => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract)
+          .mockRejectedValueOnce(new Error('MAX_TURNS'))
+          .mockResolvedValueOnce(completedNoop());
+        const mgr = new MemoryManager();
+
+        await expect(turn(mgr)).rejects.toThrow('MAX_TURNS');
+        const next = await turn(mgr);
+
+        expect(next.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
+      it('clears an armed cooldown when the queued extraction fails', async () => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        let complete!: (result: ReturnType<typeof completedNoop>) => void;
+        vi.mocked(runAutoMemoryExtract)
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                complete = resolve;
+              }),
+          )
+          .mockRejectedValueOnce(new Error('MAX_TURNS'))
+          .mockResolvedValueOnce(completedNoop());
+        const mgr = new MemoryManager();
+        const first = turn(mgr);
+        expect((await turn(mgr)).skippedReason).toBe('queued');
+        complete(completedNoop());
+        await first;
+        await mgr.drain();
+        expect(
+          mgr
+            .listTasksByType('extract', tmp.projectRoot)
+            .some((task) => task.status === 'failed'),
+        ).toBe(true);
+
+        const next = await turn(mgr);
+
+        expect(next.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      });
+
+      it.each([
+        ['near compaction', { isBelowCompactionWarn: () => false }],
+        ['when the context position is unknown', {}],
+      ] as const)('runs %s even while cooling down', async (_label, extra) => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const next = await turn(mgr, extra);
+
+        expect(next.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
+      it('reads the knob as a small non-negative integer, else off', () => {
+        const read = (value: string) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = value;
+          return resolveExtractNoopCooldownTurns();
+        };
+
+        expect(read('2')).toBe(2);
+        expect(read('99')).toBe(5);
+        expect(read('-1')).toBe(0);
+        expect(read('1.5')).toBe(0);
+        expect(read('two')).toBe(0);
+        expect(read('')).toBe(0);
+      });
     });
 
     it('runs extract and records a completed task', async () => {
