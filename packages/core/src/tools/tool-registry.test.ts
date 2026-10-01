@@ -1061,11 +1061,11 @@ describe('ToolRegistry', () => {
 
       toolRegistry.removeMcpToolsByServer('slack');
 
-      // Deliberately NOT pruned. A dropped entry reads as "never reviewed" and
-      // passes a replacement through, while a retained one can only match the
-      // same server, schema name and parameter schema — so it either still
-      // describes the live tool or forces a re-review. No removal route has to
-      // remember to touch this map, which is the point.
+      // Deliberately NOT pruned. A disconnect does not take the reviewed
+      // schema out of history, and the entry can only match the same server,
+      // schema name and parameter schema — so it either still describes the
+      // live tool or forces a re-review. History replacement is what clears
+      // it (#12569).
       expect(toolRegistry.getReviewedDeclaration(tool.name)).toBe(recorded);
 
       // A replacement republishing a changed contract does not match it.
@@ -1074,6 +1074,23 @@ describe('ToolRegistry', () => {
         properties: { channel: { type: 'string' } },
       });
       expect(deferredDeclarationFingerprint(replacement)).not.toBe(recorded);
+    });
+
+    it('clearReviewedDeclarations forgets every review (#12569)', () => {
+      const first = new MockTool({ name: 'first_deferred', shouldDefer: true });
+      const second = new MockTool({
+        name: 'second_deferred',
+        shouldDefer: true,
+      });
+      toolRegistry.registerTool(first);
+      toolRegistry.registerTool(second);
+      toolRegistry.recordReviewedDeclaration(first);
+      toolRegistry.recordReviewedDeclaration(second);
+
+      toolRegistry.clearReviewedDeclarations();
+
+      expect(toolRegistry.getReviewedDeclaration(first.name)).toBeUndefined();
+      expect(toolRegistry.getReviewedDeclaration(second.name)).toBeUndefined();
     });
 
     it('includes deferred tools listed in visibleTools in function declarations', () => {
