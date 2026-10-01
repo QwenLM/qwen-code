@@ -23,6 +23,23 @@ function bashRule(specifier?: string): PermissionRule {
   };
 }
 
+/** `name` with no specifier key, or `name(specifier)`. */
+function toolRule(
+  name: string,
+  toolName: string,
+  specifier?: string,
+): PermissionRule {
+  return specifier === undefined
+    ? { raw: name, toolName }
+    : { raw: `${name}(${specifier})`, toolName, specifier };
+}
+
+const agentRule = (specifier?: string) =>
+  toolRule('Agent', ToolNames.AGENT, specifier);
+const skillRule = (specifier?: string) =>
+  toolRule('Skill', ToolNames.SKILL, specifier);
+const readRule = () => toolRule('Read', ToolNames.READ_FILE);
+
 describe('isDangerousBashRule', () => {
   it('flags tool-level Bash (no specifier)', () => {
     expect(isDangerousBashRule(bashRule())).toBe(true);
@@ -48,11 +65,9 @@ describe('isDangerousBashRule', () => {
     'bun',
     'ruby',
     'perl',
-    // Modern package runners — `npx <pkg>` / `uvx <pkg>` / `pipx <pkg>`
-    // / `dlx <pkg>` / `go run` all fetch + execute arbitrary external
-    // code by name. `Bash(npx *)` was specifically called out as a
-    // common "always allow" pattern that previously slipped past the
-    // classifier in AUTO.
+    // Package runners (npx/uvx/pipx/dlx <pkg>, go run) fetch and execute
+    // arbitrary code by name. `Bash(npx *)` is a common "always allow"
+    // pattern that previously slipped past the classifier in AUTO.
     'npx',
     'pnpx',
     'uvx',
@@ -101,10 +116,9 @@ describe('isDangerousBashRule', () => {
   });
 
   it('does NOT flag specific colon-form rules (concrete suffix is a user-allowed concrete command)', () => {
-    // Regression: `Bash(python3:run-tests)` and similar are concrete
-    // user-allow rules — same shape as `Bash(npm run test)`. They were
-    // previously over-flagged as "interpreter + colon = dangerous",
-    // silently stripping intentional user allow lists in AUTO mode.
+    // Regression: `Bash(python3:run-tests)` etc. are concrete user-allow rules,
+    // like `Bash(npm run test)`. Over-flagging them as "interpreter + colon"
+    // silently stripped intentional user allow lists in AUTO mode.
     expect(isDangerousBashRule(bashRule('python3:run-tests'))).toBe(false);
     expect(isDangerousBashRule(bashRule('python:./scripts/build.py'))).toBe(
       false,
@@ -127,12 +141,7 @@ describe('isDangerousBashRule', () => {
   });
 
   it('returns false for non-Bash tools', () => {
-    expect(
-      isDangerousBashRule({
-        raw: 'Read',
-        toolName: ToolNames.READ_FILE,
-      }),
-    ).toBe(false);
+    expect(isDangerousBashRule(readRule())).toBe(false);
   });
 
   // ── Regression guards added during PR #4151 review ────────────────────
@@ -252,95 +261,45 @@ describe('isDangerousBashRule', () => {
     it('flags Monitor allow rules with the same interpreter logic', () => {
       // Monitor is a long-running shell-command runner; broad allow rules
       // on it bypass the AUTO classifier just like Bash(...) ones.
-      expect(
-        isDangerousBashRule({
-          raw: 'Monitor',
-          toolName: ToolNames.MONITOR,
-        }),
-      ).toBe(true);
-      expect(
-        isDangerousBashRule({
-          raw: 'Monitor(*)',
-          toolName: ToolNames.MONITOR,
-          specifier: '*',
-        }),
-      ).toBe(true);
-      expect(
-        isDangerousBashRule({
-          raw: 'Monitor(python*)',
-          toolName: ToolNames.MONITOR,
-          specifier: 'python*',
-        }),
-      ).toBe(true);
+      const monitorFlagged = (specifier?: string) =>
+        isDangerousBashRule(toolRule('Monitor', ToolNames.MONITOR, specifier));
+      expect(monitorFlagged()).toBe(true);
+      expect(monitorFlagged('*')).toBe(true);
+      expect(monitorFlagged('python*')).toBe(true);
       // Literal concrete Monitor command is NOT flagged.
-      expect(
-        isDangerousBashRule({
-          raw: 'Monitor(tail -f log)',
-          toolName: ToolNames.MONITOR,
-          specifier: 'tail -f log',
-        }),
-      ).toBe(false);
+      expect(monitorFlagged('tail -f log')).toBe(false);
     });
   });
 });
 
 describe('isDangerousAgentRule', () => {
   it('flags any Agent allow rule regardless of specifier', () => {
-    expect(
-      isDangerousAgentRule({
-        raw: 'Agent',
-        toolName: ToolNames.AGENT,
-      }),
-    ).toBe(true);
-    expect(
-      isDangerousAgentRule({
-        raw: 'Agent(coder)',
-        toolName: ToolNames.AGENT,
-        specifier: 'coder',
-      }),
-    ).toBe(true);
+    expect(isDangerousAgentRule(agentRule())).toBe(true);
+    expect(isDangerousAgentRule(agentRule('coder'))).toBe(true);
   });
 
   it('returns false for non-Agent tools', () => {
-    expect(
-      isDangerousAgentRule({ raw: 'Bash', toolName: ToolNames.SHELL }),
-    ).toBe(false);
+    const bashNoSpecifierKey = toolRule('Bash', ToolNames.SHELL);
+    expect(isDangerousAgentRule(bashNoSpecifierKey)).toBe(false);
   });
 });
 
 describe('isDangerousSkillRule', () => {
   it('flags any Skill allow rule', () => {
-    expect(
-      isDangerousSkillRule({ raw: 'Skill', toolName: ToolNames.SKILL }),
-    ).toBe(true);
-    expect(
-      isDangerousSkillRule({
-        raw: 'Skill(pdf)',
-        toolName: ToolNames.SKILL,
-        specifier: 'pdf',
-      }),
-    ).toBe(true);
+    expect(isDangerousSkillRule(skillRule())).toBe(true);
+    expect(isDangerousSkillRule(skillRule('pdf'))).toBe(true);
   });
 });
 
 describe('isDangerousAllowRule (aggregate)', () => {
   it('returns true for any dangerous category', () => {
     expect(isDangerousAllowRule(bashRule())).toBe(true);
-    expect(
-      isDangerousAllowRule({ raw: 'Agent', toolName: ToolNames.AGENT }),
-    ).toBe(true);
-    expect(
-      isDangerousAllowRule({ raw: 'Skill', toolName: ToolNames.SKILL }),
-    ).toBe(true);
+    expect(isDangerousAllowRule(agentRule())).toBe(true);
+    expect(isDangerousAllowRule(skillRule())).toBe(true);
   });
 
   it('returns false for safe rules', () => {
-    expect(
-      isDangerousAllowRule({
-        raw: 'Read',
-        toolName: ToolNames.READ_FILE,
-      }),
-    ).toBe(false);
+    expect(isDangerousAllowRule(readRule())).toBe(false);
     expect(isDangerousAllowRule(bashRule('git status'))).toBe(false);
   });
 });
@@ -350,8 +309,8 @@ describe('findDangerousAllowRules', () => {
     const rules: PermissionRule[] = [
       bashRule('git status'), // safe
       bashRule('python'), // dangerous (interpreter)
-      { raw: 'Read', toolName: ToolNames.READ_FILE }, // safe
-      { raw: 'Agent', toolName: ToolNames.AGENT }, // dangerous (any Agent)
+      readRule(), // safe
+      agentRule(), // dangerous (any Agent)
     ];
     const dangerous = findDangerousAllowRules(rules);
     expect(dangerous).toHaveLength(2);
@@ -361,10 +320,7 @@ describe('findDangerousAllowRules', () => {
   });
 
   it('returns empty array when input contains no dangerous rules', () => {
-    const rules: PermissionRule[] = [
-      bashRule('git log'),
-      { raw: 'Read', toolName: ToolNames.READ_FILE },
-    ];
+    const rules: PermissionRule[] = [bashRule('git log'), readRule()];
     expect(findDangerousAllowRules(rules)).toEqual([]);
   });
 });
