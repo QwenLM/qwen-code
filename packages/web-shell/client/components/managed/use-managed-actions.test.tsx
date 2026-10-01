@@ -195,6 +195,69 @@ describe('useManagedActions', () => {
     expect(hook.latest?.loadError).toBeUndefined();
   });
 
+  it('drops the unconfirmed-answer warning once that Action leaves the list', async () => {
+    const respond = vi.fn().mockRejectedValueOnce(new Error('offline'));
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValueOnce([]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(async () => {
+      await expect(
+        hook.latest!.respond('tool_approval_1', 'allow'),
+      ).rejects.toThrow('offline');
+    });
+    expect(hook.latest?.answerError).toEqual(new Error('offline'));
+
+    // The Action is still pending, so the warning is still about something.
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(hook.latest?.answerError).toEqual(new Error('offline'));
+
+    // The Harness ended it: there is no card left to retry.
+    hook.rerender({ events: [update(8)] });
+    await vi.waitFor(() => expect(hook.latest?.action).toBeUndefined());
+    expect(listPending).toHaveBeenCalledTimes(3);
+    expect(hook.latest?.answerError).toBeUndefined();
+  });
+
+  it('restores the retry budget when the reader is withdrawn and back', async () => {
+    vi.useFakeTimers();
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockRejectedValueOnce(new Error('unavailable'))
+      .mockResolvedValueOnce([pending]);
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    for (const delay of [0, 2_000, 5_000, 10_000, 60_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+    }
+    // The first read and three retries; the ladder is exhausted.
+    expect(listPending).toHaveBeenCalledTimes(4);
+
+    hook.rerender({ enabled: false });
+    hook.rerender({ enabled: true });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(listPending).toHaveBeenCalledTimes(5);
+    // The restored read failed, and it is retried instead of being stranded.
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(listPending).toHaveBeenCalledTimes(6);
+    expect(hook.latest?.action).toEqual(pending);
+    expect(hook.latest?.loadError).toBeUndefined();
+  });
+
   it('keeps the shown approval while the capability is unknown', async () => {
     const listPending = vi.fn().mockResolvedValue([pending]);
     const respond = vi.fn().mockResolvedValue(undefined);

@@ -48,6 +48,9 @@ export function useManagedActions(
   const [answerError, setAnswerError] = useState<unknown>();
   const [revision, setRevision] = useState(0);
   const loadFailures = useRef(0);
+  // The Action whose answer last failed, so the warning can be dropped once
+  // that Action is no longer pending instead of labelling the next one.
+  const answerFailure = useRef<string | undefined>(undefined);
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -63,11 +66,15 @@ export function useManagedActions(
     setLoadError(undefined);
     setAnswerError(undefined);
     loadFailures.current = 0;
+    answerFailure.current = undefined;
   }, [sessionId]);
 
   useEffect(() => {
     if (!reader || !sessionId) {
       setPending({ actions: [] });
+      // A withdrawn reader is not a failed read: a restored reader gets the
+      // whole retry budget back instead of a single attempt with no ladder.
+      loadFailures.current = 0;
       return undefined;
     }
     if (enabled === undefined) return undefined;
@@ -80,6 +87,16 @@ export function useManagedActions(
         loadFailures.current = 0;
         setPending({ sessionId, actions });
         setLoadError(undefined);
+        // The Action whose answer failed is no longer pending, so the
+        // unconfirmed-answer warning has nothing left to describe; keeping it
+        // would announce a stale failure beside an unrelated card.
+        if (
+          answerFailure.current !== undefined &&
+          !actions.some((entry) => entry.actionId === answerFailure.current)
+        ) {
+          answerFailure.current = undefined;
+          setAnswerError(undefined);
+        }
       })
       .catch((failure: unknown) => {
         if (abort.signal.aborted) return;
@@ -130,6 +147,7 @@ export function useManagedActions(
           idempotencyKey: `${target.actionId}:${optionId}`,
         });
         setAnswerError(undefined);
+        answerFailure.current = undefined;
         setRevision((value) => value + 1);
       } catch (failure) {
         setAnswered((current) => {
@@ -138,6 +156,7 @@ export function useManagedActions(
           return next;
         });
         setAnswerError(failure);
+        answerFailure.current = actionId;
         throw failure;
       }
     },
