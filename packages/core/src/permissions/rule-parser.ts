@@ -1022,8 +1022,10 @@ export function splitCompoundCommandSegments(
  * The union split above is the safe default for finding boundaries, but a
  * boundary only one reading sees can sit inside what bash treats as one
  * quoted word, and the phantom segments then misattribute a `cd`'s effect on
- * the write path (#12246). The shell semantics walker evaluates this
- * single-reading split alongside the union and keeps both operation sets.
+ * the write path (#12246). When the command contains a backslash the shell
+ * semantics walker replaces the union with one walk per reading and merges
+ * (dedupes) the two operation sets; the union split remains the boundary
+ * source for `splitCompoundCommand`, i.e. `Bash(...)` rule matching.
  */
 export function splitCompoundCommandSegmentsForReading(
   command: string,

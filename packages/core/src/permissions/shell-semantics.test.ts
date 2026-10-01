@@ -1184,10 +1184,10 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
     [`echo 'a\\' # trailing | touch /tmp/x`],
   ])('pins the union op set for the comment-shape row %s (#R1-6)', (cmd) => {
     // bash runs only the echo (the `#` opens a comment); neither quote
-    // reading models comments, so the bash-accurate split sees the `&&`/`|`
-    // unquoted and the union now emits a phantom touch op. Pinning the trade
-    // explicitly: verdicts stay allow only where no Write deny covers /tmp,
-    // and comment modeling belongs to the #11882 umbrella.
+    // reading models comments, so the bash reading splits at the `&&`/`|`
+    // and emits a phantom touch op. The phantom is pre-existing — the
+    // union walk at the merge base produced the same op — and comment
+    // modeling belongs to the #11882 umbrella.
     expect(extractShellOperationsAcrossCommand(cmd, '/repo')).toEqual([
       { virtualTool: 'write_file', filePath: '/tmp/x' },
     ]);
@@ -1195,10 +1195,10 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
 
   it('keeps a hard deny for a command that is unbalanced under the bash reading (#R1-11)', () => {
     // bash rejects `cd '.qwen\'; echo x > settings.json'` with an
-    // unterminated quote — nothing executes — but the escape-everywhere
-    // reading still sees the write, so the union reports it and the
-    // conservative deny stands (a verdict change introduced by the dual
-    // reading, pinned deliberately).
+    // unterminated quote — nothing executes. The bash reading splits at the
+    // `;` and reports the write (the escape-everywhere reading keeps one
+    // quoted segment and reports nothing), so the conservative deny stands
+    // exactly as it did before the dual reading.
     const ops = extractShellOperationsAcrossCommand(
       `cd '.qwen\\'; echo x > settings.json'`,
       '/repo',
@@ -1206,5 +1206,31 @@ describe('dual quote readings for backslash payloads (#12246 review)', () => {
     expect(ops).toEqual([
       { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
     ]);
+  });
+
+  it('pins an escape-everywhere-only write the bash reading quotes away (#R3-2)', () => {
+    // bash keeps the second line inside the quote opened at the end of the
+    // first, so the bash reading emits nothing; only the escape-everywhere
+    // reading splits at the newline and sees the write. Dropping that walk
+    // turns this red.
+    const ops = extractShellOperationsAcrossCommand(
+      "echo done # note 'a\\''\necho {} > .qwen/settings.json",
+      '/repo',
+    );
+    expect(ops).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('ignores a backslash that only exists inside a heredoc body', () => {
+    // The walks split stripHeredocBodies(command), so a heredoc-only
+    // backslash never reaches a splitter; both readings see the same
+    // `cat > f <<EOF` and the gate must not change the result.
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cat > f <<EOF\necho a\\b\nEOF',
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/repo/f' }]);
   });
 });

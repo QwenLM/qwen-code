@@ -2132,7 +2132,8 @@ function resolveCdTargetCwd(
  * unwrapping shell wrappers (`bash -lc '...'`, `sh -c "..."`).
  *
  * Behaviour:
- *   - `splitCompoundCommand` produces the segment boundaries.
+ *   - `splitCompoundCommandSegments` produces the segment boundaries (the
+ *     per-reading splits below take over for backslash-bearing commands).
  *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
  *     segments and themselves emit no ops.
  *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
@@ -2142,12 +2143,12 @@ function resolveCdTargetCwd(
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
  *   - Operation order is preserved across segments within one quote reading.
- *     Commands containing a backslash are also walked under bash's
- *     literal-backslash-in-single-quotes reading and the two operation sets
- *     are merged (deduped), so a boundary only one reading sees cannot hide
- *     a write behind a `cd` attribution mismatch (#12246); merged results
- *     may append the second reading's extra ops at the tail rather than in
- *     command order.
+ *     Commands containing a backslash are walked once per quote reading
+ *     (escape-everywhere and bash's literal-backslash-in-single-quotes) and
+ *     the two operation sets are merged (deduped), so a boundary only one
+ *     reading sees cannot hide a write behind a `cd` attribution mismatch
+ *     (#12246); merged results may append the second reading's extra ops at
+ *     the tail rather than in command order.
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2166,7 +2167,10 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  if (!command.includes('\\')) {
+  // The walks split stripHeredocBodies(command), so a backslash that only
+  // exists inside a heredoc body can never make the two readings diverge;
+  // gate on what the walks will see rather than on the raw command.
+  if (!stripHeredocBodies(command).includes('\\')) {
     return walkCompoundCommand(command, cwd, 0, false, undefined);
   }
   // The two quote readings can disagree on where the operators are when a
