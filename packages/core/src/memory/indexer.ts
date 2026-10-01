@@ -40,6 +40,7 @@ const MAX_INDEX_FIELD_CHARS = 120;
 // entry is emitted without one.
 const MIN_INDEX_HOOK_CHARS = 24;
 const INDEX_HOOK_SEPARATOR = ' — ';
+const INDEX_ALSO_OPEN = ' (also: ';
 
 /**
  * Shorten an already-sanitized field to `limit`, preferring a word boundary.
@@ -125,12 +126,17 @@ function encodeIndexPathTarget(value: string): string {
  * the link leaves, and is dropped entirely when that room is too small to be
  * useful. An entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} is
  * therefore allowed to run long — a resolving long link beats a short dead one.
+ * `lineBudget` lets a grouped entry hand part of the line to its sibling list;
+ * it only ever shrinks the description, never the link.
  */
-function docIndexLine(doc: ScannedAutoMemoryDocument): string {
+function docIndexLine(
+  doc: ScannedAutoMemoryDocument,
+  lineBudget = MAX_INDEX_LINE_CHARS,
+): string {
   const title = sanitizeIndexField(doc.title) || doc.type;
   const description = sanitizeIndexField(doc.description) || doc.type;
   const link = `- [${title}](${encodeIndexPathTarget(doc.relativePath)})`;
-  const room = MAX_INDEX_LINE_CHARS - link.length - INDEX_HOOK_SEPARATOR.length;
+  const room = lineBudget - link.length - INDEX_HOOK_SEPARATOR.length;
   if (room < MIN_INDEX_HOOK_CHARS) {
     return link;
   }
@@ -225,24 +231,31 @@ function groupTeamDocsByDescription(
 }
 
 function teamGroupIndexLine(group: TeamIndexGroup): string {
-  const base = docIndexLine(group.primary);
   if (group.others.length === 0) {
-    return base;
+    return docIndexLine(group.primary);
   }
-  // Append whole "(also: …)" targets while they fit, then stop. A target that
-  // does not fit is dropped rather than sliced: every emitted path has to
-  // resolve.
-  const prefix = `${base} (also: `;
+  // The siblings are reachable from this suffix and nowhere else, so it claims
+  // its room BEFORE the primary's description is rendered. Sizing the primary
+  // against the whole line instead let any description long enough to fill it
+  // leave no room at all, silently dropping every grouped file. A target that
+  // still does not fit is dropped whole — never sliced.
   let also = '';
+  let line = '';
   for (const doc of group.others) {
     const target = encodeIndexPathTarget(doc.relativePath);
     const next = also ? `${also}, ${target}` : target;
-    if (prefix.length + next.length + 1 > MAX_INDEX_LINE_CHARS) {
+    const base = docIndexLine(
+      group.primary,
+      MAX_INDEX_LINE_CHARS - (INDEX_ALSO_OPEN.length + next.length + 1),
+    );
+    const candidate = `${base}${INDEX_ALSO_OPEN}${next})`;
+    if (candidate.length > MAX_INDEX_LINE_CHARS) {
       break;
     }
     also = next;
+    line = candidate;
   }
-  return also ? `${prefix}${also})` : base;
+  return also ? line : docIndexLine(group.primary);
 }
 
 /**

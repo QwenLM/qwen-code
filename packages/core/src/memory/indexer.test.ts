@@ -607,4 +607,68 @@ describe('managed auto-memory indexer', () => {
     // The entry that did not fit is dropped, not half-written.
     expect(line).not.toContain('carol/');
   });
+
+  it('still lists the grouped siblings when the shared description fills the line', () => {
+    // Regression: sizing the primary's description against the WHOLE line left
+    // no room for the suffix whenever the description was long enough to fill
+    // it, so the grouped files — reachable only through "(also: …)" — vanished
+    // from the index entirely.
+    const shared = 'A shared fact that is long enough to fill the line '
+      .repeat(6)
+      .trim();
+    const content = buildTeamAutoMemoryIndex([
+      {
+        scope: 'team',
+        type: 'feedback',
+        filePath: '/tmp/alice/a.md',
+        relativePath: 'alice/a.md',
+        filename: 'a.md',
+        title: 'Alpha',
+        description: shared,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+      {
+        scope: 'team',
+        type: 'feedback',
+        filePath: '/tmp/bob/b.md',
+        relativePath: 'bob/b.md',
+        filename: 'b.md',
+        title: 'Bravo',
+        description: shared,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+      {
+        scope: 'team',
+        type: 'feedback',
+        filePath: '/tmp/carol/c.md',
+        relativePath: 'carol/c.md',
+        filename: 'c.md',
+        title: 'Carol',
+        description: shared,
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    // The description yields instead: both siblings are listed, every path
+    // resolves, and the line still respects the budget.
+    expect(line.length).toBeLessThanOrEqual(150);
+    expect(decodeURIComponent(linkTarget(line))).toBe('alice/a.md');
+    expect(alsoTargets(line).map(decodeURIComponent)).toEqual([
+      'bob/b.md',
+      'carol/c.md',
+    ]);
+  });
 });
