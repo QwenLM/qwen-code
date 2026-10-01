@@ -19,6 +19,12 @@ Hosted 在 worker 复用它们，保留 raw executor 及其原始调用日志，
 并拒绝文件历史 API。其长生命周期 runtime 与活跃连接需要单独设计历史生命周期；
 本次不宣称为该 profile 提供备份。
 
+面向模型的原生 Write/Edit 工具说明明确披露 MCP profile 不提供文件备份或撤销。
+Files/Shell 工具说明指出，同一 prompt 内已跟踪文件的内容或权限发生漂移，会拒绝后续
+Write/Edit 和撤销；Shell 修改本身不备份。只有整批备份验证成功后，新 prompt 才能
+采纳新的前像。撤销到较早 prompt 会跨越后续基线恢复其历史前像，包括后来保存在新
+快照中的外部或其他 Session 修改。
+
 ## 执行与持久化
 
 现有 Broker control 路由增加 `raw-file-history` 操作，直接路由到 raw history，
@@ -102,6 +108,26 @@ Rewind 恢复到目标 prompt 开始时的状态，包括撤掉后续 prompt 的
 之后重试旧请求，仍返回原始结果，不重新获取已释放的 runtime。回执与快照共用有
 大小上限的内联记录预算。
 
+### 已存回执校验（#13124）
+
+每次读取时，在调用方将数据用于历史查询、容量计算、工具获取期间的历史绑定、加载或
+撤销回放前，校验所有已存回执。每条回执恰好包含 `requestId`、`promptId`、`filesChanged` 和
+`conflict`：两个 ID 使用撤销 API 的 UUID 语法；prompt 必须属于仍保留的快照；
+请求 ID 在累计回执列表内唯一。变更路径必须是唯一、规范化且已跟踪的路径，包括
+合法的原型名称文件。冲突回执不能包含已变更路径。旧记录省略 `undoReceipts` 时
+视为空列表；null、格式错误的条目和不支持的字段均拒绝。非法记录在副作用前进入
+现有读取或恢复错误路径。
+
+回执是不可变的历史结果，不描述当前文件内容。后续撤销及 Write/Edit 提交按顺序
+保留它们，回放返回原结果，不再获取或派发 runtime。不能将旧回执与最新 prompt
+或当前指纹比较。副作用后的记录可以同时包含相符的回执与 `pendingUndo`，直到
+确认释放；pending 标记仍阻止回放和加载。如果该 pending 请求已有回执，两者的
+prompt ID 必须一致。
+
+本后续只改变校验和说明。保留策略、裁剪、同 prompt 协调、撤销期间取消、I/O 优化，
+以及未知或部分副作用的运维恢复仍是独立工作。不删除备份，也不因租约超时授权其他
+写入者。
+
 ## 部署与升级
 
 worker 备份位于 `$QWEN_HOME/file-history/<Harness Session ID>/`
@@ -133,6 +159,12 @@ CLI、真实 worker、Java Broker 和 HTTP Session Store 验证两个 Workspace�
 已有文件恢复、新建文件删除，并回归默认无工具模式与 Shell。必须通过 build、
 typecheck、bundle、定向测试和两轮干净自审。E2E 计划及实测结果保存在
 `.qwen/e2e-tests/hosted-file-history.md`。
+
+#13124 增加非法回执及各 profile 工具说明断言，补强现有 HTTP 撤销测试中的回放键
+不匹配、冲突回放与持久 pending 状态断言。复用已有的后续撤销、Write/Edit 及
+重新加载后的回放测试。验证新回合 pending 历史守卫和派发前容量拒绝。定向计划及
+实测结果保存在 `.qwen/e2e-tests/issue-13124.md`；若改变故障门禁的执行行为，
+仍须运行真实 Java/MySQL 门禁。
 
 本地验证已通过：build、typecheck、bundle、定向测试、打包 worker 故障探针及 Hosted
 进程回归。Broker/HTTP Store E2E 使用 H2 的 MySQL 兼容模式，验证了 detach/load

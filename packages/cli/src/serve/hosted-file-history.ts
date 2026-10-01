@@ -29,6 +29,9 @@ export interface HostedFileHistoryRecord {
 
 export class HostedFileHistoryRefusedError extends Error {}
 
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
 export async function assertHostedFileHistoryCapacity(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
@@ -99,6 +102,9 @@ export async function readHostedFileHistory(
     (await session.resources.read(latest.recordRef)).toString('utf8'),
   ) as HostedFileHistoryRecord;
   if (
+    !record ||
+    typeof record !== 'object' ||
+    Array.isArray(record) ||
     record.schemaVersion !== 1 ||
     !(record.pendingTurn === null || typeof record.pendingTurn === 'string') ||
     (record.pendingMessageId !== undefined &&
@@ -110,18 +116,51 @@ export async function readHostedFileHistory(
     )
   )
     throw new Error('Invalid Hosted file history record.');
+  const state = parseHostedFileHistoryState(
+    record.state,
+    session.authority.sessionHeader.sessionKey.sessionId,
+  );
+  const undoReceipts =
+    record.undoReceipts === undefined ? [] : record.undoReceipts;
+  if (!Array.isArray(undoReceipts))
+    throw new Error('Invalid Hosted file history undo receipts.');
+  const requests = new Set<string>();
+  const prompts = new Set(state.snapshots.map((snapshot) => snapshot.promptId));
+  for (const receipt of undoReceipts) {
+    if (
+      !receipt ||
+      typeof receipt !== 'object' ||
+      Array.isArray(receipt) ||
+      Object.keys(receipt).sort().join(',') !==
+        'conflict,filesChanged,promptId,requestId' ||
+      typeof receipt.requestId !== 'string' ||
+      !UUID.test(receipt.requestId) ||
+      typeof receipt.promptId !== 'string' ||
+      !UUID.test(receipt.promptId) ||
+      !prompts.has(receipt.promptId) ||
+      requests.has(receipt.requestId) ||
+      typeof receipt.conflict !== 'boolean' ||
+      !Array.isArray(receipt.filesChanged) ||
+      receipt.filesChanged.some(
+        (file) => typeof file !== 'string' || !Object.hasOwn(state.files, file),
+      ) ||
+      new Set(receipt.filesChanged).size !== receipt.filesChanged.length ||
+      (receipt.conflict && receipt.filesChanged.length !== 0) ||
+      (record.pendingUndo?.requestId === receipt.requestId &&
+        record.pendingUndo.promptId !== receipt.promptId)
+    )
+      throw new Error('Invalid Hosted file history undo receipts.');
+    requests.add(receipt.requestId);
+  }
   return {
     schemaVersion: 1,
-    state: parseHostedFileHistoryState(
-      record.state,
-      session.authority.sessionHeader.sessionKey.sessionId,
-    ),
+    state,
     pendingTurn: record.pendingTurn,
     ...(record.pendingMessageId !== undefined
       ? { pendingMessageId: record.pendingMessageId }
       : {}),
     pendingUndo: record.pendingUndo,
-    undoReceipts: record.undoReceipts ?? [],
+    undoReceipts,
   };
 }
 

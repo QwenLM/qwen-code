@@ -170,7 +170,7 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   {
     name: 'run_shell_command',
     description:
-      'Run a foreground command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. Background jobs are unavailable.',
+      'Run a foreground command in the saved Workspace working directory. Complete stdout and stderr are retained; the model receives a bounded preview. Background jobs are unavailable. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -258,7 +258,19 @@ export class HostedWorkspaceToolTurn {
     this.advertised = [
       ...(this.publication || this.shell
         ? HOSTED_WORKSPACE_SHELL_TOOLS
-        : HOSTED_WORKSPACE_FILE_TOOLS),
+        : HOSTED_WORKSPACE_FILE_TOOLS
+      ).map((tool) =>
+        ['write_file', 'edit'].includes(tool.name ?? '')
+          ? {
+              ...tool,
+              description:
+                tool.description +
+                (this.mcp
+                  ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+                  : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+            }
+          : tool,
+      ),
       ...(this.mcp?.tools() ?? []),
     ];
     return this.advertised;

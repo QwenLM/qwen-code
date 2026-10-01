@@ -23,6 +23,14 @@ existing behavior, including native Write/Edit, and refuses the file-history
 APIs. Its long-lived runtime and active connections need a separate history
 lifecycle design; this change does not claim backups for that profile.
 
+The model-facing native Write/Edit declarations explicitly disclose the MCP
+profile's lack of file backups and undo. Files/Shell declarations explain that
+tracked content or mode drift within the same prompt refuses further Write/Edit
+and undo; Shell mutations themselves are not backed up. Starting a new prompt
+can capture a fresh preimage only after complete backup validation. Undoing an
+older prompt restores its historical preimage across later rebaselines, including
+external or other-Session edits retained in newer snapshots.
+
 ## Execution and persistence
 
 The existing Broker control route gains a `raw-file-history` operation. It
@@ -141,6 +149,32 @@ older request after another undo, Write/Edit or reload returns its original
 result without reacquiring a released runtime. Receipts share the same bounded
 inline record budget as snapshots.
 
+### Stored receipt validation (#13124)
+
+On every read, validate each stored receipt before callers can use it for history
+inspection, capacity calculation, history binding during tool acquisition, load
+or undo replay. Each receipt
+has exactly `requestId`, `promptId`, `filesChanged` and `conflict`: both IDs use
+the undo API's UUID syntax; the prompt must belong to a retained snapshot;
+request IDs are unique across the cumulative receipt list. Changed paths are
+unique canonical tracked paths, including legal prototype-named files. A
+conflict receipt has no changed paths. Missing `undoReceipts` means an empty list
+for older records; null, malformed entries and unsupported fields are refused.
+An invalid record follows the existing read/recovery error paths before effects.
+
+Receipts are immutable historical outcomes, not a description of current file
+contents. Later undo and Write/Edit commits preserve them in order, and replay
+returns the original result without acquiring or dispatching another runtime.
+Do not compare an old receipt with the latest prompt or current fingerprints.
+A post-effect record may contain both the matching receipt and `pendingUndo`
+until release is confirmed; the pending marker still prevents replay and load.
+If that pending request already has a receipt, their prompt IDs must agree.
+
+This follow-up changes validation and disclosure only. Retention, pruning,
+same-prompt reconciliation, cancellation during undo, I/O optimization and
+operator recovery for unknown/partial effects remain separate work. No backup
+is deleted and no lease timeout authorizes another writer.
+
 ## Deployment and rollout
 
 Worker backups live under `$QWEN_HOME/file-history/<Harness Session ID>/`
@@ -179,6 +213,14 @@ HTTP Session Store. Verify existing file restoration and new file removal,
 plus default no-tool and Shell regressions. Build, typecheck, bundle, focused
 tests and two clean self-audit passes are required. E2E plans and measured
 results live in `.qwen/e2e-tests/hosted-file-history.md`.
+
+For #13124, add malformed-receipt and profile-disclosure assertions, and strengthen
+existing HTTP undo tests for mismatched replay keys, conflict replay and durable
+pending state. Reuse the existing later-undo, Write/Edit and reload replay tests.
+Verify fresh-turn pending-history guards and capacity refusal before dispatch.
+The focused plan and measured results are in
+`.qwen/e2e-tests/issue-13124.md`; the real Java/MySQL fault gates remain required
+for changes to their execution behavior.
 
 Local validation passed: build, typecheck, bundle, focused tests, packaged worker
 fault probes and Hosted process regressions. The Broker/HTTP Store E2E used H2
