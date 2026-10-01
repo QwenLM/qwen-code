@@ -217,6 +217,40 @@ export function registerWorkspaceTrustRoutes(
       }
     },
   );
+
+  // The recovery path for Web Shell / Desktop clients, which cannot render
+  // the terminal-only folder-trust prompt (#13130). `/workspace/trust/request`
+  // stays request-only; this route records the decision instead of asking for
+  // it, and the strict mutation gate above is what limits it to callers that
+  // already hold operator authority over this daemon.
+  app.post(
+    '/workspace/trust/grant',
+    mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      if (
+        workspaceRegistry &&
+        workspaceRegistry.primaryEntry.state !== 'active'
+      ) {
+        unavailableRuntime(res);
+        return;
+      }
+      const route = 'POST /workspace/trust/grant';
+      const ctx = { route, workspaceCwd: boundWorkspace };
+      try {
+        const status = await workspace.getWorkspaceTrustStatus(ctx);
+        if (!status.folderTrustEnabled) {
+          res.status(409).json({
+            error: 'Folder trust is disabled for this workspace',
+            code: 'folder_trust_disabled',
+          });
+          return;
+        }
+        res.status(200).json(await workspace.grantWorkspaceTrust(ctx));
+      } catch (err) {
+        sendTrustError(res, route, err);
+      }
+    },
+  );
 }
 
 export function registerWorkspaceQualifiedTrustRoutes(
@@ -347,6 +381,57 @@ export function registerWorkspaceQualifiedTrustRoutes(
             ...(reason !== undefined ? { reason } : {}),
           });
         res.status(202).json(result);
+      } catch (err) {
+        sendTrustError(res, route, err);
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/trust/grant',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const entry = resolveWorkspaceEntryFromParam(workspaceRegistry, req, res);
+      if (!entry) return;
+      if (entry.state !== 'active' || !entry.current) {
+        unavailableRuntime(res);
+        return;
+      }
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      if (runtime.provenance === 'managed-scratch') {
+        res.status(409).json({
+          error: 'Managed scratch workspace trust cannot be changed',
+          code: 'managed_scratch_trust_fixed',
+        });
+        return;
+      }
+      if (runtime.provenance === 'live-conversation') {
+        res.status(409).json({
+          error: 'Live conversation workspace trust cannot be changed',
+          code: 'live_conversation_trust_fixed',
+        });
+        return;
+      }
+      const route = 'POST /workspaces/:workspace/trust/grant';
+      const ctx = { route, workspaceCwd: runtime.workspaceCwd };
+      try {
+        const status =
+          await runtime.workspaceService.getWorkspaceTrustStatus(ctx);
+        if (!status.folderTrustEnabled) {
+          res.status(409).json({
+            error: 'Folder trust is disabled for this workspace',
+            code: 'folder_trust_disabled',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.workspaceService.grantWorkspaceTrust(ctx));
       } catch (err) {
         sendTrustError(res, route, err);
       }

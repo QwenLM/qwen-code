@@ -621,6 +621,36 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
+    it('grantWorkspaceTrust overrides an existing untrusted rule', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [workspace]: TrustLevel.DO_NOT_TRUST,
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'untrusted', source: 'file' },
+        });
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
+          {
+            v: 1,
+            workspaceCwd: workspace,
+            folderTrustEnabled: true,
+            effective: { state: 'trusted', source: 'file' },
+            explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+          },
+        );
+      });
+    });
+
     it('getWorkspacePermissionsStatus reads scoped and merged settings', async () => {
       await withIsolatedWorkspace(async ({ home, workspace }) => {
         await writeJson(path.join(home, 'settings.json'), {

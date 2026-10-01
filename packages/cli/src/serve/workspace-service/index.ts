@@ -49,7 +49,11 @@ import {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
-import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import {
+  getWorkspaceTrustStatus,
+  loadTrustedFolders,
+  TrustLevel,
+} from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
@@ -693,6 +697,15 @@ export function createDaemonWorkspaceService(
         desiredState: request.desiredState,
         requiresOperatorAction: true,
       };
+    },
+
+    async grantWorkspaceTrust(_ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      loadTrustedFolders().setValue(boundWorkspace, TrustLevel.TRUST_FOLDER);
+      return getWorkspaceTrustStatus(
+        loadBoundSettings(true).merged,
+        boundWorkspace,
+      );
     },
 
     async setWorkspacePermissionRules(

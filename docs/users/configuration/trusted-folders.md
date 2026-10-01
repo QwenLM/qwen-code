@@ -28,6 +28,8 @@ Once the feature is enabled, the first time you run the Qwen Code from a folder,
 
 Your choice is saved in a central file (`~/.qwen/trustedFolders.json`), so you will only be asked once per folder.
 
+The feature fails closed: until you make a choice, a folder counts as **untrusted**, not as trusted-by-default. If that file is missing or unreadable — a new machine, a restored home directory, a synced dotfiles setup — every folder starts untrusted, including folders you trusted before.
+
 ## Why Trust Matters: The Impact of an Untrusted Workspace
 
 When a folder is **untrusted**, the Qwen Code runs in a restricted "safe mode" to protect you. In this mode, the following features are disabled:
@@ -49,6 +51,8 @@ Granting trust to a folder unlocks the full functionality of the Qwen Code for t
 If you need to change a decision or see all your settings, you have a couple of options:
 
 - **Change the Current Folder's Trust**: Run the `/permissions` command from within the CLI. This will bring up the same interactive dialog, allowing you to change the trust level for the current folder.
+
+- **Trust a Workspace From the Web Shell**: Open the workspaces overview and use the **Trust** action on an untrusted workspace. This records the same decision without needing a terminal, which is the way back if every workspace came up untrusted. The action appears when the connected daemon supports it; a daemon that does not advertise the capability shows no such action, so use the CLI instead. The workspace finishes becoming trusted once the daemon has rebuilt its runtime, which takes a moment.
 
 - **View All Trust Rules**: To see a complete list of all your trusted and untrusted folder rules, you can inspect the contents of the `~/.qwen/trustedFolders.json` file in your home directory.
 

@@ -196,6 +196,18 @@ export interface DaemonWorkspaceService {
     request: WorkspaceTrustChangeRequest,
   ): Promise<WorkspaceTrustChangeResult>;
 
+  /**
+   * Record the bound workspace as trusted in the local trusted-folders file.
+   *
+   * `requestWorkspaceTrustChange` only publishes an operator prompt; this
+   * writes the decision. The path is always the bound workspace, never
+   * caller-supplied, and the route reaching it sits behind the strict
+   * mutation gate, so the caller already holds operator authority.
+   */
+  grantWorkspaceTrust(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceTrustStatus>;
+
   /** Replace one permission rule list. */
   setWorkspacePermissionRules(
     ctx: WorkspaceRequestContext,
