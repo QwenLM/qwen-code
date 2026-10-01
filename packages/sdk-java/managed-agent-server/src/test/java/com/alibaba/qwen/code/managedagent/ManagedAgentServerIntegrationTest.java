@@ -1638,6 +1638,12 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
+        public Attachment recoverManagedRuntime(String tenantId,
+                String sessionId, boolean cancellation) {
+            return createOrLoad(tenantId, sessionId, true);
+        }
+
+        @Override
         public Admission submit(String tenantId, String sessionId,
                 String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
