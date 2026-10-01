@@ -1,0 +1,58 @@
+.cell {
+  flex: 1;
+  --traj-request: #2a78d6;
+  --traj-tool: #eb6834;
+  --traj-subagent: #1baf7a;
+  --traj-ttft: color-mix(in srgb, var(--traj-request) 45%, var(--background));
+  position: relative;
+  align-self: stretch;
+  min-width: 0;
+  overflow: hidden;
+}
+:global(.dark) .cell {
+  --traj-request: #3987e5;
+  --traj-tool: #d95926;
+  --traj-subagent: #199e70;
+}
+
+.missing {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+.bar {
+  position: absolute;
+  top: 12px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--traj-request);
+  overflow: hidden;
+}
+.bar[data-lane='1'] {
+  background: var(--traj-tool);
+}
+.bar[data-lane='2'] {
+  background: var(--traj-subagent);
+}
+.bar[data-error='true'] {
+  background: var(--destructive);
+}
+.bar[data-zero='true'] {
+  width: 2px;
+}
+
+.bar[data-at-end='true'] {
+  transform: translateX(-2px);
+}
+.ttft {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--traj-ttft);
+}
+.range {
+  position: absolute;
+  inset: 0 auto;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
