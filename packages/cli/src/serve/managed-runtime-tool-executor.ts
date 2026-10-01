@@ -5,6 +5,9 @@
  */
 
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
+import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
@@ -31,6 +34,15 @@ import type {
   ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
+import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+import type { ManagedMcpOperationView } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+import {
+  type ManagedMcpRuntime,
+  ManagedMcpError,
+  parseManagedMcpControl,
+} from './managed-mcp-runtime.js';
+
+export class ManagedMcpToolUnknownError extends Error {}
 
 export interface ManagedToolReference {
   readonly sessionId: string;
@@ -172,6 +184,15 @@ export interface ManagedShellCapturePublisher {
  */
 export class ManagedToolExecutor {
   private readonly entries = new Map<string, JournalEntry>();
+  private readonly mcpCalls = new Map<
+    string,
+    {
+      reference: ManagedToolReference;
+      input: Record<string, unknown>;
+      inputJson: string;
+      refusal?: ManagedToolResultPayload;
+    }
+  >();
   private readonly providerSessions = new Set<string>();
   private readonly closedSessions = new Set<string>();
   private provider?: {
@@ -179,10 +200,82 @@ export class ManagedToolExecutor {
     close(): Promise<void>;
   };
   private closing = false;
+  private readonly fileHistories = new Map<string, ManagedRuntimeFileHistory>();
+  private readonly historyControls = new Set<string>();
+
+  async controlFileHistory(
+    ownerSessionId: string,
+    sessionId: string,
+    operation: RawFileHistoryOperation,
+  ): Promise<unknown> {
+    this.assertLegacySession(sessionId);
+    if (
+      this.closing ||
+      this.hasActiveSession(sessionId) ||
+      [...this.entries.values()].some(
+        (entry) =>
+          entry.reference.sessionId === sessionId && entry.state === 'unknown',
+      )
+    )
+      throw new ManagedToolConflictError(
+        'File history requires an idle Runtime Session.',
+      );
+    this.historyControls.add(sessionId);
+    try {
+      const tools = await this.toolsFor({
+        sessionId,
+        promptId: sessionId,
+        callId: 'history',
+        argsDigest: '',
+      });
+      if (!tools?.directory || tools.isActive?.() === false)
+        throw new ManagedToolUnavailableError(
+          'File history Workspace is unavailable.',
+        );
+      let history = this.fileHistories.get(sessionId);
+      if (operation.action === 'bind') {
+        if (!history) {
+          history = new ManagedRuntimeFileHistory(
+            ownerSessionId,
+            tools.directory,
+            operation.state,
+          );
+          await history.ready();
+          this.fileHistories.set(sessionId, history);
+        } else if (
+          history.ownerSessionId !== ownerSessionId ||
+          history.directory !== tools.directory ||
+          !isDeepStrictEqual(
+            history.state(),
+            operation.state ?? { ownerSessionId, snapshots: [], files: {} },
+          )
+        ) {
+          throw new ManagedToolConflictError('File history binding conflicts.');
+        }
+      }
+      if (
+        !history ||
+        history.ownerSessionId !== ownerSessionId ||
+        history.directory !== tools.directory
+      )
+        throw new ManagedToolConflictError(
+          'File history is not bound to this Workspace.',
+        );
+      if (operation.action === 'prepare')
+        await history.prepare(operation.promptId, operation.paths);
+      if (operation.action === 'rewind')
+        return await history.rewind(operation.promptId);
+      await history.ready();
+      return history.state();
+    } finally {
+      this.historyControls.delete(sessionId);
+    }
+  }
 
   constructor(
     private readonly toolsFor: ManagedToolSetResolver,
     private readonly capturePublisher?: ManagedShellCapturePublisher,
+    private readonly mcp?: ManagedMcpRuntime,
   ) {}
 
   static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
@@ -192,7 +285,10 @@ export class ManagedToolExecutor {
   }
 
   hasTool(toolName: string): boolean {
-    return ADMITTED_TOOL_NAMES.has(toolName);
+    return (
+      ADMITTED_TOOL_NAMES.has(toolName) ||
+      (toolName === MANAGED_MCP_TOOL && this.mcp !== undefined)
+    );
   }
 
   attachProvider(provider: NonNullable<ManagedToolExecutor['provider']>): void {
@@ -202,8 +298,13 @@ export class ManagedToolExecutor {
   claimProviderSession(sessionId: string): void {
     if (
       this.closing ||
+      this.historyControls.has(sessionId) ||
+      this.fileHistories.has(sessionId) ||
       this.closedSessions.has(sessionId) ||
       [...this.entries.values()].some(
+        (entry) => entry.reference.sessionId === sessionId,
+      ) ||
+      [...this.mcpCalls.values()].some(
         (entry) => entry.reference.sessionId === sessionId,
       )
     ) {
@@ -223,10 +324,12 @@ export class ManagedToolExecutor {
       );
     }
     this.closedSessions.add(sessionId);
+    this.fileHistories.delete(sessionId);
   }
 
   private assertLegacySession(sessionId: string): void {
     if (
+      this.historyControls.has(sessionId) ||
       this.providerSessions.has(sessionId) ||
       this.closedSessions.has(sessionId)
     ) {
@@ -245,6 +348,64 @@ export class ManagedToolExecutor {
         'Managed Runtime worker is closing.',
       );
     }
+    if (toolName === MANAGED_MCP_TOOL && this.mcp) {
+      const existing = this.mcpCalls.get(reference.callId);
+      const inputJson = JSON.stringify(input);
+      if (
+        this.entries.has(reference.callId) ||
+        (existing &&
+          (!sameReference(existing.reference, reference) ||
+            existing.inputJson !== inputJson))
+      )
+        throw new ManagedToolConflictError(
+          'Managed MCP invocation identity conflicts.',
+        );
+      if (existing?.refusal) return existing.refusal;
+      if (!existing) {
+        const tools = await this.toolsFor(reference);
+        this.assertLegacySession(reference.sessionId);
+        if (!tools || tools.isActive?.() === false)
+          throw new ManagedToolUnavailableError(
+            'Managed MCP Session is unavailable.',
+          );
+        if (this.mcpCalls.has(reference.callId))
+          return this.execute(reference, toolName, input);
+        const control = parseManagedMcpControl(input);
+        if (
+          control.kind !== 'mcp-invoke' ||
+          control.request.kind !== 'tool_call' ||
+          control.operationId !== reference.callId
+        )
+          throw new ManagedToolInvalidError(
+            'Managed MCP tool input is invalid.',
+          );
+        this.mcpCalls.set(reference.callId, {
+          reference,
+          input: structuredClone(input),
+          inputJson,
+        });
+      }
+      let result: ManagedMcpOperationView;
+      try {
+        result = await this.mcp.invokeTool(reference.sessionId, input);
+      } catch (error) {
+        if (!(error instanceof ManagedMcpError)) throw error;
+        const refusal: ManagedToolResultPayload = {
+          executionStatus: 'not_started',
+          responseParts: [],
+          error: { type: error.code, message: error.code },
+        };
+        this.mcpCalls.get(reference.callId)!.refusal = refusal;
+        return refusal;
+      }
+      if (result.state !== 'settled')
+        throw new ManagedMcpToolUnknownError(
+          'Managed MCP execution outcome is unknown.',
+        );
+      return mcpPayload(result);
+    }
+    if (this.mcpCalls.has(reference.callId))
+      throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
     let inputJson: string;
     try {
       inputJson = JSON.stringify(input);
@@ -319,8 +480,7 @@ export class ManagedToolExecutor {
     };
     this.entries.set(reference.callId, entry);
     entry.promise = this.run(entry, tool, tools, tools.directory);
-    await entry.promise;
-    return entry.result!;
+    return join(entry, reference, toolName, inputJson);
   }
 
   async executeV3(
@@ -507,7 +667,9 @@ export class ManagedToolExecutor {
 
   /** Read-only lookup; never creates or advances an invocation. */
   hasActiveSession(sessionId: string): boolean {
+    if (this.historyControls.has(sessionId)) return true;
     return (
+      this.mcp?.hasHolds(sessionId) === true ||
       this.provider?.hasActiveSession(sessionId) === true ||
       [...this.entries.values()].some(
         (entry) =>
@@ -520,6 +682,13 @@ export class ManagedToolExecutor {
 
   /** Read-only lookup; never creates or advances an invocation. */
   status(reference: ManagedToolReference): ManagedToolInvocationView | null {
+    const mcp = this.mcpCalls.get(reference.callId);
+    if (mcp && this.mcp) {
+      if (!sameReference(mcp.reference, reference)) return null;
+      if (mcp.refusal)
+        return { state: 'settled', lastSequence: 1, result: mcp.refusal };
+      return mcpView(this.mcp.toolStatus(reference.sessionId, mcp.input));
+    }
     const entry = this.entries.get(reference.callId);
     if (entry && entry.version !== 2) {
       throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
@@ -531,6 +700,14 @@ export class ManagedToolExecutor {
   }
 
   cancel(reference: ManagedToolReference): ManagedToolInvocationView | null {
+    const mcp = this.mcpCalls.get(reference.callId);
+    if (mcp && this.mcp) {
+      if (!sameReference(mcp.reference, reference)) return null;
+      if (mcp.refusal)
+        return { state: 'settled', lastSequence: 1, result: mcp.refusal };
+      this.mcp.cancelTool(reference.sessionId, mcp.input);
+      return mcpView(this.mcp.toolStatus(reference.sessionId, mcp.input));
+    }
     const entry = this.entries.get(reference.callId);
     if (entry && entry.version !== 2) {
       throw new ManagedToolConflictError('Managed Runtime protocol conflicts.');
@@ -558,6 +735,7 @@ export class ManagedToolExecutor {
 
   async close(): Promise<void> {
     this.closing = true;
+    await this.mcp?.close();
     for (const entry of this.entries.values()) {
       if (entry.state === 'executing' || entry.state === 'cancel_requested') {
         entry.controller.abort();
@@ -610,20 +788,54 @@ export class ManagedToolExecutor {
           `Directory '${params['directory']}' is not within any of the registered workspace directories.`,
         );
       }
-      const result: ToolResult = await sessionIdContext.run(sessionId, () => {
-        const invocation = tool.build(params);
-        return entry.version === 3 && entry.captureSink
-          ? (invocation as ShellToolInvocation).execute(
-              entry.controller.signal,
-              undefined,
-              undefined,
-              undefined,
-              undefined,
-              undefined,
-              entry.captureSink,
-            )
-          : invocation.execute(entry.controller.signal);
-      });
+      const invoke = () =>
+        sessionIdContext.run(sessionId, () => {
+          const invocation = tool.build(params);
+          return entry.version === 3 && entry.captureSink
+            ? (invocation as ShellToolInvocation).execute(
+                entry.controller.signal,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                entry.captureSink,
+              )
+            : invocation.execute(entry.controller.signal);
+        });
+      const history = this.fileHistories.get(entry.reference.sessionId);
+      let result: ToolResult;
+      if (
+        history &&
+        [WriteFileTool.Name, EditTool.Name].includes(entry.toolName)
+      ) {
+        let outcome: { result: ToolResult } | { error: unknown };
+        let invoked = false;
+        try {
+          const file = path
+            .relative(history.directory, params['file_path'] as string)
+            .split(path.sep)
+            .join('/');
+          outcome = await history.execute(file, async () => {
+            invoked = true;
+            try {
+              return { result: await invoke() };
+            } catch (error) {
+              return { error };
+            }
+          });
+        } catch (error) {
+          if (!invoked) throw error;
+          // A post-execution history failure cannot prove the file outcome.
+          entry.state = 'unknown';
+          entry.lastSequence++;
+          return;
+        }
+        if ('error' in outcome) throw outcome.error;
+        result = outcome.result;
+      } else {
+        result = await invoke();
+      }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
       payload = {
@@ -714,6 +926,38 @@ export class ManagedToolExecutor {
   }
 }
 
+function mcpView(view: ManagedMcpOperationView): ManagedToolInvocationView {
+  return {
+    state:
+      view.state === 'running'
+        ? 'executing'
+        : view.state === 'outcome_unknown'
+          ? 'unknown'
+          : 'settled',
+    lastSequence: view.state === 'running' ? 1 : 2,
+    ...(view.state === 'settled' ? { result: mcpPayload(view) } : {}),
+  };
+}
+
+function mcpPayload(view: ManagedMcpOperationView): ManagedToolResultPayload {
+  const response = view.response;
+  return {
+    executionStatus: view.error
+      ? ['managed_mcp_remote_error', 'managed_mcp_output_limit'].includes(
+          view.error.code,
+        )
+        ? 'error'
+        : 'not_started'
+      : response?.['isError'] === true
+        ? 'error'
+        : 'success',
+    responseParts: response ? [{ text: JSON.stringify(response) }] : [],
+    ...(view.error
+      ? { error: { type: view.error.code, message: view.error.code } }
+      : {}),
+  };
+}
+
 function v3View(entry: JournalEntry): ManagedToolV3View {
   return {
     state: entry.state,
@@ -774,6 +1018,10 @@ async function join(
     );
   }
   await entry.promise;
+  if (entry.state === 'unknown')
+    throw new ManagedMcpToolUnknownError(
+      'Managed Runtime tool outcome is unknown.',
+    );
   return entry.result!;
 }
 

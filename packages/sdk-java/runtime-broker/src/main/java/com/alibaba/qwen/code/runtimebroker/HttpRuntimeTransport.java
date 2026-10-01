@@ -29,7 +29,8 @@ import java.util.concurrent.TimeUnit;
  * <p>Attestation plus the tool operations execute, status, and cancel, keyed
  * by the original call reference. Status and cancel answers are projected to
  * the Broker's closed state and result. Prepared provider invocations use
- * their separate Session control protocol.
+ * their separate Session control protocol. MCP controls have their own
+ * bounded envelope.
  */
 public final class HttpRuntimeTransport implements RuntimeTransport {
     static final int BODY_LIMIT_BYTES = 16 * 1024;
@@ -44,7 +45,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
     static final String V3_ACKNOWLEDGE_PATH = "/internal/managed-runtime/v3/acknowledge";
     static final String PUBLICATION_INSTALL_PATH = "/internal/managed-runtime/v3/publications:install";
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    public static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
             "leaseId", "epoch", "provisionRequestId", "tenantId",
@@ -649,8 +650,22 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             throw new IllegalArgumentException("lease and session are required");
         }
         Map<String, Object> immutable = BrokerValues.immutableMap(operation);
+        if (ManagedMcpProtocol.isOperation(immutable)) {
+            ManagedMcpProtocol.validateSession(session, immutable);
+            Map<String, Object> body = Map.of("protocolVersion", 1,
+                    "runtimeSessionId", session.getRuntimeSessionId(), "operation", immutable);
+            byte[] encoded;
+            try {
+                encoded = encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES);
+            } catch (IllegalArgumentException tooLarge) {
+                throw new RuntimeBrokerException(413, "runtime_control_operation_too_large",
+                        "Runtime MCP operation exceeds its size limit.", false);
+            }
+            return post(lease, ManagedMcpProtocol.PATH, encoded, TOOL_RESULT_LIMIT_BYTES)
+                    .thenApply(bytes -> ManagedMcpProtocol.response(bytes, session, immutable));
+        }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
-        if ("history".equals(immutable.get("kind"))) {
+        if ("history".equals(immutable.get("kind")) || "raw-file-history".equals(immutable.get("kind"))) {
             return provider(lease, session, immutable);
         }
         return provider(lease, session, Map.of("kind", "acquire"))

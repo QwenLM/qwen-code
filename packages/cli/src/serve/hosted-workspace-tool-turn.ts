@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readHostedFileHistory,
+  commitHostedFileHistory,
+  assertHostedFileHistoryCapacity,
+  HostedFileHistoryRefusedError,
+  canSettleHostedFileHistory,
+} from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FunctionDeclaration, Part } from '@google/genai';
@@ -43,9 +50,12 @@ import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
+  isHostedFileHistoryRefusal,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import type { HostedMcpSession } from './hosted-mcp-session.js';
+import { waitForTurn } from './hosted-turn-wait.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import {
   endHostedAction,
@@ -129,7 +139,7 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   {
     name: 'write_file',
     description:
-      'Write a file in the remote Workspace. Read before overwriting an existing file. No undo backup is provided by this private profile.',
+      'Write a file in the remote Workspace. Read before overwriting an existing file.',
     parametersJsonSchema: {
       type: 'object',
       properties: { file_path: pathProperty, content: { type: 'string' } },
@@ -140,7 +150,7 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   {
     name: 'edit',
     description:
-      'Replace exact text in a remote Workspace file that you have read. No undo backup is provided by this private profile.',
+      'Replace exact text in a remote Workspace file that you have read.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -190,6 +200,7 @@ export class HostedWorkspaceToolTurn {
   private uncertain = false;
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
+  private advertised?: FunctionDeclaration[];
   private readonly publication?: {
     owner: HttpToolPublicationOwner;
     captureBytes: number;
@@ -197,7 +208,6 @@ export class HostedWorkspaceToolTurn {
   private readonly shell?: HostedShellTurnOptions;
   // Once an approval expires nobody is answering, so the Turn asks no more.
   private unanswered = false;
-  readonly declarations: FunctionDeclaration[];
 
   constructor(
     options: HostedWorkspaceBrokerOptions,
@@ -220,6 +230,7 @@ export class HostedWorkspaceToolTurn {
       | HostedShellTurnOptions,
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
+    private readonly mcp?: HostedMcpSession,
   ) {
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -229,34 +240,88 @@ export class HostedWorkspaceToolTurn {
       publicationOrShell && 'resources' in publicationOrShell
         ? publicationOrShell
         : shell;
-    this.declarations =
-      this.publication || this.shell
-        ? HOSTED_WORKSPACE_SHELL_TOOLS
-        : HOSTED_WORKSPACE_FILE_TOOLS;
-    this.broker = new HostedWorkspaceBroker(
-      options,
-      session.authority.sessionHeader.sessionKey,
-      promptId,
-    );
-    this.warmed = this.broker.warm();
+    this.broker =
+      mcp?.broker ??
+      new HostedWorkspaceBroker(
+        options,
+        session.authority.sessionHeader.sessionKey,
+        promptId,
+      );
+    this.warmed = mcp ? mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
+  }
+
+  async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
+    signal.throwIfAborted();
+    if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
+    this.advertised = [
+      ...(this.publication || this.shell
+        ? HOSTED_WORKSPACE_SHELL_TOOLS
+        : HOSTED_WORKSPACE_FILE_TOOLS),
+      ...(this.mcp?.tools() ?? []),
+    ];
+    return this.advertised;
   }
 
   async resumeCommittedResults(): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
-    await this.acquire();
+    await this.acquire(true);
     this.uncertain = false;
   }
 
-  private async acquire(): Promise<void> {
+  private async acquire(recovering = false): Promise<void> {
     this.uncertain = true;
     try {
       await this.broker.acquire();
       this.acquired = true;
+      if (!this.mcp) {
+        const saved = await readHostedFileHistory(this.session);
+        if (saved?.pendingUndo)
+          throw new Error('Hosted file history requires recovery.');
+        if (saved?.pendingTurn) {
+          if (
+            !recovering ||
+            saved.pendingTurn !== this.promptId ||
+            !(await canSettleHostedFileHistory(this.session, saved))
+          )
+            throw new Error('Hosted file history requires recovery.');
+          const state = await this.broker.fileHistory({
+            kind: 'raw-file-history',
+            action: 'snapshot',
+          });
+          if (!isDeepStrictEqual(state.snapshots, saved.state.snapshots))
+            throw new Error('Original file history snapshots changed.');
+          await commitHostedFileHistory(this.session, {
+            schemaVersion: 1,
+            state,
+            pendingTurn: null,
+            pendingUndo: null,
+          });
+          return;
+        }
+        try {
+          await this.broker.fileHistory({
+            kind: 'raw-file-history',
+            action: 'bind',
+            state: saved?.state ?? null,
+          });
+        } catch (cause) {
+          // A saved continuation still needs this original runtime ID.
+          if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
+          await this.broker.release();
+          this.acquired = false;
+          throw new HostedFileHistoryRefusedError(
+            cause.reason ?? cause.message,
+          );
+        }
+      }
     } catch (cause) {
-      if (isRetryableWorkspaceAcquisition(cause)) {
+      if (
+        (!this.acquired && isRetryableWorkspaceAcquisition(cause)) ||
+        cause instanceof HostedFileHistoryRefusedError
+      ) {
         this.uncertain = false;
         throw cause;
       }
@@ -270,11 +335,16 @@ export class HostedWorkspaceToolTurn {
     model: string,
     signal: AbortSignal,
   ): Promise<Part[]> {
+    signal.throwIfAborted();
+    if (this.mcp) await waitForTurn(this.warmed, signal);
+    const declarations = this.advertised ?? (await this.declarations(signal));
     const ids = new Set<string>();
     const requests = calls.map((call) => {
+      const runtimeCallId = randomUUID();
+      const mcpInput = this.mcp?.toolInput(call.name, call.args, runtimeCallId);
       const isShell = call.name === 'run_shell_command';
       if (
-        !this.declarations.some((tool) => tool.name === call.name) ||
+        !declarations.some((tool) => tool.name === call.name) ||
         ids.has(call.callId) ||
         call.wasOutputTruncated === true
       )
@@ -282,7 +352,9 @@ export class HostedWorkspaceToolTurn {
       ids.add(call.callId);
       let validationError: string | undefined;
       let input: Record<string, unknown>;
-      if (isShell) {
+      if (mcpInput) {
+        input = { ...mcpInput.input };
+      } else if (isShell) {
         const args = call.args;
         const unsupportedKey = Object.keys(args).find(
           (key) =>
@@ -341,35 +413,17 @@ export class HostedWorkspaceToolTurn {
           }
         }
       }
-      const payloadJson = JSON.stringify({
-        toolName: call.name,
-        input,
-      });
-      const runtimeCallId = randomUUID();
-      const inputBytes = Buffer.from(
-        JSON.stringify({
-          harnessSessionId:
-            this.session.authority.sessionHeader.sessionKey.sessionId,
-          runtimeSessionId: this.promptId,
-          payloadJson,
-        }),
+      const encoded = this.encodeToolInput(
+        mcpInput ?? { toolName: call.name, input },
       );
-      if (
-        inputBytes.length >
-        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-      )
-        throw new Error(
-          'Hosted tool input exceeds the inline Session Store limit.',
-        );
       return {
         call,
         validationError,
         input,
         isShell,
         inputDigest: isShell ? managedToolDigest(input) : undefined,
-        payloadJson,
-        inputBytes,
-        digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
+        mcp: mcpInput !== undefined,
+        ...encoded,
         argsDigest: `sha256:${managedToolDigest(input)}`,
         publicationId: isShell && this.publication ? randomUUID() : null,
         runtimeCallId,
@@ -404,19 +458,7 @@ export class HostedWorkspaceToolTurn {
         throw new HostedToolRecoveryRequiredError(cause);
       }
     }
-    let onAbort: () => void = () => undefined;
-    try {
-      await Promise.race([
-        this.warmed,
-        new Promise<never>((_, reject) => {
-          onAbort = () => reject(signal.reason);
-          signal.addEventListener('abort', onAbort, { once: true });
-        }),
-      ]);
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
-    signal.throwIfAborted();
+    await waitForTurn(this.warmed, signal);
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire();
@@ -477,6 +519,50 @@ export class HostedWorkspaceToolTurn {
             reason,
           );
     };
+    const paths = requests.flatMap((request, index) =>
+      !this.mcp &&
+      refusals[index] === undefined &&
+      ['write_file', 'edit'].includes(request.call.name)
+        ? [request.input['file_path'] as string]
+        : [],
+    );
+    if (paths.length) {
+      try {
+        const state = await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'prepare',
+          promptId: this.promptId,
+          paths: [...new Set(paths)],
+        });
+        const prepared = {
+          schemaVersion: 1 as const,
+          state,
+          pendingTurn: this.promptId,
+          pendingMessageId: messageId,
+          pendingUndo: null,
+        };
+        await assertHostedFileHistoryCapacity(this.session, prepared);
+        await commitHostedFileHistory(this.session, prepared);
+      } catch (cause) {
+        if (
+          !isHostedFileHistoryRefusal(cause) &&
+          !(cause instanceof HostedFileHistoryRefusedError)
+        )
+          throw new HostedToolRecoveryRequiredError(cause);
+        const reason =
+          cause instanceof HostedWorkspaceBrokerRejection
+            ? (cause.reason ?? cause.message)
+            : cause.message;
+        for (const [index, request] of requests.entries())
+          if (
+            refusals[index] === undefined &&
+            ['write_file', 'edit'].includes(request.call.name)
+          )
+            refusals[index] =
+              `Hosted file history refused this batch's Write/Edit before execution: ${reason.slice(0, 512)}`;
+        paths.length = 0;
+      }
+    }
     if (refusals.every((reason) => reason !== undefined)) {
       const responses = requests.flatMap((_, index) => refusal(index)!);
       try {
@@ -497,34 +583,66 @@ export class HostedWorkspaceToolTurn {
       const bindings = [];
       for (const [ordinal, request] of requests.entries()) {
         if (refusals[ordinal] !== undefined) continue;
+        if (request.mcp) {
+          const renewed = this.mcp!.toolInput(
+            request.call.name,
+            request.call.args,
+            request.runtimeCallId,
+          )!;
+          const payload = JSON.parse(request.payloadJson) as typeof renewed;
+          Object.assign(
+            request,
+            this.encodeToolInput({
+              ...payload,
+              input: { ...payload.input, grant: renewed.input.grant },
+            }),
+          );
+          inputRefs.delete(ordinal);
+        }
         const routeRef =
           inputRefs.get(ordinal) ??
           (await this.session.resources.publish(
             'managed-tool-input',
             request.inputBytes,
           ));
-        const prepared =
-          request.isShell && this.publication
-            ? await this.broker.prepareV3(
-                request.runtimeCallId,
-                request.argsDigest,
-                request.digest,
-                request.publicationId!,
-              )
-            : null;
-        const executionCallId =
-          prepared?.executionCallId ??
-          (await this.broker.prepare(
-            request.runtimeCallId,
-            request.digest,
-            request.inputDigest,
-          ));
+        let prepared;
+        let executionCallId: string;
+        try {
+          prepared =
+            request.isShell && this.publication
+              ? await this.broker.prepareV3(
+                  request.runtimeCallId,
+                  request.argsDigest,
+                  request.digest,
+                  request.publicationId!,
+                )
+              : null;
+          executionCallId =
+            prepared?.executionCallId ??
+            (await this.broker.prepare(
+              request.runtimeCallId,
+              request.digest,
+              request.inputDigest,
+              this.promptId,
+            ));
+        } catch (cause) {
+          if (
+            !(cause instanceof HostedWorkspaceBrokerRejection) ||
+            cause.status !== 409 ||
+            cause.code !== 'runtime_execution_conflict'
+          )
+            throw cause;
+          refusals[ordinal] =
+            'Runtime refused this execution reservation before dispatch: ' +
+            (cause.reason ?? cause.message).slice(0, 512);
+          continue;
+        }
         reserved.set(ordinal, executionCallId);
         const toolDefinitionRef = await this.session.resources.publish(
           'managed-tool-definition',
           Buffer.from(
             JSON.stringify(
-              this.declarations.find((tool) => tool.name === request.call.name),
+              declarations.find((tool) => tool.name === request.call.name),
             ),
           ),
         );
@@ -627,10 +745,11 @@ export class HostedWorkspaceToolTurn {
           );
         }
       }
-      await this.harness.commitAwaitRuntimeBatch(bindings, {
-        turnId: this.promptId,
-        promptId: this.promptId,
-      });
+      if (bindings.length)
+        await this.harness.commitAwaitRuntimeBatch(bindings, {
+          turnId: this.promptId,
+          promptId: this.promptId,
+        });
       if (shellBindings.size > 0) {
         const owner = await this.publication!.owner.owner();
         const authority = this.session.authority;
@@ -797,7 +916,10 @@ export class HostedWorkspaceToolTurn {
           signal,
           request.isShell
             ? Number(request.input['timeout'] ?? 120000) + 60000
-            : undefined,
+            : this.mcp
+              ? 630_000
+              : undefined,
+          this.mcp !== undefined,
         );
         const shellResult = request.isShell
           ? parseToolResultEnvelope(result)
@@ -896,6 +1018,18 @@ export class HostedWorkspaceToolTurn {
         if (receipt) await this.broker.acknowledge(executionCallId, receipt);
         responses.push(...converted);
       }
+      if (paths.length) {
+        const state = await this.broker.fileHistory({
+          kind: 'raw-file-history',
+          action: 'snapshot',
+        });
+        await commitHostedFileHistory(this.session, {
+          schemaVersion: 1,
+          state,
+          pendingTurn: null,
+          pendingUndo: null,
+        });
+      }
       this.uncertain = false;
       return responses;
     } catch (cause) {
@@ -943,6 +1077,30 @@ export class HostedWorkspaceToolTurn {
       const activeRenewal = renewInFlight as Promise<void> | null;
       await activeRenewal?.catch(() => undefined);
     }
+  }
+
+  private encodeToolInput(payload: { toolName: string; input: unknown }) {
+    const payloadJson = JSON.stringify(payload);
+    const inputBytes = Buffer.from(
+      JSON.stringify({
+        harnessSessionId:
+          this.session.authority.sessionHeader.sessionKey.sessionId,
+        runtimeSessionId: this.broker.runtimeSessionId,
+        payloadJson,
+      }),
+    );
+    if (
+      inputBytes.length >
+      HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
+    )
+      throw new Error(
+        'Hosted tool input exceeds the inline Session Store limit.',
+      );
+    return {
+      payloadJson,
+      inputBytes,
+      digest: `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
+    };
   }
 
   private async acceptShell(
@@ -1413,7 +1571,7 @@ export class HostedWorkspaceToolTurn {
     if (!this.acquired) return;
     try {
       await this.harness.settleConsumedRuntimeContinuation();
-      await this.broker.release();
+      if (!this.mcp) await this.broker.release();
       this.acquired = false;
     } catch (cause) {
       this.uncertain = true;

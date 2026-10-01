@@ -119,7 +119,7 @@ import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { parsePlanCommand } from '../utils/planMode';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
-import { serializeContextUsageMessage } from './messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './messages/ContextUsageMessage';
 import type {
   TurnOutputKind,
   TurnOutputOpenRequest,
@@ -1445,7 +1445,8 @@ export function ChatPane({
         store.dispatch([
           {
             type: 'status',
-            text: serializeContextUsageMessage(result),
+            text: t('contextUsage.title'),
+            data: createContextUsageMessageData(result),
             clearActiveText: false,
           },
         ]);
@@ -1454,7 +1455,14 @@ export function ChatPane({
         if (!owner.isCurrent()) return;
         reportError(error, 'Failed to load context usage');
       });
-  }, [actions, contextUsageAvailable, reportError, sessionOwnerGuard, store]);
+  }, [
+    actions,
+    contextUsageAvailable,
+    reportError,
+    sessionOwnerGuard,
+    store,
+    t,
+  ]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({

@@ -124,9 +124,13 @@ export async function runHostedHarnessTextTurn(input: {
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
       if (input.toolTurn)
-        client
-          .getChat()
-          .setTools([{ functionDeclarations: input.toolTurn.declarations }]);
+        client.getChat().setTools([
+          {
+            functionDeclarations: await input.toolTurn.declarations(
+              input.signal,
+            ),
+          },
+        ]);
       let calls: ToolCallRequestInfo[] = [];
       let text = '';
       let finished = false;

@@ -86,6 +86,59 @@ public class ManagedExtensionRecordStore {
     public record TaskPage(List<TaskRow> tasks, boolean hasMore) {
     }
 
+    public List<JsonNode> listRecords(String tenantId, String sessionId,
+            String domain) {
+        Body body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
+        require(body != null, "Unknown extension record domain.");
+        List<String> ids = jdbc.query("SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record WHERE"
+                        + " session_scope_key = ? AND tenant_id = ?"
+                        + " AND session_id = ? AND domain = ?"
+                        + " ORDER BY created_at, record_key",
+                (result, row) -> result.getString("record_resource_id"),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId, domain);
+        return ids.stream().map(id -> {
+            JsonNode record = readBody(readResource(tenantId, sessionId, id));
+            body.require().accept(record);
+            return record;
+        }).toList();
+    }
+
+    /** Reads only a committed resource in this Session's scope. */
+    public JsonNode readRecordResource(String tenantId, String sessionId,
+            JsonNode ref) {
+        ManagedExtensionRecords.durableRef(ref, "recordResource");
+        StoredResource resource = readResource(tenantId, sessionId,
+                ref.get("resourceId").textValue());
+        requireReference(resource, ref);
+        return readBody(resource);
+    }
+
+    private StoredResource readResource(String tenantId, String sessionId,
+            String resourceId) {
+        StoredResource resource = jdbc.query("SELECT * FROM"
+                        + " qwen_managed_session_resource WHERE"
+                        + " session_scope_key = ? AND tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?"
+                        + " AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE'"
+                        + " AND object_key IS NULL AND object_version_id IS NULL"
+                        + " AND encryption_key_id IS NULL",
+                (result, row) -> new StoredResource(
+                        result.getString("resource_id"),
+                        result.getString("kind"), result.getInt("schema_version"),
+                        result.getLong("byte_length"), result.getString("sha256"),
+                        result.getBytes("inline_bytes")),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId, resourceId).stream().findFirst()
+                .orElseThrow(() -> rejected("Missing committed MCP resource."));
+        require(resource.bytes() != null
+                && resource.bytes().length == resource.byteLength()
+                && sha256(resource.bytes()).equals(resource.digest()),
+                "The committed MCP resource is corrupt.");
+        return resource;
+    }
+
     /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
@@ -96,11 +149,12 @@ public class ManagedExtensionRecordStore {
      * {@code eventCount} events, and its transaction must hold only those
      * events and then its commit marker, as the authority writes it.
      */
-    void apply(String tenantId, String workspaceId, String sessionId,
+    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
+        List<JsonNode> receipts = new ArrayList<>();
         boolean applied = false;
         boolean shaped = true;
         String lastSubtype = null;
@@ -119,6 +173,11 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
+            if ("tool.receipt".equals(event.path("kind").asText())) {
+                require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
+                        "Tool receipt has an invalid journal position");
+                receipts.add(event);
+            }
             if (!"domain.committed".equals(event.path("kind").textValue())) {
                 continue;
             }
@@ -140,6 +199,7 @@ public class ManagedExtensionRecordStore {
         require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
+        return receipts;
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,
@@ -158,7 +218,7 @@ public class ManagedExtensionRecordStore {
         arguments.add(limit + 1);
         List<TaskRow> rows = jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ?" + cursor + " ORDER BY created_at DESC,"
+                        + " session_scope_key = ? AND task_kind IS NOT NULL" + cursor + " ORDER BY created_at DESC,"
                         + " record_key DESC LIMIT ?",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 arguments.toArray());
@@ -174,7 +234,7 @@ public class ManagedExtensionRecordStore {
         }
         return jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
-                        + " session_scope_key = ? AND record_key = ?",
+                        + " session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
                 (result, row) -> taskRow(result, tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 recordKey).stream().findFirst();
@@ -247,11 +307,31 @@ public class ManagedExtensionRecordStore {
         } catch (InvalidRecordException error) {
             throw rejected(error.getMessage());
         }
+        if (domain.equals("mcp_configuration") || domain.equals("mcp_operation")) {
+            for (String field : List.of("catalogRef", "argsRef", "resultRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
         String recordId = body.recordId().apply(record);
         String recordKey = ManagedExtensionProjection.recordKey(sessionId,
                 domain, recordId);
         String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
                 sessionId);
+        if (domain.equals("mcp_configuration")) {
+            List<String> configurations = jdbc.query("SELECT record_resource_id FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_scope_key = ? AND domain = 'mcp_configuration'",
+                    (result, row) -> result.getString("record_resource_id"), scopeKey);
+            for (String configuration : configurations) {
+                require(ManagedExtensionRecords.isDefinitionPinConsistent(
+                        readBody(resources.apply(configuration)).get("run").get("definition"),
+                        record.get("run").get("definition")),
+                        "An MCP server revision cannot name two definition digests.");
+            }
+        }
         StoredRow previous = jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
                         + " session_scope_key = ? AND record_key = ?",
@@ -259,6 +339,25 @@ public class ManagedExtensionRecordStore {
                 .stream().findFirst().orElse(null);
         String operationHash = sha256(operationId);
         if (previous == null) {
+            if (domain.equals("mcp_operation")) {
+                String configKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "mcp_configuration", record.get("configurationId").textValue());
+                String configResource = jdbc.query("SELECT record_resource_id FROM"
+                                + " qwen_managed_session_extension_record WHERE"
+                                + " session_scope_key = ? AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, configKey).stream().findFirst().orElse(null);
+                require(configResource != null,
+                        "MCP operation must bind to its active committed configuration.");
+                JsonNode config = readBody(resources.apply(configResource));
+                require("active".equals(config.get("releaseState").textValue())
+                        && "settled".equals(config.get("run").get("state").textValue())
+                        && List.of("serverId", "serverRevision", "configRevision",
+                                "catalogRevision", "connectionGeneration").stream()
+                                .allMatch(key -> ManagedMcpRecords.same(config.get(key), record.get(key)))
+                        && ManagedMcpRecords.same(config.get("run").get("definition"), record.get("run").get("definition")),
+                        "MCP operation must bind to its active committed configuration.");
+            }
             require(body.isStart().test(record), "The first revision of "
                     + domain + " record " + recordId + " must open its run.");
             // The command that opens a record becomes the operation of its
@@ -301,7 +400,7 @@ public class ManagedExtensionRecordStore {
                     scopeKey, recordKey, tenantId, workspaceId, sessionId,
                     domain, recordId, operationHash, revision, resourceId,
                     body.taskKind(),
-                    projection.state(), projection.runtimeState(),
+                    body.taskKind() == null ? null : projection.state(), projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.createdAt(),
                     projection.startedAt(), projection.settledAt());
@@ -313,14 +412,14 @@ public class ManagedExtensionRecordStore {
                             + " delivery_state = ?, started_at = ?,"
                             + " settled_at = ? WHERE session_scope_key = ?"
                             + " AND record_key = ?",
-                    revision, resourceId, projection.state(),
+                    revision, resourceId, body.taskKind() == null ? null : projection.state(),
                     projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
                     projection.settledAt(), scopeKey, recordKey);
         }
-        if (previous == null
-                || !Objects.equals(previous.projection(), projection)) {
+        if (body.taskKind() != null && (previous == null
+                || !Objects.equals(previous.projection(), projection))) {
             announce(tenantId, sessionId,
                     ManagedExtensionProjection.taskId(recordKey),
                     projection.state(), revision);
@@ -386,7 +485,7 @@ public class ManagedExtensionRecordStore {
     }
 
     /** A JSON object as the authority's reader parses it, or null. */
-    private static JsonNode parse(String text) {
+    static JsonNode parse(String text) {
         try {
             JsonNode node = JSON.readTree(text);
             return node != null && node.isObject() && finite(node) ? node
@@ -410,12 +509,24 @@ public class ManagedExtensionRecordStore {
     }
 
     private static String sha256(String value) {
+        return sha256(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String sha256(byte[] value) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance(
-                    "SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+                    "SHA-256").digest(value));
         } catch (NoSuchAlgorithmException error) {
             throw new IllegalStateException("SHA-256 is unavailable", error);
         }
+    }
+
+    private static void requireReference(StoredResource resource, JsonNode ref) {
+        require(resource.kind().equals(ref.get("kind").textValue())
+                && resource.schemaVersion() == ref.get("schemaVersion").longValue()
+                && resource.byteLength() == ref.get("byteLength").longValue()
+                && resource.digest().equals(ref.get("digest").textValue()),
+                "The MCP reference does not match its committed resource.");
     }
 
     private static void require(boolean condition, String message) {
