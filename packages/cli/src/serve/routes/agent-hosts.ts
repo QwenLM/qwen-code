@@ -424,12 +424,6 @@ export function registerAgentHostTransportRoutes(
       }
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       if (!requireEnabled(runtime.workspaceCwd, res)) return;
-      if (
-        !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
-      ) {
-        res.status(401).json({ error: 'Invalid Agent Host credential.' });
-        return;
-      }
       try {
         const deadline = Date.now() + waitMs;
         // An empty poll backs off: every pickup scan walks the agent store
@@ -447,14 +441,35 @@ export function registerAgentHostTransportRoutes(
             return;
           }
           if (!requireEnabled(runtime.workspaceCwd, res)) return;
-          const assignment = await pickupRunForHost(
-            runtime.workspaceCwd,
-            hostId,
-          );
+          if (
+            !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
+          ) {
+            res.status(401).json({ error: 'Invalid Agent Host credential.' });
+            return;
+          }
+          if (req.socket.destroyed || res.writableEnded) return;
           if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
             res.status(404).json({ error: 'Workspace not found.' });
             return;
           }
+          if (!requireEnabled(runtime.workspaceCwd, res)) return;
+          const assignment = await pickupRunForHost(
+            runtime.workspaceCwd,
+            hostId,
+          );
+          if (
+            assignment &&
+            !(await authenticateAgentHost(runtime.workspaceCwd, hostId, secret))
+          ) {
+            res.status(401).json({ error: 'Invalid Agent Host credential.' });
+            return;
+          }
+          if (req.socket.destroyed || res.writableEnded) return;
+          if (runtimeFor(workspaceRegistry, workspaceId) !== runtime) {
+            res.status(404).json({ error: 'Workspace not found.' });
+            return;
+          }
+          if (!requireEnabled(runtime.workspaceCwd, res)) return;
           if (assignment) {
             res.json({ assignment });
             return;

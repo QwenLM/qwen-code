@@ -13,10 +13,11 @@ import type {
 } from '../workspace-registry.js';
 import { registerAgentHostTransportRoutes } from './agent-hosts.js';
 
-const { pickup, heartbeat, applyResult } = vi.hoisted(() => ({
+const { pickup, heartbeat, applyResult, authenticate } = vi.hoisted(() => ({
   pickup: vi.fn<() => Promise<unknown>>(),
   heartbeat: vi.fn<() => Promise<unknown>>(),
   applyResult: vi.fn<() => Promise<unknown>>(),
+  authenticate: vi.fn<() => Promise<unknown>>(),
 }));
 
 vi.mock(
@@ -35,7 +36,7 @@ vi.mock(
     ...(await importOriginal<
       typeof import('@qwen-code/qwen-code-core/agents/workspace-agents/store.js')
     >()),
-    authenticateAgentHost: async () => true,
+    authenticateAgentHost: authenticate,
     heartbeatAgentHost: heartbeat,
   }),
 );
@@ -44,6 +45,7 @@ beforeEach(() => {
   pickup.mockReset();
   heartbeat.mockReset();
   applyResult.mockReset();
+  authenticate.mockReset().mockResolvedValue(true);
 });
 
 function setup(initiallyEnabled = true) {
@@ -143,6 +145,57 @@ it('stops polling when the selected workspace becomes unavailable', async () => 
   expect((await response).status).toBe(404);
   expect(pickup).toHaveBeenCalledOnce();
 });
+
+it('stops an open pickup poll when the Host credential is revoked', async () => {
+  pickup.mockResolvedValue(undefined);
+  const response = setup().poll();
+  await vi.waitFor(() => expect(pickup).toHaveBeenCalledOnce());
+  authenticate.mockResolvedValue(undefined);
+
+  const refused = await response;
+  expect(refused.status).toBe(401);
+  expect(refused.body).toEqual({ error: 'Invalid Agent Host credential.' });
+  expect(pickup).toHaveBeenCalledOnce();
+});
+
+it('withholds a claimed assignment if the Host credential was revoked during pickup', async () => {
+  let completePickup!: (assignment: unknown) => void;
+  pickup.mockReturnValue(
+    new Promise((resolve) => {
+      completePickup = resolve;
+    }),
+  );
+  const response = setup().poll();
+  await vi.waitFor(() => expect(pickup).toHaveBeenCalledOnce());
+  authenticate.mockResolvedValue(undefined);
+  completePickup({ prompt: 'private' });
+
+  const refused = await response;
+  expect(refused.status).toBe(401);
+  expect(refused.body).toEqual({ error: 'Invalid Agent Host credential.' });
+  expect(JSON.stringify(refused.body)).not.toContain('private');
+});
+
+it.each(['removed', 'disabled'])(
+  'does not claim work if the workspace is %s while authentication is pending',
+  async (state) => {
+    let completeAuthentication!: (authenticated: boolean) => void;
+    authenticate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        completeAuthentication = resolve;
+      }),
+    );
+    const { poll, remove, disable } = setup();
+    const response = poll();
+    await vi.waitFor(() => expect(authenticate).toHaveBeenCalledOnce());
+    if (state === 'removed') remove();
+    else disable();
+    completeAuthentication(true);
+
+    expect((await response).status).toBe(404);
+    expect(pickup).not.toHaveBeenCalled();
+  },
+);
 
 it('backs off an idle pickup poll instead of scanning at a fixed cadence', async () => {
   // Each empty scan walks the agent store under its transaction; a fixed
