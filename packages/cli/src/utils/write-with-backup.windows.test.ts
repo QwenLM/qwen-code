@@ -34,7 +34,8 @@ let reads = 0;
 const timer = setInterval(() => {
   try {
     const settings = JSON.parse(fs.readFileSync(target, 'utf8'));
-    if (settings.tools?.executionSandbox?.network !== 'closed') failures.push('policy missing');
+    const policy = settings.tools?.executionSandbox;
+    if (policy?.filesystem !== 'read-only' || policy?.network !== 'closed') failures.push('policy missing');
     reads++;
   } catch (error) { failures.push(String(error)); }
 }, 1);
@@ -73,7 +74,7 @@ fs.writeFileSync(ready, 'ready');`,
             successfulWrites++;
           } catch (error) {
             expect(error).toMatchObject({ code: 'EPERM' });
-            expect(fs.readFileSync(target, 'utf8')).toBe(published);
+            expect(fs.readFileSync(target)).toEqual(Buffer.from(published));
           }
           if (index % 10 === 0) await delay(5);
         }
