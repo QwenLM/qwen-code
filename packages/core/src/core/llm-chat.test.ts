@@ -689,7 +689,7 @@ describe('LlmChat', async () => {
     ]);
     syncReviewedDeclarations.mockClear();
     vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-      streamResponse(stopResponse([{ text: 'Done.' }])),
+      streamOf(stopResponse([{ text: 'Done.' }])),
     );
 
     const stream = await chat.sendMessageStream(

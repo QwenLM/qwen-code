@@ -6008,7 +6008,7 @@ Other open files:
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
 
-      await fromAsync(
+      await collect(
         client.sendMessageStream(
           [{ text: 'What do you know about me?' }],
           new AbortController().signal,
@@ -8011,6 +8011,7 @@ Other open files:
 
       mockTurnRunFn.mockReturnValue(textTurn('Done'));
 
+      const tokenCount = vi.fn();
       const mockChat = installChat({
         getHistory: vi
           .fn()
@@ -8018,6 +8019,7 @@ Other open files:
             userText('I prefer terse responses.'),
             modelText('Done'),
           ]),
+        getLastPromptTokenCount: tokenCount,
       });
 
       const events = await run(
@@ -8047,8 +8049,6 @@ Other open files:
         window,
         mockConfig.getAutoCompactThreshold(),
       );
-      const tokenCount = vi.fn();
-      mockChat.getLastPromptTokenCount = tokenCount;
       tokenCount.mockReturnValue(0);
       expect(cooldownPosition?.()).toBe(false);
       tokenCount.mockReturnValue(warn - 1);

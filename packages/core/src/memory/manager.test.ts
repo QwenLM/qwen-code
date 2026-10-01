@@ -1629,7 +1629,7 @@ describe('MemoryManager', () => {
         },
       ) =>
         mgr.scheduleExtract({
-          projectRoot,
+          projectRoot: tmp.projectRoot,
           sessionId: 'sess-1',
           history,
           ...extra,
@@ -1728,7 +1728,7 @@ describe('MemoryManager', () => {
         );
         expect(
           mgr
-            .listTasksByType('extract', projectRoot)
+            .listTasksByType('extract', tmp.projectRoot)
             .filter((t) => t.metadata?.['skippedReason'] === 'cooldown'),
         ).toHaveLength(2);
       });
@@ -1834,7 +1834,7 @@ describe('MemoryManager', () => {
         await mgr.drain();
         expect(
           mgr
-            .listTasksByType('extract', projectRoot)
+            .listTasksByType('extract', tmp.projectRoot)
             .some((task) => task.status === 'failed'),
         ).toBe(true);
 
