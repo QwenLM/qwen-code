@@ -57,6 +57,10 @@ function makeMessage(overrides?: Partial<MailboxMessage>): MailboxMessage {
   };
 }
 
+/** Write makeMessage(overrides) to `to` (the worker by default) in 'team'. */
+const post = (overrides?: Partial<MailboxMessage>, to = 'worker') =>
+  writeMessage('team', to, makeMessage(overrides));
+
 describe('mailbox', () => {
   let tmpDir: string;
 
@@ -69,8 +73,6 @@ describe('mailbox', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  // ─── getInboxPath ──────────────────────────────────────────
-
   it('returns correct inbox path', () => {
     const p = getInboxPath('my-team', 'worker');
     expect(p).toBe(
@@ -78,14 +80,10 @@ describe('mailbox', () => {
     );
   });
 
-  // ─── readInbox ─────────────────────────────────────────────
-
   it('returns empty array for nonexistent inbox', async () => {
     const messages = await readInbox('team', 'nobody');
     expect(messages).toEqual([]);
   });
-
-  // ─── writeMessage + readInbox ──────────────────────────────
 
   it('writes and reads a message', async () => {
     const msg = makeMessage({ text: 'task assigned' });
@@ -98,8 +96,8 @@ describe('mailbox', () => {
   });
 
   it('appends multiple messages', async () => {
-    await writeMessage('team', 'worker', makeMessage({ text: 'first' }));
-    await writeMessage('team', 'worker', makeMessage({ text: 'second' }));
+    await post({ text: 'first' });
+    await post({ text: 'second' });
 
     const messages = await readInbox('team', 'worker');
     expect(messages).toHaveLength(2);
@@ -114,24 +112,15 @@ describe('mailbox', () => {
     const old = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const recent = new Date(Date.now() - 60 * 1000).toISOString();
 
-    await writeMessage(
-      'team',
+    await post({ text: 'aged-read', read: true, timestamp: old }, 'leader');
+    await post(
+      { text: 'recent-read', read: true, timestamp: recent },
       'leader',
-      makeMessage({ text: 'aged-read', read: true, timestamp: old }),
     );
-    await writeMessage(
-      'team',
-      'leader',
-      makeMessage({ text: 'recent-read', read: true, timestamp: recent }),
-    );
-    await writeMessage(
-      'team',
-      'leader',
-      makeMessage({ text: 'aged-unread', read: false, timestamp: old }),
-    );
+    await post({ text: 'aged-unread', read: false, timestamp: old }, 'leader');
 
     // A subsequent write runs the retention compaction.
-    await writeMessage('team', 'leader', makeMessage({ text: 'fresh' }));
+    await post({ text: 'fresh' }, 'leader');
 
     const texts = (await readInbox('team', 'leader')).map((m) => m.text);
     expect(texts).not.toContain('aged-read'); // read + aged → dropped
@@ -140,15 +129,11 @@ describe('mailbox', () => {
     expect(texts).toContain('fresh');
   });
 
-  // ─── Lock compromise ─────────────────────────────────────
-
   it('still writes the message when the lock is compromised', async () => {
     const { lockSpy, getOnCompromised } = mockCompromisedLock();
 
     try {
-      await expect(
-        writeMessage('team', 'worker', makeMessage({ text: 'compromised' })),
-      ).resolves.toBeUndefined();
+      await expect(post({ text: 'compromised' })).resolves.toBeUndefined();
       expect(getOnCompromised()).toBeTypeOf('function');
     } finally {
       lockSpy.mockRestore();
@@ -158,11 +143,9 @@ describe('mailbox', () => {
     expect(messages.map((m) => m.text)).toEqual(['compromised']);
   });
 
-  // ─── consumeUnread ─────────────────────────────────────────
-
   it('returns unread messages and marks them read', async () => {
-    await writeMessage('team', 'worker', makeMessage({ text: 'a' }));
-    await writeMessage('team', 'worker', makeMessage({ text: 'b' }));
+    await post({ text: 'a' });
+    await post({ text: 'b' });
 
     const unread = await consumeUnread('team', 'worker');
     expect(unread).toHaveLength(2);
@@ -174,7 +157,7 @@ describe('mailbox', () => {
   });
 
   it('returns empty when all messages already read', async () => {
-    await writeMessage('team', 'worker', makeMessage({ read: true }));
+    await post({ read: true });
     const unread = await consumeUnread('team', 'worker');
     expect(unread).toEqual([]);
   });
@@ -186,22 +169,9 @@ describe('mailbox', () => {
     expect(unread).toEqual([]);
   });
 
-  // ─── consumeUnread (type filter) ───────────────────────────
-
   it('only consumes messages of matching type', async () => {
-    await writeMessage(
-      'team',
-      'worker',
-      makeMessage({
-        text: 'shutdown',
-        type: 'shutdown_request',
-      }),
-    );
-    await writeMessage(
-      'team',
-      'worker',
-      makeMessage({ text: 'task', type: 'task_assignment' }),
-    );
+    await post({ text: 'shutdown', type: 'shutdown_request' });
+    await post({ text: 'task', type: 'task_assignment' });
 
     const shutdowns = await consumeUnread('team', 'worker', 'shutdown_request');
     expect(shutdowns).toHaveLength(1);
@@ -214,10 +184,8 @@ describe('mailbox', () => {
     expect(unreadRemaining[0]!.type).toBe('task_assignment');
   });
 
-  // ─── clearInbox ────────────────────────────────────────────
-
   it('clears an inbox', async () => {
-    await writeMessage('team', 'worker', makeMessage());
+    await post();
     await clearInbox('team', 'worker');
 
     const messages = await readInbox('team', 'worker');
@@ -228,8 +196,6 @@ describe('mailbox', () => {
     await expect(clearInbox('team', 'nobody')).resolves.not.toThrow();
   });
 
-  // ─── clearAllInboxes ───────────────────────────────────────
-
   it('clears all inboxes for a team', async () => {
     await writeMessage('team', 'w1', makeMessage());
     await writeMessage('team', 'w2', makeMessage());
@@ -239,8 +205,6 @@ describe('mailbox', () => {
     expect(await readInbox('team', 'w1')).toEqual([]);
     expect(await readInbox('team', 'w2')).toEqual([]);
   });
-
-  // ─── disposeInboxLocks ─────────────────────────────────────
 
   it('evicts inbox locks for one team and reports the count', async () => {
     // writeMessage creates a per-inbox lock under the team's inboxes dir.
@@ -266,8 +230,6 @@ describe('mailbox', () => {
     expect(disposeInboxLocks('gamma')).toBe(0);
   });
 
-  // ─── sendStructuredMessage ─────────────────────────────────
-
   it('sends a structured message with type', async () => {
     await sendStructuredMessage('team', 'worker', {
       from: 'leader',
@@ -286,22 +248,19 @@ describe('mailbox', () => {
     expect(messages[0]!.timestamp).toBeDefined();
   });
 
-  // ─── Corrupt inbox handling ────────────────────────────────
-
   it('writeMessage quarantines a corrupt inbox and keeps delivering', async () => {
-    // A corrupt inbox used to fail every subsequent writeMessage /
-    // consumeUnread on the same file — the teammate could never
-    // receive another message, including shutdown requests. The fix
-    // mirrors the leader path: the corrupt file is renamed to
-    // `.corrupt-{ts}` (preserved for forensics, never clobbered)
-    // and delivery continues on a fresh inbox.
-    await writeMessage('team', 'worker', makeMessage({ text: 'preserved-1' }));
+    // A corrupt inbox used to fail every later writeMessage / consumeUnread on
+    // the file, so the teammate never received another message, shutdown
+    // requests included. Like the leader path, the corrupt file is renamed to
+    // `.corrupt-{ts}` (kept for forensics, never clobbered) and delivery
+    // continues on a fresh inbox.
+    await post({ text: 'preserved-1' });
 
     // Truncate the file mid-array to simulate a kill during write.
     const inboxPath = getInboxPath('team', 'worker');
     await fs.writeFile(inboxPath, '[ {"from":"leader","te', 'utf-8');
 
-    await writeMessage('team', 'worker', makeMessage({ text: 'new' }));
+    await post({ text: 'new' });
 
     // The corrupt content survives in the quarantine file.
     const dir = path.dirname(inboxPath);
@@ -320,12 +279,10 @@ describe('mailbox', () => {
     expect(consumed.map((m) => m.text)).toEqual(['new']);
   });
 
-  // ─── Concurrent writes ────────────────────────────────────
-
   it('handles concurrent writes without corruption', async () => {
     const count = 10;
     const promises = Array.from({ length: count }, (_, i) =>
-      writeMessage('team', 'worker', makeMessage({ text: `msg-${i}` })),
+      post({ text: `msg-${i}` }),
     );
     await Promise.all(promises);
 
@@ -337,31 +294,24 @@ describe('mailbox', () => {
     expect(texts).toEqual(expected);
   });
 
-  // ─── Lockless reads during concurrent writes ──────────────
-  //
-  // Regression: `writeMessage` previously did `fs.writeFile`
-  // (open with O_TRUNC) under a `proper-lockfile` write lock,
-  // but `readInbox` does not take that lock — the leader's
-  // 500ms inbox poll therefore could observe a 0-byte or
-  // partially-written file during the brief truncate→write
-  // window. `JSON.parse` would throw and
-  // `readLeaderInboxOrQuarantine` would rename the inbox to
-  // `.corrupt-{ts}`, dropping unread teammate messages.
-  //
-  // The fix replaces O_TRUNC writes with tmp-file + rename;
-  // POSIX rename is atomic so a lockless reader either sees
-  // the pre-write or post-write file, never a partial one.
-  // This test stresses the race: many writers + many readers
-  // running concurrently, none of the reads should throw.
+  // Regression (lockless reads during concurrent writes): `writeMessage` did
+  // `fs.writeFile` (O_TRUNC) under a `proper-lockfile` write lock, but
+  // `readInbox` takes no lock, so the leader's 500ms poll could see a 0-byte or
+  // partial file in the truncate→write window; `JSON.parse` threw and
+  // `readLeaderInboxOrQuarantine` renamed the inbox to `.corrupt-{ts}`,
+  // dropping unread teammate messages. Writes now go tmp-file + rename (atomic
+  // on POSIX), so a lockless reader sees the old or new file, never a partial
+  // one. This stresses the race: many concurrent writers and readers, and no
+  // read may throw.
   it('lockless readInbox never sees a partial file mid-write', async () => {
     const writeCount = 10;
     const readCount = 200;
 
     // Seed the inbox so the first reads have something to parse.
-    await writeMessage('team', 'worker', makeMessage({ text: 'seed' }));
+    await post({ text: 'seed' });
 
     const writes = Array.from({ length: writeCount }, (_, i) =>
-      writeMessage('team', 'worker', makeMessage({ text: `w-${i}` })),
+      post({ text: `w-${i}` }),
     );
     const reads = Array.from({ length: readCount }, () =>
       readInbox('team', 'worker'),

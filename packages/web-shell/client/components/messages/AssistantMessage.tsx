@@ -28,6 +28,8 @@ import {
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
+import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
+import { AuthorAvatar } from './AuthorAvatar';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -35,6 +37,7 @@ import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
   content: string;
+  author?: DaemonMessageAuthor;
   isStreaming?: boolean;
   timestamp?: number;
   onBranchSession?: () => void | Promise<void>;
@@ -54,6 +57,7 @@ interface AssistantMessageProps {
 
 export const AssistantMessage = memo(function AssistantMessage({
   content,
+  author,
   isStreaming,
   timestamp,
   onBranchSession,
@@ -134,6 +138,12 @@ export const AssistantMessage = memo(function AssistantMessage({
   );
   return (
     <div className={styles.message}>
+      {author && (
+        <div className={styles.author}>
+          <AuthorAvatar name={author.name} color={author.color} />
+          <span className={styles.authorName}>{author.name}</span>
+        </div>
+      )}
       {content && (
         <div
           className={`${styles.content}${
@@ -283,6 +293,7 @@ function BranchIcon() {
 
 interface ThinkingMessageProps {
   content: string;
+  author?: DaemonMessageAuthor;
   isStreaming?: boolean;
   timestamp?: number;
   isLocateFlashing?: boolean;
@@ -322,6 +333,8 @@ interface ThinkingSummaryHeaderProps {
   documentMode: boolean;
   /** Pre-localized running/done label, including the elapsed duration. */
   summaryText: string;
+  /** Whose thought this is, in a transcript with several agents. */
+  authorName?: string;
   /**
    * Thought content for the zh-CN translate button. Omitted while streaming —
    * the button is hidden then — so streamed content growth does not defeat the
@@ -343,6 +356,7 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
   thinkingExpanded,
   documentMode,
   summaryText,
+  authorName,
   translateContent,
   showTranslateButton,
   generateContent,
@@ -380,6 +394,9 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
         <span className={styles.thinkingSummaryIcon} aria-hidden="true">
           <ThinkingDoneIcon />
         </span>
+        {authorName && (
+          <span className={styles.thinkingAuthor}>{authorName}</span>
+        )}
         <span
           className={
             thinkingActive
@@ -413,6 +430,7 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
 
 export const ThinkingMessage = memo(function ThinkingMessage({
   content,
+  author,
   isStreaming,
   timestamp,
   isLocateFlashing = false,
@@ -489,6 +507,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               thinkingExpanded={showThinking}
               documentMode={documentMode}
               summaryText={summaryText}
+              authorName={author?.name}
               translateContent={thinkingActive ? undefined : content}
               showTranslateButton={
                 !documentMode &&

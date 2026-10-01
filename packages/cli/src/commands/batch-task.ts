@@ -213,9 +213,19 @@ export interface TaskAttempt {
   /** Terminal provider status and job-level errors, recorded at collect. */
   finalStatus?: string;
   jobErrors?: string[];
-  /** Settled, downloaded and cleaned up: later collects only re-read the
-   * local files and never ask the provider about this batch again. */
+  /** Harvested: every item of the attempt reached its state from settled
+   * results. Later collects only re-read the local files for delivery; this
+   * alone decides whether the attempt still blocks retry, cancel and clean. */
   collected?: boolean;
+  /** The remote input/output/error files are gone (deleted, or 404). A
+   * manual collect retries cleanup until then; it never blocks anything. */
+  remoteCleaned?: boolean;
+  /** Remote files deliberately left for inspection: the provider's result
+   * file could not be read even after a fresh download. */
+  remoteKept?: boolean;
+  /** A previous pass found the result files short and dropped them for a
+   * fresh download; a second short harvest from fresh copies is final. */
+  harvestShort?: boolean;
 }
 
 export type TaskStatus =

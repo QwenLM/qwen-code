@@ -11,6 +11,7 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  readWorktreeSessionMarker,
   canonicalSessionPrUrl,
   readSessionPrs,
   toSessionPrInfo,
@@ -36,6 +37,10 @@ import {
 import { laterActivityTimestamp } from './activity-timestamp.js';
 import { classifyTopLevelConversationSource } from '../../runtime/live-session-source.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  HIDDEN_CATALOG_SOURCE_TYPES,
+  isHiddenCatalogSource,
+} from '../../runtime/agent-session-source.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -446,7 +451,10 @@ async function enrichWorktreeSidecars(
       signal?.throwIfAborted();
       sidecar = null;
     }
-    if (sidecar) {
+    if (
+      sidecar &&
+      (await readWorktreeSessionMarker(sidecar.worktreePath)) === sessionId
+    ) {
       bySessionId.set(sessionId, {
         ...summary,
         worktree: {
@@ -725,6 +733,7 @@ async function loadAllPersistedSummaries(
       size: 10_000,
       archiveState,
       signal,
+      excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     });
     signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
@@ -1089,6 +1098,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   }
 
   const filtered = [...bySessionId.values()].filter((session) => {
+    if (isHiddenCatalogSource(session.sourceType)) return false;
     if (!matchesSessionMetadataSource(session, options)) return false;
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
@@ -1290,6 +1300,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
   const matches = [...bySessionId.values()]
     .filter(
       (session) =>
+        !isHiddenCatalogSource(session.sourceType) &&
         (filter.parentSessionId === undefined ||
           session.parentSessionId === filter.parentSessionId) &&
         matchesSessionMetadataSource(session, filter),
@@ -1457,6 +1468,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     cursor: numericCursor,
     size: pageSize,
     archiveState,
+    excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
     ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
   readOptions.signal?.throwIfAborted();
@@ -1487,7 +1499,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return { sessions, nextCursor };
   }
 
-  const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
+  const liveSessions = bridge
+    .listWorkspaceSessions(workspaceCwd)
+    .filter((session) => !isHiddenCatalogSource(session.sourceType));
   for (const live of liveSessions) {
     const existing = bySessionId.get(live.sessionId);
     if (existing) {
@@ -1554,6 +1568,7 @@ export async function listLiveWorkspaceSessionsForResponse(
         : undefined;
     const sessions = bridge
       .listWorkspaceSessions(workspaceCwd)
+      .filter((session) => !isHiddenCatalogSource(session.sourceType))
       .sort((a, b) =>
         compareLiveSessionCursorKeys(
           getLiveSessionCursorKey(a),
@@ -1634,7 +1649,7 @@ export async function searchWorkspaceSessionsForResponse(
     for (const hit of hits) {
       readOptions.signal?.throwIfAborted();
       const item = await sessionService.getSessionListItem(hit.sessionId);
-      if (item)
+      if (item && !isHiddenCatalogSource(item.sourceType))
         bySessionId.set(
           hit.sessionId,
           applyOrganization(
@@ -1677,14 +1692,21 @@ export async function getWorkspaceSessionInfoForResponse(
   workspaceCwd: string,
   options: { includeLive?: boolean } = {},
 ): Promise<WorkspaceSessionInfoResult> {
-  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts();
+  const counts = await new SessionService(workspaceCwd).getSessionInfoCounts({
+    excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
+  });
   return {
     active: counts.active,
     archived: counts.archived,
     total: counts.total,
     ...(options.includeLive === false
       ? {}
-      : { live: bridge.listWorkspaceSessions(workspaceCwd).length }),
+      : {
+          live: bridge
+            .listWorkspaceSessions(workspaceCwd)
+            .filter((session) => !isHiddenCatalogSource(session.sourceType))
+            .length,
+        }),
     expensive: true,
     cost: 'disk_scan',
     ...(counts.truncated ? { truncated: true } : {}),

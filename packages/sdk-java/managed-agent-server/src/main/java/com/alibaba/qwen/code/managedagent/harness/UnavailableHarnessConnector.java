@@ -40,7 +40,7 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void closeSession(String tenantId, String sessionId) {
+    public String closeSession(String tenantId, String sessionId) {
         throw unavailable();
     }
 

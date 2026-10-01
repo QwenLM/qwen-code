@@ -71,7 +71,11 @@ import {
   type HookProgressOutcome,
 } from '../confirmation-bus/types.js';
 import { approvalModeToPermissionMode } from './permission-mode.js';
-import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
+import { randomUUID } from 'node:crypto';
+import {
+  assertHookExecutionOwner,
+  resolveHookExecutionOwner,
+} from './hook-execution-context.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
@@ -211,6 +215,7 @@ export class HookEventHandler {
     hookAggregator: HookAggregator,
     sessionHooksManager: SessionHooksManager,
     messagesProvider?: MessagesProvider,
+    private readonly runtimeId: string = randomUUID(),
   ) {
     this.config = config;
     this.hookPlanner = hookPlanner;
@@ -946,8 +951,24 @@ export class HookEventHandler {
     };
 
     try {
-      // Create execution plan from registry hooks
-      const plan = this.hookPlanner.createExecutionPlan(eventName, context);
+      const owner = Object.freeze({
+        ...resolveHookExecutionOwner(
+          this.runtimeId,
+          this.config.getSessionId(),
+        ),
+        sessionId: input.session_id,
+        agentId: input.agent_id ?? null,
+      });
+      assertHookExecutionOwner(
+        owner,
+        this.runtimeId,
+        this.config.getSessionId(),
+      );
+      const plan = this.hookPlanner.createExecutionPlan(
+        eventName,
+        context,
+        owner,
+      );
 
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
@@ -1020,7 +1041,7 @@ export class HookEventHandler {
       // Read once per batch so a hook's start and end carry the same value by
       // construction rather than by relying on async context propagation.
       // Same source as the hook input's `agent_id`.
-      const agentId = getCurrentAgentId() ?? undefined;
+      const agentId = owner.agentId ?? undefined;
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
@@ -1166,11 +1187,16 @@ export class HookEventHandler {
     const sourceType = this.config.getSessionSourceType();
     const sourceId = this.config.getSessionSourceId();
 
-    const agentId = getCurrentAgentId();
+    const owner = resolveHookExecutionOwner(
+      this.runtimeId,
+      this.config.getSessionId(),
+    );
+    assertHookExecutionOwner(owner, this.runtimeId, this.config.getSessionId());
+    const agentId = owner.agentId;
     const promptId = promptIdContext.getStore();
 
     return {
-      session_id: this.config.getSessionId(),
+      session_id: owner.sessionId,
       ...(sourceType !== undefined ? { source_type: sourceType } : {}),
       ...(sourceId !== undefined ? { source_id: sourceId } : {}),
       transcript_path: transcriptPath,
