@@ -292,6 +292,93 @@ describe('Managed MCP Runtime', () => {
     }
   });
 
+  it('settles a timed-out release only after physical close, retaining another connection', async () => {
+    const instance = runtime([
+      stdioDefinition(),
+      { ...stdioDefinition(), serverId: 'second' },
+    ]);
+    const first = (await settled(instance, configure())).catalog!;
+    const otherConfig = {
+      ...configure(),
+      operationId: 'other-configuration',
+      serverId: 'second',
+      grant: grant('other-configuration'),
+    };
+    const other = (await settled(instance, otherConfig)).catalog!;
+    let finishClose!: () => void;
+    const closing = new Promise<void>((resolve) => {
+      finishClose = resolve;
+    });
+    const physicalClose = Client.prototype.close;
+    const close = vi
+      .spyOn(Client.prototype, 'close')
+      .mockImplementationOnce(async function (this: Client) {
+        await closing;
+        await physicalClose.call(this);
+      });
+    const release: ManagedMcpControl = {
+      kind: 'mcp-release',
+      sessionKey,
+      operationId: 'slow-release',
+      serverId: first.serverId,
+      serverRevision: first.serverRevision,
+      connectionGeneration: first.connectionGeneration,
+      grant: grant('configuration-1'),
+    };
+    try {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      expect((await instance.control(runtimeSessionId, release)).state).toBe(
+        'running',
+      );
+      await vi.advanceTimersByTimeAsync(5_001);
+      const status: ManagedMcpControl = {
+        kind: 'mcp-status',
+        sessionKey,
+        operationId: 'status',
+        targetOperationId: release.operationId,
+      };
+      expect(await instance.control(runtimeSessionId, status)).toMatchObject({
+        state: 'outcome_unknown',
+        error: { code: 'managed_mcp_drain_unknown' },
+      });
+      expect((await instance.control(runtimeSessionId, release)).state).toBe(
+        'outcome_unknown',
+      );
+      expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+      vi.useRealTimers();
+      finishClose();
+      await vi.waitFor(async () => {
+        expect(await instance.control(runtimeSessionId, status)).toEqual({
+          operationId: release.operationId,
+          state: 'settled',
+          response: { released: true },
+        });
+      });
+      expect(await instance.control(runtimeSessionId, release)).toMatchObject({
+        state: 'settled',
+        response: { released: true },
+      });
+      expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+      expect(close).toHaveBeenCalledOnce();
+      expect(
+        (
+          await settled(instance, {
+            ...release,
+            operationId: 'release-other',
+            serverId: 'second',
+            connectionGeneration: other.connectionGeneration,
+            grant: grant('other-configuration'),
+          })
+        ).response,
+      ).toEqual({ released: true });
+      expect(instance.hasHolds(runtimeSessionId)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      finishClose();
+      close.mockRestore();
+    }
+  });
+
   it('refuses an MCP tool when a provider claims its Session during context lookup', async () => {
     const instance = runtime();
     const catalog = (await settled(instance, configure())).catalog!;

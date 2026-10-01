@@ -44,7 +44,7 @@ public final class ManagedMcpRecords {
                 && run.get("executionCallId").isNull(),
                 "MCP configuration must identify its physical request through effectId");
         String release = record.get("releaseState").textValue();
-        require(release != null && List.of("active", "releasing", "released")
+        require(release != null && List.of("active", "releasing", "drained", "released")
                 .contains(release), "Invalid MCP releaseState");
         require("active".equals(release) || canRelease(run),
                 "Only a conclusively completed MCP configuration can be released");
@@ -110,6 +110,8 @@ public final class ManagedMcpRecords {
                     && (before.equals(after)
                             || canRelease(previous.get("run"))
                                     && "active".equals(before) && "releasing".equals(after)
+                            || "releasing".equals(before) && "drained".equals(after)
+                            || "drained".equals(before) && "released".equals(after)
                             || "releasing".equals(before) && "released".equals(after))
                     && (previous.get("catalogRef").isNull()
                             || same(without(previous, "releaseState"), without(next, "releaseState")));
