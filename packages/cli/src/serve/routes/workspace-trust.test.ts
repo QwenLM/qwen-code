@@ -212,4 +212,51 @@ describe('workspace trust grant', () => {
       workspaceCwd: selected.workspaceCwd,
     });
   });
+
+  it('refuses both grant routes with 503 while the runtime is not active', async () => {
+    const selected = runtime('existing');
+    const primary = runtime('existing', true);
+    const registry = createWorkspaceRegistry([primary, selected]);
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceTrustRoutes(app, {
+      boundWorkspace: primary.workspaceCwd,
+      workspace: primary.workspaceService,
+      mutate: allowMutation,
+      safeBody: (req) => req.body as Record<string, unknown>,
+      parseAndValidateClientId: () => undefined,
+      workspaceRegistry: registry,
+    });
+    registerWorkspaceQualifiedTrustRoutes(app, {
+      workspaceRegistry: registry,
+      mutate: allowMutation,
+      safeBody: (req) => req.body as Record<string, unknown>,
+    });
+
+    // Primary mid-rebuild (transitioning) and secondary draining.
+    registry.beginReplacement(registry.primaryEntry, 'rev-2');
+    registry.beginDrain(selected);
+
+    const primaryResponse = await request(app).post('/workspace/trust/grant');
+    expect(primaryResponse.status).toBe(503);
+    expect(primaryResponse.body).toEqual({
+      code: 'workspace_runtime_unavailable',
+      error: 'Workspace runtime is not active',
+    });
+    expect(primaryResponse.headers['retry-after']).toBe('1');
+    expect(primary.workspaceService.grantWorkspaceTrust).not.toHaveBeenCalled();
+
+    const qualifiedResponse = await request(app).post(
+      `/workspaces/${encodeURIComponent(selected.workspaceId)}/trust/grant`,
+    );
+    expect(qualifiedResponse.status).toBe(503);
+    expect(qualifiedResponse.body).toEqual({
+      code: 'workspace_runtime_unavailable',
+      error: 'Workspace runtime is not active',
+    });
+    expect(qualifiedResponse.headers['retry-after']).toBe('1');
+    expect(
+      selected.workspaceService.grantWorkspaceTrust,
+    ).not.toHaveBeenCalled();
+  });
 });

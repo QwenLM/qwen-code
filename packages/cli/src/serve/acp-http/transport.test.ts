@@ -7857,6 +7857,19 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('dispatches _qwen/workspace/trust/grant', async () => {
+    // The pre-write status must differ from the post-write grant result on
+    // the asserted fields, so the reply below can only be satisfied by the
+    // grant result — not by the dispatcher echoing the pre-write status.
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'untrusted', source: 'file' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
     const grantSpy = vi.spyOn(fakeWorkspace, 'grantWorkspaceTrust');
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -7879,6 +7892,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
     expect(grantSpy).toHaveBeenCalledTimes(1);
+    trustSpy.mockRestore();
     grantSpy.mockRestore();
   });
 
