@@ -404,9 +404,11 @@ public final class WorkspaceRecoveryStore {
             }
             ObjectNode completed = result.deepCopy();
             completed.put("authorityCompatible", compatible).put("activation", false);
-            jdbc.update("UPDATE managed_workspace_recovery_operation SET state = ?, manifest_digest = ?, last_error_code = NULL,"
-                    + " result_json = ?, updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ?",
-                    "capture".equals(mode) ? "SEALED" : "VERIFIED", digest, completed.toString(), id);
+            int updated = jdbc.update("UPDATE managed_workspace_recovery_operation SET state = ?, manifest_digest = ?, last_error_code = NULL,"
+                    + " result_json = ?, updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND state = ?",
+                    "capture".equals(mode) ? "SEALED" : "VERIFIED", digest, completed.toString(), id,
+                    "capture".equals(mode) ? "CAPTURING" : "VERIFYING");
+            check(updated == 1, "operation_not_writable");
             return inspect();
         });
     }

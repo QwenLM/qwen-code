@@ -3,9 +3,10 @@
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
 Status: implemented; local validation passed, deployment acceptance pending.
-Integrated with main `310f4ba3a` and the original
+Integrated with main `a4bf0026c` and the original
 file-history dependency [#13110](https://github.com/QwenLM/qwen-code/pull/13110)
-at `fee8f8763`, through its latest main integration `560752cad`.
+at `fee8f8763`, including main integration `560752cad` and recovery-test
+update `80f8cfe3f`.
 Part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 Completes the W1b slice of the [W1 recovery design](2026-09-29-managed-workspace-w1-recovery.md),
 without implementing W1c placement promotion.
@@ -81,6 +82,8 @@ Operation phases are `CAPTURING`, `SEALED`, `VERIFYING`, `VERIFIED` and
 `INVALIDATED`. I/O interruption retains the phase and progress. Source drift
 invalidates the operation. Operators investigate and start a new recovery UUID
 under the still-owned fence; no operation takes over another fence.
+Completion updates only the expected mutable phase, so a concurrent committed
+invalidation cannot be overwritten by a stale completion request.
 
 The Java private main supports `capture`, `verify` and `inspect` with an
 operator-owned JSON request and `--offline-confirmed` for mutations. Requests
@@ -155,6 +158,13 @@ cyclic or dangling links, hard-linked regular files and special files refuse.
 No ACL/xattr or full host-image recovery is claimed. Candidate-only or missing
 entries refuse; provider metadata and private blobs are also checked for
 undeclared files. Source and candidate roots cannot alias or overlap.
+On partial-inventory retries, recheck persisted original entries even without a
+completed tree marker. A lost original file, Workspace root or Session backup
+directory invalidates the old capture instead of accepting replacement bytes.
+Replacing a pinned Workspace or backup root with a symlink or non-directory
+also invalidates it; invalid roots without captured evidence still refuse.
+Source loss during the first forward/reverse inventory pass likewise
+invalidates capture; candidate-side damage retains its separate refusal.
 
 Private exports preserve exact journal transaction bytes and source digests.
 Validate genesis identity, revision/sequence continuity, commit markers and
@@ -245,7 +255,7 @@ Complete two consecutive clean self-audit passes and independent review; attach
 the measured E2E report to the single PR. There are no open provider/scope
 choices; remaining acceptance evidence is recorded as pending until measured.
 
-Measured on 2026-10-01: build/typecheck/bundle, the 41 W1b unit tests, CLI
+Measured on 2026-10-01: build/typecheck/bundle, the 63 W1b unit tests, CLI
 bootstrap tests, relevant core/history tests, and focused Java tests/Checkstyle
 passed. An independent maintenance-process fallback used the actual packaged
 CLI child, packaged Java classes, MySQL 8.4.11 and a synthetic storage identity
@@ -255,7 +265,10 @@ artifact digests. Fresh verification separated compatible content from
 content-only verification after source loss. Interrupted and mid-run source
 drift remained `INVALIDATED/source_drift`, without sealing or authority writes.
 Original O2 protocol fixtures also passed on real MySQL with an in-memory object
-store. These fixtures do not prove live Harness/Worker/Broker or external OSS
+store. Independent review found a concurrent completion/invalidation race and a
+partial-inventory source-loss path; fixes now preserve the durable invalidation
+and recheck pinned originals. Focused packaged/H2 and Node regression probes are
+reported separately from the earlier full MySQL run. These fixtures do not prove live Harness/Worker/Broker or external OSS
 deployment acceptance. Real Linux identity, full deployed O2 capture, exhaustive
 physical interruption boundaries and stress-scale evidence remain pending,
 along with #13110's main-branch merge.

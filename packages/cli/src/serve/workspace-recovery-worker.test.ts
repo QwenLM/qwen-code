@@ -6,11 +6,14 @@
 
 import {
   cp,
+  link,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -182,9 +185,59 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
-  it.each(['entry', 'session'])(
-    'invalidates a changed source on retry after an interrupted %s commit',
-    async (boundary) => {
+  it.each(['file', 'nested'])(
+    'invalidates original %s removed after its entry commit in the same capture pass',
+    async (name) => {
+      const f = await fixture();
+      if (name === 'nested') {
+        const original = join(f.context.request.sourceRoot, name);
+        await mkdir(original);
+        await writeFile(join(original, 'child'), 'retained');
+        await cp(
+          original,
+          join(f.context.request.bundleRoot, 'workspace', name),
+          {
+            recursive: true,
+          },
+        );
+      }
+      const rpc: RecoveryRpc = async (method, params) => {
+        if (method === 'invalidate') {
+          f.calls.push(method);
+          return { state: 'INVALIDATED' };
+        }
+        const result = await f.rpc(method, params);
+        if (
+          method === 'asset' &&
+          (params as { metadata: { path?: string } }).metadata.path ===
+            `workspace/${name}`
+        )
+          await rm(join(f.context.request.sourceRoot, name), {
+            recursive: true,
+          });
+        return result;
+      };
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow('source_drift');
+      expect(f.calls).toContain('invalidate');
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
+  it.each(
+    ['entry', 'session'].flatMap((boundary) =>
+      [
+        'changed',
+        'missing',
+        'missing-both',
+        'missing-root',
+        'root-alias',
+        'root-file',
+        'hardlink',
+      ].map((mutation) => [boundary, mutation]),
+    ),
+  )(
+    'invalidates a source on retry after an interrupted %s commit (%s)',
+    async (boundary, mutation) => {
       const f = await fixture();
       let interrupted = false;
       if (boundary === 'session') f.interrupt();
@@ -206,7 +259,114 @@ describe('workspace recovery private worker', () => {
       await expect(runRecoveryWorker(rpc)).rejects.toThrow(
         'injected_io_failure',
       );
-      await writeFile(join(f.context.request.sourceRoot, 'file'), 'changed');
+      const original = join(f.context.request.sourceRoot, 'file');
+      if (mutation === 'changed') await writeFile(original, 'changed');
+      else if (mutation === 'missing-root')
+        await rm(f.context.request.sourceRoot, { recursive: true });
+      else if (mutation.startsWith('root-')) {
+        const retained = join(f.root, 'retained-source');
+        await rename(f.context.request.sourceRoot, retained);
+        if (mutation === 'root-alias')
+          await symlink(retained, f.context.request.sourceRoot);
+        else await writeFile(f.context.request.sourceRoot, 'replacement');
+      } else if (mutation.startsWith('missing')) {
+        await rm(original);
+        if (mutation === 'missing-both')
+          await rm(join(f.context.request.bundleRoot, 'workspace/file'));
+      } else await link(original, join(f.root, 'other-link'));
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow('source_drift');
+      expect(f.calls).toContain('invalidate');
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
+  it.each(['session-000', 'session-034'])(
+    'invalidates a history parent replaced after %s completes in the same pass',
+    async (sessionId) => {
+      const f = await fixture();
+      const original = join(f.context.request.fileHistoryRoot, 'session-000');
+      await mkdir(original);
+      await writeFile(join(original, 'preimage'), 'retained');
+      await mkdir(join(f.context.request.bundleRoot, 'file-history'));
+      await cp(
+        original,
+        join(f.context.request.bundleRoot, 'file-history/session-000'),
+        { recursive: true },
+      );
+      const rpc: RecoveryRpc = async (method, params) => {
+        if (method === 'invalidate') {
+          f.calls.push(method);
+          return { state: 'INVALIDATED' };
+        }
+        const result = await f.rpc(method, params);
+        if (
+          method === 'sessionComplete' &&
+          (params as { sessionId: string }).sessionId === sessionId
+        ) {
+          await rename(
+            f.context.request.fileHistoryRoot,
+            join(f.root, 'retained-history'),
+          );
+          await writeFile(f.context.request.fileHistoryRoot, 'replacement');
+        }
+        return result;
+      };
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow('source_drift');
+      expect(f.calls).toContain('invalidate');
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
+  it.each(
+    ['entry', 'session'].flatMap((boundary) =>
+      ['missing', 'parent-alias', 'parent-file'].map((mutation) => [
+        boundary,
+        mutation,
+      ]),
+    ),
+  )(
+    'invalidates a changed history root on retry after an interrupted %s commit (%s)',
+    async (boundary, mutation) => {
+      const f = await fixture();
+      const source = join(f.context.request.fileHistoryRoot, 'session-000');
+      await mkdir(source);
+      await writeFile(join(source, 'preimage'), 'retained');
+      await mkdir(join(f.context.request.bundleRoot, 'file-history'));
+      await cp(
+        source,
+        join(f.context.request.bundleRoot, 'file-history/session-000'),
+        {
+          recursive: true,
+        },
+      );
+      let interrupted = false;
+      if (boundary === 'session') f.interrupt();
+      const rpc: RecoveryRpc = async (method, params) => {
+        if (method === 'invalidate') {
+          f.calls.push(method);
+          return { state: 'INVALIDATED' };
+        }
+        const result = await f.rpc(method, params);
+        if (boundary === 'entry' && method === 'asset' && !interrupted) {
+          const metadata = (params as { metadata: { path?: string } }).metadata;
+          if (metadata.path === 'file-history/session-000/preimage') {
+            interrupted = true;
+            throw new Error('injected_io_failure');
+          }
+        }
+        return result;
+      };
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'injected_io_failure',
+      );
+      if (mutation === 'missing') await rm(source, { recursive: true });
+      else {
+        const retained = join(f.root, 'retained-history');
+        await rename(f.context.request.fileHistoryRoot, retained);
+        if (mutation === 'parent-alias')
+          await symlink(retained, f.context.request.fileHistoryRoot);
+        else await writeFile(f.context.request.fileHistoryRoot, 'replacement');
+      }
       await expect(runRecoveryWorker(rpc)).rejects.toThrow('source_drift');
       expect(f.calls).toContain('invalidate');
       expect(f.calls).not.toContain('finish');

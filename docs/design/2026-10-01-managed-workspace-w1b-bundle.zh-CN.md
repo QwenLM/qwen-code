@@ -2,9 +2,9 @@
 
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
-状态：已实现，本地验证通过，部署验收待完成。已整合 main `310f4ba3a`，直接整合文件历史依赖
+状态：已实现，本地验证通过，部署验收待完成。已整合 main `a4bf0026c`，直接整合文件历史依赖
 [#13110](https://github.com/QwenLM/qwen-code/pull/13110) 的原提交 `fee8f8763`，
-包含其最新主干整合 `560752cad`。
+包含主干整合 `560752cad` 及恢复测试更新 `80f8cfe3f`。
 属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。完成
 [W1 恢复设计](2026-09-29-managed-workspace-w1-recovery.zh-CN.md) 的 W1b 切片，
 不实现 W1c 挂载提升。
@@ -63,6 +63,7 @@ compaction 和 blocked recovery 拒绝捕获。
 操作阶段为 `CAPTURING`、`SEALED`、`VERIFYING`、`VERIFIED` 和 `INVALIDATED`。
 I/O 中断保留阶段和进度，来源漂移使操作失效。运维调查后在仍持有的 fence 下
 使用新恢复 UUID；任何操作不能接管其他 fence。
+完成提交只更新预期的可写阶段，陈旧的完成请求不能覆盖另一个进程已提交的失效。
 
 Java 私有 main 支持 `capture`、`verify`、`inspect`，读取运维拥有的 JSON 请求，
 写操作要求 `--offline-confirmed`。请求包含 tenant/storage、恢复 UUID、fence UUID、
@@ -119,6 +120,11 @@ tenant/storage、登记、原 mount revision/fence/capture ID、固定来源摘�
 多硬链接普通文件和特殊文件拒绝。不宣称 ACL/xattr 或完整主机镜像恢复。
 候选多余或缺失条目拒绝，provider 元数据和私有 blob 同样检测未声明文件。
 源根和候选根不得互为别名或重叠。
+部分清单的续办即使尚无完整 tree marker，也必须复查已持久保存的原始条目。
+原文件、Workspace 根或 Session 备份目录丢失会使旧捕获失效，不能接受替换字节。
+已固定的 Workspace 根或备份根被替换为符号链接或非目录时同样失效；尚无捕获
+证据的非法根仍直接拒绝。
+首次正向或反向清单遍历期间的来源丢失同样使捕获失效，副本损坏保留独立的拒绝语义。
 
 私有导出保留精确 journal 事务字节及来源摘要。校验 genesis 身份、revision/sequence
 连续性、commit marker 和最终固定 head。遍历 header 引用、类型化事件引用、
@@ -189,13 +195,15 @@ W1c 消费者必须在自己的转换前复查恢复点和预期 mount revision�
 单列，不替代 Linux 验收。完成两轮连续干净自审和独立审查，在单一 PR 附实际
 E2E 报告。provider/范围没有未定选择，其余验收证据在实际测量前记录为待完成。
 
-2026-10-01 实测：build/typecheck/bundle、41 个 W1b 单元测试、CLI bootstrap
+2026-10-01 实测：build/typecheck/bundle、63 个 W1b 单元测试、CLI bootstrap
 测试、相关 core/history 测试及定向 Java 测试/Checkstyle 通过。独立维护进程
 测试脚本回退在 macOS 使用实际已打包 CLI 子进程、Java 制品中的类、MySQL
 8.4.11 和替代存储身份读取器，捕获两个 Workspace 的 35 个 Session、106 个
 asset 和 56 个文件系统条目；同 ID 完成重试保持回执与全部制品摘要一致。
 新验证分别报告当前兼容内容与源丢失后的仅内容通过。中断续办及处理中来源漂移
 均保持 `INVALIDATED/source_drift`，不封存、不写原权威数据。原 O2 协议 fixture
-也在真实 MySQL 配合内存对象存储通过。这些 fixture 不证明实时
+也在真实 MySQL 配合内存对象存储通过。独立审查发现并发完成/失效竞态及部分清单的
+来源丢失路径；修复保留持久失效并复查固定来源。定向已打包 Java/H2 和 Node 回归
+探针与此前完整 MySQL 测试分别记录。这些 fixture 不证明实时
 Harness/Worker/Broker 或外部 OSS 部署验收。真实 Linux 身份、完整部署的 O2
 捕获、全部物理中断边界及压力规模证据仍待完成，#13110 合入主干也尚待完成。

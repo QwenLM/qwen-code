@@ -16,6 +16,8 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -259,6 +261,38 @@ class WorkspaceRecoveryStoreTest {
         assertThatThrownBy(() -> capture.call("finish", params)).hasMessageContaining("source_drift");
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
         assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
+    }
+
+    @Test
+    void concurrentInvalidationCannotBeOverwrittenByCompletion() throws Exception {
+        var original = capture();
+        Path manifest = Files.createDirectories(bundle.resolve(".w1-recovery")).resolve("manifest.json");
+        Files.writeString(manifest, manifest(original).toString());
+        ObjectNode params = object().put("manifestDigest", WorkspaceRecoveryStore.hash(Files.readAllBytes(manifest)));
+        params.set("result", object().put("contentVerified", true).put("activation", false));
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var racingJdbc = new JdbcTemplate(jdbc.getDataSource()) {
+                @Override
+                public int update(String sql, Object... args) {
+                    if (sql.startsWith("UPDATE managed_workspace_recovery_operation SET state = ?, manifest_digest")) {
+                        try {
+                            executor.submit(() -> original.call("invalidate", object().put("code", "source_drift")))
+                                    .get(5, TimeUnit.SECONDS);
+                        } catch (Exception error) {
+                            throw new AssertionError(error);
+                        }
+                    }
+                    return super.update(sql, args);
+                }
+            };
+            var finishing = new WorkspaceRecoveryStore(racingJdbc, manager, guard, null, "capture",
+                    request.toString().getBytes(StandardCharsets.UTF_8));
+            assertThatThrownBy(() -> finishing.call("finish", params)).hasMessageContaining("operation_not_writable");
+        }
+        assertThat(original.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(original.inspect().path("lastErrorCode").asText()).isEqualTo("source_drift");
+        assertThat(original.inspect().path("result").isNull()).isTrue();
+        assertThat(original.inspect().path("manifestDigest").isNull()).isTrue();
     }
 
     private ObjectNode manifest(WorkspaceRecoveryStore capture) {

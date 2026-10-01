@@ -166,6 +166,40 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+function sourceReadDrift(error: unknown): boolean {
+  return (
+    ['ENOENT', 'ENOTDIR', 'ELOOP'].includes(
+      (error as NodeJS.ErrnoException).code ?? '',
+    ) ||
+    (error instanceof Error &&
+      [
+        'missing_bundle_asset',
+        'file_changed_during_read',
+        'unsupported_symlink',
+        'unsupported_file_type',
+        'invalid_source_root',
+      ].includes(error.message))
+  );
+}
+
+async function* sourceTree(root: string): AsyncGenerator<BundleEntry> {
+  try {
+    yield* tree(dirname(root), basename(root));
+  } catch (error) {
+    if (sourceReadDrift(error)) throw new Error('source_drift');
+    throw error;
+  }
+}
+
+async function sourceExists(path: string): Promise<boolean> {
+  try {
+    return await exists(path);
+  } catch (error) {
+    if (sourceReadDrift(error)) throw new Error('source_drift');
+    throw error;
+  }
+}
+
 export class LocalRecoveryBundle {
   constructor(
     readonly root: string,
@@ -186,12 +220,45 @@ export class LocalRecoveryBundle {
         inside(this.root, source)
       )
         throw new Error('overlapping_roots');
-      if (
-        this.mode === 'capture' &&
-        (source === sourceRoot || (await exists(source))) &&
-        (await realpath(source)) !== source
-      )
-        throw new Error('invalid_source_root');
+      if (this.mode === 'capture') {
+        try {
+          if (source !== sourceRoot && !(await exists(source))) continue;
+          if (
+            (await realpath(source)) !== source ||
+            !(await lstat(source)).isDirectory()
+          )
+            throw new Error('invalid_source_root');
+        } catch (error) {
+          if (
+            source === sourceRoot &&
+            sourceReadDrift(error) &&
+            (await this.rpc('assetLookup', {
+              key: recoveryAssetKey('entry', 'workspace'),
+            })) !== null
+          )
+            throw new Error('source_drift');
+          if (source === historyRoot && sourceReadDrift(error)) {
+            let afterKey: string | null = null;
+            do {
+              const page = (await this.rpc('assetPage', { afterKey })) as {
+                assets: Array<{ metadata: Record<string, unknown> }>;
+                nextKey: string | null;
+              };
+              if (
+                page.assets.some(
+                  ({ metadata }) =>
+                    metadata['type'] === 'entry' &&
+                    typeof metadata['path'] === 'string' &&
+                    metadata['path'].startsWith('file-history/'),
+                )
+              )
+                throw new Error('source_drift');
+              afterKey = page.nextKey;
+            } while (afterKey !== null);
+          }
+          throw error;
+        }
+      }
     }
     if (inside(sourceRoot, historyRoot) || inside(historyRoot, sourceRoot))
       throw new Error('overlapping_roots');
@@ -263,12 +330,45 @@ export class LocalRecoveryBundle {
       })) !== null
     )
       await this.recheckTree(sourceRoot, candidate);
+    else if (
+      (await this.rpc('assetLookup', {
+        key: recoveryAssetKey('entry', candidate),
+      })) !== null
+    ) {
+      let afterKey: string | null = null;
+      do {
+        const page = (await this.rpc('assetPage', { afterKey })) as {
+          assets: Array<{ metadata: Record<string, unknown> }>;
+          nextKey: string | null;
+        };
+        for (const { metadata: saved } of page.assets) {
+          const path = saved['path'];
+          if (
+            saved['type'] !== 'entry' ||
+            typeof path !== 'string' ||
+            !(path === candidate || path.startsWith(`${candidate}/`))
+          )
+            continue;
+          let original: BundleEntry;
+          try {
+            original = await entry(
+              dirname(sourceRoot),
+              `${basename(sourceRoot)}${path.slice(candidate.length)}`,
+              sourceRoot,
+            );
+          } catch (error) {
+            if (sourceReadDrift(error)) throw new Error('source_drift');
+            throw error;
+          }
+          if (recoveryJson(saved) !== recoveryJson({ ...original, path }))
+            throw new Error('source_drift');
+        }
+        afterKey = page.nextKey;
+      } while (afterKey !== null);
+    }
     let count = 0;
     // Symlink resolution is relative to the complete tree, not to each parent.
-    for await (const original of tree(
-      dirname(sourceRoot),
-      basename(sourceRoot),
-    )) {
+    for await (const original of sourceTree(sourceRoot)) {
       const suffix = original.path.slice(basename(sourceRoot).length);
       const name = `${candidate}${suffix}`;
       const saved = await this.rpc('assetLookup', {
@@ -288,11 +388,17 @@ export class LocalRecoveryBundle {
     // Each candidate-only path must already have an original entry.
     for await (const copy of tree(this.root, candidate)) {
       const suffix = copy.path.slice(candidate.length);
-      const original = await entry(
-        dirname(sourceRoot),
-        `${basename(sourceRoot)}${suffix}`,
-        sourceRoot,
-      );
+      let original: BundleEntry;
+      try {
+        original = await entry(
+          dirname(sourceRoot),
+          `${basename(sourceRoot)}${suffix}`,
+          sourceRoot,
+        );
+      } catch (error) {
+        if (sourceReadDrift(error)) throw new Error('source_drift');
+        throw error;
+      }
       if (recoveryJson({ ...original, path: copy.path }) !== recoveryJson(copy))
         throw new Error('snapshot_source_mismatch');
     }
@@ -308,39 +414,31 @@ export class LocalRecoveryBundle {
     if (sessionId.includes('/')) throw new Error('invalid_session_id');
     const source = join(historyRoot, sessionId);
     const candidate = `file-history/${sessionId}`;
-    if (await exists(source)) await this.compareTree(source, candidate);
+    if (await sourceExists(source)) await this.compareTree(source, candidate);
+    else if (
+      (await this.rpc('assetLookup', {
+        key: recoveryAssetKey('entry', candidate),
+      })) !== null
+    )
+      throw new Error('source_drift');
     else if (await exists(join(this.root, candidate)))
       throw new Error('snapshot_source_mismatch');
   }
 
   async recheckTree(sourceRoot: string, candidate: string): Promise<void> {
     let count = 0;
-    try {
-      for await (const original of tree(
-        dirname(sourceRoot),
-        basename(sourceRoot),
-      )) {
-        const name = `${candidate}${original.path.slice(basename(sourceRoot).length)}`;
-        const saved = await this.lookup('entry', name);
-        if (recoveryJson(saved) !== recoveryJson({ ...original, path: name }))
-          throw new Error('source_drift');
-        count++;
+    for await (const original of sourceTree(sourceRoot)) {
+      const name = `${candidate}${original.path.slice(basename(sourceRoot).length)}`;
+      let saved: Record<string, unknown>;
+      try {
+        saved = await this.lookup('entry', name);
+      } catch (error) {
+        if (sourceReadDrift(error)) throw new Error('source_drift');
+        throw error;
       }
-    } catch (error) {
-      if (
-        ['ENOENT', 'ELOOP'].includes(
-          (error as NodeJS.ErrnoException).code ?? '',
-        ) ||
-        (error instanceof Error &&
-          [
-            'missing_bundle_asset',
-            'file_changed_during_read',
-            'unsupported_symlink',
-            'unsupported_file_type',
-          ].includes(error.message))
-      )
+      if (recoveryJson(saved) !== recoveryJson({ ...original, path: name }))
         throw new Error('source_drift');
-      throw error;
+      count++;
     }
     const expected = await this.lookup('tree', candidate);
     if (count !== expected['count']) throw new Error('source_drift');
@@ -354,7 +452,7 @@ export class LocalRecoveryBundle {
     const saved = await this.rpc('assetLookup', {
       key: recoveryAssetKey('entry', candidate),
     });
-    if (await exists(source)) await this.recheckTree(source, candidate);
+    if (await sourceExists(source)) await this.recheckTree(source, candidate);
     else if (saved !== null) throw new Error('source_drift');
   }
 
