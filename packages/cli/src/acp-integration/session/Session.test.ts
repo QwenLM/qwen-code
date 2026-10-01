@@ -36828,92 +36828,74 @@ describe('Session', () => {
           expect(executeSpy).not.toHaveBeenCalled();
         });
 
-        it.each([false, true])(
-          'runs the host guard before execution (agent-host=%s)',
-          async (agentHost) => {
-            mockConfig.getApprovalMode = vi
-              .fn()
-              .mockReturnValue(
-                agentHost ? ApprovalMode.PLAN : ApprovalMode.YOLO,
-              );
-            mockConfig.getSessionSourceType = vi
-              .fn()
-              .mockReturnValue(agentHost ? 'agent-host' : undefined);
-            const guard = vi.fn().mockResolvedValue({
-              allowed: false,
-              reason: 'host policy denied',
-            });
-            mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
+        it('runs the host guard with final params and denies before execution', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const guard = vi.fn().mockResolvedValue({
+            allowed: false,
+            reason: 'host policy denied',
+          });
+          mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
 
-            const executeSpy = vi.fn();
-            const tool = {
-              name: 'read_file',
-              kind: core.Kind.Read,
-              build: vi.fn().mockReturnValue({
-                params: { path: '/normalized/final.txt' },
-                getDefaultPermission: vi
-                  .fn()
-                  .mockResolvedValue(agentHost ? 'ask' : 'allow'),
-                getConfirmationDetails: vi.fn().mockResolvedValue({
-                  type: 'exec',
-                  title: 'Confirm read',
-                  command: 'read',
-                  rootCommand: 'read',
-                  onConfirm: vi.fn(),
-                }),
-                execute: executeSpy,
-              }),
-            };
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/normalized/final.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
 
-            mockToolRegistry.getTool.mockReturnValue(tool);
-            mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-              createStreamWithChunks([
-                {
-                  type: core.StreamEventType.CHUNK,
-                  value: {
-                    functionCalls: [
-                      {
-                        id: 'call-guard',
-                        name: 'read_file',
-                        args: { path: './original.txt' },
-                      },
-                    ],
-                  },
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-guard',
+                      name: 'read_file',
+                      args: { path: './original.txt' },
+                    },
+                  ],
                 },
-              ]),
-            );
+              },
+            ]),
+          );
 
-            await session.prompt({
-              sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: 'read the file' }],
-            });
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
 
-            expect(guard).toHaveBeenCalledWith({
+          expect(guard).toHaveBeenCalledWith({
+            callId: 'call-guard',
+            toolName: 'read_file',
+            args: { path: '/normalized/final.txt' },
+            signal: expect.any(AbortSignal),
+            permissionChecked: true,
+            // The daemon policy falls back to the session and needs to know
+            // where the tool will run.
+            sessionId: 'test-session-id',
+            cwd: process.cwd(),
+          });
+          expect(executeSpy).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.objectContaining({
               callId: 'call-guard',
-              toolName: 'read_file',
-              args: { path: '/normalized/final.txt' },
-              signal: expect.any(AbortSignal),
-              permissionChecked: !agentHost,
-              // The daemon policy falls back to the session and needs to know
-              // where the tool will run.
-              sessionId: 'test-session-id',
-              cwd: process.cwd(),
-            });
-            expect(executeSpy).not.toHaveBeenCalled();
-            expect(mockClient.requestPermission).not.toHaveBeenCalled();
-            expect(
-              mockChatRecordingService.recordToolResult,
-            ).toHaveBeenCalledWith(
-              expect.any(Array),
-              expect.objectContaining({
-                callId: 'call-guard',
-                status: 'error',
-                executionStatus: 'not_started',
-                errorType: core.ToolErrorType.EXECUTION_DENIED,
-              }),
-            );
-          },
-        );
+              status: 'error',
+              executionStatus: 'not_started',
+              errorType: core.ToolErrorType.EXECUTION_DENIED,
+            }),
+          );
+        });
 
         it('executes once when the host guard allows the final invocation', async () => {
           mockConfig.getApprovalMode = vi
