@@ -4,13 +4,13 @@
 
 ## 问题与基线
 
-O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现叠加在 O3 提交 `2180afe42207ca547cec37530a7856cf5bf667d4` 上；合入前须与最终 O2/O3 接口对齐。
+O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V27 迁移，接在已有 V26 投影迁移之后。
 
 ## 契约与范围
 
 Session 是保留根。close、archive、Runtime 排空、ACK 和事件过期后仍保留输出。删除完成永久退役私有 journal 及恢复引用；原 operation、退役 generation 和时间不能重置。再等待 24 小时，且独立证明读写闭合，才可回收。回收的是原始 payload，历史中已有的模型消息和公共预览不在此擦除范围。
 
-只覆盖前台 Shell O2 publication。后台流、MCP、媒体 adapter、共享输出和通用历史清理另行交付。未完成、blocked、隔离输出、未完成 operation、恢复保护和缺少写入证据的历史数据保持占额。过期 candidate 恢复继续由 #13019 负责。
+只覆盖前台 Shell O2 publication。后台流、MCP、媒体 adapter、共享输出和通用历史清理另行交付。未完成、blocked、隔离输出、未完成 operation、恢复保护和缺少写入证据的历史数据保持占额。过期前驱通过已有 O2 显式恢复路径推进；退役不会将未完成操作标为成功。
 
 ## 保护与退役
 
@@ -38,4 +38,4 @@ O4-1 在 Session/publication store、生命周期完成及 projector/Artifact �
 
 ## 验收与待补部署证据
 
-测试 seal/close/archive 后保留；删除与 acquisition/receipt/projection/download 竞争；租约到期与 generation 不匹配；重试后未知旧 PUT；删除应答丢失；分页中途/进程崩溃；SQL 确认失败和双 worker 接管；保守占额；partial/隔离/历史证据保护。必须用真实 MySQL/MariaDB 提供锁竞争证据。真实 OSS 使用完全隔离的测试桶和前缀。验证 100 MiB/1 GiB 闭包记账及分页边界。报告记录准确 revision、运行时、数据库及存储 profile，区分已执行与不可用门禁。最终 O2/O3 合并基线及隔离 OSS 凭证仍是外部依赖。
+测试 seal/close/archive 后保留；删除与 acquisition/receipt/projection/download 竞争；租约到期与 generation 不匹配；重试后未知旧 PUT；删除应答丢失；分页中途/进程崩溃；SQL 确认失败和双 worker 接管；保守占额；partial/隔离/历史证据保护。必须用真实 MySQL/MariaDB 提供锁竞争证据。真实 OSS 使用完全隔离的测试桶和前缀。验证 100 MiB/1 GiB 闭包记账及分页边界。报告记录准确 revision、运行时、数据库及存储 profile，区分已执行与不可用门禁。O2/O3 合并基线已对齐；可选部署门禁仍依赖隔离 OSS 凭证。

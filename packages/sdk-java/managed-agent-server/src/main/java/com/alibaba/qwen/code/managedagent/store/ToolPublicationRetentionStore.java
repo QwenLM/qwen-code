@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.charset.StandardCharsets;
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -29,7 +28,9 @@ public final class ToolPublicationRetentionStore {
     }
 
     static long now(JdbcTemplate jdbc) {
-        return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).getTime();
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(),"
+                + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
     }
 
     static void lockSession(JdbcTemplate jdbc, String tenant, String session) {
@@ -64,17 +65,16 @@ public final class ToolPublicationRetentionStore {
                     "Session was retired by another operation");
             return;
         }
-        var heads = jdbc.queryForList("SELECT state, writer_lease_until, recovery_status FROM"
+        var heads = jdbc.queryForList("SELECT state, recovery_status, CASE WHEN"
+                + " writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_active FROM"
                 + " qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 tenant, session);
         long time = now(jdbc);
         boolean protectedRecovery = false;
         if (!heads.isEmpty()) {
             var head = heads.getFirst();
-            Object lease = head.get("writer_lease_until");
-            long leaseTime = lease instanceof java.time.LocalDateTime local
-                    ? Timestamp.valueOf(local).getTime() : lease instanceof Timestamp stamp ? stamp.getTime() : 0;
-            if ("ACTIVE".equals(head.get("state")) && leaseTime > time) {
+            if ("ACTIVE".equals(head.get("state"))
+                    && ((Number) head.get("writer_active")).intValue() != 0) {
                 throw new ApiException(HttpStatus.CONFLICT, "managed_session_writer_active",
                         "Session deletion is waiting for its writer to stop.");
             }

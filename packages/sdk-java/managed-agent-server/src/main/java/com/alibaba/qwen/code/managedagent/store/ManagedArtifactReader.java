@@ -50,6 +50,7 @@ public class ManagedArtifactReader {
     }
 
     public InputStream open(Artifact artifact, Runnable guard) {
+        guard.run();
         var lease = lease(artifact);
         try {
             Runnable protectedGuard = () -> {
@@ -83,6 +84,7 @@ public class ManagedArtifactReader {
                         && offset <= artifact.descriptor().path("byte_length").asLong()
                         && length <= artifact.descriptor().path("byte_length").asLong() - offset,
                 "Artifact range is invalid");
+        guard.run();
         try (var lease = lease(artifact)) {
             Runnable protectedGuard = () -> {
                 lease.check();
@@ -111,6 +113,7 @@ public class ManagedArtifactReader {
     }
 
     ToolPublicationDataStore.VerifiedStream verified(Artifact artifact, Runnable guard) {
+        guard.run();
         var source = artifact.source();
         var binding = artifact.binding();
         var identity = JSON.createObjectNode();

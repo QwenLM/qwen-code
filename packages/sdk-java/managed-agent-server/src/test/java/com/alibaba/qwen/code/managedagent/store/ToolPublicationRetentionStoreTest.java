@@ -194,6 +194,24 @@ public class ToolPublicationRetentionStoreTest {
         assertThat(blocker()).isEqualTo("recovery_protected");
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+        "READY", "BLOCKED_RESOURCE", "BLOCKED_WORKSPACE", "BLOCKED_EXECUTION"
+    })
+    void retirementDerivesRecoveryProtectionFromThePrivateHead(String recovery) {
+        var sessions = new ManagedSessionStore(jdbc);
+        tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
+        tx.executeWithoutResult(status -> sessions.sealWriter(tenant, session, "a".repeat(32),
+                new ManagedSessionStoreModels.SealWriterRequest("workspace-1", "writer", 1)));
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET recovery_status = ?"
+                + " WHERE tenant_id = ? AND session_id = ?", recovery, tenant, session);
+        retire();
+        assertThat(blocker()).isEqualTo("READY".equals(recovery) ? null : "recovery_protected");
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM qwen_tool_publication WHERE scope_key = ?",
+                Long.class, scope)).isEqualTo(1000);
+    }
+
     @Test
     void writerAcquisitionAndRetirementSerializeEvenWithoutAnExistingHead() throws Exception {
         var sessions = new ManagedSessionStore(jdbc);

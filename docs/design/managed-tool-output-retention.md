@@ -4,13 +4,13 @@
 
 ## Problem and baseline
 
-O2 creates immutable foreground Shell stdout/stderr, manifests, pages and original outcomes in SQL and private OSS. O3 projects them into public Tool Results and Artifacts. Neither implementation currently proves that writers and readers have stopped before deleting bytes. This implementation is stacked on O3 commit `2180afe42207ca547cec37530a7856cf5bf667d4`; reconcile it with the final O2/O3 interfaces before landing.
+O2 creates immutable foreground Shell stdout/stderr, manifests, pages and original outcomes in SQL and private OSS. O3 projects them into public Tool Results and Artifacts. Neither implementation currently proves that writers and readers have stopped before deleting bytes. This implementation is based on main `93efe3558`, including merged O3 `6310dd38d` and publication recovery fixes. Retention uses migration V27 after the existing V26 projection migration.
 
 ## Contract and scope
 
 A Session is the retention root. Outputs stay pinned through close, archive, Runtime draining, ACK and event expiry. Completed deletion permanently retires its private journal and recovery references; the original operation, retirement generation and retirement timestamp cannot be reset. Collection waits another 24 hours and independent proof of read/write closure. Collection removes original payload, not model messages or public previews already copied into history.
 
-Only foreground Shell O2 publications are covered. Background streams, MCP, media adapters, shared outputs and generic history cleanup are outside this change. Incomplete/blocked/quarantined output, pending operations, recovery protection and legacy missing write evidence remain held. Expired candidate recovery remains owned by issue #13019.
+Only foreground Shell O2 publications are covered. Background streams, MCP, media adapters, shared outputs and generic history cleanup are outside this change. Incomplete/blocked/quarantined output, pending operations, recovery protection and legacy missing write evidence remain held. Expired predecessor recovery uses the existing explicit O2 recovery path; retirement does not mark unfinished operations as succeeded.
 
 ## Protection and retirement
 
@@ -38,4 +38,4 @@ O4-1 adds retirement, leases, physical PUT evidence and observation to the Sessi
 
 ## Acceptance and unresolved deployment evidence
 
-Test retained output after seal/close/archive; delete vs acquisition/receipt/projection/download; lease expiry and generation mismatch; unknown late PUT after retry; response-loss deletion; mid-page/process crash; SQL confirmation failure and two-worker takeover; conservative accounting; protected partial/quarantined/legacy cases. Real MySQL/MariaDB is required for locking evidence. Real OSS uses a fully isolated test bucket and prefix. Validate 100 MiB and 1 GiB closure accounting and bounded pages. Record exact revision, runtime, database and storage profile in reports, and distinguish executed gates from unavailable gates. The final O2/O3 merge baseline and availability of isolated OSS credentials remain external dependencies.
+Test retained output after seal/close/archive; delete vs acquisition/receipt/projection/download; lease expiry and generation mismatch; unknown late PUT after retry; response-loss deletion; mid-page/process crash; SQL confirmation failure and two-worker takeover; conservative accounting; protected partial/quarantined/legacy cases. Real MySQL/MariaDB is required for locking evidence. Real OSS uses a fully isolated test bucket and prefix. Validate 100 MiB and 1 GiB closure accounting and bounded pages. Record exact revision, runtime, database and storage profile in reports, and distinguish executed gates from unavailable gates. The O2/O3 baseline is aligned; isolated OSS credentials remain an external dependency for the optional deployment gate.

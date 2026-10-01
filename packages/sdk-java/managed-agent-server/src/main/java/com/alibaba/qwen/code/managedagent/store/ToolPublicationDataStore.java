@@ -1348,14 +1348,15 @@ public final class ToolPublicationDataStore {
         arguments.add(text(key, "tenantId"));
         arguments.add(text(key, "workspaceId"));
         arguments.add(text(key, "sessionId"));
+        arguments.add(ToolPublicationRetentionStore.hash(text(key, "tenantId")));
+        arguments.add(ToolPublicationRetentionStore.hash(text(key, "sessionId")));
         arguments.addAll(ids);
         var rows = jdbc.queryForList("SELECT publication_id, producer_phase, admission_resource_id,"
                 + " receipt_revision, receipt_sequence, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
                 + " FROM qwen_tool_publication WHERE scope_key = ?"
                 + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
-                + " AND NOT EXISTS (SELECT 1 FROM qwen_tool_output_retirement r"
-                + " WHERE r.tenant_id = qwen_tool_publication.tenant_id"
-                + " AND r.session_id = qwen_tool_publication.session_id) AND publication_id IN ("
+                + " AND NOT EXISTS (SELECT 1 FROM qwen_output_session_retirement r"
+                + " WHERE r.tenant_key = ? AND r.session_key = ?) AND publication_id IN ("
                 + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", arguments.toArray());
         for (var row : rows) {
             result.put((String) row.get("publication_id"), row);
