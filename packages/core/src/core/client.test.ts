@@ -2384,6 +2384,25 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.getDeferredToolSummary).toHaveBeenCalledTimes(1);
     });
 
+    it.each([
+      [[], []],
+      [
+        [{ name: 'read_file' }],
+        [{ functionDeclarations: [{ name: 'read_file' }] }],
+      ],
+    ])('declares %j to the chat as %j', async (declarations, tools) => {
+      const reg = registryMock();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      reg.getFunctionDeclarations.mockReturnValue(declarations);
+      const setTools = vi
+        .spyOn(client.getChat(), 'setTools')
+        .mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(setTools).toHaveBeenCalledWith(tools);
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder = todoReminder('run tests');
 

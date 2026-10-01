@@ -125,6 +125,15 @@ rejection is completion evidence; an abort signal alone is not. A callback still
 pending after the grace period keeps its unknown outcome and original Runtime
 hold, with no replay. Native Legacy function-Hook cancellation remains unchanged.
 
+Workspace Write/Edit backups and explicit rewind share the Session's Hook Runtime
+owner, while snapshots retain the actual prompt identity. Acknowledged async Hooks
+may coexist with history bind, prepare and snapshot; rewind and owner release still
+require all Hook executions to settle. Rewind also excludes Hook catalog/model
+operations and inactive activations. On cold load, pending file history is observed
+through the original Runtime owner saved in the matching checkpoint tool inputs,
+before earlier Hook owners are released. Missing or conflicting owner evidence
+keeps recovery blocked; no new durable field is needed.
+
 HTTP uses native URL/DNS, credential-variable and timeout policy. Redirects are
 refused. A local runner-construction failure before dispatch is a settled failure
 under the saved fail policy. A received failure response can settle; a lost response after sending

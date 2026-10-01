@@ -96,6 +96,13 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 是结束证据，仅有 abort signal 不是。超过宽限期仍未结束的回调保留 unknown 结果和
 原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
 
+Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
+快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
+及 snapshot 并行；撤销和释放 owner 仍要求全部 Hook 执行结束。撤销也排除 Hook
+目录/模型操作和非 active activation。冷加载时，先用匹配 checkpoint 工具输入中
+保存的原 Runtime owner 观察未决文件历史，再释放此前的 Hook owner。缺失或冲突的
+owner 证据继续阻塞恢复，不增加新的持久化字段。
+
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
 执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。单项回执和聚合输出上限均为 60 KiB。
