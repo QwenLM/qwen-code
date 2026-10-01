@@ -1132,6 +1132,11 @@ describe('Session', () => {
       isTrusted: false,
       user: { settings: {} },
       workspace: { settings: {} },
+      forScope: vi.fn((scope: SettingScope) =>
+        scope === SettingScope.Workspace
+          ? mockSettings.workspace
+          : mockSettings.user,
+      ),
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
       reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
@@ -8496,6 +8501,7 @@ describe('Session', () => {
 
     it.each([
       ['configured Responses', ['responses'], AuthType.USE_OPENAI],
+      ['configured Chat', ['chat-completions'], AuthType.USE_OPENAI],
       ['raw', [], AuthType.USE_OPENAI_RESPONSES],
       ['runtime', ['responses'], AuthType.USE_OPENAI_RESPONSES],
       [
@@ -8509,6 +8515,7 @@ describe('Session', () => {
         AuthType.USE_OPENAI,
       ],
       ['Workspace', ['responses'], AuthType.USE_OPENAI_RESPONSES],
+      ['inherited Workspace', ['responses'], AuthType.USE_OPENAI],
       [
         'invalid reload',
         ['responses', 'invalid'],
@@ -8519,12 +8526,13 @@ describe('Session', () => {
       async (scenario, wires, expectedAuth) => {
         const modelId = 'gpt-6-astra';
         const baseUrl = 'https://api.example/v1';
-        const authType =
-          scenario === 'duplicate Chat'
-            ? AuthType.USE_OPENAI
-            : AuthType.USE_OPENAI_RESPONSES;
-        const scope =
-          scenario === 'Workspace' ? SettingScope.Workspace : SettingScope.User;
+        const isChat = scenario.endsWith('Chat');
+        const authType = isChat
+          ? AuthType.USE_OPENAI
+          : AuthType.USE_OPENAI_RESPONSES;
+        const scope = scenario.endsWith('Workspace')
+          ? SettingScope.Workspace
+          : SettingScope.User;
         const owner =
           scope === SettingScope.Workspace
             ? mockSettings.workspace
@@ -8538,11 +8546,15 @@ describe('Session', () => {
         owner.settings.security = {
           auth: {
             selectedType:
-              scenario === 'Workspace' || scenario === 'duplicate Chat'
+              scenario === 'Workspace' || isChat
                 ? AuthType.USE_OPENAI_RESPONSES
                 : AuthType.USE_OPENAI,
           },
         };
+        if (scenario === 'inherited Workspace') {
+          delete owner.settings.security;
+          mockSettings.merged.security = mockSettings.user.settings.security;
+        }
         owner.settings.modelProviders = {
           openai: wires.map((wireApi) => ({
             id: wireApi === 'invalid' ? 'broken' : modelId,
