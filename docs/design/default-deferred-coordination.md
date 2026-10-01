@@ -27,6 +27,13 @@ eager reveal in an incomplete-bridge session is neither, so both lines drop. No
 other gated line gains an exception, and no further prompt-trimming policy is
 added. Memory, history, and the schemas that subagents receive are unchanged.
 
+ACP batches resolve a bridge call's target before applying the existing
+Agent-only concurrency rule. Bridged Agent results retain the immediate todo
+reminder using their validated execution observations; other bridge targets
+keep their existing scheduling and reminder cadence. Keyword discovery filters
+out declarations that are unavailable in the current context before applying
+`max_results`, including Goal proposal when its host turn key is absent.
+
 ## Risks and acceptance
 
 An extra discovery request can offset the first-request saving. Natural
@@ -42,6 +49,9 @@ and prompts on the base and candidate, with no `tools.eager` override:
    and verifier outcome through the bridge; refusal must not start a Goal.
 4. `tools.visible`, a disabled bridge, denied tools, and a resumed direct-call
    history: verify the existing visibility and permission contracts.
+5. ACP direct and bridged Agent calls: verify concurrent delegation and the
+   immediate todo reminder. Non-Agent bridge calls remain sequential and do not
+   force that reminder. Goal keyword search must follow turn-key availability.
 
 Keep raw requests and task outcomes, not only declaration character counts.
 Report regressions and discovery overhead separately; do not claim a percentage

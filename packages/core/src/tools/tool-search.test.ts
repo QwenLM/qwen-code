@@ -466,6 +466,19 @@ describe('ToolSearchTool', () => {
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
   });
 
+  it('excludes unavailable goal proposals from keyword candidates', async () => {
+    config.setGoalProposalHostSupported(true);
+    defer(ToolNames.PROPOSE_GOAL);
+    expect(registry.isToolDeclared(ToolNames.PROPOSE_GOAL)).toBe(false);
+    expect((await search(config, 'propose_goal')).content).toContain(
+      'No tools found matching',
+    );
+    config.setGoalProposalTurnKey('user-turn');
+    expect((await search(config, 'propose_goal')).content).toContain(
+      '"name":"propose_goal"',
+    );
+  });
+
   it.each([
     ['select', 'select:cron_create'],
     ['keyword', 'schedule cron'],

@@ -23,6 +23,11 @@ Codebase Search 两行在 `agent` 已声明、或已注册在桥接两端之后�
 因此这两行会被裁掉。其余受控行不新增例外，也不增加其他 prompt 裁剪策略。
 memory、history 和子 Agent 收到的 schema 保持不变。
 
+ACP 在应用已有的仅 Agent 并发规则前，先解析桥接调用的目标。桥接 Agent 结果
+通过已验证的执行记录保留立即发送的 todo 提醒；其他桥接目标保持原有调度和提醒
+节奏。关键词发现先过滤当前上下文中不可用的声明，再应用 `max_results`，包括
+host turn key 缺失时不可用的 Goal 提议。
+
 ## 风险与验收
 
 额外的发现请求可能抵消首次请求的节省，不能降低自然委派或 Goal 完成的可靠性。
@@ -36,6 +41,8 @@ memory、history 和子 Agent 收到的 schema 保持不变。
    结果；用户拒绝不能启动 Goal。
 4. `tools.visible`、禁用桥接、禁用工具及含历史直接调用的恢复会话：验证既有
    可见性和权限契约。
+5. ACP 直接和桥接 Agent 调用：验证并发委派及立即发送的 todo 提醒。非 Agent
+   桥接调用保持串行，不强制该提醒。Goal 关键词搜索须跟随 turn key 可用性。
 
 保留原始请求和任务结果，不能只记录声明字符数。单独报告回归和发现开销，不引用
 此前 allowlist 实验的降幅作为本次收益。#12333 的外部 benchmark pool overlay
