@@ -65,9 +65,6 @@ describe('ToolApproval disabled options', () => {
     // The goal variant keeps its own, more specific rule.
     const goal = find('.goalApproval .option:disabled');
     expect(goal).toHaveLength(1);
-    expect(declarations(goal[0]!)).toEqual([
-      'opacity: 0.5',
-      'cursor: default',
-    ]);
+    expect(declarations(goal[0]!)).toEqual(['opacity: 0.5', 'cursor: default']);
   });
 });
