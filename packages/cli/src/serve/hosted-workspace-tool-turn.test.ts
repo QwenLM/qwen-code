@@ -1005,12 +1005,12 @@ it.each([
   },
 );
 
-it('normalizes a glob path before dispatch', async () => {
+it('normalizes a glob pattern and path before dispatch', async () => {
   turn = createSearchTurn();
   const call = {
     ...calls[0],
     name: 'glob',
-    args: { pattern: '**/*.ts', path: ' ./src//nested ' },
+    args: { pattern: ' **/*.ts ', path: ' ./src//nested ' },
   };
   await turn.execute(
     [call],

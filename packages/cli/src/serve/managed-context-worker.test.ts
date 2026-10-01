@@ -1025,6 +1025,44 @@ describe('Managed context tool gate', () => {
     );
   });
 
+  it('refuses a glob that would search or report outside the Session directory', async () => {
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), '');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.symlinkSync(path.join('..', 'web'), path.join(root, 'services/api/peek'));
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    await post(origin, CONTEXT, installation('session-1', 'services/api'));
+    await post(origin, CONTEXT, installation('session-2', 'services/web'));
+    const glob = async (callId: string, input: Record<string, unknown>) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'glob',
+          input,
+        })
+      ).json();
+
+    // `pattern` is a search root of its own: glob resolves `..` against the
+    // filesystem and treats an absolute pattern as absolute.
+    const dotdot = await glob('call-1', { pattern: '../**/*' });
+    const absolute = await glob('call-2', { pattern: '/etc/host*' });
+    // A failed search still reaches the model and the durable record.
+    const missing = await glob('call-3', { pattern: '**/*', path: 'nope' });
+    // A link inside the Session context that points at a sibling Session.
+    const linked = await glob('call-4', { pattern: '*', path: 'peek' });
+
+    expect(dotdot.result.executionStatus).toBe('error');
+    expect(absolute.result.executionStatus).toBe('error');
+    expect(missing.result.executionStatus).toBe('error');
+    expect(linked.result.executionStatus).toBe('error');
+    for (const response of [dotdot, absolute, missing, linked]) {
+      const text = JSON.stringify(response);
+      expect(text).not.toContain('secret.txt');
+      expect(text).not.toContain(realDirectory(root, 'services/api'));
+      expect(text).not.toContain('/etc/');
+    }
+  });
+
   it('refuses new calls once the directory is gone, and still answers settled ones', async () => {
     const root = workspace();
     const origin = await startWorker({ ...BOOT, mountRoot: root });

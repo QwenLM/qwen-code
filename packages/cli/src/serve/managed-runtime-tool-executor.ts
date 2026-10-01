@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
@@ -791,12 +792,34 @@ export class ManagedToolExecutor {
           );
         const requested =
           typeof params['path'] === 'string' ? params['path'].trim() : '';
+        // `pattern` is a second search root: glob resolves `..` segments and
+        // treats an absolute pattern as absolute, so it is contained too, by
+        // segment so a literal `a/..b/*.ts` stays usable.
+        const pattern =
+          typeof params['pattern'] === 'string' ? params['pattern'] : '';
+        if (
+          path.isAbsolute(pattern) ||
+          pattern.split(/[\\/]/).includes('..')
+        ) {
+          throw new Error(
+            'Glob pattern must stay within the Workspace directory.',
+          );
+        }
         const resolved =
           requested === '' || requested === '.'
             ? root
             : path.resolve(root, requested);
-        const relative = path.relative(root, resolved);
-        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        // Containment compares realpaths: a lexical compare cannot see a
+        // symlink inside the Session context that leaves it.
+        const relative = path.relative(
+          await realpathIfPresent(root),
+          await realpathIfPresent(resolved),
+        );
+        if (
+          relative === '..' ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
           throw new Error(
             `Path '${requested}' is not within the Workspace directory.`,
           );
@@ -871,13 +894,19 @@ export class ManagedToolExecutor {
       }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       payload = {
         executionStatus: ManagedToolExecutor.isCancelRequested(entry)
           ? 'cancelled'
           : 'error',
         responseParts: [],
         error: {
-          message: error instanceof Error ? error.message : String(error),
+          // A refused or failed glob reaches the model and the durable record
+          // the same way its results do, so it is rewritten the same way.
+          message:
+            entry.toolName === GlobTool.Name && tools.directory !== undefined
+              ? relativizeGlobText(message, tools.directory)
+              : message,
         },
       };
     }
@@ -1111,18 +1140,46 @@ function sameInvocation(
  * Runtime host's physical layout: every path under the Session's installed
  * context becomes Workspace-relative, and the root itself becomes ".".
  */
-function relativizeGlobResult(result: ToolResult, directory: string) {
-  if (typeof result.llmContent !== 'string') return result;
+function relativizeGlobText(text: string, directory: string): string {
   const root = path.resolve(directory);
   const prefix = root.endsWith(path.sep) ? root : root + path.sep;
   const bareRoot = new RegExp(
     root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![/\\w.-])',
     'g',
   );
-  return {
-    ...result,
-    llmContent: result.llmContent.split(prefix).join('').replace(bareRoot, '.'),
-  };
+  return text.split(prefix).join('').replace(bareRoot, '.');
+}
+
+/** Both of glob's model-facing channels carry paths, so both are rewritten. */
+function relativizeGlobResult(
+  result: ToolResult,
+  directory: string,
+): ToolResult {
+  const next: ToolResult = { ...result };
+  if (typeof next.llmContent === 'string') {
+    next.llmContent = relativizeGlobText(next.llmContent, directory);
+  }
+  if (typeof next.error?.message === 'string') {
+    next.error = {
+      ...next.error,
+      message: relativizeGlobText(next.error.message, directory),
+    };
+  }
+  return next;
+}
+
+/**
+ * A path that does not exist has nothing to escape through, so containment
+ * falls back to the lexical value and lets the tool report it; any other
+ * failure to resolve is not something containment may assume away.
+ */
+async function realpathIfPresent(candidate: string): Promise<string> {
+  try {
+    return await realpath(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return candidate;
+    throw error;
+  }
 }
 
 function toPayload(

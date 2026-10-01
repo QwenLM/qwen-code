@@ -467,7 +467,12 @@ export class HostedWorkspaceToolTurn {
         const directory = call.args['path'];
         if (typeof pattern !== 'string' || !pattern.trim()) {
           validationError = globError;
-        } else if (directory !== undefined) {
+        } else {
+          // Dispatch what was validated: glob treats an untrimmed pattern as a
+          // literal, so it matches nothing and the false negative is persisted.
+          input['pattern'] = pattern.trim();
+        }
+        if (!validationError && directory !== undefined) {
           if (typeof directory !== 'string') {
             validationError = globError;
           } else {
