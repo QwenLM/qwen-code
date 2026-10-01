@@ -317,7 +317,11 @@ Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
-header alone does not authenticate an actor.
+header alone does not authenticate an actor. For local runs and the
+packaged-stack E2E, which have no ingress,
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` names a request header whose value is
+then trusted as the actor for the request's tenant. It is disabled by default;
+never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, the Session creator can list, inspect and answer pending permission
@@ -633,23 +637,34 @@ Hosted Harness process trees, deletes their old local homes, starts replacement
 owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
-The in-flight and continuation variants are not yet runnable. Both drive their
-assertion through a physical tool execution, and the Hosted Harness no-tool
-slice refuses every tool call by design, so the modes exit immediately with a
-not-yet-enabled error until the tool-capable Hosted turn tracked in #12380
-lands:
+The in-flight and continuation variants run the same replacement-owner proof
+through a physical Workspace file tool execution. The runner seeds the
+Workspace registry and access grant as deployment data, enables the G0 file
+admission, and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local
+actor, so the Session is created through the public route like any other
+Workspace-bound Session:
 
 ```bash
-npm run test:e2e:managed-inflight-failover       # gated: exits not-yet-enabled
-npm run test:e2e:managed-continuation-failover   # gated: exits not-yet-enabled
+npm run test:e2e:managed-inflight-failover
+npm run test:e2e:managed-continuation-failover
 ```
 
-Once enabled, the in-flight mode holds the first Broker `:start` request after
-the Harness has durably committed its `await_runtime` checkpoint, kills the
-original Spring and Hosted Harness process trees, deletes their homes, and
-starts replacement owners. It requires the replacement Harness to use the
-original `executionCallId`, execute the physical tool exactly once, continue
-the original Prompt without replay, and commit one public terminal event.
+Both modes require Linux: the replacement owner retires the dead worker's
+Runtime binding through the durable local-Worker reclaim (#12380 W0e), which
+runs on Linux only. The runner enables `durable-local-process` for these modes
+and refuses other platforms with an explicit error; the Hosted MySQL CI job
+runs both.
+
+The in-flight mode holds the first Broker `:start` request after the Harness
+has durably committed its `await_runtime` checkpoint, kills the original
+Spring and Hosted Harness process trees, deletes their homes, and starts
+replacement owners. It requires the replacement Harness to use the original
+`executionCallId`, execute the physical tool exactly once, continue the
+original Prompt without replay, and commit one public terminal event. The
+continuation mode kills the Harness after the first published text chunk and
+requires one tool execution, one further continuation, only the replacement's
+answer in the public transcript, and one terminal event. Both modes run in the
+Hosted MySQL CI job.
 
 Once the missing integration lands, a zero-delay run can check the real-model
 path. A controlled cold-start delay can then test output before Runtime
