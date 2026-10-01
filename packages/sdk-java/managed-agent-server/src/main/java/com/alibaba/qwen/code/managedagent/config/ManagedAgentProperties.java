@@ -1,15 +1,19 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import java.util.Locale;
+import java.util.Set;
 
 @ConfigurationProperties("qwen.managed-agent")
 public class ManagedAgentProperties {
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final ToolPublication toolPublication = new ToolPublication();
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
@@ -21,6 +25,10 @@ public class ManagedAgentProperties {
 
     public SessionStore getSessionStore() {
         return sessionStore;
+    }
+
+    public ToolPublication getToolPublication() {
+        return toolPublication;
     }
 
     public Dispatch getDispatch() {
@@ -43,12 +51,47 @@ public class ManagedAgentProperties {
         this.agentRevision = agentRevision;
     }
 
+    @PostConstruct
+    void validateWorkspaceFiles() {
+        long timeout = harness.getApprovalTimeout().toMillis();
+        if (timeout < 1000 || timeout > 86400000) {
+            throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h");
+        }
+        if (harness.isWorkspaceFilesEnabled()
+                && (!harness.isEnabled()
+                        || !sessionStore.isEnabled()
+                        || !runtimeBroker.isEnabled()
+                        || !"local-process".equals(runtimeBroker.getProvisioner())
+                        || !"session".equals(runtimeBroker.getIsolationClass())
+                        || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || !Set.of("yolo", "default", "auto-edit")
+                                .contains(
+                                        harness.getApprovalMode()
+                                                .toLowerCase(Locale.ROOT)))) {
+            throw new IllegalStateException(
+                    "Hosted Workspace files require"
+                            + " a supported Harness, Session Store and Session-isolated"
+                            + " local-process Broker with Workspace mounts");
+        }
+    }
+
     public static class Harness {
         private boolean enabled;
+        private boolean workspaceFilesEnabled;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
         private String approvalMode = "yolo";
+        private Duration approvalTimeout = Duration.ofMinutes(10);
+
+        public Duration getApprovalTimeout() {
+            return approvalTimeout;
+        }
+
+        public void setApprovalTimeout(Duration value) {
+            approvalTimeout = value;
+        }
+
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
@@ -59,6 +102,14 @@ public class ManagedAgentProperties {
 
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        public boolean isWorkspaceFilesEnabled() {
+            return workspaceFilesEnabled;
+        }
+
+        public void setWorkspaceFilesEnabled(boolean workspaceFilesEnabled) {
+            this.workspaceFilesEnabled = workspaceFilesEnabled;
         }
 
         public String getBaseUrl() {
@@ -155,6 +206,52 @@ public class ManagedAgentProperties {
         public void setWriterLeaseDuration(Duration writerLeaseDuration) {
             this.writerLeaseDuration = writerLeaseDuration;
         }
+    }
+
+    public static class ToolPublication {
+        private boolean enabled;
+        private String ossEndpoint = "";
+        private String ossRegion = "";
+        private String ossBucket = "";
+        private String serviceBaseUrl = "";
+        private Long executionBytes;
+        private Long sessionBytes;
+        private Long tenantBytes;
+        private Long activeCaptures;
+        private Integer entryConcurrency;
+        private Duration operationTimeout;
+        private Duration claimTimeout;
+        private Long verificationBytesPerSecond;
+        private Duration maxVerificationTimeout;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getOssEndpoint() { return ossEndpoint; }
+        public void setOssEndpoint(String value) { ossEndpoint = value; }
+        public String getOssRegion() { return ossRegion; }
+        public void setOssRegion(String value) { ossRegion = value; }
+        public String getOssBucket() { return ossBucket; }
+        public void setOssBucket(String value) { ossBucket = value; }
+        public String getServiceBaseUrl() { return serviceBaseUrl; }
+        public void setServiceBaseUrl(String value) { serviceBaseUrl = value; }
+        public Long getExecutionBytes() { return executionBytes; }
+        public void setExecutionBytes(Long value) { executionBytes = value; }
+        public Long getSessionBytes() { return sessionBytes; }
+        public void setSessionBytes(Long value) { sessionBytes = value; }
+        public Long getTenantBytes() { return tenantBytes; }
+        public void setTenantBytes(Long value) { tenantBytes = value; }
+        public Long getActiveCaptures() { return activeCaptures; }
+        public void setActiveCaptures(Long value) { activeCaptures = value; }
+        public Integer getEntryConcurrency() { return entryConcurrency; }
+        public void setEntryConcurrency(Integer value) { entryConcurrency = value; }
+        public Duration getOperationTimeout() { return operationTimeout; }
+        public void setOperationTimeout(Duration value) { operationTimeout = value; }
+        public Duration getClaimTimeout() { return claimTimeout; }
+        public void setClaimTimeout(Duration value) { claimTimeout = value; }
+        public Long getVerificationBytesPerSecond() { return verificationBytesPerSecond; }
+        public void setVerificationBytesPerSecond(Long value) { verificationBytesPerSecond = value; }
+        public Duration getMaxVerificationTimeout() { return maxVerificationTimeout; }
+        public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
     }
 
     public static class Dispatch {
@@ -283,6 +380,10 @@ public class ManagedAgentProperties {
         private List<WorkspaceMount> workspaceMounts = List.of();
         private String isolationClass = "session";
         private String stateDirectory = "";
+        private boolean durableLocalProcess;
+        private boolean trustedLocalRebootRecovery;
+        private boolean operatorRecoveryEnabled;
+        private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -388,6 +489,38 @@ public class ManagedAgentProperties {
 
         public void setIsolationClass(String isolationClass) {
             this.isolationClass = isolationClass;
+        }
+
+        public boolean isDurableLocalProcess() {
+            return durableLocalProcess;
+        }
+
+        public void setDurableLocalProcess(boolean durableLocalProcess) {
+            this.durableLocalProcess = durableLocalProcess;
+        }
+
+        public boolean isTrustedLocalRebootRecovery() {
+            return trustedLocalRebootRecovery;
+        }
+
+        public void setTrustedLocalRebootRecovery(boolean trustedLocalRebootRecovery) {
+            this.trustedLocalRebootRecovery = trustedLocalRebootRecovery;
+        }
+
+        public boolean isOperatorRecoveryEnabled() {
+            return operatorRecoveryEnabled;
+        }
+
+        public void setOperatorRecoveryEnabled(boolean operatorRecoveryEnabled) {
+            this.operatorRecoveryEnabled = operatorRecoveryEnabled;
+        }
+
+        public boolean isVerifiedWorkspaceRecoveryEnabled() {
+            return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
+            this.verifiedWorkspaceRecoveryEnabled = verifiedWorkspaceRecoveryEnabled;
         }
 
         public String getStateDirectory() {

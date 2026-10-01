@@ -10,16 +10,10 @@ import {
   cleanSummary,
   createToolUseSummaryMessage,
   generateToolUseSummary,
+  type GenerateToolUseSummaryParams,
   TOOL_USE_SUMMARY_SYSTEM_PROMPT,
   truncateJson,
 } from './toolUseSummary.js';
-
-// Sanity helper for the pre-truncation tests: `y` count in the output must
-// be less than maxLength (since JSON quoting and the field name eat some of
-// the budget) — confirming the input never reached its full 10MB form.
-function maxLengthGuard(maxLength: number) {
-  return maxLength;
-}
 
 describe('truncateJson', () => {
   it('returns JSON for short values', () => {
@@ -49,17 +43,16 @@ describe('truncateJson', () => {
   });
 
   it('pre-truncates large string fields inside objects', () => {
-    // The point: a 10MB string field must not be fully serialized before the
-    // outer cap is applied (would allocate 10MB+ of JSON only to slice it).
-    // Pre-truncation slices each string leaf to maxLength first, so the
-    // serializer never sees the full payload.
+    // A 10MB string field must not be fully serialized before the outer cap
+    // (10MB+ of JSON only to slice it): each string leaf is sliced to maxLength
+    // first, so the serializer never sees the full payload.
     const obj = { content: 'y'.repeat(10_000_000) };
     const result = truncateJson(obj, 300);
     expect(result.length).toBeLessThanOrEqual(300);
-    // The huge field is truncated to <= maxLength characters — far below
-    // its original 10M length.
+    // Fewer `y`s than maxLength (JSON quoting and the field name eat some of
+    // the budget) confirms the input never reached its full 10MB form.
     const yCount = (result.match(/y/g) ?? []).length;
-    expect(yCount).toBeLessThan(maxLengthGuard(300));
+    expect(yCount).toBeLessThan(300);
   });
 
   it('handles circular references gracefully', () => {
@@ -196,57 +189,57 @@ describe('generateToolUseSummary', () => {
     } as unknown as Config;
   };
 
-  const abortController = (): AbortController => new AbortController();
+  /** A `generateText` mock that resolves with `text`. */
+  const replying = (text: string) =>
+    vi.fn().mockResolvedValue({ text, usage: undefined });
+
+  /**
+   * Summarizes with fast model 'qwen-fast' backed by `generateContentFn` (no
+   * LLM client when omitted) and one empty Read tool, unless `params` override.
+   */
+  const summarize = (
+    generateContentFn?: ReturnType<typeof vi.fn>,
+    params: Partial<GenerateToolUseSummaryParams> = {},
+  ) =>
+    generateToolUseSummary({
+      config: makeMockConfig('qwen-fast', generateContentFn),
+      tools: [{ name: 'Read', input: {}, output: '' }],
+      signal: new AbortController().signal,
+      ...params,
+    });
+
+  /** The user prompt text of the first model call. */
+  const promptOf = (generateContentFn: ReturnType<typeof vi.fn>) =>
+    generateContentFn.mock.calls[0][0].contents[0].parts[0].text as string;
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it('returns null when tools array is empty', async () => {
-    const config = makeMockConfig('qwen-fast');
-    const result = await generateToolUseSummary({
-      config,
-      tools: [],
-      signal: abortController().signal,
-    });
-    expect(result).toBeNull();
+    expect(await summarize(undefined, { tools: [] })).toBeNull();
   });
 
   it('returns null when no fast model is configured', async () => {
-    const config = makeMockConfig(undefined);
-    const result = await generateToolUseSummary({
-      config,
+    const result = await summarize(undefined, {
+      config: makeMockConfig(undefined),
       tools: [{ name: 'Read', input: { file: 'a.ts' }, output: '...' }],
-      signal: abortController().signal,
     });
     expect(result).toBeNull();
   });
 
   it('returns null when signal is already aborted', async () => {
-    const config = makeMockConfig('qwen-fast');
-    const ac = abortController();
+    const ac = new AbortController();
     ac.abort();
-    const result = await generateToolUseSummary({
-      config,
-      tools: [{ name: 'Read', input: {}, output: '' }],
-      signal: ac.signal,
-    });
-    expect(result).toBeNull();
+    expect(await summarize(undefined, { signal: ac.signal })).toBeNull();
   });
 
   it('calls model with fast model id and system prompt', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: 'Searched in auth/',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const result = await generateToolUseSummary({
-      config,
+    const generateContentFn = replying('Searched in auth/');
+    const result = await summarize(generateContentFn, {
       tools: [
         { name: 'Grep', input: { pattern: 'login' }, output: '3 matches' },
       ],
-      signal: abortController().signal,
     });
 
     expect(result).toBe('Searched in auth/');
@@ -258,7 +251,7 @@ describe('generateToolUseSummary', () => {
     expect(options.promptId).toBe('side-query:tool-use-summary');
     expect(options.systemInstruction).toBe(TOOL_USE_SUMMARY_SYSTEM_PROMPT);
 
-    const userText = options.contents[0].parts[0].text as string;
+    const userText = promptOf(generateContentFn);
     expect(userText).toContain('Tool: Grep');
     expect(userText).toContain('"pattern":"login"');
     expect(userText).toContain('3 matches');
@@ -266,22 +259,14 @@ describe('generateToolUseSummary', () => {
   });
 
   it('includes lastAssistantText as intent prefix', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: 'Fixed auth bug',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    await generateToolUseSummary({
-      config,
+    const generateContentFn = replying('Fixed auth bug');
+    await summarize(generateContentFn, {
       tools: [{ name: 'Edit', input: {}, output: '' }],
-      signal: abortController().signal,
       lastAssistantText:
         'I will now fix the authentication bug in the login flow.',
     });
 
-    const userText = generateContentFn.mock.calls[0][0].contents[0].parts[0]
-      .text as string;
+    const userText = promptOf(generateContentFn);
     expect(userText).toContain(
       "User's intent (from assistant's last message):",
     );
@@ -289,106 +274,60 @@ describe('generateToolUseSummary', () => {
   });
 
   it('truncates lastAssistantText to 200 chars', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: 'Done',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const longText = 'A'.repeat(500);
-    await generateToolUseSummary({
-      config,
+    const generateContentFn = replying('Done');
+    await summarize(generateContentFn, {
       tools: [{ name: 'Edit', input: {}, output: '' }],
-      signal: abortController().signal,
-      lastAssistantText: longText,
+      lastAssistantText: 'A'.repeat(500),
     });
 
-    const userText = generateContentFn.mock.calls[0][0].contents[0].parts[0]
-      .text as string;
+    const userText = promptOf(generateContentFn);
     // 200 As + some wrapper text, but no 500 As
     expect(userText).toContain('A'.repeat(200));
     expect(userText).not.toContain('A'.repeat(201));
   });
 
   it('returns null when model returns empty text', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: '',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const result = await generateToolUseSummary({
-      config,
-      tools: [{ name: 'Read', input: {}, output: '' }],
-      signal: abortController().signal,
-    });
-    expect(result).toBeNull();
+    expect(await summarize(replying(''))).toBeNull();
   });
 
   it('returns null when model call throws', async () => {
     const generateContentFn = vi.fn().mockRejectedValue(new Error('API error'));
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const result = await generateToolUseSummary({
-      config,
-      tools: [{ name: 'Read', input: {}, output: '' }],
-      signal: abortController().signal,
-    });
-    expect(result).toBeNull();
+    expect(await summarize(generateContentFn)).toBeNull();
   });
 
   it('returns null when the signal aborts during the call', async () => {
-    const ac = abortController();
+    const ac = new AbortController();
     const generateContentFn = vi.fn().mockImplementation(async () => {
       ac.abort();
       throw new Error('aborted');
     });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const result = await generateToolUseSummary({
-      config,
-      tools: [{ name: 'Read', input: {}, output: '' }],
-      signal: ac.signal,
-    });
-    expect(result).toBeNull();
+    expect(
+      await summarize(generateContentFn, { signal: ac.signal }),
+    ).toBeNull();
   });
 
   it('truncates tool input/output to 300 chars', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: 'Read file',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const hugeInput = { content: 'x'.repeat(10000) };
-    const hugeOutput = 'y'.repeat(10000);
-
-    await generateToolUseSummary({
-      config,
-      tools: [{ name: 'Read', input: hugeInput, output: hugeOutput }],
-      signal: abortController().signal,
+    const generateContentFn = replying('Read file');
+    await summarize(generateContentFn, {
+      tools: [
+        {
+          name: 'Read',
+          input: { content: 'x'.repeat(10000) },
+          output: 'y'.repeat(10000),
+        },
+      ],
     });
 
-    const userText = generateContentFn.mock.calls[0][0].contents[0].parts[0]
-      .text as string;
-    // Each field capped at 300, so overall prompt shouldn't contain the
-    // full 10K repetition.
+    const userText = promptOf(generateContentFn);
+    // Each field is capped at 300, so the prompt lacks the full 10K repetition.
     expect(userText).not.toContain('x'.repeat(500));
     expect(userText).not.toContain('y'.repeat(500));
     expect(userText).toContain('...');
   });
 
   it('cleans markdown bullets / quotes from model output', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: '- "Searched auth/"',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    const result = await generateToolUseSummary({
-      config,
+    const result = await summarize(replying('- "Searched auth/"'), {
       tools: [{ name: 'Grep', input: {}, output: '' }],
-      signal: abortController().signal,
     });
     expect(result).toBe('Searched auth/');
   });

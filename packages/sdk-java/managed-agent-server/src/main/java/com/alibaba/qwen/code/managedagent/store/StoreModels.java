@@ -84,7 +84,8 @@ public final class StoreModels {
     public enum OperationKind {
         CLOSE,
         ARCHIVE,
-        DELETE
+        DELETE,
+        ACTION_RESPONSE
     }
 
     /**
@@ -113,6 +114,14 @@ public final class StoreModels {
 
     public record SessionPage(List<SessionRecord> sessions,
             boolean hasMore) {
+    }
+
+    /** The fields of a Turn that its public view shows, without its input. */
+    public record TurnSummary(String sessionId, String turnId, String status,
+            long createdAt, Long completedAt, String errorCode) {
+    }
+
+    public record TurnPage(List<TurnSummary> turns, boolean hasMore) {
     }
 
     public record EventPage(List<EventRecord> events, boolean hasMore) {
