@@ -1111,11 +1111,13 @@ describe('NativeLspService disk document synchronization', () => {
 
   function queryDiagnosticsTool(
     operation: 'diagnostics' | 'workspaceDiagnostics' = 'diagnostics',
+    serverName?: string,
   ) {
     return lspTool()
       .build({
         operation,
         ...(operation === 'diagnostics' ? { filePath: file } : {}),
+        ...(serverName ? { serverName } : {}),
       })
       .execute(new AbortController().signal);
   }
@@ -2216,10 +2218,15 @@ describe('NativeLspService disk document synchronization', () => {
       'reports %s as a tool error when no server is ready',
       async (operation) => {
         handle.status = 'FAILED';
+        handle.error = new Error('command not found: test-server');
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toBeDefined();
-        // The state word, not the tool's `LSP diagnostics failed:` prefix.
+        // The state word, not the tool's `LSP diagnostics failed:` prefix,
+        // plus the recorded cause the service is already holding.
         expect(result.error?.message).toContain('test is failed');
+        expect(result.error?.message).toContain(
+          'command not found: test-server',
+        );
         expect(result.llmContent).not.toContain('No diagnostics found');
         expect(connection.request).not.toHaveBeenCalled();
       },
@@ -2251,13 +2258,7 @@ describe('NativeLspService disk document synchronization', () => {
       'keeps a valid %s diagnostic with an empty-string message',
       async (operation) => {
         const emptyMessageDiagnostic = { range, severity: 1, message: '' };
-        connection.request.mockImplementation(async (method) =>
-          method === 'workspace/diagnostic'
-            ? {
-                items: [{ uri, kind: 'full', items: [emptyMessageDiagnostic] }],
-              }
-            : { kind: 'full', items: [emptyMessageDiagnostic] },
-        );
+        mockDiagnosticsResponses(connection, [emptyMessageDiagnostic]);
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toBeUndefined();
         expect(result.llmContent).toContain('1 issues');
@@ -2269,35 +2270,20 @@ describe('NativeLspService disk document synchronization', () => {
       'keeps partial %s results when another server fails',
       async (operation) => {
         const healthyConnection = createConnection();
-        healthyConnection.request.mockImplementation(async (method) =>
-          method === 'workspace/diagnostic'
-            ? {
-                items: [
-                  {
-                    uri,
-                    kind: 'full',
-                    items: [{ range, severity: 2, message: 'real warning' }],
-                  },
-                ],
-              }
-            : {
-                kind: 'full',
-                items: [{ range, severity: 2, message: 'real warning' }],
-              },
-        );
-        const healthyHandle: LspServerHandle = {
-          ...handle,
-          connection: healthyConnection,
-        };
-        (service as unknown as { serverManager: unknown }).serverManager = {
-          getHandles: () =>
-            new Map([
-              ['test', handle],
-              ['healthy', healthyHandle],
-            ]),
-          warmupTypescriptServer: vi.fn(),
-          isTypescriptServer: () => false,
-        };
+        mockDiagnosticsResponses(healthyConnection, [
+          { range, severity: 2, message: 'real warning' },
+        ]);
+        withServers([
+          ['test', handle],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: healthyConnection,
+            },
+          ],
+        ]);
         connection.request.mockRejectedValue(new Error('server exploded'));
         const result = await run(queryDiagnosticsTool(operation));
         expect(result.error).toBeUndefined();
@@ -2314,14 +2300,25 @@ describe('NativeLspService disk document synchronization', () => {
       };
     }
 
+    /**
+     * Answer every diagnostics pull on the connection with a report carrying
+     * the given items (wrapped in a file entry for a workspace pull).
+     */
+    function mockDiagnosticsResponses(
+      target: ReturnType<typeof createConnection>,
+      items: unknown[] = [],
+    ) {
+      target.request.mockImplementation(async (method: string) =>
+        method === 'workspace/diagnostic'
+          ? { items: items.length ? [{ uri, kind: 'full', items }] : [] }
+          : { kind: 'full', items },
+      );
+    }
+
     /** A READY server that answers every pull with a valid empty report. */
     function emptyReportHandle(name: string): LspServerHandle {
       const emptyConnection = createConnection();
-      emptyConnection.request.mockImplementation(async (method) =>
-        method === 'workspace/diagnostic'
-          ? { items: [] }
-          : { kind: 'full', items: [] },
-      );
+      mockDiagnosticsResponses(emptyConnection);
       return {
         ...handle,
         config: { ...handle.config, name },
@@ -2347,11 +2344,7 @@ describe('NativeLspService disk document synchronization', () => {
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'names a server that was never queried when %s retrieves nothing',
       async (operation) => {
-        connection.request.mockImplementation(async (method) =>
-          method === 'workspace/diagnostic'
-            ? { items: [] }
-            : { kind: 'full', items: [] },
-        );
+        mockDiagnosticsResponses(connection);
         const pendingHandle: LspServerHandle = {
           ...handle,
           config: { ...handle.config, name: 'pyright' },
@@ -2372,16 +2365,223 @@ describe('NativeLspService disk document synchronization', () => {
     );
 
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
-      'rejects %s when a disposed connection answers with no response',
+      'rejects %s when a connection answers with no response',
       async (operation) => {
         // `sendRequest` resolves `undefined` once disposed instead of
-        // rejecting, so the handle still looks READY and answerable.
-        connection.request.mockResolvedValue(undefined);
+        // rejecting, and a JSON-RPC success can carry `result: null`; both
+        // leave the handle looking READY and answerable.
+        for (const response of [undefined, null]) {
+          connection.request.mockResolvedValue(response);
+          await expect(
+            operation === 'diagnostics'
+              ? run(service.diagnostics(uri))
+              : run(service.workspaceDiagnostics()),
+          ).rejects.toThrow('server returned no response');
+        }
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects %s when every reported item fails normalization',
+      async (operation) => {
+        // A severity-1 finding without a range cannot be normalized; dropping
+        // it must not certify the file clean. The workspace twin drops a file
+        // report that carries no uri.
+        connection.request.mockImplementation(async (method: string) =>
+          method === 'workspace/diagnostic'
+            ? {
+                items: [
+                  {
+                    kind: 'full',
+                    items: [{ range, severity: 1, message: 'Type error' }],
+                  },
+                ],
+              }
+            : {
+                kind: 'full',
+                items: [{ severity: 1, message: 'Type error' }],
+              },
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('unusable');
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'caps a huge %s rejection message instead of flooding the tool result',
+      async (operation) => {
+        connection.request.mockRejectedValue(new Error('x'.repeat(5000)));
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        // getErrorMessage caps the detail at 1000 chars; the rendered message
+        // must stay bounded even with the wrapper text around it.
+        expect(result.error!.message.length).toBeLessThan(1100);
+        expect(result.llmContent).not.toContain('x'.repeat(1001));
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'keeps the cause chain of a rejected %s pull',
+      async (operation) => {
+        connection.request.mockRejectedValue(
+          new Error('outer', { cause: new Error('inner root cause') }),
+        );
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('(cause: inner root cause)');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names every failing server when all %s pulls fail',
+      async (operation) => {
+        const secondConnection = createConnection();
+        secondConnection.request.mockRejectedValue(
+          new Error('second exploded'),
+        );
+        withServers([
+          ['test', handle],
+          [
+            'healthy',
+            {
+              ...handle,
+              config: { ...handle.config, name: 'healthy' },
+              connection: secondConnection,
+            },
+          ],
+        ]);
+        connection.request.mockRejectedValue(new Error('first exploded'));
         await expect(
           operation === 'diagnostics'
             ? run(service.diagnostics(uri))
             : run(service.workspaceDiagnostics()),
-        ).rejects.toThrow('server returned no response');
+        ).rejects.toThrow(/test: first exploded; healthy: second exploded/);
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'names every unreachable server when %s retrieves nothing',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const failedHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'failedone' },
+          status: 'FAILED',
+          connection: undefined,
+        };
+        const pendingHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'pendingtwo' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['failedone', failedHandle],
+          ['pendingtwo', pendingHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeDefined();
+        expect(result.error?.message).toContain('failedone is failed');
+        expect(result.error?.message).toContain('pendingtwo is in progress');
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'rejects a %s query naming a server that is not configured',
+      async (operation) => {
+        await expect(
+          operation === 'diagnostics'
+            ? run(service.diagnostics(uri, 'missing'))
+            : run(service.workspaceDiagnostics('missing')),
+        ).rejects.toThrow(
+          'No LSP server named missing is configured or running',
+        );
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not name other servers as skipped for a server-scoped %s query',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const pendingHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'pyright' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['pyright', pendingHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation, 'test'));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not let a server that cannot own the file veto a clean %s answer',
+      async (operation) => {
+        mockDiagnosticsResponses(connection);
+        const failedPythonHandle: LspServerHandle = {
+          ...handle,
+          config: {
+            ...handle.config,
+            name: 'pyright',
+            languages: ['python'],
+          },
+          status: 'FAILED',
+          connection: undefined,
+          error: new Error('command not found: pyright-langserver'),
+        };
+        withServers([
+          ['test', handle],
+          ['pyright', failedPythonHandle],
+        ]);
+        const result = await run(queryDiagnosticsTool(operation));
+        if (operation === 'diagnostics') {
+          // pyright could never own main.ts, so the ready server's
+          // authoritative empty report stands.
+          expect(result.error).toBeUndefined();
+          expect(result.llmContent).toMatch(/^No diagnostics found/);
+        } else {
+          // A workspace report would silently certify pyright's slice clean.
+          expect(result.error).toBeDefined();
+          expect(result.error?.message).toContain('pyright is failed');
+        }
+      },
+    );
+
+    it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
+      'does not name a server that became ready during the %s query',
+      async (operation) => {
+        const lateConnection = createConnection();
+        mockDiagnosticsResponses(lateConnection);
+        const lateHandle: LspServerHandle = {
+          ...handle,
+          config: { ...handle.config, name: 'late' },
+          status: 'IN_PROGRESS',
+          connection: undefined,
+        };
+        withServers([
+          ['test', handle],
+          ['late', lateHandle],
+        ]);
+        connection.request.mockImplementation(async (method: string) => {
+          // The pending server finishes starting while the ready server
+          // answers, so the pre-loop snapshot is stale by the decision point.
+          lateHandle.status = 'READY';
+          lateHandle.connection = lateConnection;
+          return method === 'workspace/diagnostic'
+            ? { items: [] }
+            : { kind: 'full', items: [] };
+        });
+        const result = await run(queryDiagnosticsTool(operation));
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toMatch(/^No diagnostics found/);
       },
     );
   });

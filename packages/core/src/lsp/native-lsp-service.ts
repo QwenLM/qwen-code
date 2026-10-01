@@ -54,16 +54,25 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getErrorMessage } from '../utils/errors.js';
 import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
 
-/** Render one server a diagnostics query could not use, by name and state. */
+/**
+ * Render one server a diagnostics query could not use, by name, state and —
+ * where the manager recorded one — the cause. `handle.error` is set on only
+ * some FAILED transitions and `processDiagnostics` is absent for crash paths,
+ * so both are optional here.
+ */
 function describeLspServerState(name: string, handle: LspServerHandle): string {
   if (handle.status === 'READY' && !handle.connection) {
     return `${name} has no active connection`;
   }
-  return `${name} is ${handle.status.toLowerCase().replace(/_/g, ' ')}`;
+  const reason =
+    handle.error?.message ?? handle.processDiagnostics?.stderrTail?.trim();
+  const state = handle.status.toLowerCase().replace(/_/g, ' ');
+  return `${name} is ${state}${reason ? ` (${reason})` : ''}`;
 }
 
 /**
@@ -78,10 +87,7 @@ function nothingRetrievedForDiagnostics(
   skipped: string[],
 ): Error {
   const detail = [
-    ...failures.map(
-      ({ name, error }) =>
-        `${name}: ${(error as Error)?.message || String(error)}`,
-    ),
+    ...failures.map(({ name, error }) => `${name}: ${getErrorMessage(error)}`),
     ...skipped,
   ].join('; ');
   return new Error(`No LSP diagnostics could be retrieved (${detail})`);
@@ -575,34 +581,26 @@ export class NativeLspService {
   }
 
   /**
-   * Ready handles for a diagnostics query, plus the rendered state of every
-   * configured server that query will not reach. Rejects outright when nothing
-   * is ready — no matching server, a server that failed or never started, a
+   * Ready handles for a diagnostics query. Rejects outright when nothing is
+   * ready — no matching server, a server that failed or never started, a
    * server still starting up — because an empty ready set would otherwise be
-   * reported as a clean result. When the ready set is only a subset, the
-   * servers left out are returned alongside it so a query that retrieves
-   * nothing can name them instead of certifying the part of the workspace they
-   * own as clean. `getReadyHandles` itself must keep returning an empty array
-   * for the not-ready case: `replayOpenDocuments` skips handles missing from
-   * its map rather than rejecting.
+   * reported as a clean result. Servers left out of a non-empty ready set are
+   * accounted for at the decision point by `unreachableDiagnosticServers`,
+   * which re-reads live handle state: a snapshot taken here would be stale by
+   * the time the query loop finishes. `getReadyHandles` itself must keep
+   * returning an empty array for the not-ready case: `replayOpenDocuments`
+   * skips handles missing from its map rather than rejecting.
    */
-  private getDiagnosticHandles(serverName?: string): {
-    handles: Array<
-      [string, LspServerHandle & { connection: LspConnectionInterface }]
-    >;
-    skipped: string[];
-  } {
+  private getDiagnosticHandles(
+    serverName?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
     const handles = this.getReadyHandles(serverName);
-    const skipped = Array.from(this.serverManager.getHandles())
-      .filter(
-        ([name]) =>
-          (!serverName || name === serverName) &&
-          !handles.some(([readyName]) => readyName === name),
-      )
-      .map(([name, handle]) => describeLspServerState(name, handle));
     if (handles.length > 0) {
-      return { handles, skipped };
+      return handles;
     }
+    const skipped = Array.from(this.serverManager.getHandles())
+      .filter(([name]) => !serverName || name === serverName)
+      .map(([name, handle]) => describeLspServerState(name, handle));
     throw new Error(
       skipped.length > 0
         ? `No LSP server is ready to provide diagnostics (${skipped.join('; ')})`
@@ -610,6 +608,44 @@ export class NativeLspService {
           ? `No LSP server named ${serverName} is configured or running`
           : 'No LSP servers are configured or running',
     );
+  }
+
+  /**
+   * Rendered states of the servers a diagnostics query did not reach and
+   * still cannot reach, recomputed from live handle state at the decision
+   * point: a server that finished starting mid-query is no longer named as
+   * pending, and a server that has since become ready is no veto at all (it
+   * simply was not queried this time). For a document query (`uri` given),
+   * only servers whose configured extensions cover the file can veto — a
+   * server that could never own the file must not discard another server's
+   * authoritative empty report. For a workspace query every unreachable
+   * server vetoes, since the report would otherwise certify that server's
+   * slice of the workspace as clean.
+   */
+  private unreachableDiagnosticServers(
+    queried: ReadonlyArray<readonly [string, unknown]>,
+    serverName: string | undefined,
+    uri?: string,
+  ): string[] {
+    let extension: string | undefined;
+    if (uri) {
+      try {
+        extension = path.extname(fileURLToPath(uri)).slice(1).toLowerCase();
+      } catch {
+        // An unparseable URI cannot prove any server irrelevant; keep the veto.
+        extension = undefined;
+      }
+    }
+    return Array.from(this.serverManager.getHandles())
+      .filter(
+        ([name, handle]) =>
+          (!serverName || name === serverName) &&
+          !queried.some(([queriedName]) => queriedName === name) &&
+          !(handle.status === 'READY' && handle.connection !== undefined) &&
+          (extension === undefined ||
+            this.getWorkspaceSymbolExtensions(handle).includes(extension)),
+      )
+      .map(([name, handle]) => describeLspServerState(name, handle));
   }
 
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
@@ -1818,7 +1854,7 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const { handles, skipped } = this.getDiagnosticHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const allDiagnostics: LspDiagnostic[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
 
@@ -1836,10 +1872,11 @@ export class NativeLspService {
           },
         );
 
-        if (response === undefined) {
+        if (response == null) {
           // A disposed connection resolves `undefined` instead of rejecting,
-          // so without this an unusable answer would count as a clean empty
-          // one and never reach the ledger below.
+          // and a JSON-RPC success can carry `result: null`; both would
+          // otherwise count as a clean empty answer and never reach the
+          // ledger below.
           failures.push({
             name,
             error: new Error('server returned no response'),
@@ -1848,6 +1885,7 @@ export class NativeLspService {
           const responseObj = response as Record<string, unknown>;
           const items = responseObj['items'];
           if (Array.isArray(items)) {
+            let kept = 0;
             for (const item of items) {
               const normalized = this.normalizer.normalizeDiagnostic(
                 item,
@@ -1855,7 +1893,16 @@ export class NativeLspService {
               );
               if (normalized) {
                 allDiagnostics.push(normalized);
+                kept++;
               }
+            }
+            if (items.length > 0 && kept === 0) {
+              // The server did report problems but none survived
+              // normalization (e.g. no range); that is not a clean report.
+              failures.push({
+                name,
+                error: new Error('server returned only unusable diagnostics'),
+              });
             }
           }
         }
@@ -1870,11 +1917,15 @@ export class NativeLspService {
       }
     }
 
-    if (
-      allDiagnostics.length === 0 &&
-      (failures.length > 0 || skipped.length > 0)
-    ) {
-      throw nothingRetrievedForDiagnostics(failures, skipped);
+    if (allDiagnostics.length === 0) {
+      const unreachable = this.unreachableDiagnosticServers(
+        handles,
+        serverName,
+        uri,
+      );
+      if (failures.length > 0 || unreachable.length > 0) {
+        throw nothingRetrievedForDiagnostics(failures, unreachable);
+      }
     }
     return allDiagnostics;
   }
@@ -1886,7 +1937,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const { handles, skipped } = this.getDiagnosticHandles(serverName);
+    const handles = this.getDiagnosticHandles(serverName);
     const results: LspFileDiagnostics[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
 
@@ -1960,11 +2011,12 @@ export class NativeLspService {
           },
         );
 
-        if (response === undefined) {
+        if (response == null) {
           // A disposed connection resolves `undefined` instead of rejecting,
-          // so without this an unusable answer would count as a clean empty
-          // one and never reach the ledger below. The staleness guard above
-          // cannot see it: identity, status and map membership are unchanged.
+          // and a JSON-RPC success can carry `result: null`; both would
+          // otherwise count as a clean empty answer and never reach the
+          // ledger below. The staleness guard above cannot see the disposed
+          // case: identity, status and map membership are unchanged.
           failures.push({
             name,
             error: new Error('server returned no response'),
@@ -1973,17 +2025,30 @@ export class NativeLspService {
           const responseObj = response as Record<string, unknown>;
           const items = responseObj['items'];
           if (Array.isArray(items)) {
+            let examined = 0;
+            let dropped = 0;
             for (const item of items) {
               if (results.length >= limit) {
                 break;
               }
+              examined++;
               const normalized = this.normalizer.normalizeFileDiagnostics(
                 item,
                 name,
               );
-              if (normalized && normalized.diagnostics.length > 0) {
+              if (!normalized) {
+                dropped++;
+              } else if (normalized.diagnostics.length > 0) {
                 results.push(normalized);
               }
+            }
+            if (examined > 0 && dropped === examined) {
+              // The server did report files but none survived normalization
+              // (e.g. no uri/items); that is not a clean report.
+              failures.push({
+                name,
+                error: new Error('server returned only unusable diagnostics'),
+              });
             }
           }
         }
@@ -1999,8 +2064,14 @@ export class NativeLspService {
       }
     }
 
-    if (results.length === 0 && (failures.length > 0 || skipped.length > 0)) {
-      throw nothingRetrievedForDiagnostics(failures, skipped);
+    if (results.length === 0) {
+      const unreachable = this.unreachableDiagnosticServers(
+        handles,
+        serverName,
+      );
+      if (failures.length > 0 || unreachable.length > 0) {
+        throw nothingRetrievedForDiagnostics(failures, unreachable);
+      }
     }
     return results.slice(0, limit);
   }
