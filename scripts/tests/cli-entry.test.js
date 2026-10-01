@@ -277,7 +277,9 @@ describe('scripts/cli-entry.js production entry', () => {
       expect(output).toContain('-4092');
       // The message already carries the code and syscall: not repeated.
       expect(output.match(/EACCES/g)).toHaveLength(1);
-      expect(output).toContain('spawnSync node.exe');
+      expect(output.match(/spawnSync node\.exe/g)).toHaveLength(1);
+      expect(output).toContain('errno -4092');
+      expect(output).not.toContain('next run');
       expect(output).toContain(process.execPath);
       expect(output).toContain('cli.js');
       expect(exitSpy).toHaveBeenCalledTimes(1);
@@ -285,6 +287,56 @@ describe('scripts/cli-entry.js production entry', () => {
       // Distinguishable from a CLI that itself exits 1, and from the
       // managed-update code 44 that triggers a relaunch.
       expect(exitCode).toBe(126);
+    } finally {
+      stderrSpy.mockRestore();
+      spawnSyncMock.mockImplementation(spawnImpl);
+    }
+  });
+
+  it('keeps the errno when the path happens to contain its digits', async () => {
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => ({
+      status: null,
+      signal: null,
+      error: Object.assign(
+        new Error('spawnSync /srv/app-2/dist/cli.js ENOENT'),
+        {
+          code: 'ENOENT',
+          errno: -2,
+          syscall: 'spawnSync /srv/app-2/dist/cli.js',
+        },
+      ),
+    }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await import('../cli-entry.js?errno-in-path');
+      const output = stderrSpy.mock.calls.map(([chunk]) => chunk).join('');
+      expect(output).toContain('(errno -2)');
+      expect(output.match(/ENOENT/g)).toHaveLength(1);
+    } finally {
+      stderrSpy.mockRestore();
+      spawnSyncMock.mockImplementation(spawnImpl);
+    }
+  });
+
+  it('prints no empty detail for a partial spawn error', async () => {
+    const spawnImpl = spawnSyncMock.getMockImplementation();
+    spawnSyncMock.mockImplementation(() => ({
+      status: null,
+      signal: null,
+      error: new Error('spawn failed'),
+    }));
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await import('../cli-entry.js?partial-error');
+      const output = stderrSpy.mock.calls.map(([chunk]) => chunk).join('');
+      expect(output).toContain('spawn failed');
+      expect(output).not.toMatch(/\(\s*\)/);
+      expect(output).not.toContain('undefined');
     } finally {
       stderrSpy.mockRestore();
       spawnSyncMock.mockImplementation(spawnImpl);
@@ -322,6 +374,7 @@ describe('scripts/cli-entry.js production entry', () => {
       const output = stderrSpy.mock.calls.map(([chunk]) => chunk).join('');
       expect(output).toContain('ENOENT');
       expect(output).toContain(launcher);
+      expect(output).toContain('next run');
       expect(exitSpy).toHaveBeenCalledTimes(1);
       const exitCode = exitSpy.mock.calls[0][0];
       expect(exitCode).toBe(126);
@@ -529,6 +582,47 @@ describe('scripts/cli-entry.js production entry', () => {
         );
         process.removeListener('exit', hook);
       } finally {
+        delete process.env.QWEN_CODE_LAUNCHER_PATH;
+      }
+    });
+
+    it('reports a failed relaunch from the exit hook and exits 126', async () => {
+      const exitListeners = process.listeners('exit');
+      process.env.QWEN_CODE_LAUNCHER_PATH = '/opt/qwen-standalone/bin/qwen';
+      existsSyncMock.mockImplementation(
+        (p) => normalizePath(p) === '/opt/qwen-standalone/bin/qwen',
+      );
+      const spawnImpl = spawnSyncMock.getMockImplementation();
+      spawnSyncMock.mockImplementation(() => ({
+        status: null,
+        signal: null,
+        error: Object.assign(
+          new Error('spawnSync /opt/qwen-standalone/bin/qwen ENOENT'),
+          {
+            code: 'ENOENT',
+            errno: -2,
+            syscall: 'spawnSync /opt/qwen-standalone/bin/qwen',
+          },
+        ),
+      }));
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let hook;
+      try {
+        await import('../cli-entry.js?in-process-relaunch-error');
+        hook = process
+          .listeners('exit')
+          .find((l) => !exitListeners.includes(l));
+        hook(44);
+        const output = stderrSpy.mock.calls.map(([chunk]) => chunk).join('');
+        expect(output).toContain('ENOENT');
+        expect(output).toContain('next run');
+        expect(exitSpy).toHaveBeenCalledWith(126);
+      } finally {
+        if (hook) process.removeListener('exit', hook);
+        stderrSpy.mockRestore();
+        spawnSyncMock.mockImplementation(spawnImpl);
         delete process.env.QWEN_CODE_LAUNCHER_PATH;
       }
     });

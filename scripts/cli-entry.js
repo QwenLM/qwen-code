@@ -313,11 +313,12 @@ if (isInProcessFastPath()) {
   const exitOnSpawnError = (command, error) => {
     // Node's message already reads "<syscall> <path> <code>"; add only what it
     // does not say.
-    const detail = [error.code, error.errno, error.syscall]
-      .filter(
-        (part) => part !== undefined && !error.message.includes(String(part)),
-      )
-      .join(' ');
+    const detail = [
+      ...[error.code, error.syscall].filter(
+        (part) => typeof part === 'string' && !error.message.includes(part),
+      ),
+      ...(error.errno === undefined ? [] : [`errno ${error.errno}`]),
+    ].join(' ');
     process.stderr.write(
       `Failed to start ${command}: ${error.message}${detail ? ` (${detail})` : ''}\n`,
     );
@@ -428,6 +429,9 @@ if (isInProcessFastPath()) {
             env: relaunchEnv,
           });
     if (relaunchResult.error) {
+      process.stderr.write(
+        'Update successful! The new version will be used on your next run.\n',
+      );
       exitOnSpawnError(launcher, relaunchResult.error);
     } else if (relaunchResult.signal) {
       process.kill(process.pid, relaunchResult.signal);
