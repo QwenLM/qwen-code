@@ -483,6 +483,25 @@ creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
+Hosted files/Shell file history additionally requires persistent worker backup
+storage. Configure an absolute `QWEN_HOME` in the Broker/worker environment and
+mount it as durable storage writable by the worker OS user. Backups are stored
+at `$QWEN_HOME/file-history/<Harness Session ID>/`; without the override they
+use the worker user's `~/.qwen/file-history/`. Preserve this directory alongside
+the Workspace and SQL database. A Workspace mount alone does not preserve these
+backup bytes, and referenced backups must survive worker/container restarts.
+The stock image runs as UID 10001; derived images must provision appropriate
+write access for their worker user.
+
+Roll out the Broker and worker bundle before the Hosted Harness. An older
+Broker rejects raw-history control, including the bind before a read-only tool
+turn. The Harness releases a definite rejected bind and ends the turn with an
+error; it does not run unbacked writes. Missing backups also refuse tool turns
+until the original backup data is restored. Unknown or partial effects still
+require operator recovery. See the bilingual
+[file-history design](../../../docs/design/2026-09-30-hosted-file-history.md)
+for record capacity and rewind semantics.
+
 ### Verified original-mount recovery (W1a)
 
 W1a's physical mount guard is opt-in for process restart in a trusted, single-host OpenJDK 21/Linux `local-process` deployment with a persistent, unambiguous root birth time. Taking the next tool Turn after a Broker restart requires `durable-local-process=true`. Whole-host restart succeeds only while the registered physical identity still matches. Flyway
