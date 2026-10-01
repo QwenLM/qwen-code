@@ -1,5 +1,6 @@
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { issueAgentHostEnrollment } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 
@@ -22,6 +23,11 @@ function serverUrl(value: unknown, allowHttp: boolean): string {
     );
   }
   return url.toString().replace(/\/+$/, '');
+}
+
+function isCleartext(value: string): boolean {
+  const url = new URL(value);
+  return url.protocol === 'http:' && !isLoopbackBind(url.hostname);
 }
 
 const PROVIDERS = ['qwen'];
@@ -160,6 +166,12 @@ export function registerAgentHostConnectionRoutes(
       )
         throw new Error('远程服务不支持所选执行程序或接入协议。');
       if (!isCurrent(req, res, runtime)) return;
+      // The enrollment token below crosses both legs; mirror the Host's
+      // warning on this side, which is the one holding the secret.
+      if (isCleartext(remote) || isCleartext(callback))
+        writeStderrLine(
+          'WARNING: Agent Host HTTP demo mode sends the enrollment token, credentials, task content and results without encryption. Use only on a trusted network.',
+        );
       const enrollment = await issueAgentHostEnrollment(runtime.workspaceCwd);
       if (!isCurrent(req, res, runtime)) return;
       const result = await request('/connect', {

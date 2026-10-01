@@ -13,12 +13,14 @@ import {
 } from '../workspace-registry.js';
 import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
 
-const { issueEnrollment } = vi.hoisted(() => ({
+const { issueEnrollment, writeStderrLine } = vi.hoisted(() => ({
   issueEnrollment: vi.fn(),
+  writeStderrLine: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/agents/workspace-agents/store.js', () => ({
   issueAgentHostEnrollment: issueEnrollment,
 }));
+vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine }));
 vi.mock('../agent-host-client.js', () => ({
   startAgentHostConnection: vi.fn(),
 }));
@@ -66,6 +68,76 @@ it.each(['service', 'enrollment'] as const)(
     expect(response.status).toBe(409);
     expect(fetch).toHaveBeenCalledOnce();
     expect(issueEnrollment).toHaveBeenCalledTimes(stage === 'service' ? 0 : 1);
+  },
+);
+
+it.each([
+  [
+    'an http remote',
+    'http://192.168.1.20:4170',
+    'https://coordinator.example',
+    true,
+  ],
+  [
+    'an http callback',
+    'https://worker.example',
+    'http://192.168.1.10:4170',
+    true,
+  ],
+  ['loopback http', 'http://127.0.0.1:4171', 'http://localhost:4170', false],
+  ['https', 'https://worker.example', 'https://coordinator.example', false],
+] as const)(
+  'warns before issuing an enrollment token over %s only when cleartext leaves the machine',
+  async (_label, remoteUrl, serverUrl, warns) => {
+    const runtime = {
+      workspaceId: 'workspace',
+      workspaceCwd: '/selected',
+      generationGuard: createWorkspaceGenerationGuard(),
+    } as WorkspaceRuntime;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              protocol: 1,
+              providers: ['qwen'],
+              connected: true,
+            }),
+          ),
+      ),
+    );
+    issueEnrollment.mockImplementation(async () => {
+      expect(writeStderrLine).toHaveBeenCalledTimes(warns ? 1 : 0);
+      return { token: 'enrollment-token' };
+    });
+    const app = express();
+    app.use(express.json());
+    registerAgentHostConnectionRoutes(
+      app,
+      '/agent',
+      () => runtime,
+      () => (_req, _res, next) => next(),
+    );
+
+    const response = await request(app)
+      .post('/agent/hosts/remote-connect')
+      .send({
+        remoteUrl,
+        serverUrl,
+        remoteCwd: '/remote',
+        remoteToken: 'remote-token',
+        provider: 'qwen',
+        allowHttp: true,
+      });
+
+    expect(response.status).toBe(200);
+    expect(issueEnrollment).toHaveBeenCalledOnce();
+    if (warns)
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('enrollment token'),
+      );
+    else expect(writeStderrLine).not.toHaveBeenCalled();
   },
 );
 
