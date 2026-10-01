@@ -395,7 +395,10 @@ export class UiTelemetryService extends EventEmitter {
     if (this.getTotalOutputTokens(sessionId) >= restoredTotal) return;
     const metrics =
       this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
-    metrics.models = structuredClone(models);
+    metrics.models = cloneSessionMetrics({
+      ...createInitialMetrics(),
+      models,
+    }).models;
     this.#sessionMetrics.set(sessionId, metrics);
     this.#closedSessions.delete(sessionId);
   }

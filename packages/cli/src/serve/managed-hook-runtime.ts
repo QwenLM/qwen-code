@@ -840,6 +840,19 @@ export class ManagedHookRuntime {
         };
         return;
       }
+      if (!dispatched && !(error instanceof ManagedHookError)) {
+        entry.view = {
+          operationId: control.operationId,
+          state: 'settled',
+          result: {
+            success: false,
+            outcome: 'non_blocking_error',
+            duration: 0,
+            error: 'Managed hook failed before dispatch.',
+          },
+        };
+        return;
+      }
       entry.view = {
         operationId: control.operationId,
         state: dispatched ? 'outcome_unknown' : 'settled',

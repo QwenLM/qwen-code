@@ -1498,6 +1498,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (
       session.blocked ||
+      session.managed.authority.currentActivation?.phase !== 'active' ||
       session.mcp?.hasPendingOperations() ||
       session.hooks?.hasPendingOperations
     )

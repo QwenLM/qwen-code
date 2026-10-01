@@ -477,6 +477,29 @@ describe('ManagedHookRuntime', () => {
     expect(instance.hasHolds('runtime-session')).toBe(false);
   });
 
+  it('settles an HTTP runner construction failure without dispatch or replay', async () => {
+    const execute = vi.spyOn(HttpHookRunner.prototype, 'execute');
+    const instance = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Http,
+          url: String.raw`https://example.com/\.[`,
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { success: false, outcome: 'non_blocking_error' },
+    });
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    expect(execute).not.toHaveBeenCalled();
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+  });
+
   it.skipIf(!hasCgroup)(
     'settles cancellation only after the execution cgroup has drained',
     async () => {

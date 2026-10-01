@@ -92,6 +92,7 @@ ACK，这不是完成回执。正常已确认的 async 工作可与后续 turn �
 并保留 Runtime hold。
 
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
+执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。单项回执和聚合输出上限均为 60 KiB。
 初始计划（含事件输入、descriptor 和快照引用）超限时，保存有界 blocking 回执及原始
 语义输入的摘要。恢复直接返回该拒绝，不派发或消费 once，即使没有匹配 handler 也能
@@ -115,6 +116,8 @@ blocking 回执，PermissionRequest 始终返回 deny，不受失败策略影响
 Notification、扩展和关闭事件可以领取 `hook_operation` activation，不创建用户 turn、
 任务完成、工具循环或 startup Hook。两种 subject 共用 Session 单调递增的 activation
 epoch。即使 provider 忽略超时取消，scope 也会保持占用直到调用实际结束。
+释放旧 activation 后若安装 Hook activation 失败，控制器仍会恢复 Session activation。
+如果恢复也失败，则在 activation 恢复前拒绝接收新的 prompt。
 
 模型尝试和用量关联原 Hook operation，并在存在时关联原 turn。预算记账沿用 Session
 与 turn 的现有语义；Hook operation 不得重置原预算。本变更不增加金额预算策略或独立
@@ -153,7 +156,7 @@ tenant/actor scope 的 `GET /v1/agents/sessions/{sessionId}/hook-catalog` 只投
 保持原有行为。
 
 变更涉及 Core Hook dispatch/activation/record 校验、CLI Hosted 编排与 Runtime 执行、
-Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V26 将首次
+Java Broker transport 和 Session Store 投影，以及对应同目录测试。Migration V27 将首次
 准入的日志序号保存为 `first_sequence`，后续修订保持不变。最新已结算目录按该序号选择，
 与原生注册顺序一致；即使旧注册较晚结算，也不受时钟或 UUID 排序影响。
 
