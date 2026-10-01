@@ -561,7 +561,7 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId, true)));
+                        maySubmitWorkspaceTurn(session, actorId)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -718,14 +718,6 @@ public class ManagedAgentService {
 
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
-        return maySubmitWorkspaceTurn(session, actorId, false);
-    }
-
-    // readGranted is true on the read paths (session get/list), where the
-    // page query or requireReadGrant already established the caller's
-    // can_read for a bound row, so the clause would re-ask a fixed true.
-    private boolean maySubmitWorkspaceTurn(SessionRecord session,
-            String actorId, boolean readGranted) {
         if (session.workspace() == null || !harness.isWorkspaceFilesAvailable()) {
             return false;
         }
@@ -739,15 +731,16 @@ public class ManagedAgentService {
                         session.workspace().getContextConfigRef())) {
             return false;
         }
-        if ((!readGranted && !workspaces.canRead(session.tenantId(), actorId,
-                session.workspace().getWorkspaceId()))
-                || !workspaces.createdSession(session.tenantId(), actorId,
-                        session.sessionId())) {
+        // createdSession precedes findReadable: it answers false for an actor
+        // id the registry key cannot encode, where findReadable throws.
+        if (!workspaces.createdSession(session.tenantId(), actorId,
+                session.sessionId())) {
             return false;
         }
         // The caller is the Session's creator, so this reads the creator's
-        // grant row, as the execution authority's join does: can_create on a
-        // registry whose state is ACTIVE.
+        // grant row, as the execution authority's join does: can_read (the
+        // join's own filter) and can_create, on a registry whose state is
+        // ACTIVE.
         ManagedWorkspaceRegistry.WorkspaceSummary summary =
                 workspaces.findReadable(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId());
