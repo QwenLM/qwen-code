@@ -18,7 +18,7 @@ import { NotebookEditTool } from './notebook-edit.js';
 import { ReadFileTool } from './read-file.js';
 import { WriteFileTool } from './write-file.js';
 import { ToolNames } from './tool-names.js';
-import { ToolConfirmationOutcome } from './tools.js';
+import { ToolConfirmationOutcome, type AnyDeclarativeTool } from './tools.js';
 
 describe('execution tool facade', () => {
   let workspace: string;
@@ -44,6 +44,30 @@ describe('execution tool facade', () => {
     await rm(workspace, { recursive: true, force: true });
   });
 
+  const wrap = (tool: AnyDeclarativeTool = new ReadFileTool(config)) =>
+    wrapExecutionTool(tool, environment, config);
+
+  const run = (facade: AnyDeclarativeTool, file: string) =>
+    facade.build({ file_path: file }).execute(signal);
+
+  const writeWorkspaceFile = async (name: string, content: string) => {
+    const file = path.join(workspace, name);
+    await writeFile(file, content);
+    return file;
+  };
+
+  /** Stays pending until `signal` aborts (later), then rejects with its reason. */
+  const pendingUntilAbort = (
+    signal: AbortSignal,
+    onReject?: (reject: (error: Error) => void) => void,
+  ) =>
+    new Promise<never>((_resolve, reject) => {
+      onReject?.(reject);
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      });
+    });
+
   it.each([true, false])(
     'reports the container artifact limit without changing local registration (%s)',
     async (artifactEnabled) => {
@@ -58,7 +82,7 @@ describe('execution tool facade', () => {
         fileReadCacheDisabled: false,
       });
       const original = new WriteFileTool(config);
-      const facade = wrapExecutionTool(original, environment, config);
+      const facade = wrap(original);
       const content = '<h1>Report</h1>';
       const local = await original
         .build({ file_path: path.join(workspace, 'local.html'), content })
@@ -93,8 +117,7 @@ describe('execution tool facade', () => {
   );
 
   it('preserves schema and classifier metadata while never calling host build or filesystem', async () => {
-    const file = path.join(workspace, 'file.txt');
-    await writeFile(file, 'before\n');
+    const file = await writeWorkspaceFile('file.txt', 'before\n');
     const original = new ReadFileTool(config);
     const hostBuild = vi.spyOn(original, 'build').mockImplementation(() => {
       throw new Error('host build must not run');
@@ -104,7 +127,7 @@ describe('execution tool facade', () => {
       .mockImplementation(() => {
         throw new Error('host fs must not run');
       });
-    const facade = wrapExecutionTool(original, environment, config);
+    const facade = wrap(original);
     expect(facade.schema).toEqual(original.schema);
     expect(facade.maxOutputChars).toBe(original.maxOutputChars);
     const invocation = facade.build({ file_path: file });
@@ -118,7 +141,7 @@ describe('execution tool facade', () => {
     expect(hostFs).not.toHaveBeenCalled();
     const edit = new EditTool(config);
     expect(
-      wrapExecutionTool(edit, environment, config).toAutoClassifierInput({
+      wrap(edit).toAutoClassifierInput({
         file_path: file,
         new_string: 'after',
       }),
@@ -132,44 +155,28 @@ describe('execution tool facade', () => {
   });
 
   it('propagates host cache clears before the next execution', async () => {
-    const file = path.join(workspace, 'file.txt');
-    await writeFile(file, 'read me\n');
-    const facade = wrapExecutionTool(
-      new ReadFileTool(config),
-      environment,
-      config,
+    const file = await writeWorkspaceFile('file.txt', 'read me\n');
+    const facade = wrap();
+    await run(facade, file);
+    expect((await run(facade, file)).llmContent).toContain(
+      'unchanged since last read',
     );
-    await facade.build({ file_path: file }).execute(signal);
-    expect(
-      (await facade.build({ file_path: file }).execute(signal)).llmContent,
-    ).toContain('unchanged since last read');
     config.getFileReadCache().clear();
-    expect(
-      (await facade.build({ file_path: file }).execute(signal)).llmContent,
-    ).toContain('read me');
+    expect((await run(facade, file)).llmContent).toContain('read me');
   });
 
   it('retries failed invalidation before preparing another invocation', async () => {
-    const file = path.join(workspace, 'file.txt');
-    await writeFile(file, 'read me');
-    const facade = wrapExecutionTool(
-      new ReadFileTool(config),
-      environment,
-      config,
-    );
-    await facade.build({ file_path: file }).execute(signal);
+    const file = await writeWorkspaceFile('file.txt', 'read me');
+    const facade = wrap();
+    await run(facade, file);
     config.getFileReadCache().clear();
     const invalidate = vi
       .spyOn(environment, 'invalidateReadCache')
       .mockRejectedValueOnce(new Error('failed invalidation'));
     const prepare = vi.spyOn(environment, 'prepare');
-    await expect(
-      facade.build({ file_path: file }).execute(signal),
-    ).rejects.toThrow('failed invalidation');
+    await expect(run(facade, file)).rejects.toThrow('failed invalidation');
     expect(prepare).not.toHaveBeenCalled();
-    expect(
-      (await facade.build({ file_path: file }).execute(signal)).llmContent,
-    ).toContain('read me');
+    expect((await run(facade, file)).llmContent).toContain('read me');
     expect(invalidate).toHaveBeenCalledTimes(2);
   });
 
@@ -182,21 +189,14 @@ describe('execution tool facade', () => {
     ['permission', 'release without caller signal'],
   ] as const)('cancels pending %s on %s', async (phase, action) => {
     let pendingSignal!: AbortSignal;
-    vi.spyOn(environment, phase).mockImplementation(
-      (_request, signal) =>
-        new Promise<never>((_resolve, reject) => {
-          pendingSignal = signal;
-          signal.addEventListener('abort', () => reject(signal.reason), {
-            once: true,
-          });
-        }),
-    );
+    vi.spyOn(environment, phase).mockImplementation((_request, signal) => {
+      pendingSignal = signal;
+      return pendingUntilAbort(signal);
+    });
     const release = vi.spyOn(environment, 'release');
-    const invocation = wrapExecutionTool(
-      new ReadFileTool(config),
-      environment,
-      config,
-    ).build({ file_path: path.join(workspace, 'file.txt') });
+    const invocation = wrap().build({
+      file_path: path.join(workspace, 'file.txt'),
+    });
     const controller = new AbortController();
     const permission = invocation.getDefaultPermission(
       action === 'release without caller signal'
@@ -216,19 +216,16 @@ describe('execution tool facade', () => {
   it('releases a no-argument permission denial exactly once', async () => {
     vi.spyOn(environment, 'permission').mockResolvedValue('deny');
     const release = vi.spyOn(environment, 'release');
-    const invocation = wrapExecutionTool(
-      new ReadFileTool(config),
-      environment,
-      config,
-    ).build({ file_path: path.join(workspace, 'file.txt') });
+    const invocation = wrap().build({
+      file_path: path.join(workspace, 'file.txt'),
+    });
     expect(await invocation.getDefaultPermission()).toBe('deny');
     await invocation.release?.();
     expect(release).toHaveBeenCalledOnce();
   });
 
   it('bounds release when a cancelled permission request also loses its cleanup reply', async () => {
-    const file = path.join(workspace, 'file.txt');
-    await writeFile(file, 'content');
+    const file = await writeWorkspaceFile('file.txt', 'content');
     const deadline = new AbortController();
     const timeout = vi
       .spyOn(AbortSignal, 'timeout')
@@ -237,30 +234,19 @@ describe('execution tool facade', () => {
     let permissionSignal!: AbortSignal;
     let releaseSignal!: AbortSignal;
     let rejectRelease: ((error: Error) => void) | undefined;
-    const permission = vi.spyOn(environment, 'permission').mockImplementation(
-      (_id, signal) =>
-        new Promise((_resolve, reject) => {
-          permissionSignal = signal;
-          signal.addEventListener('abort', () => reject(signal.reason), {
-            once: true,
-          });
-        }),
-    );
-    const release = vi.spyOn(environment, 'release').mockImplementation(
-      (_id, signal) =>
-        new Promise((_resolve, reject) => {
-          releaseSignal = signal;
-          rejectRelease = reject;
-          signal.addEventListener('abort', () => reject(signal.reason), {
-            once: true,
-          });
-        }),
-    );
-    const invocation = wrapExecutionTool(
-      new ReadFileTool(config),
-      environment,
-      config,
-    ).build({ file_path: file });
+    const permission = vi
+      .spyOn(environment, 'permission')
+      .mockImplementation((_id, signal) => {
+        permissionSignal = signal;
+        return pendingUntilAbort(signal);
+      });
+    const release = vi
+      .spyOn(environment, 'release')
+      .mockImplementation((_id, signal) => {
+        releaseSignal = signal;
+        return pendingUntilAbort(signal, (reject) => (rejectRelease = reject));
+      });
+    const invocation = wrap().build({ file_path: file });
     const controller = new AbortController();
     const cancelled = invocation
       .getDefaultPermission(controller.signal)
@@ -283,11 +269,7 @@ describe('execution tool facade', () => {
 
   it('routes the retained editor confirmation callback to the rebuilt invocation', async () => {
     const file = path.join(workspace, 'edited.txt');
-    const facade = wrapExecutionTool(
-      new WriteFileTool(config),
-      environment,
-      config,
-    );
+    const facade = wrap(new WriteFileTool(config));
     const first = facade.build({
       file_path: file,
       content: 'initial',
@@ -309,8 +291,7 @@ describe('execution tool facade', () => {
   });
 
   it('preserves output sizing while filtering worker paths and control metadata', async () => {
-    const file = path.join(workspace, 'file.txt');
-    await writeFile(file, 'content');
+    const file = await writeWorkspaceFile('file.txt', 'content');
     vi.spyOn(environment, 'execute').mockResolvedValueOnce({
       llmContent: 'remote result',
       returnDisplay: 'remote result',
@@ -327,12 +308,8 @@ describe('execution tool facade', () => {
       modelOverride: 'untrusted-model',
       terminateTurn: true,
     });
-    const facade = wrapExecutionTool(
-      new ReadFileTool(config),
-      environment,
-      config,
-    );
-    expect(await facade.build({ file_path: file }).execute(signal)).toEqual({
+    const facade = wrap();
+    expect(await run(facade, file)).toEqual({
       llmContent: 'remote result',
       returnDisplay: 'remote result',
       outputBudgetApplied: true,
@@ -361,19 +338,8 @@ describe('execution tool facade', () => {
         nbformat_minor: 5,
       };
       await writeFile(file, JSON.stringify(notebook));
-      const read = wrapExecutionTool(
-        new ReadFileTool(config),
-        environment,
-        config,
-      );
-      expect(
-        (await read.build({ file_path: file }).execute(signal)).error,
-      ).toBeUndefined();
-      const facade = wrapExecutionTool(
-        new NotebookEditTool(config),
-        environment,
-        config,
-      );
+      expect((await run(wrap(), file)).error).toBeUndefined();
+      const facade = wrap(new NotebookEditTool(config));
       if (!isModifiableDeclarativeTool(facade))
         throw new Error('Missing modify context');
       const params = {

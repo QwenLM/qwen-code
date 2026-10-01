@@ -64,6 +64,33 @@ function adapterFor(
   return { adapter, writes };
 }
 
+/** Plans a custom-provider install against `initial`'s existing models. */
+function planOver(
+  initial: ModelProvidersConfig,
+  mapping?: ProviderProtocolConfig,
+  planInputs: Parameters<typeof buildInstallPlan>[1] = inputs,
+) {
+  const existing = getModelsForProviderProtocol(
+    initial,
+    AuthType.USE_OPENAI,
+    mapping,
+  );
+  return buildInstallPlan(customProvider, planInputs, existing);
+}
+
+const applyWithoutRefresh = (
+  plan: ReturnType<typeof buildInstallPlan>,
+  settings: ProviderSettingsAdapter,
+) => applyProviderInstallPlan(plan, { settings, doRefreshAuth: false });
+
+/** The custom preset as a released install saved it. */
+const releasedPreset = () => ({
+  ...customProvider,
+  envKey: 'RELEASED_KEY',
+  modelNamePrefix: '',
+  ownsModel: undefined,
+});
+
 afterEach(() => vi.unstubAllEnvs());
 
 describe('released Responses configuration', () => {
@@ -92,12 +119,7 @@ describe('released Responses configuration', () => {
       const initial = { [providerId]: [selected, ...siblings] };
       const before = structuredClone(initial);
       const { adapter } = adapterFor(initial, mapping);
-      const existing = getModelsForProviderProtocol(
-        initial,
-        AuthType.USE_OPENAI,
-        mapping,
-      );
-      const plan = buildInstallPlan(customProvider, inputs, existing);
+      const plan = planOver(initial, mapping);
       expect(plan.env).toEqual({ RELEASED_KEY: inputs.apiKey });
       expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_OPENAI);
       expect(plan.modelProviders?.[0]?.models).toEqual([
@@ -107,28 +129,18 @@ describe('released Responses configuration', () => {
           generationConfig: selected.generationConfig,
         },
       ]);
-      await applyProviderInstallPlan(plan, {
-        settings: adapter,
-        doRefreshAuth: false,
-      });
+      await applyWithoutRefresh(plan, adapter);
       const result = adapter.getModelProviders();
       if (providerId !== 'openai') expect(result[providerId]).toEqual(siblings);
       const registry = new ModelRegistry(result, mapping);
-      expect(
-        registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'same', baseUrl)
-          ?.envKey,
-      ).toBe('RELEASED_KEY');
-      expect(
-        registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'same', `${baseUrl}/`)
-          ?.envKey,
-      ).toBe('SLASH_KEY');
+      const responses = (id: string, url: string) =>
+        registry.getModel(AuthType.USE_OPENAI_RESPONSES, id, url);
+      expect(responses('same', baseUrl)?.envKey).toBe('RELEASED_KEY');
+      expect(responses('same', `${baseUrl}/`)?.envKey).toBe('SLASH_KEY');
       expect(
         registry.getModel(AuthType.USE_OPENAI, 'same', baseUrl)?.envKey,
       ).toBe('CHAT_KEY');
-      expect(
-        registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'image', baseUrl)
-          ?.imageOnly,
-      ).toBe(true);
+      expect(responses('image', baseUrl)?.imageOnly).toBe(true);
       expect(initial).toEqual(before);
       expect(mapping).toEqual({ [providerId]: 'openai-responses' });
     },
@@ -144,15 +156,7 @@ describe('released Responses configuration', () => {
         ? { 'openai-responses': [old], openai: [canonical] }
         : { openai: [canonical], 'openai-responses': [old] };
       const { adapter } = adapterFor(initial);
-      const plan = buildInstallPlan(
-        customProvider,
-        inputs,
-        getModelsForProviderProtocol(initial, AuthType.USE_OPENAI),
-      );
-      await applyProviderInstallPlan(plan, {
-        settings: adapter,
-        doRefreshAuth: false,
-      });
+      await applyWithoutRefresh(planOver(initial), adapter);
       expect(adapter.getModelProviders()['openai-responses']).toEqual([]);
       expect(
         new ModelRegistry(adapter.getModelProviders()).getModelsForAuthType(
@@ -169,15 +173,11 @@ describe('released Responses configuration', () => {
     };
     const mapping = { 'openai-responses': 'openai' };
     const { adapter } = adapterFor(initial, mapping);
-    const plan = buildInstallPlan(
-      customProvider,
-      { ...inputs, wireApi: 'chat-completions' },
-      getModelsForProviderProtocol(initial, AuthType.USE_OPENAI, mapping),
-    );
-    await applyProviderInstallPlan(plan, {
-      settings: adapter,
-      doRefreshAuth: false,
+    const plan = planOver(initial, mapping, {
+      ...inputs,
+      wireApi: 'chat-completions',
     });
+    await applyWithoutRefresh(plan, adapter);
     expect(adapter.getModelProviders()['openai-responses']).toEqual([]);
     expect(
       new ModelRegistry(adapter.getModelProviders(), mapping).getModel(
@@ -192,8 +192,8 @@ describe('released Responses configuration', () => {
     'leaves a dotted legacy bucket id alone instead of writing a nested settings path (legacy matches install=%s)',
     async (matches) => {
       vi.stubEnv('RELEASED_KEY', 'test-only-old');
-      // The display name is what buildInstallPlan adds on top of a stored
-      // entry, so a legacy entry without it differs from the install.
+      // buildInstallPlan adds the display name to a stored entry, so a legacy
+      // entry without it differs from the install.
       const legacy = {
         id: 'same',
         baseUrl,
@@ -203,20 +203,12 @@ describe('released Responses configuration', () => {
       const initial = { 'my.gateway': [legacy] };
       const mapping = { 'my.gateway': 'openai-responses' };
       const { adapter, writes } = adapterFor(initial, mapping);
-      const plan = buildInstallPlan(
-        customProvider,
-        inputs,
-        getModelsForProviderProtocol(initial, AuthType.USE_OPENAI, mapping),
-      );
-      const install = applyProviderInstallPlan(plan, {
-        settings: adapter,
-        doRefreshAuth: false,
-      });
+      const plan = planOver(initial, mapping);
+      const install = applyWithoutRefresh(plan, adapter);
       // Both settings adapters treat `modelProviders.<id>` as a bucket write
-      // only when the key has exactly two segments; a dotted id would be
-      // walked as a nested path (`modelProviders.my.gateway`), so the cleanup
-      // must skip it. When the untouched stale entry still wins, the
-      // post-write verification fails the install loudly instead.
+      // only for exactly two segments; a dotted id would be walked as a nested
+      // path (`modelProviders.my.gateway`), so cleanup must skip it. When the
+      // untouched stale entry still wins, post-write verification fails loudly.
       if (matches) await install;
       else
         await expect(install).rejects.toMatchObject({ step: 'modelProviders' });
@@ -256,37 +248,23 @@ describe('released Responses configuration', () => {
   });
 
   it('keeps a selected canonical Chat route when a retained legacy Responses sibling appears first', () => {
-    const config = {
-      ...customProvider,
-      envKey: 'RELEASED_KEY',
-      modelNamePrefix: '',
-      ownsModel: undefined,
-    };
+    const config = releasedPreset();
     const model = { id: 'same', baseUrl, envKey: 'RELEASED_KEY' };
     const source = { 'openai-responses': [model], openai: [model] };
-    expect(
+    const protocolFor = (authType: AuthType) =>
       findExistingProviderModels(config, source, undefined, {
-        authType: AuthType.USE_OPENAI,
+        authType,
         id: 'same',
         baseUrl,
-      })?.protocol,
-    ).toBe(AuthType.USE_OPENAI);
-    expect(
-      findExistingProviderModels(config, source, undefined, {
-        authType: AuthType.USE_OPENAI_RESPONSES,
-        id: 'same',
-        baseUrl,
-      })?.protocol,
-    ).toBe(AuthType.USE_OPENAI_RESPONSES);
+      })?.protocol;
+    expect(protocolFor(AuthType.USE_OPENAI)).toBe(AuthType.USE_OPENAI);
+    expect(protocolFor(AuthType.USE_OPENAI_RESPONSES)).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
   });
 
   it('finds a preset through a released custom mapping without modifying defaults', () => {
-    const config = {
-      ...customProvider,
-      envKey: 'RELEASED_KEY',
-      modelNamePrefix: '',
-      ownsModel: undefined,
-    };
+    const config = releasedPreset();
     const model = { id: 'saved', baseUrl, envKey: 'RELEASED_KEY' };
     const source = { gateway: [model] };
     expect(

@@ -221,6 +221,8 @@ public class ManagedAgentProperties {
         private Integer entryConcurrency;
         private Duration operationTimeout;
         private Duration claimTimeout;
+        private Long verificationBytesPerSecond;
+        private Duration maxVerificationTimeout;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -246,6 +248,10 @@ public class ManagedAgentProperties {
         public void setOperationTimeout(Duration value) { operationTimeout = value; }
         public Duration getClaimTimeout() { return claimTimeout; }
         public void setClaimTimeout(Duration value) { claimTimeout = value; }
+        public Long getVerificationBytesPerSecond() { return verificationBytesPerSecond; }
+        public void setVerificationBytesPerSecond(Long value) { verificationBytesPerSecond = value; }
+        public Duration getMaxVerificationTimeout() { return maxVerificationTimeout; }
+        public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
     }
 
     public static class Dispatch {
@@ -377,6 +383,7 @@ public class ManagedAgentProperties {
         private boolean durableLocalProcess;
         private boolean trustedLocalRebootRecovery;
         private boolean operatorRecoveryEnabled;
+        private boolean verifiedWorkspaceRecoveryEnabled;
         private String credentialKeyId = "";
         private String credentialKey = "";
         private String nodeExecutable = "";
@@ -506,6 +513,14 @@ public class ManagedAgentProperties {
 
         public void setOperatorRecoveryEnabled(boolean operatorRecoveryEnabled) {
             this.operatorRecoveryEnabled = operatorRecoveryEnabled;
+        }
+
+        public boolean isVerifiedWorkspaceRecoveryEnabled() {
+            return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {
+            this.verifiedWorkspaceRecoveryEnabled = verifiedWorkspaceRecoveryEnabled;
         }
 
         public String getStateDirectory() {

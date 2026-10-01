@@ -170,6 +170,15 @@ public class ToolPublicationController {
                 ToolPublicationContract.readJson(read(request, 2 * 1024 * 1024))));
     }
 
+    @PostMapping("/receipts/verify")
+    public JsonNode verifyReceipt(TenantContext tenant, @PathVariable String sessionId,
+            @RequestParam String workspaceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            HttpServletRequest request) {
+        return limited(() -> admissions.verifyReceipt(scope(tenant, workspaceId, sessionId),
+                writerToken, ToolPublicationContract.readJson(read(request, 64 * 1024))));
+    }
+
     @PostMapping("/publications/{publicationId}/receipts/commit")
     public JsonNode commitReceipt(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String publicationId, @RequestParam String workspaceId,
