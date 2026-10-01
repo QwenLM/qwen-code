@@ -69,6 +69,15 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return CompletableFuture.completedFuture(null);
     }
 
+    default boolean supportsDrainedStop() {
+        return false;
+    }
+
+    default CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(409,
+                "workspace_close_identity_unverified", "Durable worker stop is unavailable.", false));
+    }
+
     /** Whether saved startup identity can be observed without relaunching it. */
     default boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
         return false;

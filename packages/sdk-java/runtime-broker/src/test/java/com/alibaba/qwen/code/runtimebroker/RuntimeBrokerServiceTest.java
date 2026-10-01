@@ -4391,6 +4391,22 @@ class RuntimeBrokerServiceTest {
 
     private static final class StaleBindingRepository
             implements RuntimeBindingRepository {
+        @Override
+        public void requestHarnessDrain(String tenantId, String harnessId) {
+            delegate.requestHarnessDrain(tenantId, harnessId);
+        }
+
+        @Override
+        public boolean isHarnessDraining(String tenantId, String harnessId) {
+            return delegate.isHarnessDraining(tenantId, harnessId);
+        }
+
+        @Override
+        public java.util.List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessId,
+                String after, int limit) {
+            return delegate.findByHarnessSession(tenantId, harnessId, after, limit);
+        }
+
         private final InMemoryRuntimeBindingRepository delegate;
         volatile RuntimeBindingRecord nextRead;
         volatile Runnable afterReady;

@@ -1258,6 +1258,7 @@ export function registerHostedHarnessSessionRoutes(
       });
       return;
     }
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (session.blocked || session.mcp?.hasPendingOperations())
       return error(res, 409, 'hosted_turn_recovery_required');

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -577,6 +578,74 @@ class DurableLocalProcessRuntimeProvisionerTest {
                         await(second.reconcile(request, SEED, handle, null)).getOutcome());
             }
         }
+    }
+
+    @Test
+    void drainedStopTombstonesTheExactWorkerAndConfirmsItsExit() throws Exception {
+        var request = closeRequest();
+        var store = store();
+        try (var provider = provisioner(store)) {
+            var handle = await(provider.ensureResource(request, SEED, null));
+            var lease = launch(provider, store, request);
+            var worker = registration(store, request, handle).process();
+            var binding = closeBinding(request, handle, lease);
+            var receipt = await(provider.stopDrained(binding));
+            assertTrue(receipt.matches(binding));
+            assertTrue(registration(store, request, handle).processAbsent());
+            assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+            assertFalse(worker.isAlive());
+            assertTrue(await(provider.stopDrained(binding)).matches(binding));
+            assertThrows(Exception.class, () -> await(provider.provision(request, SEED)));
+        }
+    }
+
+    @Test
+    void drainedIntentNeverLaunchesAndAmbiguousStartupStaysBlocked() throws Exception {
+        var request = closeRequest();
+        var store = store();
+        try (var provider = provisioner(store)) {
+            var handle = await(provider.ensureResource(request, SEED, null));
+            var binding = closeBinding(request, handle, null);
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(record.withState(LocalRuntimeStore.State.LAUNCHING));
+                return null;
+            });
+            assertThrows(Exception.class, () -> await(provider.stopDrained(binding)));
+            assertEquals(LocalRuntimeStore.State.LAUNCHING, registration(store, request, handle).state());
+            store.locked(request, SEED, handle, false, (resource, record) -> {
+                resource.save(record.withState(LocalRuntimeStore.State.INTENT));
+                return null;
+            });
+            assertTrue(await(provider.stopDrained(binding)).matches(binding));
+            assertNull(registration(store, request, handle).process());
+            assertEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+        }
+    }
+
+    @Test
+    void drainedStopDoesNotStopOtherProfilesOrSharedWorkers() throws Exception {
+        var request = request(true);
+        var store = store();
+        try (var provider = provisioner(store)) {
+            var handle = await(provider.ensureResource(request, SEED, null));
+            var lease = launch(provider, store, request);
+            assertThrows(Exception.class, () -> await(provider.stopDrained(closeBinding(request, handle, lease))));
+            assertNotEquals(LocalRuntimeStore.State.RETIRED, registration(store, request, handle).state());
+            assertNotNull(registration(store, request, handle).process());
+            assertFalse(registration(store, request, handle).processAbsent());
+        }
+    }
+
+    private RuntimeProvisionRequest closeRequest() {
+        return new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1",
+                directory.toAbsolutePath().toString(), WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"),
+                "harness", LocalProcessRuntimeProvisioner.KIND, "storage:a");
+    }
+
+    private RuntimeBindingRecord closeBinding(RuntimeProvisionRequest request, RuntimeResourceHandle handle,
+            RuntimeLease lease) {
+        return new RuntimeBindingRecord("binding", request, SEED, 1, RuntimeBindingRecord.State.DRAINING,
+                lease, handle, lease == null ? 0 : 1, true, null, null, 0, 0, null, Instant.now(), Instant.now());
     }
 
     private RuntimeProvisionRequest request(boolean managed) {

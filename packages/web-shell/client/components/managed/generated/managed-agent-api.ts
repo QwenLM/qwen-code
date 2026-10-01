@@ -408,6 +408,8 @@ export interface components {
             /** @default false */
             actions: boolean;
             tasks: boolean;
+            /** @default false */
+            sessionClose?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -592,7 +594,7 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing. */
             failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown);

@@ -249,6 +249,57 @@ describe('Hosted Harness no-tool session', () => {
     await rm(state.root, { recursive: true, force: true });
   });
 
+  it('refuses a new prompt while the journal close is still sealing', async () => {
+    const server = app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalJsonlManagedSessionJournalHandle.prototype.seal;
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockImplementation(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      commit,
+    ) {
+      entered();
+      await gate;
+      await original.call(this, commit);
+    });
+    const closing = headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).then((response) => response);
+    await started;
+    try {
+      const prompt = [{ type: 'text', text: 'late input' }];
+      const rejected = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        });
+      expect(rejected.status).toBe(409);
+      expect(state.model).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    expect((await closing).status).toBe(204);
+  });
+
   it.each([false, true])(
     'unblocks MCP resource requests after the original unknown operation settles (Broker restarted: %s)',
     async (restartBroker) => {

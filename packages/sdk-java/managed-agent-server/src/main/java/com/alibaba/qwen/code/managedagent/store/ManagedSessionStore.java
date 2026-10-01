@@ -146,6 +146,12 @@ public class ManagedSessionStore {
         validateScope(tenantId, request.workspaceId(), sessionId);
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
+        List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
+                (row, index) -> row.getString("status"), tenantId, sessionId);
+        if (!closed.isEmpty() && !"ACTIVE".equals(closed.getFirst())) {
+            throw conflict("managed_session_not_writable", "The Session is closing or closed.");
+        }
         String tokenHash = tokenHash(writerToken);
         Timestamp createdAt = databaseNow();
         Timestamp initialLeaseUntil = plusMillis(createdAt,
@@ -980,12 +986,12 @@ public class ManagedSessionStore {
      * has not expired by database time. A Harness renews that lease while it
      * holds the Session and seals the writer when it closes the Session.
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public boolean hasLiveWriter(String tenantId, String sessionId) {
         List<Timestamp> leases = jdbc.query("SELECT writer_lease_until FROM"
                         + " qwen_managed_session_journal_head WHERE"
                         + " tenant_id = ? AND session_id = ? AND state ="
-                        + " 'ACTIVE'",
+                        + " 'ACTIVE' FOR UPDATE",
                 (result, row) -> result.getTimestamp("writer_lease_until"),
                 tenantId, sessionId);
         return !leases.isEmpty() && leases.getFirst() != null

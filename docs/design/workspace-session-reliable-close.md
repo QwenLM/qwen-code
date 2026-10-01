@@ -1,0 +1,43 @@
+# Reliable close for Workspace-bound Sessions
+
+[English](workspace-session-reliable-close.md) | [简体中文](workspace-session-reliable-close.zh-CN.md)
+
+## Status and scope
+
+Implemented and locally verified. This slice enables idle public `hosted-workspace-files/1` Sessions to close through existing public and WebShell lifecycle operations. Running, cancelling, accepted, or approval-waiting Turns remain a `409 turn_active`. Shell, MCP, archive/delete, and a new UI button are excluded. Close preserves transcripts, Artifacts, and shared Workspace files.
+
+## Problem
+
+D4 durably admits lifecycle operations but rejects Workspace bindings. Embedded Broker drain only records an in-memory retired Session and stops no worker. Text-only Turns can finish while background warm is still creating a worker. Writer lease expiry or a replacement Harness answering 404 cannot prove physical cleanup.
+
+## API and admission
+
+Existing close routes return 202 and the original actor-scoped idempotent operation. The Workspace creator with current read access may admit close; unreadable Sessions return 404 and readable non-creators return 403. Replay precedes lifecycle-state validation. Under the public Session lock, check active Turns and unfinished operations, persist the operation, and change ACTIVE to CLOSING. New writer acquisition locks the public Session before the journal and rejects bound non-ACTIVE Sessions. Existing writers may finish settlement and seal.
+
+Optional `session_close` / `sessionClose` capabilities default false. Bound close is available only for files/1 with durable local-process stop support; `session_lifecycle` remains false. Completion changes CLOSING to CLOSED, emits the existing close event, and confirms the operation. Accepted cleanup uses saved identities even after access or mounts change.
+
+## Broker fence and release
+
+Persist a permanent tenant/Harness-Session drain fence under the existing tenant placement guard. Binding creation and new Session/execution admissions check that fence in the same lock domain. It survives resource retirement and prevents delayed warm from creating another generation. Existing receipts remain readable. Close also reserves the existing in-process binding operation slot so it cannot reuse a provisioning claim owned by the same Broker.
+
+Enumerate saved binding generations by tenant, Session isolation class, and isolation key, in bounded pages with byte-exact identities regardless of database collation. Mark them draining without authorizing current Workspace execution. Enumerate Runtime Sessions by exact binding/generation and release using saved records: provider release, activation=false acknowledgement, conditional original-holder release, then durable RELEASED. No acquire, installation, execution replay, or model call is part of close. Unknown execution or startup identity blocks completion. An unusable original worker blocks with an identity failure instead of entering generic lease recovery. A newer holder on shared storage is preserved.
+
+## Worker stop and completion
+
+Add fail-closed `RuntimeProvisioner.stopDrained(binding)` and independent `RuntimeDrainReceipt`, persisted on the binding. Do not change the existing discard-release or classify clean shutdown as JOURNAL_LOST. Only drained file-profile workers can produce this receipt.
+
+The durable local provider validates seed, handle, host/boot/namespaces, and PID/start identity under its permanent registration lock. It retires the original registration before signalling the exact process, waits 5 seconds after TERM, then 5 seconds after KILL when necessary, and verifies absence. An INTENT can be retired without starting a process. LAUNCHING without a persisted PID, missing registration, or unverifiable identity remains blocked. Retries continue the original registration and cannot provision a replacement.
+
+Before binding retirement, require no active logical Session, no unsettled execution, absence of this generation's holder, and persisted stop proof. Public completion additionally requires a durable close fence and no database-time live journal writer. The writer check locks the journal head, waits for any pending renewal/settlement/seal transaction, then checks database time; an uncommitted renewal must not look like an expired writer. Leases use database time, are renewed, and fence stale completion. Transient faults retry with existing backoff. Uncertain identities/executions expose recovery_blocked and stable failure codes; lifecycle recovery examines the original resource only. Generic Runtime maintenance skips close-fenced bindings so a normal retirement cannot manufacture JOURNAL_LOST; already recorded LOST evidence can still finish the existing recovery/operator path.
+
+## Implementation areas
+
+Managed Agent lifecycle service/store/coordinator, capabilities and canonical OpenAPI/generated WebShell types; Runtime Broker repositories/service/provider and schema; Hosted Harness admission; collocated tests. No new lifecycle orchestrator or broad core refactor is introduced. Align lifecycle contracts with [#12867](https://github.com/QwenLM/qwen-code/issues/12867) and Harness recovery with [#12740](https://github.com/QwenLM/qwen-code/issues/12740).
+
+## Validation and acceptance
+
+Test normal close, no Runtime, repeated keys, actor isolation, both surfaces, active/approval Turn refusal, late text-only warm, in-flight startup, multiple Runtime Sessions, release/stop ACK loss, crash before completion, second-server takeover, revoked ACL or mounts, stale claims/callbacks, unknown outcomes, and preservation of a newer holder. Run package build/typecheck/bundle, focused TS/Java tests, SQL concurrency tests, and real durable worker tests where trusted Linux identity is available. Record environmental limits rather than claiming execution coverage.
+
+Close is complete only when admission is permanently fenced and original writers, Sessions, worker, and holder are settled; historical data is retained. No product decisions remain open.
+
+Local verification passed build/typecheck/bundle, focused TS/Java tests, real MySQL admission/claim races, and actual POSIX worker stop with an injected test host identity. Existing Hosted files/approval E2E passed. The new durable close E2E compiles but is Linux-only and was skipped on macOS; production host/boot/PID namespace validation and the full physical recovery fault matrix still need execution on Linux. Public Artifacts are currently unimplemented, so retention assertions cover managed history/resources and Workspace files rather than inventing an Artifact endpoint. Commands and detailed results are recorded in `.qwen/e2e-tests/workspace-session-reliable-close.md`.

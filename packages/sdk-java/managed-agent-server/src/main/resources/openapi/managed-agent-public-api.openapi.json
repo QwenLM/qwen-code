@@ -3055,6 +3055,11 @@
           },
           "tasks": {
             "type": "boolean"
+          },
+          "session_close": {
+            "type": "boolean",
+            "default": false,
+            "description": "Supports close independently of archive/delete; bound files Sessions require durable worker stop support."
           }
         }
       },
@@ -3954,6 +3959,10 @@
           },
           "tasks": {
             "type": "boolean"
+          },
+          "sessionClose": {
+            "type": "boolean",
+            "default": false
           }
         }
       },
@@ -5265,7 +5274,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"
@@ -5651,7 +5660,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. Workspace close recovery_blocked reports original resource identity or unsettled execution; the Session remains closing."
           },
           "replayed": {
             "type": "boolean"

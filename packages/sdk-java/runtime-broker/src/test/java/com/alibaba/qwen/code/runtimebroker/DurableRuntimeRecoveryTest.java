@@ -1359,6 +1359,11 @@ class DurableRuntimeRecoveryTest {
 
     private static final class GatedSessionRepository
             implements RuntimeSessionRepository {
+        @Override
+        public java.util.List<RuntimeSessionRecord> findByBinding(String id, long generation, String after, int limit) {
+            return delegate.findByBinding(id, generation, after, limit);
+        }
+
         private final RuntimeSessionRepository delegate;
         private final CountDownLatch gate;
         private final AtomicInteger counts = new AtomicInteger();
@@ -1406,6 +1411,22 @@ class DurableRuntimeRecoveryTest {
 
     private static final class ClaimFailureRepository
             implements RuntimeBindingRepository {
+        @Override
+        public void requestHarnessDrain(String tenantId, String harnessId) {
+            delegate.requestHarnessDrain(tenantId, harnessId);
+        }
+
+        @Override
+        public boolean isHarnessDraining(String tenantId, String harnessId) {
+            return delegate.isHarnessDraining(tenantId, harnessId);
+        }
+
+        @Override
+        public java.util.List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessId,
+                String after, int limit) {
+            return delegate.findByHarnessSession(tenantId, harnessId, after, limit);
+        }
+
         private final RuntimeBindingRepository delegate;
         private final AtomicBoolean fail = new AtomicBoolean(true);
 

@@ -311,6 +311,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         Context context = context(lease, session, false);
         // RELEASING fences later claims; an absent holder needs no physical release.
         if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
+                && !context.runtime().isDrainRequested()
                 && !ownership.isHeld(context.binding(), context.session())) {
             return CompletableFuture.completedFuture(true);
         }

@@ -199,6 +199,21 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         return CompletableFuture.completedFuture(null);
     }
 
+    @Override
+    public boolean supportsWorkspaceClose() {
+        return service.supportsDrainedStop();
+    }
+
+    @Override
+    public void requestWorkspaceClose(String tenantId, String sessionId) {
+        service.requestHarnessDrain(tenantId, sessionId);
+    }
+
+    @Override
+    public CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
+        return service.drainHarnessSession(tenantId, sessionId);
+    }
+
     public URI getBaseUri() {
         return server.getBaseUri();
     }

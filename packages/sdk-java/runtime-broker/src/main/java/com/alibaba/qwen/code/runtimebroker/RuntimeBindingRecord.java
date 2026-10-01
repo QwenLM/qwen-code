@@ -34,6 +34,7 @@ public final class RuntimeBindingRecord {
     private final Instant lastActiveAt;
     private final RuntimeRecoveryEvidence lossEvidence;
     private final RuntimeRecoveryEvidence stopEvidence;
+    private final RuntimeDrainReceipt drainReceipt;
 
     public RuntimeBindingRecord(String bindingId,
             RuntimeProvisionRequest request, long generation, State state,
@@ -82,6 +83,21 @@ public final class RuntimeBindingRecord {
             long operationGeneration, long version, Instant lastHealthAt,
             Instant lastReconciledAt, Instant lastActiveAt,
             RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence) {
+        this(bindingId, request, provisionSeed, generation, state, lease, resourceHandle,
+                attestationGeneration, drainRequested, operationOwner, operationLeaseUntil,
+                operationGeneration, version, lastHealthAt, lastReconciledAt, lastActiveAt,
+                lossEvidence, stopEvidence, null);
+    }
+
+    RuntimeBindingRecord(String bindingId, RuntimeProvisionRequest request,
+            RuntimeProvisionSeed provisionSeed, long generation, State state,
+            RuntimeLease lease, RuntimeResourceHandle resourceHandle,
+            long attestationGeneration, boolean drainRequested,
+            String operationOwner, Instant operationLeaseUntil,
+            long operationGeneration, long version, Instant lastHealthAt,
+            Instant lastReconciledAt, Instant lastActiveAt,
+            RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence,
+            RuntimeDrainReceipt drainReceipt) {
         this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
         if (request == null) {
             throw new IllegalArgumentException("request is required");
@@ -161,6 +177,10 @@ public final class RuntimeBindingRecord {
         }
         this.lossEvidence = lossEvidence;
         this.stopEvidence = stopEvidence;
+        if (drainReceipt != null && (!drainRequested || !drainReceipt.matches(this))) {
+            throw new IllegalArgumentException("Drain receipt identity differs");
+        }
+        this.drainReceipt = drainReceipt;
     }
 
     private void requireEvidence(RuntimeRecoveryEvidence evidence,
@@ -193,7 +213,21 @@ public final class RuntimeBindingRecord {
                 operationLeaseUntil, operationGeneration, version,
                 lastHealthAt, lastReconciledAt, activeAt,
                 lossEvidence == null ? loss : lossEvidence,
-                stopEvidence == null ? stop : stopEvidence);
+                stopEvidence == null ? stop : stopEvidence, drainReceipt);
+    }
+
+    public RuntimeDrainReceipt getDrainReceipt() {
+        return drainReceipt;
+    }
+
+    public RuntimeBindingRecord withDrainReceipt(RuntimeDrainReceipt receipt) {
+        if (!drainRequested || receipt == null || !receipt.matches(this)) {
+            throw new IllegalArgumentException("Drain receipt identity differs");
+        }
+        return new RuntimeBindingRecord(bindingId, request, provisionSeed, generation, state,
+                lease, receipt.resourceHandle(), attestationGeneration, drainRequested,
+                operationOwner, operationLeaseUntil, operationGeneration, version, lastHealthAt,
+                lastReconciledAt, lastActiveAt, lossEvidence, stopEvidence, receipt);
     }
 
     public String getBindingId() {
@@ -346,6 +380,9 @@ public final class RuntimeBindingRecord {
     }
 
     void requireSafeReplacement(RuntimeBindingRecord replacement) {
+        if (drainReceipt != null && !drainReceipt.equals(replacement.drainReceipt)) {
+            throw new IllegalArgumentException("Drain proof cannot be overwritten");
+        }
         if (!Objects.equals(lossEvidence, replacement.lossEvidence)
                         && lossEvidence != null
                 || !Objects.equals(stopEvidence, replacement.stopEvidence)
@@ -396,6 +433,6 @@ public final class RuntimeBindingRecord {
                 generation, nextState, nextLease, nextHandle,
                 nextAttestationGeneration, requested, owner, leaseUntil,
                 nextOperationGeneration, nextVersion, healthAt,
-                reconciledAt, activeAt, lossEvidence, stopEvidence);
+                reconciledAt, activeAt, lossEvidence, stopEvidence, drainReceipt);
     }
 }
