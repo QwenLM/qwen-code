@@ -143,6 +143,68 @@ describe('managed session metadata', () => {
     ).toEqual({ title: 'Design review notes', source: 'manual' });
   });
 
+  // The harness writes `0 engine`, `1 header`, `2 event`, `3 marker`, so index 2
+  // is the tear the writer is most likely to leave: a transaction is appended
+  // events first and marker last, and a crash between the two appends glues the
+  // event onto its own marker. Reading that line in file order reaches the event
+  // before the marker that authorises it and drops a rename that did commit.
+  it('still reads a renamed title when the event is glued to its own commit marker', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-glued-marker'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Design review notes', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    await glueTwoLines(harness.transcriptPath, 2);
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Design review notes', source: 'manual' });
+  });
+
+  it('reads the latest title when the newest event is glued to its own commit marker', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-2'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Second title', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    // `4 event`, `5 marker`: the second transaction's event shares a line with
+    // its own marker. Returning the first title here would show the session list
+    // a name the user already replaced.
+    await glueTwoLines(harness.transcriptPath, 4);
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Second title', source: 'manual' });
+  });
+
   it('projects a renamed title into the synchronous directory read', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
