@@ -1,5 +1,7 @@
 # Code Mode
 
+> Current behavior: Only discovers schemas through top-level tool_search and invokes tools through exec. Full signatures are included when search is unavailable in the current scope; tools.eager can reduce the initial declaration. Hybrid keeps direct tools plus exec with its existing bridge and eager permission boundaries. The original MVP statements below about hiding tool_search or always including full schemas are superseded by the [lazy-loading design](lazy-code-mode.md).
+
 [English](code-mode.md) | [简体中文](code-mode.zh-CN.md)
 
 ## Status
@@ -44,13 +46,13 @@ force `direct`. Container execution exposes direct tools only: selecting
 
 ## Exposure policy
 
-| Surface              | `direct`                    | `code_mode`                     | `code_mode_only` |
-| -------------------- | --------------------------- | ------------------------------- | ---------------- |
-| Ordinary eager tools | Direct                      | Direct and nested               | Nested only      |
-| Deferred tools       | `tool_search` + `tool_call` | Bridge and nested               | Nested only      |
-| Direct-control tools | Direct                      | Direct only                     | Direct only      |
-| `exec`               | Not registered              | Direct                          | Direct           |
-| Hidden bridge tools  | Existing direct behavior    | Direct where already applicable | Hidden           |
+| Surface              | `direct`                    | `code_mode`                     | `code_mode_only`                   |
+| -------------------- | --------------------------- | ------------------------------- | ---------------------------------- |
+| Ordinary eager tools | Direct                      | Direct and nested               | Nested only                        |
+| Deferred tools       | `tool_search` + `tool_call` | Bridge and nested               | Nested only                        |
+| Direct-control tools | Direct                      | Direct only                     | Direct only                        |
+| `exec`               | Not registered              | Direct                          | Direct                             |
+| Discovery bridge     | Existing direct behavior    | Direct where already applicable | Top-level search; tool_call hidden |
 
 In `code_mode`, ordinary visible tool descriptions gain an `exec` declaration
 for that tool. The `exec` description keeps the complete `ALL_TOOLS` metadata
@@ -63,13 +65,14 @@ available direct tool, subject to normal validation and approval.
 
 When either bridge half is absent or the agent surface is filtered, `exec`
 includes signatures for nested tools whose schemas are otherwise unavailable.
-In `code_mode_only`, all nested declarations live in the `exec` description.
-Both bridge tools are hidden, deferred reminders and the incomplete-bridge
-warning are skipped, and on the session surface `tools.eager` /
-`tools.visible` do not reduce those nested schemas. Callable tools remain
-available through `exec`. An AgentCore surface (subagent, headless agent,
-arena) excludes tools hidden by `tools.eager` from its nested bindings and
-applies the agent allowlist rules below.
+In `code_mode_only`, top-level `tool_search` discovers deferred schemas and
+`exec` calls the tools. Only `tool_call` is hidden. Deferred reminders, budget
+preload, and the incomplete-bridge warning are skipped. `tools.eager` and
+`tools.visible` control which signatures appear initially; if search is absent
+from the current scope, all allowed signatures are included. Deferred tools
+remain callable through `exec`. Hybrid AgentCore surfaces exclude tools hidden
+by `tools.eager` from nested bindings; Only retains these deferred targets.
+Both modes apply the agent allowlist rules below.
 
 Nested bindings prefer an exact canonical JavaScript name over names rewritten
 to that property. Other collisions retain canonical-name ordering; omitted

@@ -39,6 +39,7 @@ import { ToolMode } from '@qwen-code/qwen-code-core/tools/code-mode.js';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import type { Mem0Settings } from './mem0-settings.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -2331,6 +2332,67 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for managed auto-memory.',
     showInDialog: false,
     properties: {
+      mem0: {
+        type: 'object',
+        label: 'Mem0',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as Mem0Settings | undefined,
+        description:
+          'Bundled Mem0 connection. Configure in user or system settings.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['baseUrl'],
+          properties: {
+            baseUrl: { type: 'string', format: 'uri' },
+            envKey: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              default: 'MEM0_API_KEY',
+              description:
+                'Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field.',
+            },
+            credentialEnv: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              deprecated: true,
+              description:
+                'Legacy alias for envKey. If both are set, their values must match.',
+            },
+            protocol: {
+              type: 'string',
+              enum: [
+                'mem0-v2',
+                'mem0-v3',
+                'mem0-oss-2026-08',
+                'aliyun-polardb-mysql-2026-08',
+                'mem0-platform-v3',
+                'mem0-oss-rest-2026-08',
+              ],
+              default: 'mem0-v2',
+            },
+            scope: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                userId: { type: 'string', minLength: 1, maxLength: 256 },
+                agentId: { type: 'string', minLength: 1, maxLength: 256 },
+                appId: { type: 'string', minLength: 1, maxLength: 256 },
+              },
+            },
+            enableWrites: { type: 'boolean', default: false },
+            allowInsecureHttp: { type: 'boolean', default: false },
+            timeoutMs: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 30000,
+              default: 5000,
+            },
+          },
+        },
+      },
       enableManagedAutoMemory: {
         type: 'boolean',
         label: 'Enable Managed Auto-Memory',
@@ -2830,7 +2892,10 @@ const SETTINGS_SCHEMA = {
           required: ['filesystem', 'network'],
           additionalProperties: false,
           properties: {
-            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            backend: {
+              type: 'string',
+              enum: ['auto', 'bwrap', 'landlock'],
+            },
             filesystem: {
               type: 'string',
               enum: ['read-only', 'workspace-write'],
@@ -2846,7 +2911,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: ToolMode.Direct,
         description:
-          'Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct. Container execution warns and uses direct tools for Code Mode, and rejects Code Mode Only. SSH workspaces warn and use Direct for either code mode. Code Mode Only ignores eager/visible schema deferral on the session surface: callable tools retain full nested schemas there and tool_search is hidden. In both code modes, AgentCore excludes tools still hidden by tools.eager from nested bindings; agent allowlists that do not grant exec narrow nested bindings. Inheriting or explicitly granting exec keeps all otherwise admitted ordinary code-mode-callable bindings. An execution allowlist that mentions any MCP tool additionally restricts MCP bindings to matching exact names or server patterns.',
+          'Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct. Container execution warns and uses direct tools for Code Mode, and rejects Code Mode Only. SSH workspaces warn and use Direct for either code mode. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager from nested bindings; agent allowlists that do not grant exec narrow nested bindings. Inheriting or explicitly granting exec keeps all otherwise admitted ordinary code-mode-callable bindings. An execution allowlist that mentions any MCP tool additionally restricts MCP bindings to matching exact names or server patterns.',
         showInDialog: true,
         options: [
           { value: ToolMode.Direct, label: 'Default' },
@@ -2967,7 +3032,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 0,
             description:
-              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). Defaults to 0, which performs no threshold-based preload; ordinary deferred tools normally stay behind the stable ToolSearch + ToolCall bridge, at the cost of one tool_search round trip before first use. Raise it to N so that, when every eligible deferred schema fits within N% of the context window, all are declared upfront for direct calls with no bridge round trip; otherwise they stay behind the bridge while both bridge tools are registered. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge while it is registered; when either bridge tool is unregistered (tools.toolSearch.enabled false denies both; a tool_search or tool_call deny rule removes one) the demoted tools that remain hidden are absent from top-level declarations and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct and hybrid tool modes. In Code Mode, withheld tools with actual exec bindings also remain callable through exec; the warning names that subset. CodeModeOnly hides both bridge tools, keeps full nested schemas for callable deferred tools in exec, and skips deferred reminders and this warning; on the session surface tools.eager does not make them unreachable or save their schema tokens. In both code modes, AgentCore excludes tools still hidden by tools.eager from nested bindings; agent allowlists that do not grant exec narrow nested bindings. Inheriting or explicitly granting exec keeps all otherwise admitted ordinary code-mode-callable bindings. An execution allowlist that mentions any MCP tool additionally restricts MCP bindings to matching exact names or server patterns. In direct and hybrid modes they stay registered, so a direct call by their own name is still evaluated and approved normally. Separate paths can still declare deferred tools at 0: tools.visible; the live-history compatibility scan on every tool-set refresh (including resume, MCP discovery, first plan-mode entry, and subagent definition changes); the incomplete-bridge eager fallback; and daemon ACP late registration, which explicitly reveals and pins create_sub_session.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). Defaults to 0, which performs no threshold-based preload; ordinary deferred tools normally stay behind the stable ToolSearch + ToolCall bridge, at the cost of one tool_search round trip before first use. Raise it to N so that, when every eligible deferred schema fits within N% of the context window, all are declared upfront for direct calls with no bridge round trip; otherwise they stay behind the bridge while both bridge tools are registered. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge while it is registered; when either bridge tool is unregistered (tools.toolSearch.enabled false denies both; a tool_search or tool_call deny rule removes one) the demoted tools that remain hidden are absent from top-level declarations and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct and hybrid tool modes. In Code Mode, withheld tools with actual exec bindings also remain callable through exec; the warning names that subset. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager from nested bindings; agent allowlists that do not grant exec narrow nested bindings. Inheriting or explicitly granting exec keeps all otherwise admitted ordinary code-mode-callable bindings. An execution allowlist that mentions any MCP tool additionally restricts MCP bindings to matching exact names or server patterns. In direct and hybrid modes they stay registered, so a direct call by their own name is still evaluated and approved normally. Separate paths can still declare deferred tools at 0: tools.visible; the live-history compatibility scan on every tool-set refresh (including resume, MCP discovery, first plan-mode entry, and subagent definition changes); the incomplete-bridge eager fallback; and daemon ACP late registration, which explicitly reveals and pins create_sub_session.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -3138,7 +3203,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Deferred tool names made visible at startup without requiring the ToolSearch + ToolCall bridge. Listed tools appear alongside core tools in the initial session. Code Mode Only already includes full nested schemas in exec and hides both bridge tools.',
+          'Deferred tool names made visible at startup without requiring the ToolSearch + ToolCall bridge. Listed tools appear alongside core tools in the initial session. In Code Mode Only, listed tools have signatures in the initial exec description; other deferred schemas are discovered through top-level tool_search.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -3149,7 +3214,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are absent from top-level declarations and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct and hybrid tool modes. In Code Mode, withheld tools with actual exec bindings also remain callable through exec; the warning names that subset. CodeModeOnly hides both bridge tools, keeps full nested schemas for callable deferred tools in exec, and skips deferred reminders and this warning; on the session surface tools.eager does not make them unreachable or save their schema tokens. In both code modes, AgentCore excludes tools still hidden by tools.eager from nested bindings; agent allowlists that do not grant exec narrow nested bindings. Inheriting or explicitly granting exec keeps all otherwise admitted ordinary code-mode-callable bindings. An execution allowlist that mentions any MCP tool additionally restricts MCP bindings to matching exact names or server patterns. In direct and hybrid modes they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and sessions whose live history contains a direct call to a still-hidden demoted tool, which any tool-set refresh (resume, MCP discovery, the first plan-mode entry in a session, a subagent definition change) re-declares. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are absent from top-level declarations and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct and hybrid tool modes. In Code Mode, withheld tools with actual exec bindings also remain callable through exec; the warning names that subset. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager from nested bindings; agent allowlists that do not grant exec narrow nested bindings. Inheriting or explicitly granting exec keeps all otherwise admitted ordinary code-mode-callable bindings. An execution allowlist that mentions any MCP tool additionally restricts MCP bindings to matching exact names or server patterns. In direct and hybrid modes they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and sessions whose live history contains a direct call to a still-hidden demoted tool, which any tool-set refresh (resume, MCP discovery, the first plan-mode entry in a session, a subagent definition change) re-declares. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {
@@ -4312,6 +4377,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+        showInDialog: true,
+      },
+      agentCollaboration: {
+        type: 'boolean',
+        label: 'Enable Agent Collaboration',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
       },
       artifact: {

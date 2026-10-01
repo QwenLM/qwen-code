@@ -1584,6 +1584,37 @@ describe('SettingsDialog', () => {
     });
   });
 
+  describe('Aux-model selector display', () => {
+    it('redacts userinfo from the persisted visionModel selector row', async () => {
+      const settings = createMockSettings({
+        visionModel: 'o:v\0https://user:sk-secret@h.example/v1',
+      });
+      const onSelect = vi.fn();
+
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+      await wait();
+
+      const index = getDialogSettingKeys().indexOf('visionModel');
+      expect(index).toBeGreaterThanOrEqual(0);
+      for (let i = 0; i < index; i++) {
+        act(() => {
+          stdin.write('j');
+        });
+        await wait(10);
+      }
+
+      const frame = lastFrame();
+      // The selector stays readable; the embedded credential must not render.
+      expect(frame).toContain('o:v (https://h.example/v1)');
+      expect(frame).not.toContain('sk-secret');
+      unmount();
+    });
+  });
+
   describe('Config Tabs and Search', () => {
     it('renders the tab bar with all three tabs and a search box', () => {
       const settings = createMockSettings();

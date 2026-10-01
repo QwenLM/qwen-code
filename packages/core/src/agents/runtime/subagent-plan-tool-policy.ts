@@ -7,6 +7,7 @@
 import { ToolNames } from '../../tools/tool-names.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
+import type { ToolConfig } from './agent-types.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
@@ -76,10 +77,76 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
   // Recall state and shared memory writes belong to the parent session.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,
 ]);
+
+/**
+ * Whether an agent running with `toolConfig` is declared the Skill tool.
+ *
+ * Mirrors the *Direct-mode* declaration filter `AgentCore.prepareTools()`
+ * applies to the Skill tool, so it answers from the `ToolConfig` alone and
+ * does not re-run it. A filter added there propagates here only by hand.
+ *
+ * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
+ * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
+ * (whether the agent's Config holds a `SkillManager`, which decides whether a
+ * bundled reference reaches it as a pointer or inline). One predicate, so the
+ * listing and the pointer cannot disagree about whether a skill can actually
+ * be loaded — the disagreement #12424 reports.
+ *
+ * Callers supply whether exec bindings are reachable in the current mode and
+ * registry. A finite list naming exec can therefore reach Skill without
+ * naming it directly. CodeModeOnly retains eager-deferred nested targets;
+ * Hybrid applies its final eager and permission scope in prepareTools().
+ * Registry deny/exclude rules remain the bundled-reference resolver's concern;
+ * this predicate supplies the per-agent policy that resolver cannot see.
+ *
+ * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
+ * configured names to canonical tool names before they reach a `ToolConfig`.
+ *
+ * Where this cannot tell, it answers true. A wrong `true` costs a pointer the
+ * agent cannot follow at the `SubagentManager` call site, and at
+ * `AgentCore.willHaveSkillTool()` additionally an `<available_skills>` block in
+ * the cached prompt prefix listing skills the agent cannot load; a wrong `false`
+ * takes skills away from an agent that could load them.
+ */
+export function toolConfigAllowsSkill(
+  toolConfig: ToolConfig | undefined,
+  execBindingsAvailable = false,
+): boolean {
+  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  // No per-agent config inherits the whole registry.
+  if (!toolConfig) {
+    return true;
+  }
+  if (matchesAgentToolBlocklist(toolConfig.disallowedTools, ToolNames.SKILL)) {
+    return false;
+  }
+  const names = toolConfig.tools.filter(
+    (tool): tool is string => typeof tool === 'string',
+  );
+  // Only a wildcard inherits the registry, exactly as `prepareTools()` does.
+  // Neither an explicit empty list (the documented deny-all contract) nor a
+  // list holding only inline declarations inherits: both take the explicit
+  // branch there, which declares no registry tool.
+  const inheritsRegistry = names.includes('*');
+  // Naming an available exec gateway can reach the nested Skill binding.
+  const reachesThroughExec =
+    execBindingsAvailable && names.includes(ToolNames.EXEC);
+  return (
+    inheritsRegistry || names.includes(ToolNames.SKILL) || reachesThroughExec
+  );
+}
 
 /**
  * Tools excluded from teammates. Teammates need send_message and the
@@ -110,6 +177,12 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // for nested agents — without WORKFLOW here, a teammate-launched
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
   // Teammates also share the leader's memory state.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,

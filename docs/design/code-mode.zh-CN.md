@@ -1,5 +1,7 @@
 # Code Mode
 
+> 当前行为：Only 模式通过顶层 tool_search 按需加载 schema，并通过 exec 调用。搜索在当前范围不可用时才提供完整签名；tools.eager 可缩小初始声明。Hybrid 继续使用直接工具加 exec，保留其 bridge 与 eager 权限边界。本文以下 MVP 中“隐藏 tool_search / 始终完整 schema”的旧约定已由 [延迟加载设计](lazy-code-mode.zh-CN.md) 取代。
+
 [English](code-mode.md) | [简体中文](code-mode.zh-CN.md)
 
 ## 状态
@@ -42,13 +44,13 @@ CodeModeOnly。
 
 ## 暴露策略
 
-| 调用面       | `direct`                    | `code_mode`          | `code_mode_only` |
-| ------------ | --------------------------- | -------------------- | ---------------- |
-| 普通即时工具 | 直接调用                    | 直接调用和嵌套调用   | 仅嵌套调用       |
-| 延迟工具     | `tool_search` + `tool_call` | 桥接和嵌套调用       | 仅嵌套调用       |
-| 直接控制工具 | 直接调用                    | 仅直接调用           | 仅直接调用       |
-| `exec`       | 未注册                      | 直接调用             | 直接调用         |
-| 隐藏桥接工具 | 保持现有直接模式行为        | 在原本适用时直接调用 | 隐藏             |
+| 调用面       | `direct`                    | `code_mode`          | `code_mode_only`         |
+| ------------ | --------------------------- | -------------------- | ------------------------ |
+| 普通即时工具 | 直接调用                    | 直接调用和嵌套调用   | 仅嵌套调用               |
+| 延迟工具     | `tool_search` + `tool_call` | 桥接和嵌套调用       | 仅嵌套调用               |
+| 直接控制工具 | 直接调用                    | 仅直接调用           | 仅直接调用               |
+| `exec`       | 未注册                      | 直接调用             | 直接调用                 |
+| 发现桥接工具 | 保持现有直接模式行为        | 在原本适用时直接调用 | 顶层搜索；隐藏 tool_call |
 
 在 `code_mode` 中，普通可见工具的描述会附加该工具的 `exec` 调用声明。
 `exec` 描述保留完整的 `ALL_TOOLS` 元数据，但不重复所有 schema。两个桥接工具
@@ -58,11 +60,12 @@ CodeModeOnly。
 外使用 `tool_call`，或调用可用的直接工具，沿用正常的参数校验和审批。
 
 任一桥接工具缺失或智能体调用面经过过滤时，`exec` 会为无法从其他途径取得
-schema 的嵌套工具附上签名。在 `code_mode_only` 中，所有嵌套声明集中在 `exec`
-描述中；两个桥接工具都被隐藏，延迟提醒和桥接不完整的警告被跳过。在会话层，
-`tools.eager` 和 `tools.visible` 不会减少这些嵌套 schema，仍可调用的工具继续
-通过 `exec` 使用。AgentCore 层（subagent、headless agent、arena）会从嵌套绑定中
-排除被 `tools.eager` 隐藏的工具，并应用下文的智能体 allowlist 规则。
+schema 的嵌套工具附上签名。在 `code_mode_only` 中，顶层 `tool_search` 按需发现
+延迟 schema，`exec` 负责调用；只有 `tool_call` 被隐藏。延迟提醒、预算预载与
+桥接不完整的警告被跳过。`tools.eager` 和 `tools.visible` 控制初始签名，当前范围
+不能搜索时则提供全部允许工具的签名。延迟工具仍可通过 `exec` 调用。
+Hybrid 的 AgentCore 调用面从嵌套绑定中排除被 `tools.eager` 隐藏的工具；Only
+保留这些延迟目标。两种模式均应用下文的智能体 allowlist 规则。
 
 嵌套绑定优先保留与 JavaScript 属性精确一致的规范名称，再考虑改写为该属性的
 名称。其他碰撞沿用规范名称字典序；被省略的绑定不出现在嵌套签名中，

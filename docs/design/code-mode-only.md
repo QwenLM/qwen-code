@@ -1,11 +1,18 @@
 # CodeModeOnly MVP
 
+> Current behavior: Only discovers schemas through top-level tool_search and invokes tools through exec. Full signatures are included when search is unavailable in the current scope; tools.eager can reduce the initial declaration. Hybrid keeps direct tools plus exec with its existing bridge and eager permission boundaries. The original MVP statements below about hiding tool_search or always including full schemas are superseded by the [lazy-loading design](lazy-code-mode.md).
+
 [English](code-mode-only.md) | [简体中文](code-mode-only.zh-CN.md)
 
 ## Status
 
 Implemented for [#10377](https://github.com/QwenLM/qwen-code/issues/10377).
 The feature is opt-in and defaults off.
+
+Partly superseded by [Lazy Code Mode](lazy-code-mode.md): `tool_search` is now
+a top-level direct control, and `exec` omits deferred tool signatures while
+search is available. The exposure table and the deferred-schema paragraph below
+describe this MVP; `tool_call` stays hidden.
 
 ## Goal
 

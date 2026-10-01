@@ -349,7 +349,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '启用内置 list_directory 工具。默认关闭；当它被显式列入 coreTools 白名单（--core-tools / tools.core）时会自动启用。',
   'settings.label.tools.mode': '工具模式（实验性）',
   'settings.description.tools.mode':
-    '选择工具向模型暴露的方式。Direct 使用普通工具调用；Code Mode 额外提供隔离的 exec JavaScript 工具；Code Mode Only 仅通过 exec 暴露普通工具。safe 和 bare 模式始终使用 Direct。容器执行时，Code Mode 会警告并使用直接工具，Code Mode Only 则被拒绝。SSH 工作区会警告并将两种代码模式回退为 Direct。Code Mode Only 在会话工具界面忽略 eager/visible 的 schema 延迟加载：可调用工具保留完整嵌套 schema，tool_search 被隐藏。两种代码模式下，AgentCore 都不会将仍被 tools.eager 隐藏的工具加入嵌套绑定；未授予 exec 的智能体白名单会收窄嵌套绑定。继承或显式授予 exec 会保留其他规则允许的所有普通代码模式工具绑定。执行白名单只要提及任一 MCP 工具，就会进一步将 MCP 绑定限制为匹配的精确名称或服务器模式。',
+    '选择工具向模型暴露的方式。Direct 使用普通工具调用；Code Mode 额外提供隔离的 exec JavaScript 工具；Code Mode Only 仅通过 exec 暴露普通工具。safe 和 bare 模式始终使用 Direct。容器执行时，Code Mode 会警告并使用直接工具，Code Mode Only 则被拒绝。SSH 工作区会警告并将两种代码模式回退为 Direct。Code Mode Only 通过顶层 tool_search 按需发现 schema，再通过 exec 调用；跳过预算预加载与启动工具清单。tools.eager 会减少初始 exec 声明，当前范围无法搜索时则保留所有允许工具的签名。Hybrid 模式下，AgentCore 不会将仍被 tools.eager 隐藏的工具加入嵌套绑定；未授予 exec 的智能体白名单会收窄嵌套绑定。继承或显式授予 exec 会保留其他规则允许的所有普通代码模式工具绑定。执行白名单只要提及任一 MCP 工具，就会进一步将 MCP 绑定限制为匹配的精确名称或服务器模式。',
   'settings.label.tools.todoWrite.enabled': '启用 Todo Write',
   'settings.description.tools.todoWrite.enabled':
     '启用内置 todo_write 工具及其系统提示词引导。',
@@ -393,6 +393,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.agentTeam': '启用 Agent Team',
   'settings.description.experimental.agentTeam':
     '启用 agent 团队协作工具（实验性）。启用后，模型可以创建 agent 团队，并用 team_create、team_delete、send_message、task_create、task_update 和 task_list 协调工作。也可通过 QWEN_CODE_ENABLE_AGENT_TEAM=1 环境变量启用。',
+  'settings.label.experimental.agentCollaboration': '启用 Agent 协作',
+  'settings.description.experimental.agentCollaboration':
+    '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',

@@ -383,9 +383,9 @@ Use `tools` and `disallowedTools` to control which tools a subagent can access.
 
 **`tools` (allowlist):** When specified, the list bounds direct tool calls and deferred-tool bridge targets. Code mode also supports the nested `exec` path described below. When omitted, the subagent inherits all available tools from the parent session.
 
-The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions.
+The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.mode: "code_mode_only"`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
 
-With `tools.mode: "code_mode"` or `"code_mode_only"`, `exec` provides a third path: nested `tools.<name>(...)` calls. Explicitly listing `exec` also grants otherwise-admitted code-mode-callable bindings, including ordinary tools such as `write_file` and `run_shell_command` that are not individually listed. Thus `tools: [read_file, exec]` is not a read-only policy. Omit `exec` from the configured list to keep nested targets bounded by the listed names; the runtime still exposes the `exec` wrapper in code mode. `disallowedTools`, `permissions.deny`, subagent exclusions, and tools hidden by `tools.eager` continue to restrict access. This nested grant does not add direct-call permission in hybrid mode. A fork's explicit `fork_tools: [exec]` grant also remains bounded by its parent's inherited execution policy.
+With `tools.mode: "code_mode"` or `"code_mode_only"`, `exec` provides a third path: nested `tools.<name>(...)` calls. Explicitly listing `exec` also grants otherwise-admitted code-mode-callable bindings, including ordinary tools such as `write_file` and `run_shell_command` that are not individually listed. Thus `tools: [read_file, exec]` is not a read-only policy. Omit `exec` from the configured list to keep nested targets bounded by the listed names; the runtime still exposes the `exec` wrapper in code mode. `disallowedTools`, `permissions.deny`, and subagent exclusions continue to restrict access in both modes. Hybrid additionally excludes tools hidden by `tools.eager`. This nested grant does not add direct-call permission in hybrid mode. A fork's explicit `fork_tools: [exec]` grant also remains bounded by its parent's inherited execution policy.
 
 ```
 ---
@@ -481,14 +481,16 @@ and land in follow-up PRs once the prerequisite infrastructure exists
 (`effort` needs a model-layer parameter; `memory` needs a scoped memory
 subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
 
-> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
-> its hook entries fire for every matching event in the session, not only
-> for that subagent's own tool calls. If two subagents with different
-> per-agent hook sets run concurrently, both sets fire for both agents.
-> Per-agent scope filtering at hook-firing time is left to a follow-up;
-> for v1, prefer per-agent hooks that are safe to fire globally for the
-> duration of the agent's run (e.g. logging) over hooks that mutate
-> behavior.
+Agent frontmatter hooks run only for that agent invocation. They do not receive
+parent, sibling, or nested child agent events. Global settings hooks and
+session-wide skill/function hooks keep their existing inheritance. Hooks are
+removed when the invocation is disposed. Project-agent hooks are skipped in an
+untrusted workspace and recheck their source workspace's trust before each event.
+
+Use `SubagentStart` and `SubagentStop` for the agent's lifecycle. `Stop` is not an
+alias for `SubagentStop`; hooks that previously observed the parent's `Stop` or
+other agents through shared registration must move to settings to keep that
+session-wide behavior.
 
 #### Example Usage
 

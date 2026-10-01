@@ -436,11 +436,7 @@ export interface QueryOptions {
    * On the session surface in hybrid mode, while `exec` is registered (container or SSH execution
    * warns and falls back to direct tools without it), exec retains callable
    * nested bindings; their schemas are included in exec when either bridge
-   * tool is unavailable. CodeModeOnly hides both bridge tools, includes
-   * callable deferred tools' full schemas in exec, and skips deferred
-   * reminders and this warning; on the session surface tools.eager does not
-   * make those nested tools unreachable or reduce their schema tokens.
-   * In both code modes, AgentCore excludes tools still hidden by tools.eager
+   * tool is unavailable. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed signatures. In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
    * from nested bindings. Agent allowlists that do not grant `exec` narrow nested bindings.
    * Inheriting or explicitly granting `exec` keeps all otherwise admitted
    * ordinary code-mode-callable bindings. An execution allowlist that
@@ -517,12 +513,12 @@ export interface QueryOptions {
    *   On the session surface in hybrid mode, while `exec` is registered (container or SSH
    *   execution warns and falls back to direct tools without it), exec
    *   retains callable nested bindings; their schemas are included in
-   *   exec when either bridge tool is unavailable. CodeModeOnly hides
-   *   both bridge tools, includes callable deferred tools' full schemas
-   *   in exec, and skips deferred reminders and this warning; on the
-   *   session surface tools.eager does not make those nested tools
-   *   unreachable or reduce their schema tokens.
-   *   In both code modes, AgentCore excludes tools still hidden by tools.eager
+   *   exec when either bridge tool is unavailable. CodeModeOnly discovers deferred schemas through
+   *   top-level tool_search and invokes them through exec. It skips deferred
+   *   preload and startup catalogs; tools.eager reduces the initial exec
+   *   description. When search is unavailable in the current scope, exec
+   *   includes all allowed signatures.
+   *   In Hybrid mode, AgentCore excludes tools still hidden by tools.eager
    *   from nested bindings. Agent allowlists that do not grant `exec` narrow nested bindings.
    *   Inheriting or explicitly granting `exec` keeps all otherwise admitted
    *   ordinary code-mode-callable bindings. An execution allowlist that

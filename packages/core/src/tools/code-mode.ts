@@ -34,9 +34,10 @@ export function isCodeModeEnabled(mode: unknown): boolean {
   return mode === ToolMode.CodeMode || mode === ToolMode.CodeModeOnly;
 }
 
-const HIDDEN_TOOLS = new Set<string>([ToolNames.TOOL_SEARCH, 'tool_call']);
+const HIDDEN_TOOLS = new Set<string>(['tool_call']);
 
 const DIRECT_ONLY_TOOLS = new Set<string>([
+  ToolNames.TOOL_SEARCH,
   ToolNames.AGENT,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.STRUCTURED_OUTPUT,
@@ -211,11 +212,7 @@ function bindingSignature(binding: CodeModeToolBinding): string {
   return `${binding.jsName}(args: ${schemaToType(binding.parametersJsonSchema)}): Promise<CodeModeToolResult>`;
 }
 
-function describeBinding(binding: CodeModeToolBinding): string {
-  // A deferred tool keeps its registry semantics, but CodeModeOnly hides
-  // tool_search and never surfaces nested calls as history functionCalls, so
-  // nothing can reveal it later: this description is its only chance to carry
-  // a schema.
+export function describeCodeModeBinding(binding: CodeModeToolBinding): string {
   return `tools.${bindingSignature(binding)};`;
 }
 
@@ -234,14 +231,29 @@ declare const tools: { ${bindingSignature(binding)}; };
   };
 }
 
+export interface ExecDescriptionOptions {
+  codeModeOnly?: boolean;
+  searchAvailable?: boolean;
+  topLevelBindingNames?: ReadonlySet<string>;
+  canSearchDeferredSchemas?: boolean;
+  hasToolCallBridge?: boolean;
+}
+
 export function buildExecDescription(
   plan: CodeModeBindingPlan,
-  codeModeOnly = true,
-  topLevelBindingNames: ReadonlySet<string> = new Set(),
-  canSearchDeferredSchemas = false,
-  hasToolCallBridge = canSearchDeferredSchemas,
+  options: ExecDescriptionOptions = {},
 ): string {
-  const allTools = plan.bindings.map(
+  const {
+    codeModeOnly = true,
+    topLevelBindingNames = new Set<string>(),
+    canSearchDeferredSchemas = false,
+    hasToolCallBridge = canSearchDeferredSchemas,
+  } = options;
+  const searchAvailable = codeModeOnly && (options.searchAvailable ?? false);
+  const visibleBindings = plan.bindings.filter(
+    (binding) => !searchAvailable || !binding.deferred,
+  );
+  const allTools = visibleBindings.map(
     ({ name, jsName, description, deferred }) => ({
       name,
       jsName,
@@ -249,7 +261,7 @@ export function buildExecDescription(
       deferred,
     }),
   );
-  const collisionText = plan.collisions
+  const collisionText = (searchAvailable ? [] : plan.collisions)
     .map(
       ({ jsName, kept, omitted }) =>
         `- ${omitted} is omitted because it collides with ${kept} as tools.${jsName}.`,
@@ -264,7 +276,7 @@ export function buildExecDescription(
     plan.bindings.length === 0
       ? ''
       : codeModeOnly
-        ? plan.bindings.map(describeBinding).join('\n')
+        ? visibleBindings.map(describeCodeModeBinding).join('\n')
         : [
             'Nested tool declarations for directly exposed tools are included in their top-level tool descriptions.',
             hasToolCallBridge
@@ -272,17 +284,20 @@ export function buildExecDescription(
               : uncoveredBindings.length === 0
                 ? ''
                 : 'Other nested parameter schemas are declared below. Match tool names exactly to ALL_TOOLS.name, then call tools[entry.jsName] with arguments shaped by that schema. If no entry matches, the tool has no nested binding; do not normalize or guess one.',
-            uncoveredBindings.map(describeBinding).join('\n'),
+            uncoveredBindings.map(describeCodeModeBinding).join('\n'),
           ]
             .filter(Boolean)
             .join('\n');
   const toolsDescription = codeModeOnly
-    ? 'the code-mode-callable tool functions declared below.'
+    ? 'all registered code-mode-callable tool functions permitted in this context, including deferred tools.'
     : `the code-mode-callable functions listed in ALL_TOOLS. Parameter schemas are in their top-level tool descriptions or below${hasToolCallBridge ? ', or returned by tool_search' : ''}; use the exact ALL_TOOLS name-to-jsName mapping.`;
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
-Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Prefer batching independent calls with Promise.all. A denied or failed nested call rejects its promise; an uncaught rejection aborts the program. Catch expected failures if execution should continue, and keep a call that may be refused out of a batch you would then have to repeat. Await every tool promise; unawaited calls are cancelled when the script finishes. Pass values you need to inspect or return to text(); assigning a result does not include it in the exec output. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+Use async/await and call registered tools through tools.<jsName>(args), using the exact JavaScript name documented for the tool. Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Batch independent searches and reads with await Promise.allSettled([...]) and inspect every result: emit fulfilled output with text(result.value.output) and rejected reasons with text(String(result.reason)). Safe calls run concurrently within the runtime limit; a rejected promise does not discard sibling results. Keep dependent actions, mutations, and approvals sequential. User cancellation still stops unfinished calls. Await every tool promise; unawaited calls are cancelled when the script finishes. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+${searchAvailable ? '\nDeferred tool signatures and descriptions are omitted below. Invoke tool_search as a separate top-level tool call, outside exec; it is not a JavaScript global or a tools binding. Search by keywords to obtain the registered name, full schema, and jsName. Use select:<name> only with a registered name, including the full MCP prefix. Read the result before writing a later exec call using tools.<jsName>(args). Reuse schemas already in the current context. If a schema is missing, including after context compression, search again before constructing arguments. Search results do not change this declaration.\n' : ''}
+
+A denied or failed nested call rejects its promise; an uncaught rejection aborts the program. Catch expected failures if execution should continue. Pass values you need to inspect or return to text(); assigning a result does not include it in the exec output.
 
 Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata are also automatically retained; a result without content needs no image() call.
 
@@ -303,28 +318,20 @@ There is no Node.js, process, require, filesystem, network, import, console, Web
 
 type ImageContent = { type: 'image'; data: string; mimeType: string };
 type CodeModeToolResult = { callId: string; name: string; status: 'success'; output: string; content?: ImageContent[] };
-${declarations || '// No ordinary tools are available in this context.'}
+${declarations || (searchAvailable ? '// Use tool_search to discover callable tools.' : '// No ordinary tools are available in this context.')}
 
-const ALL_TOOLS = ${JSON.stringify(allTools)} as const;
+${searchAvailable ? 'Metadata for tools documented above (runtime ALL_TOOLS also includes deferred tools):' : 'ALL_TOOLS metadata:'}
+${JSON.stringify(allTools)}
 ${collisionText ? `\nName collisions:\n${collisionText}` : ''}`;
 }
 
 export function buildExecDeclaration(
   execTool: AnyDeclarativeTool,
   plan: CodeModeBindingPlan,
-  codeModeOnly = true,
-  topLevelBindingNames?: ReadonlySet<string>,
-  canSearchDeferredSchemas?: boolean,
-  hasToolCallBridge?: boolean,
+  options: ExecDescriptionOptions = {},
 ): FunctionDeclaration {
   return {
     ...execTool.schema,
-    description: buildExecDescription(
-      plan,
-      codeModeOnly,
-      topLevelBindingNames,
-      canSearchDeferredSchemas,
-      hasToolCallBridge,
-    ),
+    description: buildExecDescription(plan, options),
   };
 }

@@ -1,5 +1,7 @@
 # CodeModeOnly MVP
 
+> 当前行为：Only 模式通过顶层 tool_search 按需加载 schema，并通过 exec 调用。搜索在当前范围不可用时才提供完整签名；tools.eager 可缩小初始声明。Hybrid 继续使用直接工具加 exec，保留其 bridge 与 eager 权限边界。本文以下 MVP 中“隐藏 tool_search / 始终完整 schema”的旧约定已由 [延迟加载设计](lazy-code-mode.zh-CN.md) 取代。
+
 [English](code-mode-only.md) | [简体中文](code-mode-only.zh-CN.md)
 
 ## 状态

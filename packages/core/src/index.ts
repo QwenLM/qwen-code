@@ -910,6 +910,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -966,3 +970,10 @@ export type {
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';

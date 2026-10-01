@@ -226,6 +226,12 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.ThreadPost': '发帖到线程',
+  'toolDisplayName.ThreadWait': '等待协作方',
+  'toolDisplayName.ThreadBlock': '提出阻塞问题',
+  'toolDisplayName.ThreadReview': '提交待评审',
+  'toolDisplayName.ThreadCreate': '创建子线程',
+  'toolDisplayName.ThreadRead': '读取线程',
   'toolDisplayName.DownsampleImage': '降采样图像',
   'toolDisplayName.DownscaleVideo': '降采样视频',
   'toolDisplayName.DownsampleAudio': '降采样音频',
@@ -425,6 +431,8 @@ export default {
     '回退不会影响手工编辑或通过 shell 命令修改的文件。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '无法回退到已被压缩的轮次，请尝试更近一些的轮次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '无法将对话回退到该轮次：它已无法与模型历史对应（例如经过重试）。请尝试更近一些的轮次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
