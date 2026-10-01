@@ -563,6 +563,110 @@ describe('ManagedHookRuntime', () => {
       error: { code: 'managed_hook_handler_unavailable' },
     });
   });
+  it.each([
+    'resolve-on-abort',
+    'reject-on-abort',
+    'ignore-abort',
+    'finish-after-timeout',
+  ])(
+    'keeps function interruption proof tied to callback completion (%s)',
+    async (behavior) => {
+      const modulePath = path.join(directory, 'cancel-handler.mjs');
+      await writeFile(
+        modulePath,
+        `
+        import { appendFileSync } from 'node:fs';
+        import { setTimeout as delay } from 'node:timers/promises';
+        let finish;
+        export const release = () => finish();
+        export const registered = { handlerRevision: 1, callback: async (input, context) => {
+          appendFileSync(input.cwd + '/counter', 'started\\n');
+          try {
+            await new Promise((resolve, reject) => {
+              finish = resolve;
+              if (${JSON.stringify(behavior)} === 'finish-after-timeout') setTimeout(resolve, 50);
+              else if (${JSON.stringify(behavior)} !== 'ignore-abort') {
+                const stop = () => ${JSON.stringify(behavior)} === 'reject-on-abort'
+                  ? reject(new DOMException('cancelled', 'AbortError')) : resolve();
+                context.signal.addEventListener('abort', stop, { once: true });
+                if (context.signal.aborted) stop();
+              }
+            });
+            return { continue: true };
+          } finally {
+            await delay(10);
+            appendFileSync(input.cwd + '/counter', 'settled\\n');
+          }
+        }};
+      `,
+      );
+      const instance = runtime([
+        {
+          ...definition(),
+          config: {
+            type: 'function',
+            timeout: behavior === 'finish-after-timeout' ? 10 : 8000,
+          },
+          handler: {
+            handlerId: 'cancel-handler',
+            handlerRevision: 1,
+            modulePath,
+            exportName: 'registered',
+          },
+        },
+      ]);
+      const call = request();
+      await instance.control('runtime-session', call);
+      await vi.waitFor(async () => {
+        const trace = await readFile(path.join(directory, 'counter'), 'utf8');
+        if (behavior === 'finish-after-timeout')
+          expect(trace).toContain('started\n');
+        else expect(trace).toBe('started\n');
+      });
+      if (behavior !== 'finish-after-timeout')
+        await instance.control('runtime-session', {
+          kind: 'hook-cancel',
+          sessionKey: key,
+          operationId: 'cancel',
+          targetOperationId: call.operationId,
+        });
+      const receipt = await settled(instance);
+      if (behavior === 'ignore-abort') {
+        expect(receipt.state).toBe('outcome_unknown');
+        expect(instance.hasHolds('runtime-session')).toBe(true);
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
+          'started\n',
+        );
+        const module = (await import(modulePath)) as { release: () => void };
+        module.release();
+        await vi.waitFor(async () => {
+          expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
+            'started\nsettled\n',
+          );
+        });
+      } else {
+        expect(receipt).toMatchObject({
+          state: 'settled',
+          result: {
+            success: false,
+            outcome:
+              behavior === 'finish-after-timeout' ? 'timeout' : 'cancelled',
+          },
+        });
+        expect(instance.hasHolds('runtime-session')).toBe(false);
+        expect(await instance.control('runtime-session', call)).toEqual(
+          receipt,
+        );
+        expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
+          'started\nsettled\n',
+        );
+      }
+    },
+  );
+
   it('keeps oversized output as a bounded failure receipt without replay', async () => {
     const modulePath = path.join(directory, 'large-handler.mjs');
     await writeFile(
