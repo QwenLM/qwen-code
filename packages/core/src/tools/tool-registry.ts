@@ -31,6 +31,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { getCurrentAgentChat } from '../agents/runtime/agent-context.js';
 import {
   buildExecDeclaration,
   getToolExposure,
@@ -1096,6 +1097,12 @@ export class ToolRegistry {
    * history.
    */
   getReviewedDeclaration(name: string): string | undefined {
+    const agentChat = getCurrentAgentChat();
+    const client = this.config.getLlmClient?.();
+    const history =
+      agentChat?.getHistoryShallow(true) ??
+      (client?.isInitialized?.() ? client.getHistoryShallow(true) : undefined);
+    if (history !== undefined) this.syncReviewedDeclarations(history);
     return this.reviewedDeferredDeclarations.get(name);
   }
 

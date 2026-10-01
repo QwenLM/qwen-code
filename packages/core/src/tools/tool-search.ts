@@ -291,7 +291,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const matches = scored.slice(0, maxResults).map((s) => s.tool.name);
     if (matches.length === 0) {
       return {
-        llmContent: `No tools found matching '${query}'. Try broader keywords or use \`select:ToolName\`.`,
+        llmContent: `No tools found matching '${escapeJsonTagCharacters(query)}'. Try broader keywords or use \`select:ToolName\`.`,
         returnDisplay: `No matches for '${query}'`,
       };
     }
@@ -501,7 +501,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Not found: ${missing.join(', ')}`;
+      llmContent += `${header}Not found: ${escapeJsonTagCharacters(missing.join(', '))}`;
       if (bindings) {
         llmContent +=
           '\nselect: requires the registered name, including mcp__<server>__<tool> for MCP tools. Search with keywords without select: to discover the full name and schema, then use the returned jsName in exec.';
@@ -517,7 +517,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // counts as a duplicate call and can end the turn as a loop.
       const entries = ambiguous.map(
         ({ requested, candidates }) =>
-          `"${requested}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
+          `"${escapeJsonTagCharacters(requested)}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
             .map((name) => `select:${name}`)
             .join(' or ')}.`,
       );
@@ -554,7 +554,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // assume every requested name was reviewed and later receive an
       // "unknown tool" API error.
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${escapeJsonTagCharacters(truncated.join(', '))}`;
     }
 
     const displayParts: string[] = [];
@@ -586,6 +586,11 @@ export class ToolSearchTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name = ToolNames.TOOL_SEARCH;
+
+  override get maxOutputChars(): number {
+    // The bridge requires complete schema blocks; max_results bounds their count.
+    return Number.POSITIVE_INFINITY;
+  }
 
   constructor(private readonly config: Config) {
     super(
