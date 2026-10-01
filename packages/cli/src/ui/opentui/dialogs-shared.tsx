@@ -21,6 +21,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { MouseButton } from '@opentui/core';
 import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
 import {
@@ -86,7 +87,7 @@ export function DialogFrame(props: {
     <box
       flexDirection="column"
       borderStyle="rounded"
-      borderColor={props.borderColor ?? C.dim}
+      borderColor={props.borderColor ?? C.borderDefault}
       padding={1}
     >
       {props.children}
@@ -160,6 +161,8 @@ export interface UseDialogSelectOptions<TItem extends DialogListItem<unknown>> {
 
 export interface UseDialogSelectResult<TItem extends DialogListItem<unknown>> {
   activeIndex: number;
+  /** The highlight as the current key/wheel burst sees it. */
+  activeIndexRef: Readonly<{ current: number }>;
   scrollOffset: number;
   setScrollOffset: (offset: number) => void;
   setActiveIndex: (index: number) => void;
@@ -190,9 +193,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     onHighlight,
   } = options;
 
-  const [activeIndex, setActiveIndexState] = useState(() =>
-    computeInitialActiveIndex(initialIndex, items),
-  );
+  const {
+    cursor: activeIndex,
+    cursorRef,
+    setCursor: moveCursor,
+  } = useBatchSafeCursor(() => computeInitialActiveIndex(initialIndex, items));
   const [scrollOffset, setScrollOffset] = useState(() =>
     getSelectionScrollOffset(
       computeInitialActiveIndex(initialIndex, items),
@@ -226,7 +231,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     // key-follow below must not override it with the previous view's key.
     itemsRef.current = items;
     const next = computeInitialActiveIndex(initialIndex, items);
-    setActiveIndexState(next);
+    moveCursor(next);
     setScrollOffset(
       getSelectionScrollOffset(next, items.length, maxItemsToShow),
     );
@@ -257,7 +262,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
         followed >= 0
           ? followed
           : computeInitialActiveIndex(initialIndex, items);
-      setActiveIndexState(next);
+      moveCursor(next);
       setScrollOffset(
         getSelectionScrollOffset(next, items.length, maxItemsToShow),
       );
@@ -292,9 +297,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   };
 
   const highlightIndex = (index: number) => {
-    if (index < 0 || index >= items.length || index === activeIndex) return;
+    if (index < 0 || index >= items.length || index === cursorRef.current) {
+      return;
+    }
     if (items[index]?.disabled) return;
-    setActiveIndexState(index);
+    moveCursor(index);
     const item = items[index];
     if (item) onHighlight?.(item.value, index);
   };
@@ -303,12 +310,14 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // like wheel/hover navigation step one row per gesture, and rejecting
   // disabled targets would leave them permanently stuck on a disabled row.
   const setActiveIndex = (index: number) => {
-    if (index < 0 || index >= items.length || index === activeIndex) return;
+    if (index < 0 || index >= items.length || index === cursorRef.current) {
+      return;
+    }
     // Moving the highlight by any means (wheel, hover) invalidates a
     // pending numeric flush: the flush must commit the typed row, not
     // wherever the pointer happened to land.
     clearNumberBuffer();
-    setActiveIndexState(index);
+    moveCursor(index);
     const item = items[index];
     if (item) onHighlight?.(item.value, index);
   };
@@ -322,7 +331,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     // ink dispatches SET_ACTIVE_INDEX before SELECT_CURRENT, so highlight
     // consumers (theme preview, scope selection) stay synced on mouse input
     // too, not just keyboard input.
-    setActiveIndexState(index);
+    moveCursor(index);
     onHighlight?.(item.value, index);
     onSelect?.(item.value);
   };
@@ -346,13 +355,13 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       );
       numberBuffer.current = result.buffer;
       if (result.activeIndex !== undefined) {
-        setActiveIndexState(result.activeIndex);
+        moveCursor(result.activeIndex);
         const item = items[result.activeIndex];
         if (item) onHighlight?.(item.value, result.activeIndex);
       }
       if (result.selectNow) {
         clearNumberBuffer();
-        const item = items[result.activeIndex ?? activeIndex];
+        const item = items[result.activeIndex ?? cursorRef.current];
         if (item && !item.disabled) onSelect?.(item.value);
       } else if (result.pendingSelect) {
         numberTimer.current = setTimeout(() => {
@@ -372,21 +381,24 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     clearNumberBuffer();
 
     if (keyMatchers[Command.SELECTION_UP](original)) {
-      highlightIndex(findNextEnabledIndex(items, activeIndex, 'up'));
+      highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'up'));
       return;
     }
     if (keyMatchers[Command.SELECTION_DOWN](original)) {
-      highlightIndex(findNextEnabledIndex(items, activeIndex, 'down'));
+      highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'down'));
       return;
     }
     if (original.name === 'return') {
-      const item = items[activeIndex];
+      const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }
   });
 
   return {
     activeIndex,
+    // Handlers of a key or wheel burst read the live index, not the one this
+    // render captured.
+    activeIndexRef: cursorRef,
     scrollOffset,
     setScrollOffset,
     setActiveIndex,

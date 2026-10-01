@@ -1,3 +1,4 @@
+import type { ArtifactFilter } from './components/artifacts/TurnOutputs';
 import {
   createContext,
   useContext,
@@ -27,6 +28,12 @@ export type MarkdownContentSource = 'assistant' | 'thinking';
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
+  /**
+   * 当前消息的生成态；历史或静态内容为 false。所属 MessageList 空闲
+   * （isResponding=false）时，恢复 replay 中残留的 streaming 标记也会被
+   * 收口为 false，且已收口的行在会话重新响应时、内容不变的前提下保持收口。
+   */
+  isStreaming: boolean;
 }
 
 export interface WebShellCodeBlockRenderInfo {
@@ -187,6 +194,8 @@ export type WebShellChatHeaderItem =
   | 'contextUsage';
 
 export interface WebShellChatHeaderOptions {
+  /** Show the mobile-access QR entry in chat headers. Defaults to false. */
+  showMobileAccess?: boolean;
   /** Built-in header actions to show. Token and context usage are opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
@@ -195,7 +204,8 @@ export type WebShellRightPanelItem =
   | 'review'
   | 'sideTask'
   | 'terminal'
-  | 'webPreview';
+  | 'webPreview'
+  | 'trajectory';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -295,6 +305,23 @@ export interface WebShellAssistantMessageInfo {
   content: string;
   isStreaming?: boolean;
   timestamp?: number;
+}
+
+export type WebShellAssistantTurnOutcome = 'completed' | 'cancelled' | 'failed';
+
+export interface WebShellAssistantTurnSettledEvent {
+  sessionId: string;
+  /** Daemon terminal prompt identifier and stable host idempotency key. */
+  promptId: string;
+  outcome: WebShellAssistantTurnOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  /** Final visible assistant message when retained in the mounted transcript. */
+  message?: WebShellAssistantMessageInfo;
+  error?: {
+    message: string;
+    code?: string;
+  };
 }
 
 export interface WebShellAssistantTurnFooterRenderInfo {
@@ -465,6 +492,11 @@ export interface WebShellAtItem {
   iconTooltip?: string;
   insertText?: string;
   composerTag?: WebShellComposerTag;
+  /**
+   * Makes the item an action instead of a reference: choosing it removes the
+   * typed `@query` and calls this, inserting nothing.
+   */
+  onSelect?: () => void;
 }
 
 export type WebShellBuiltinAtProviderId =
@@ -506,6 +538,11 @@ export interface WebShellAtProvider {
   order?: number;
   tabs?: readonly WebShellAtProviderTab[];
   renderItem?: WebShellAtItemRenderer;
+  /**
+   * Claims a typed `@query` that names no category, so it searches this
+   * provider instead of falling back to files.
+   */
+  claimsTypedQuery?(query: string): boolean;
   search(params: {
     query: string;
     signal: AbortSignal;
@@ -666,6 +703,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  filterArtifact?: ArtifactFilter;
   artifact?: WebShellArtifactCustomization;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;

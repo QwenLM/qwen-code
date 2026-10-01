@@ -94,6 +94,7 @@ function held(over: {
   monotonicAt?: number;
   selfSent?: true;
   controller?: HeldMessage['controller'];
+  toSessionId?: string;
 }): HeldMessage {
   return {
     frame: {
@@ -103,6 +104,9 @@ function held(over: {
       priority: 'next',
       from: '/tmp/peer.sock',
       ...(over.fromName !== undefined ? { fromName: over.fromName } : {}),
+      ...(over.toSessionId !== undefined
+        ? { toSessionId: over.toSessionId }
+        : {}),
       message: { role: 'user', content: over.content ?? 'do a thing' },
     },
     cause: over.cause ?? 'mode-mismatch',
@@ -120,7 +124,7 @@ function held(over: {
 
 interface Fake {
   getHeld: () => readonly HeldMessage[];
-  getHeldExpiryMs: () => number | null;
+  getHeldExpiryMs: (sessionId?: string) => number | null;
   decide: ReturnType<typeof vi.fn>;
   forgetController: ReturnType<typeof vi.fn>;
   recordHeldListing: ReturnType<typeof vi.fn>;
@@ -131,11 +135,20 @@ function makeContext(
   peerMessaging: Fake | null,
   crossSessionMessaging?: unknown,
   scopes: Record<string, unknown> = {},
+  suppression: { isSafeMode?: boolean; getBareMode?: boolean } = {},
 ): CommandContext {
   return {
     services: {
       peerMessaging,
       settings: { merged: { agents: { crossSessionMessaging } }, ...scopes },
+      // The gate reads the two session-level suppressions off the Config,
+      // so the double models them rather than stubbing the answer: a case
+      // where the flags and the setting disagree stays expressible, and the
+      // message can be checked against the cause it actually derived.
+      config: {
+        isSafeMode: () => suppression.isSafeMode === true,
+        getBareMode: () => suppression.getBareMode === true,
+      },
     },
   } as unknown as CommandContext;
 }
@@ -453,6 +466,93 @@ describe('/peers', () => {
     expect(result.content).not.toContain('Remove that entry');
   });
 
+  // Arm-specific assertions on purpose. Every branch of
+  // `describeMessagingOff` also begins with "Cross-session messaging is
+  // off", so asserting only that shared prefix stays green with the
+  // suppression arm deleted — and `/peers` then tells a safe-mode user
+  // whose setting is already `true` to go remove that entry, a remedy that
+  // changes nothing. Each case also pins the environment channel, since
+  // both suppressions can be reached without the flag.
+  it('names safe mode as the reason instead of a settings remedy', async () => {
+    const result = await peersCommand.action!(
+      makeContext(null, true, {}, { isSafeMode: true }),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in safe mode');
+    expect(result.content).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.content).not.toContain('Remove that entry');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  it('names bare mode as the reason instead of a settings remedy', async () => {
+    const result = await peersCommand.action!(
+      makeContext(null, true, {}, { getBareMode: true }),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in bare mode');
+    expect(result.content).toContain('QWEN_CODE_SIMPLE');
+    expect(result.content).not.toContain('Remove that entry');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  // The both-causes state, which the two cases above cannot express: they
+  // build their context with the setting on. Naming only the flag here tells
+  // a user whose own settings entry is also off that the setting cannot
+  // matter, and sends them to a restart that leaves messaging off.
+  async function runBothCauses(suppression: {
+    isSafeMode?: boolean;
+    getBareMode?: boolean;
+  }): Promise<{ messageType: string; content: string }> {
+    const result = await peersCommand.action!(
+      makeContext(
+        null,
+        false,
+        { user: { settings: { agents: { crossSessionMessaging: false } } } },
+        suppression,
+      ),
+      '',
+    );
+    if (!result || result.type !== 'message') {
+      throw new Error('expected a message result');
+    }
+    return { messageType: result.messageType, content: result.content };
+  }
+
+  it('names the settings remedy and safe mode when both turn messaging off', async () => {
+    const result = await runBothCauses({ isSafeMode: true });
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in safe mode');
+    expect(result.content).toContain('QWEN_CODE_SAFE_MODE');
+    expect(result.content).toContain('Remove that entry');
+    // The single-cause claim is false in this state: the setting is one of
+    // the two reasons messaging is off, so it is not something the flag
+    // alone overrides.
+    expect(result.content).not.toContain('cannot turn it back on');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
+  it('names the settings remedy and bare mode when both turn messaging off', async () => {
+    const result = await runBothCauses({ getBareMode: true });
+
+    expect(result.messageType).toBe('info');
+    expect(result.content).toContain('in bare mode');
+    expect(result.content).toContain('QWEN_CODE_SIMPLE');
+    expect(result.content).toContain('Remove that entry');
+    expect(result.content).not.toContain('cannot turn it back on');
+    expect(result.content).not.toContain('failed to bind');
+  });
+
   it('repeats the bind failure and what to change when the inbox could not bind', async () => {
     inboxFailure.current = {
       cause: 'foreign_owner',
@@ -679,6 +779,32 @@ describe('/peers', () => {
     expect(result.content).toContain('4 minutes left');
   });
 
+  it("counts each message down on its own session's lifetime", async () => {
+    // One process can hold sessions from several workspaces, each with
+    // its own `agents.crossSessionHeldExpiry`. A listing that showed one
+    // number for all of them would promise a deadline the gate will not
+    // keep for at least one of the messages on screen.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        heldAt: Date.now() - 30_000,
+        toSessionId: 'brief',
+      }),
+      held({
+        msgId: 'bbbbbb22-0000-4000-8000-000000000000',
+        heldAt: Date.now() - 30_000,
+        toSessionId: 'patient',
+      }),
+    ];
+    fake.getHeldExpiryMs = (sessionId?: string) =>
+      sessionId === 'brief' ? 60_000 : 10 * 60_000;
+
+    const result = await run(fake, '');
+
+    expect(result.content).toContain('less than a minute left');
+    expect(result.content).toContain('10 minutes left');
+  });
+
   it('bounces a handle that would reassign after the shorter id expired', async () => {
     // `msgId` is peer-chosen and only shape-checked, so a peer can park
     // `abc` beside `abc12345`. While both are held the handles are
@@ -783,7 +909,7 @@ describe("formatHeldList for the session's own process", () => {
 
 describe('formatHeldList — remaining time', () => {
   it('says nothing about expiry when holds do not expire', () => {
-    const out = formatHeldList([held({ msgId: 'a1b2c3' })], null);
+    const out = formatHeldList([held({ msgId: 'a1b2c3' })], () => null);
     expect(out).not.toContain('left');
     expect(out).not.toContain('expiring');
   });
@@ -793,7 +919,7 @@ describe('formatHeldList — remaining time', () => {
     // that hides its own deadline invites decisions made too late.
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 60_000 })],
-      5 * 60_000,
+      () => 5 * 60_000,
     );
     expect(out).toContain('4 minutes left');
   });
@@ -809,7 +935,7 @@ describe('formatHeldList — remaining time', () => {
     // scheduling drift up to 30s.
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 30_000 })],
-      120_000,
+      () => 120_000,
     );
     expect(out).toContain('2 minutes left');
   });
@@ -832,7 +958,7 @@ describe('formatHeldList — remaining time', () => {
             monotonicAt: 0,
           }),
         ],
-        5 * 60_000,
+        () => 5 * 60_000,
       );
       expect(out).toContain('expiring now');
       expect(out).not.toContain('minutes left');
@@ -844,7 +970,7 @@ describe('formatHeldList — remaining time', () => {
   it('does not count seconds nobody can act on', () => {
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 55_000 })],
-      60_000,
+      () => 60_000,
     );
     expect(out).toContain('less than a minute left');
   });
@@ -852,7 +978,7 @@ describe('formatHeldList — remaining time', () => {
   it('says so when the hold has already run out', () => {
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() - 120_000 })],
-      60_000,
+      () => 60_000,
     );
     expect(out).toContain('expiring now');
   });
@@ -860,7 +986,7 @@ describe('formatHeldList — remaining time', () => {
   it('keeps the hold cause alongside the deadline', () => {
     const out = formatHeldList(
       [held({ msgId: 'a1b2c3', heldAt: Date.now() })],
-      5 * 60_000,
+      () => 5 * 60_000,
     );
     expect(out).toContain('held because');
     expect(out).toContain('5 minutes left');

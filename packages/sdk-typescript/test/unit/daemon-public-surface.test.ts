@@ -106,6 +106,11 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionCatalogVersion,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionLiveState,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
@@ -234,6 +239,7 @@ describe('continuation compatibility', () => {
 });
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
+    expect(typeof Public.DaemonAttachmentUploadError).toBe('function');
     expect(typeof Public.asKnownDaemonEvent).toBe('function');
     expect(typeof Public.isKnownDaemonEvent).toBe('function');
     expect(typeof Public.isDaemonEventType).toBe('function');
@@ -608,6 +614,76 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
   });
 
+  it('exposes batched session catalogs at the public entry', () => {
+    expect(typeof Public.DaemonClient.prototype.listSessionsCatalog).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionCatalogWorkspace>().toEqualTypeOf<{
+      workspace: string;
+      cursor?: string;
+    }>();
+    expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
+      workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      includeGroups?: boolean;
+    }>();
+    expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
+      sessions: Public.DaemonSessionSummary[];
+      nextCursor?: string;
+      liveMergeFailed?: boolean;
+      truncated?: boolean;
+      workspace: string;
+      workspaceId: string;
+      cwd: string;
+      groups?: Public.DaemonSessionGroupCatalog;
+    }>();
+    expectTypeOf<DaemonSessionCatalogError>().toEqualTypeOf<{
+      workspace: string;
+      workspaceId?: string;
+      cwd?: string;
+      error: { code: string; message: string; status: number };
+    }>();
+    expectTypeOf<DaemonSessionCatalogResult>().toEqualTypeOf<{
+      workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
+    }>();
+    expectTypeOf<DaemonClient['listSessionsCatalog']>().toEqualTypeOf<
+      (
+        request: DaemonSessionCatalogRequest,
+        opts?: { signal?: AbortSignal; timeoutMs?: number },
+      ) => Promise<DaemonSessionCatalogResult>
+    >();
+  });
+
+  it('parses every kind of background turn a daemon emits', () => {
+    // A consumer built against an older SDK would reject a kind it has
+    // never seen and lose the turn, so every kind the daemon can emit has
+    // to be listed here as well as in the type.
+    for (const kind of [
+      'agent',
+      'monitor',
+      'shell',
+      'workflow',
+      'peer',
+    ] as const) {
+      expect(
+        Public.parseDaemonBackgroundTurn({
+          turnId: 't1',
+          taskId: 'k1',
+          kind,
+          startedAt: 1,
+        }),
+      ).toMatchObject({ kind });
+    }
+    expect(
+      Public.parseDaemonBackgroundTurn({
+        turnId: 't1',
+        taskId: 'k1',
+        kind: 'something-else',
+        startedAt: 1,
+      }),
+    ).toBeUndefined();
+  });
+
   it('exposes the workspace session live-state surface at the public entry', () => {
     expect(typeof Public.parseDaemonBackgroundTurn).toBe('function');
     // The prototype checks execute under vitest (type-only imports are
@@ -730,7 +806,13 @@ describe('runtime MCP add/remove SDK types', () => {
   it('request type compiles', () => {
     const req: DaemonRuntimeMcpAddRequest = {
       name: 'echo',
-      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      config: {
+        command: 'node',
+        args: ['echo.js'],
+        type: 'stdio',
+        appResourceMaxBytes: 4_194_304,
+        appResourceTimeoutMs: 30_000,
+      },
       displayName: 'Echo Server',
     };
     expect(req.name).toBe('echo');

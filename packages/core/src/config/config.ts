@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertHookExecutionOwner,
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
@@ -153,6 +158,7 @@ import {
   resetDenialState,
 } from '../permissions/denialTracking.js';
 import { parseRule } from '../permissions/rule-parser.js';
+import { clearSessionCommits } from '../permissions/destructive-commands.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -239,6 +245,16 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { createAgentToolInvocationGuard } from '../agents/workspace-agents/capability.js';
+import type {
+  ExecutionSandboxPolicy,
+  ResolvedExecutionSandboxPolicy,
+} from '../sandbox/sandbox-execution.js';
+import {
+  admitShellSandbox,
+  probeShellSandbox,
+  assertShellSandboxCwd,
+} from '../sandbox/runtime-shell-policy.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -280,6 +296,7 @@ import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
+  type ManagedSessionRecordWriter,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import {
@@ -304,15 +321,46 @@ import type {
   SessionRuntimeResumeState,
 } from '../services/session-transcript-reader.js';
 import {
+  assertSessionExecutionEngine,
+  SessionExecutionEngineError,
+  type SessionExecutionEngine,
+} from '../services/session-execution-engine.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '../managed-runtime/managed-session-assembly.js';
+import {
+  EMPTY_COMMIT_PREFIX_HASH,
+  LocalManagedSessionAuthority,
+  ManagedSessionUncommittedTailError,
+} from '../managed-runtime/managed-session-authority.js';
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
+import {
+  MANAGED_SESSION_FORMAT_VERSION,
+  ManagedSessionRecordError,
+  type ManagedSessionDurableRef,
+} from '../managed-runtime/managed-session-records.js';
+import {
+  isManagedSessionTranscriptSync,
+  localManagedSessionKey,
+  readManagedExecutionEvidenceSync,
+} from '../utils/sessionStorageUtils.js';
+import {
   SessionTranscriptChangedError,
   SessionWriterError,
   SessionWriterLease,
   SessionWriterLostError,
   SessionWriterUnavailableError,
+  type SessionWriterCommitProof,
 } from '../services/session-writer-lease.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
-import { ConditionalRulesRegistry } from './rulesDiscovery.js';
+import {
+  ConditionalRulesRegistry,
+  type ExtensionRuleSource,
+} from './rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
@@ -331,12 +379,21 @@ import {
   readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
+  rebuildAutoMemoryIndexAtRoot,
+  rebuildManagedAutoMemoryIndex,
   rebuildTeamAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
   TeamMemoryRootSecurityError,
 } from '../memory/indexer.js';
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
+import {
+  getProjectMetadataMigrationRoots,
+  scanMemoryMetadataCorpusStatus,
+  type MemoryMetadataCorpusStatus,
+} from '../memory/metadata-migration.js';
+import { buildStructuredAutoMemoryPrompt } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
 
@@ -345,12 +402,81 @@ const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
+export type MemoryRecallMode = 'legacy' | 'structured';
+
+export interface PreparedMemoryRecallTransition {
+  from: MemoryRecallMode;
+  to: MemoryRecallMode;
+  revision: string;
+  autoMemoryPrompt: string;
+  previousRevision: string;
+  previousAutoMemoryPrompt: string;
+}
+
+// Absolute ceiling on the same warning: 15% of a 1M window is 150,000 tokens,
+// so the ratio alone means a large-window session can carry an enormous
+// always-on context and never be told. The cost of that context is the same on
+// every model (#12029); the #12028 sample carried 15,400 tokens of it and drew
+// no warning at all.
+const MEMORY_CONTEXT_WARNING_MAX_TOKENS = 10_000;
+
 /** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
 const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 
 // Default `tools.toolSearch.threshold` (percent of the context window):
-// mirrors the settings-schema default in packages/cli.
-const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+// mirrors the settings-schema default in packages/cli. `0` keeps every
+// deferred tool behind the bridge, which is now affordable because a bridge
+// reveal never rewrites the declaration list.
+const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
+
+// Horizon a Managed session activation records; it is renewed at a third of
+// it while the session is open. Liveness of a local session is its writer
+// lock, so the horizon only bounds how long a reader treats an activation
+// without a live lock as possibly current.
+const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
+
+/** The recorder's view of a Managed Session log. */
+function managedRecordWriter(
+  managed: ManagedSession,
+  log: { readonly transcriptPath: string; readonly runtimeBaseDir: string },
+): ManagedSessionRecordWriter {
+  return {
+    canCarry: (record) => managed.sink.canCarry(record),
+    write: (record) => managed.sink.write(record),
+    // Every record the reader replays, not only messages: turn results, goal
+    // state and the other records the chain passes through are parents too.
+    project: () =>
+      readManagedSessionRecords({
+        transcriptPath: log.transcriptPath,
+        runtimeBaseDir: log.runtimeBaseDir,
+        sessionKey: managed.authority.sessionHeader.sessionKey,
+      }),
+    stopAdvancing: () => stopAdvancing(managed),
+    commitProof: () => managedCommitProof(managed),
+    logSize: () => {
+      try {
+        return fs.statSync(log.transcriptPath).size;
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+async function stopAdvancing(managed: ManagedSession): Promise<void> {
+  // Stops renewing the activation. The lease was adopted, so the session's
+  // own close, or the activation that failed, seals it afterwards.
+  await managed.close();
+  await managed.releaseActivation();
+}
+
+function managedCommitProof(managed: ManagedSession): SessionWriterCommitProof {
+  const proof = managed.authority.commitProof;
+  return {
+    last_commit_sequence: proof.lastCommitSequence,
+    committed_prefix_hash: proof.committedPrefixHash,
+  };
+}
 
 import {
   ModelsConfig,
@@ -383,6 +509,16 @@ export function parseVisionModelSetting(setting: string | undefined):
 
 function formatVisionModelSettingForLog(setting: string): string {
   return setting.replace(/\0/g, '\\0');
+}
+
+export function isValidAdvisorMaxUses(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
 }
 
 // Re-export types
@@ -940,12 +1076,19 @@ export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  /**
+   * Engine a paired host selected for this session. Initialization records it
+   * as the owner of a new transcript, or requires the restored transcript to
+   * prove it, before hooks, MCP or tools start.
+   */
+  sessionExecutionEngine?: SessionExecutionEngine;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -1045,8 +1188,8 @@ export interface ConfigParameters {
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
    * schema size of every eligible deferred tool — bundled built-ins and MCP
-   * alike — fits within the budget, they are revealed upfront instead of
-   * loaded on demand via `tool_search`. Tools demoted by `tools.eager` are
+   * alike — fits within the budget, they are revealed upfront for direct calls instead of being invoked through
+   * the `tool_search` + `tool_call` bridge. Tools demoted by `tools.eager` are
    * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
@@ -1063,6 +1206,8 @@ export interface ConfigParameters {
    * before execution. A configured guard fails closed.
    */
   toolInvocationGuard?: ToolInvocationGuard;
+  /** Internal trusted-host integration; never loaded from workspace settings. */
+  shellExecutionSandbox?: Readonly<ShellExecutionSandboxPolicy>;
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -1114,6 +1259,17 @@ export interface ConfigParameters {
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
   proxy?: string;
+  /**
+   * Whether construction installs the process-global undici proxy
+   * dispatcher (and the runtime-fetch proxy slot) when `proxy` resolves.
+   * Defaults to `true`. Throwaway Configs that exist only to route
+   * telemetry events must pass `false`: they still expose the proxy via
+   * `getProxy()` for the RUM logger's own agent, but must not rewrite the
+   * host process's global network state — in `qwen serve` one long-lived
+   * process hosts many workspaces, and nothing ever restores the
+   * dispatcher (#12770).
+   */
+  installProxyDispatcher?: boolean;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
   includeDirectories?: string[];
@@ -1189,6 +1345,11 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /**
+   * Opt-in for persistent workspace Agents collaborating on shared threads.
+   * Separate from `agentTeamEnabled`: neither implies the other.
+   */
+  agentCollaborationEnabled?: boolean;
   workflowsEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
   sessionWorkflowEnabled?: boolean;
@@ -1393,6 +1554,15 @@ export interface ConfigParameters {
    */
   enableTeamMemory?: boolean;
   enableTeamMemorySync?: boolean;
+  /**
+   * Enable the structured on-demand memory recall protocol. Defaults to false
+   * (opt-in): while it is off the corpus stays on the legacy flat-MEMORY.md
+   * protocol and the metadata migration that would make it structured-ready is
+   * never scheduled. Overridable at runtime by
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` ('0'/'1') via
+   * {@link Config.getStructuredMemoryRecallEnabled}.
+   */
+  enableStructuredMemoryRecall?: boolean;
   /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
   enableAutoSkill?: boolean;
   /** Require user confirmation before persisting an auto-activated skill. Defaults to true. */
@@ -1415,6 +1585,12 @@ export interface ConfigParameters {
    * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
    */
   fastModel?: string;
+  /**
+   * Explicit model selector for the native Advisor tool. Empty, whitespace,
+   * and "off" disable Advisor and do not fall back to the primary model.
+   */
+  advisorModel?: string;
+  advisorMaxUses?: number;
   /**
    * Built-in WebSearch settings. `enabled: false` disables the tool; when the
    * setting is omitted, the tool may derive a backend from the active provider
@@ -1518,6 +1694,8 @@ export interface ConfigParameters {
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
 }
+
+export type ShellExecutionSandboxPolicy = ExecutionSandboxPolicy;
 
 export type TerminalImageRenderSupport =
   | { available: true }
@@ -2229,6 +2407,9 @@ export type DerivedConfigOverrides = Partial<
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
+    | 'getEffectiveInputModalities'
+    | 'getFileReadCache'
+    | 'getFileHistoryService'
     | 'getToolRegistry'
     | 'getPermissionManager'
     | 'getApprovalMode'
@@ -2247,6 +2428,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getDisableAllHooks'
     | 'getHookSystem'
     | 'getMessageBus'
+    | 'getToolInvocationGuard'
     | 'getAutoMemoryPrompt'
     | 'getUserMemory'
   >
@@ -2489,6 +2671,17 @@ export function deriveConfig(
   base: Config,
   overrides: DerivedConfigOverrides = {},
 ): Config {
+  const shellSandbox = base.getShellExecutionSandbox?.();
+  if (shellSandbox) {
+    for (const key of [
+      'getTargetDir',
+      'getCwd',
+      'getWorkingDir',
+      'getProjectRoot',
+    ] as const) {
+      assertShellSandboxCwd(shellSandbox, overrides[key]?.() ?? base[key]());
+    }
+  }
   const derived = Object.create(base) as Config;
   for (const key in overrides) {
     if (!Object.hasOwn(overrides, key)) continue;
@@ -2507,6 +2700,10 @@ export function deriveConfig(
 }
 
 export class Config {
+  private shellExecutionSandbox:
+    | Readonly<ShellExecutionSandboxPolicy>
+    | Readonly<ResolvedExecutionSandboxPolicy>
+    | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
   private sessionSourceId?: string;
@@ -2516,6 +2713,7 @@ export class Config {
   private readonly sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
   >;
+  private readonly sessionExecutionEngine?: SessionExecutionEngine;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -2525,6 +2723,8 @@ export class Config {
   private provisionalWorkspaceActivation?: Promise<void>;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  /** The Managed Session log a Managed session records through. */
+  private managedSession?: ManagedSession;
   private pendingSessionWriterRelease:
     | { lease: SessionWriterLease; promise: Promise<void> }
     | undefined;
@@ -2614,7 +2814,9 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
-  private readonly systemPrompt: string | undefined;
+  private systemPrompt: string | undefined;
+  private workspaceAgentName: string | undefined;
+  private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -2720,6 +2922,9 @@ export class Config {
    * the shortest possible cached prompt prefix.
    */
   private autoMemoryPrompt = '';
+  private memoryRecallMode: MemoryRecallMode = 'legacy';
+  private memoryCorpusRevision = '';
+  private memoryRecallModeInitialized = false;
   private sdkMode: boolean;
   private memoryFileCount: number;
   private loadedContextFilePaths: string[] = [];
@@ -2841,6 +3046,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
@@ -2888,6 +3094,7 @@ export class Config {
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private readonly executionEnvironment?: ExecutionEnvironment;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
   private readonly executionShutdown = new AbortController();
   private executionCleanupPromise?: Promise<void>;
@@ -2930,6 +3137,11 @@ export class Config {
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
   private readonly warnings: string[];
+  /**
+   * Extension rules skipped for having no `paths:`, by display path. Refreshed
+   * with the memory load that discovered them; surfaced by `getWarnings()`.
+   */
+  private ignoredExtensionRules: string[] = [];
   private readonly allowedHttpHookUrls: string[];
   private readonly allowPrivateNetworkHooks: boolean;
   private readonly onPersistPermissionRuleCallback?: (
@@ -2968,6 +3180,7 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private readonly enableTeamMemory: boolean;
   private readonly enableTeamMemorySync: boolean;
+  private readonly enableStructuredMemoryRecall: boolean;
   // Latch (keyed by projectRoot) so the "team memory enabled but not shareable"
   // warning is emitted at most once per repo, even though refreshHierarchicalMemory
   // may re-run. Keyed rather than a single boolean so entering a new repo (/cd)
@@ -2978,6 +3191,9 @@ export class Config {
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
+  private advisorModel?: string;
+  private readonly advisorMaxUses: number;
+  private readonly advisorUsage = { calls: 0 };
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   /**
@@ -3009,6 +3225,9 @@ export class Config {
   private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
+  private readonly approvalModeChangeListeners = new Set<
+    (mode: ApprovalMode, prePlanMode: ApprovalMode | undefined) => void
+  >();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
   // (first in this process); gates the global write in publishModelEnv so no
   // other instance updates it. Per-session publishing is not gated on it.
@@ -3016,6 +3235,12 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.executionEnvironment = params.executionEnvironment;
+    if (params.executionEnvironment) {
+      this.executionEnvironments = new Set([
+        Promise.resolve(params.executionEnvironment),
+      ]);
+    }
     this.agentExecutionBackend = params.agentExecutionBackend;
     const executionFactory = params.executionEnvironmentFactory;
     this.executionEnvironmentFactory = executionFactory
@@ -3026,6 +3251,11 @@ export class Config {
           )
       : undefined;
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
+    this.shellExecutionSandbox = admitShellSandbox(
+      params,
+      this.sessionRuntimeBaseDir,
+      Storage.getGlobalQwenDir(),
+    );
     this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
@@ -3040,6 +3270,7 @@ export class Config {
     }
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
+    this.sessionExecutionEngine = params.sessionExecutionEngine;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3250,6 +3481,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
@@ -3479,7 +3711,7 @@ export class Config {
     }
 
     const proxyUrl = this.getProxy();
-    if (proxyUrl) {
+    if (proxyUrl && (params.installProxyDispatcher ?? true)) {
       // Use EnvHttpProxyAgent (not a bare ProxyAgent) so `NO_PROXY` is
       // honored. A bare ProxyAgent tunnels EVERY request — including local
       // MCP servers reached over `http://localhost:...` — through the proxy,
@@ -3541,11 +3773,15 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
       locale: params.locale,
+      usageStatisticsEnabled: this.usageStatisticsEnabled,
+      proxy: this.proxy,
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.enableTeamMemory = params.enableTeamMemory ?? false;
     this.enableTeamMemorySync = params.enableTeamMemorySync ?? false;
+    this.enableStructuredMemoryRecall =
+      params.enableStructuredMemoryRecall ?? false;
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.autoSkillConfirm = params.autoSkillConfirm ?? true;
     // Clamp: schema validation only runs on interactive edit paths, so a
@@ -3563,6 +3799,14 @@ export class Config {
         ? params.memoryAgentMaxTurns
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.advisorModel = normalizeAdvisorModel(params.advisorModel);
+    // Nothing validates settings.json on the load path, so a hand-edited
+    // -1, 1.5 or "5" reaches this constructor. Fall back to the default
+    // (unlimited) like the neighbouring numeric settings instead of refusing
+    // to start; the CLI surfaces a settings warning for the ignored value.
+    this.advisorMaxUses = isValidAdvisorMaxUses(params.advisorMaxUses)
+      ? params.advisorMaxUses
+      : 0;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -3604,6 +3848,15 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (this.executionEnvironment) {
+      options = {
+        ...options,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      };
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
     }
@@ -3703,6 +3956,11 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): Promise<void> {
     try {
+      if (this.shellExecutionSandbox)
+        this.shellExecutionSandbox = await probeShellSandbox(
+          this.shellExecutionSandbox,
+          options?.signal,
+        );
       const activation = this.activateChatRecording();
       this.sessionWriterActivationPromise = activation;
       try {
@@ -3713,6 +3971,7 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
+      await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -3749,13 +4008,33 @@ export class Config {
     }
   }
 
+  /**
+   * Runs after the writer can take records and before any initialization side
+   * effect. A restore is checked against the owner read from its own snapshot;
+   * without chat recording there is no durable session to own.
+   */
+  private async bindSessionExecutionEngine(): Promise<void> {
+    const engine = this.sessionExecutionEngine;
+    if (engine === undefined) return;
+    if (this.sessionRestoreProjectionSource || this.sessionData) {
+      assertSessionExecutionEngine(
+        this.pendingSessionRestoreProjection?.executionEngine,
+        this.sessionId,
+        engine,
+      );
+      return;
+    }
+    // A Managed Session log records its owner itself, before its header.
+    if (this.managedSession) return;
+    await this.chatRecordingService?.recordExecutionEngine(engine);
+  }
+
   private async initializeInternal(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
     options?.signal?.throwIfAborted();
-
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
     // instead of erroring midway through the first video interaction.
@@ -3774,7 +4053,7 @@ export class Config {
       await assertOmniRuntimeDependencies();
     }
 
-    if (options?.skipFileCheckpointing === true) {
+    if (options?.skipFileCheckpointing === true || this.shellExecutionSandbox) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
     }
@@ -3794,9 +4073,19 @@ export class Config {
           (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
-    if (!this.isSafeMode() && !this.getBareMode()) {
+    if (
+      !this.executionEnvironment &&
+      !this.shellExecutionSandbox &&
+      !this.isSafeMode() &&
+      !this.getBareMode()
+    ) {
       await this.extensionManager.refreshCache();
-    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
+    } else if (
+      !this.executionEnvironment &&
+      !this.shellExecutionSandbox &&
+      !this.isSafeMode() &&
+      explicitExtensionNames.length > 0
+    ) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
@@ -3842,276 +4131,283 @@ export class Config {
               return;
             }
 
-            // Execute the appropriate hook based on eventName
-            let result;
-            let stopHookCount: number | undefined;
-            const input = request.input || {};
-            const signal = request.signal;
-            switch (request.eventName) {
-              case 'UserPromptSubmit':
-                result = await hookSystem.fireUserPromptSubmitEvent(
-                  (input['prompt'] as string) || '',
-                  signal,
-                  typeof input['submitted_prompt'] === 'string' &&
-                    input['submitted_prompt'].trim().length > 0
-                    ? input['submitted_prompt']
-                    : undefined,
-                );
-                break;
-              case 'UserPromptExpansion':
-                result = await hookSystem.fireUserPromptExpansionEvent(
-                  (input['command_name'] as string) || '',
-                  (input['command_args'] as string) || '',
-                  (input['prompt'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'Stop': {
-                // Extract context usage data from input with runtime validation
-                const contextUsageData = buildContextUsage(
-                  input['context_limit'] as number | undefined,
-                  (input['input_tokens'] as number | undefined) ?? 0,
-                );
-
-                const stopResult = await hookSystem.fireStopEvent(
-                  (input['stop_hook_active'] as boolean) || false,
-                  (input['last_assistant_message'] as string) || '',
-                  contextUsageData,
-                  signal,
-                );
-                result = stopResult.finalOutput
-                  ? createHookOutput('Stop', stopResult.finalOutput)
-                  : undefined;
-                stopHookCount = stopResult.allOutputs.length;
-                break;
-              }
-              case 'MessageDisplay': {
-                const messageDisplayResult =
-                  await hookSystem.fireMessageDisplayEvent(
-                    (input['message_id'] as string) || '',
-                    (input['displayed_text'] as string) || '',
-                    (input['is_final'] as boolean) || false,
+            assertHookExecutionOwner(
+              request.owner,
+              hookSystem.runtimeId,
+              this.getSessionId(),
+            );
+            await runWithHookExecutionOwner(request.owner, async () => {
+              // Execute the appropriate hook based on eventName
+              let result;
+              let stopHookCount: number | undefined;
+              const input = request.input || {};
+              const signal = request.signal;
+              switch (request.eventName) {
+                case 'UserPromptSubmit':
+                  result = await hookSystem.fireUserPromptSubmitEvent(
+                    (input['prompt'] as string) || '',
+                    signal,
+                    typeof input['submitted_prompt'] === 'string' &&
+                      input['submitted_prompt'].trim().length > 0
+                      ? input['submitted_prompt']
+                      : undefined,
+                  );
+                  break;
+                case 'UserPromptExpansion':
+                  result = await hookSystem.fireUserPromptExpansionEvent(
+                    (input['command_name'] as string) || '',
+                    (input['command_args'] as string) || '',
+                    (input['prompt'] as string) || '',
                     signal,
                   );
-                result = messageDisplayResult.finalOutput
-                  ? createHookOutput(
-                      'MessageDisplay',
-                      messageDisplayResult.finalOutput,
-                    )
-                  : undefined;
-                break;
-              }
-              case 'PreToolUse': {
-                result = await hookSystem.firePreToolUseEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as PermissionMode | undefined) ??
-                    PermissionMode.Default,
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                );
-                break;
-              }
-              case 'PostToolUse':
-                result = await hookSystem.firePostToolUseEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_response'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                  typeof input['duration_ms'] === 'number'
-                    ? input['duration_ms']
-                    : undefined,
-                );
-                break;
-              case 'PostToolUseFailure':
-                result = await hookSystem.firePostToolUseFailureEvent(
-                  (input['tool_use_id'] as string) || '',
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['error'] as string) || '',
-                  input['is_interrupt'] as boolean | undefined,
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                  typeof input['duration_ms'] === 'number'
-                    ? input['duration_ms']
-                    : undefined,
-                );
-                break;
-              case 'PostToolBatch':
-                result = await hookSystem.firePostToolBatchEvent(
-                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
-                  (input['permission_mode'] as PermissionMode) || 'default',
-                  signal,
-                );
-                break;
-              case 'Notification':
-                result = await hookSystem.fireNotificationEvent(
-                  (input['message'] as string) || '',
-                  (input['notification_type'] as NotificationType) ||
-                    'permission_prompt',
-                  (input['title'] as string) || undefined,
-                  signal,
-                );
-                break;
-              case 'PermissionRequest':
-                result = await hookSystem.firePermissionRequestEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  (input['permission_suggestions'] as
-                    | PermissionSuggestion[]
-                    | undefined) || undefined,
-                  signal,
-                );
-                break;
-              case 'PermissionDenied':
-                result = await hookSystem.firePermissionDeniedEvent(
-                  (input['tool_name'] as string) || '',
-                  (input['tool_input'] as Record<string, unknown>) || {},
-                  (input['tool_use_id'] as string) || '',
-                  (input['reason'] as PermissionDeniedReason) ||
-                    'classifier_blocked',
-                  signal,
-                  (input['tool_call_id'] as string) || undefined,
-                );
-                break;
-              case 'SubagentStart':
-                result = await hookSystem.fireSubagentStartEvent(
-                  (input['agent_id'] as string) || '',
-                  (input['agent_type'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  signal,
-                );
-                break;
-              case 'SubagentStop':
-                result = await hookSystem.fireSubagentStopEvent(
-                  (input['agent_id'] as string) || '',
-                  (input['agent_type'] as string) || '',
-                  (input['agent_transcript_path'] as string) || '',
-                  (input['last_assistant_message'] as string) || '',
-                  (input['stop_hook_active'] as boolean) || false,
-                  (input['permission_mode'] as PermissionMode) ||
-                    PermissionMode.Default,
-                  signal,
-                );
-                break;
-              case 'SessionStart':
-                result = await hookSystem.fireSessionStartEvent(
-                  input['source'] as SessionStartSource,
-                  (input['model'] as string) || '',
-                  (input['permission_mode'] as PermissionMode) || undefined,
-                  input['agent_type'] as AgentType | undefined,
-                  signal,
-                );
-                break;
-              case 'SessionEnd':
-                result = await hookSystem.fireSessionEndEvent(
-                  input['reason'] as SessionEndReason,
-                  signal,
-                );
-                break;
-              case 'SessionDelete':
-                result = await hookSystem.fireSessionDeleteEvent(
-                  (input['deleted_session_id'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'PreCompact':
-                result = await hookSystem.firePreCompactEvent(
-                  input['trigger'] as PreCompactTrigger,
-                  (input['custom_instructions'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'PostCompact':
-                result = await hookSystem.firePostCompactEvent(
-                  input['trigger'] as PostCompactTrigger,
-                  (input['compact_summary'] as string) || '',
-                  signal,
-                );
-                break;
-              case 'InstructionsLoaded':
-                result = await hookSystem.fireInstructionsLoadedEvent(
-                  (input['file_path'] as string) || '',
-                  input['memory_type'] as InstructionMemoryType,
-                  input['load_reason'] as InstructionLoadReason,
-                  {
-                    triggerFilePath: input['trigger_file_path'] as
-                      | string
-                      | undefined,
-                    parentFilePath: input['parent_file_path'] as
-                      | string
-                      | undefined,
-                  },
-                  signal,
-                );
-                break;
-              // These three return the aggregated result, and the bus replies
-              // with its final output as is. For TodoCreated and TodoCompleted
-              // that is what direct callers read (todoWrite checks
-              // `finalOutput.decision`). StopFailure is fire-and-forget: the
-              // aggregator hard-codes its `finalOutput` to undefined and every
-              // direct caller detaches without reading the result, so its arm
-              // always replies with no output and awaits only so the hooks run.
-              // Stop and MessageDisplay instead wrap theirs with
-              // createHookOutput.
-              case 'StopFailure':
-                result = (
-                  await hookSystem.fireStopFailureEvent(
-                    input['error'] as StopFailureErrorType,
-                    input['error_details'] as string | undefined,
-                    input['last_assistant_message'] as string | undefined,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              case 'TodoCreated':
-                result = (
-                  await hookSystem.fireTodoCreatedEvent(
-                    (input['todo_id'] as string) || '',
-                    (input['todo_content'] as string) || '',
-                    input['todo_status'] as TodoStatus,
-                    (input['all_todos'] as TodoItem[]) || [],
-                    input['phase'] as HookPhase,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              case 'TodoCompleted':
-                result = (
-                  await hookSystem.fireTodoCompletedEvent(
-                    (input['todo_id'] as string) || '',
-                    (input['todo_content'] as string) || '',
-                    input['previous_status'] as 'pending' | 'in_progress',
-                    (input['all_todos'] as TodoItem[]) || [],
-                    input['phase'] as HookPhase,
-                    signal,
-                  )
-                ).finalOutput;
-                break;
-              default:
-                this.debugLogger.warn(
-                  `Unknown hook event: ${request.eventName}`,
-                );
-                result = undefined;
-            }
+                  break;
+                case 'Stop': {
+                  // Extract context usage data from input with runtime validation
+                  const contextUsageData = buildContextUsage(
+                    input['context_limit'] as number | undefined,
+                    (input['input_tokens'] as number | undefined) ?? 0,
+                  );
 
-            // Send response
-            this.messageBus?.publish({
-              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
-              correlationId: request.correlationId,
-              success: true,
-              output: result,
-              // Include stop hook count for Stop events
-              stopHookCount,
-            } as HookExecutionResponse);
+                  const stopResult = await hookSystem.fireStopEvent(
+                    (input['stop_hook_active'] as boolean) || false,
+                    (input['last_assistant_message'] as string) || '',
+                    contextUsageData,
+                    signal,
+                  );
+                  result = stopResult.finalOutput
+                    ? createHookOutput('Stop', stopResult.finalOutput)
+                    : undefined;
+                  stopHookCount = stopResult.allOutputs.length;
+                  break;
+                }
+                case 'MessageDisplay': {
+                  const messageDisplayResult =
+                    await hookSystem.fireMessageDisplayEvent(
+                      (input['message_id'] as string) || '',
+                      (input['displayed_text'] as string) || '',
+                      (input['is_final'] as boolean) || false,
+                      signal,
+                    );
+                  result = messageDisplayResult.finalOutput
+                    ? createHookOutput(
+                        'MessageDisplay',
+                        messageDisplayResult.finalOutput,
+                      )
+                    : undefined;
+                  break;
+                }
+                case 'PreToolUse': {
+                  result = await hookSystem.firePreToolUseEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['permission_mode'] as PermissionMode | undefined) ??
+                      PermissionMode.Default,
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                  );
+                  break;
+                }
+                case 'PostToolUse':
+                  result = await hookSystem.firePostToolUseEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_response'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                    typeof input['duration_ms'] === 'number'
+                      ? input['duration_ms']
+                      : undefined,
+                  );
+                  break;
+                case 'PostToolUseFailure':
+                  result = await hookSystem.firePostToolUseFailureEvent(
+                    (input['tool_use_id'] as string) || '',
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['error'] as string) || '',
+                    input['is_interrupt'] as boolean | undefined,
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                    typeof input['duration_ms'] === 'number'
+                      ? input['duration_ms']
+                      : undefined,
+                  );
+                  break;
+                case 'PostToolBatch':
+                  result = await hookSystem.firePostToolBatchEvent(
+                    (input['tool_calls'] as PostToolBatchToolCall[]) || [],
+                    (input['permission_mode'] as PermissionMode) || 'default',
+                    signal,
+                  );
+                  break;
+                case 'Notification':
+                  result = await hookSystem.fireNotificationEvent(
+                    (input['message'] as string) || '',
+                    (input['notification_type'] as NotificationType) ||
+                      'permission_prompt',
+                    (input['title'] as string) || undefined,
+                    signal,
+                  );
+                  break;
+                case 'PermissionRequest':
+                  result = await hookSystem.firePermissionRequestEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    (input['permission_suggestions'] as
+                      | PermissionSuggestion[]
+                      | undefined) || undefined,
+                    signal,
+                  );
+                  break;
+                case 'PermissionDenied':
+                  result = await hookSystem.firePermissionDeniedEvent(
+                    (input['tool_name'] as string) || '',
+                    (input['tool_input'] as Record<string, unknown>) || {},
+                    (input['tool_use_id'] as string) || '',
+                    (input['reason'] as PermissionDeniedReason) ||
+                      'classifier_blocked',
+                    signal,
+                    (input['tool_call_id'] as string) || undefined,
+                  );
+                  break;
+                case 'SubagentStart':
+                  result = await hookSystem.fireSubagentStartEvent(
+                    (input['agent_id'] as string) || '',
+                    (input['agent_type'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    signal,
+                  );
+                  break;
+                case 'SubagentStop':
+                  result = await hookSystem.fireSubagentStopEvent(
+                    (input['agent_id'] as string) || '',
+                    (input['agent_type'] as string) || '',
+                    (input['agent_transcript_path'] as string) || '',
+                    (input['last_assistant_message'] as string) || '',
+                    (input['stop_hook_active'] as boolean) || false,
+                    (input['permission_mode'] as PermissionMode) ||
+                      PermissionMode.Default,
+                    signal,
+                  );
+                  break;
+                case 'SessionStart':
+                  result = await hookSystem.fireSessionStartEvent(
+                    input['source'] as SessionStartSource,
+                    (input['model'] as string) || '',
+                    (input['permission_mode'] as PermissionMode) || undefined,
+                    input['agent_type'] as AgentType | undefined,
+                    signal,
+                  );
+                  break;
+                case 'SessionEnd':
+                  result = await hookSystem.fireSessionEndEvent(
+                    input['reason'] as SessionEndReason,
+                    signal,
+                  );
+                  break;
+                case 'SessionDelete':
+                  result = await hookSystem.fireSessionDeleteEvent(
+                    (input['deleted_session_id'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'PreCompact':
+                  result = await hookSystem.firePreCompactEvent(
+                    input['trigger'] as PreCompactTrigger,
+                    (input['custom_instructions'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'PostCompact':
+                  result = await hookSystem.firePostCompactEvent(
+                    input['trigger'] as PostCompactTrigger,
+                    (input['compact_summary'] as string) || '',
+                    signal,
+                  );
+                  break;
+                case 'InstructionsLoaded':
+                  result = await hookSystem.fireInstructionsLoadedEvent(
+                    (input['file_path'] as string) || '',
+                    input['memory_type'] as InstructionMemoryType,
+                    input['load_reason'] as InstructionLoadReason,
+                    {
+                      triggerFilePath: input['trigger_file_path'] as
+                        | string
+                        | undefined,
+                      parentFilePath: input['parent_file_path'] as
+                        | string
+                        | undefined,
+                    },
+                    signal,
+                  );
+                  break;
+                // These three return the aggregated result, and the bus replies
+                // with its final output as is. For TodoCreated and TodoCompleted
+                // that is what direct callers read (todoWrite checks
+                // `finalOutput.decision`). StopFailure is fire-and-forget: the
+                // aggregator hard-codes its `finalOutput` to undefined and every
+                // direct caller detaches without reading the result, so its arm
+                // always replies with no output and awaits only so the hooks run.
+                // Stop and MessageDisplay instead wrap theirs with
+                // createHookOutput.
+                case 'StopFailure':
+                  result = (
+                    await hookSystem.fireStopFailureEvent(
+                      input['error'] as StopFailureErrorType,
+                      input['error_details'] as string | undefined,
+                      input['last_assistant_message'] as string | undefined,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                case 'TodoCreated':
+                  result = (
+                    await hookSystem.fireTodoCreatedEvent(
+                      (input['todo_id'] as string) || '',
+                      (input['todo_content'] as string) || '',
+                      input['todo_status'] as TodoStatus,
+                      (input['all_todos'] as TodoItem[]) || [],
+                      input['phase'] as HookPhase,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                case 'TodoCompleted':
+                  result = (
+                    await hookSystem.fireTodoCompletedEvent(
+                      (input['todo_id'] as string) || '',
+                      (input['todo_content'] as string) || '',
+                      input['previous_status'] as 'pending' | 'in_progress',
+                      (input['all_todos'] as TodoItem[]) || [],
+                      input['phase'] as HookPhase,
+                      signal,
+                    )
+                  ).finalOutput;
+                  break;
+                default:
+                  this.debugLogger.warn(
+                    `Unknown hook event: ${request.eventName}`,
+                  );
+                  result = undefined;
+              }
+
+              // Send response
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: true,
+                output: result,
+                // Include stop hook count for Stop events
+                stopHookCount,
+              } as HookExecutionResponse);
+            });
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
             this.messageBus?.publish({
@@ -4158,7 +4454,11 @@ export class Config {
         }
       }
       this.skillManager = new SkillManager(this);
-      if (this.getBareMode() || this.isSafeMode()) {
+      if (
+        this.shellExecutionSandbox ||
+        this.getBareMode() ||
+        this.isSafeMode()
+      ) {
         await this.skillManager.refreshCache();
       } else {
         await this.skillManager.startWatching();
@@ -4225,7 +4525,12 @@ export class Config {
     }
 
     recordStartupEvent('config_initialize_extensions_final_start');
-    if (!this.getBareMode() && !this.isSafeMode()) {
+    if (
+      !this.executionEnvironment &&
+      !this.shellExecutionSandbox &&
+      !this.getBareMode() &&
+      !this.isSafeMode()
+    ) {
       await this.extensionManager.refreshCache();
     }
     recordStartupEvent('config_initialize_extensions_final_end');
@@ -4331,6 +4636,7 @@ export class Config {
     // also respects the `allowedMcpServers` filter already applied there.
     const hasMcpServers = Object.keys(this.getMcpServers() ?? {}).length > 0;
     if (
+      !this.shellExecutionSandbox &&
       skipInlineMcpDiscovery &&
       (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
       !this.provisionalWorkspace &&
@@ -4348,11 +4654,13 @@ export class Config {
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
     // earlier `agent` runs that exited before their cleanup helper ran
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
-    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
-    // is fail-closed against tracked changes or unpushed commits — so
-    // running it on every startup cannot destroy user work. We do not
-    // await this: it is a hygiene task that must never delay the
-    // first model turn.
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and gates
+    // removal on worktreeHasWork — tracked, untracked and ignored content
+    // (minus disposable build output, symlinks whose targets live outside
+    // the checkout, and the session marker) all preserve the worktree, and
+    // any probe error fails closed — so running it on every startup cannot
+    // destroy user work in the checkout. We do not await this: it is a
+    // hygiene task that must never delay the first model turn.
     //
     // Anchor the sweep at the repo top-level so it scans the same
     // directory the worktree creators (`enter_worktree` and
@@ -4360,7 +4668,11 @@ export class Config {
     // directly would cause launches from a monorepo subdirectory to
     // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
     // sweep would silently be a no-op forever.
-    if (!this.getBareMode() && !this.provisionalWorkspace) {
+    if (
+      !this.shellExecutionSandbox &&
+      !this.getBareMode() &&
+      !this.provisionalWorkspace
+    ) {
       void (async () => {
         try {
           // Resolve the repo top-level FIRST. The previous code bailed
@@ -4413,9 +4725,193 @@ export class Config {
     }
   }
 
+  /**
+   * Opens this session's Managed Session log on the writer the recorder is
+   * about to use. The authority adopts that lease, so the session keeps one
+   * writer. Without a header, the log is created: the authority writes the
+   * owner record and then the header, which also completes a create that
+   * stopped after its owner record.
+   */
+  private async openManagedSessionLog(
+    lease: SessionWriterLease,
+  ): Promise<ManagedSession> {
+    const transcriptPath = this.getTranscriptPath();
+    // Keyed the way the reader keys the log it projects.
+    const sessionKey = localManagedSessionKey(
+      this.storage.getProjectRoot(),
+      this.sessionId,
+    );
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: this.sessionRuntimeBaseDir,
+      sessionKey,
+    });
+    const create = isManagedSessionTranscriptSync(transcriptPath)
+      ? undefined
+      : await this.publishManagedSessionRoot(resources);
+    const open = () =>
+      openManagedSession({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionId: this.sessionId,
+        transcriptPath,
+        sessionKey,
+        // The recorder stamps the same directory on every record it writes.
+        cwd: this.getProjectRoot(),
+        version: this.getCliVersion() || 'unknown',
+        workerId: this.sessionId,
+        activationLeaseDurationMs: MANAGED_ACTIVATION_LEASE_MS,
+        lease,
+        resourceStore: resources,
+        ...(create === undefined ? {} : { create }),
+      });
+    try {
+      return await open();
+    } catch (error) {
+      if (!(error instanceof ManagedSessionUncommittedTailError)) throw error;
+      // A crash left records after the last commit marker. They were never
+      // committed; this writer holds the lease, so it moves them to the
+      // diagnostic file beside the log and opens the log at its last commit.
+      await LocalManagedSessionAuthority.recoverUncommittedTail({
+        lease,
+        sessionKey,
+      });
+      return await open();
+    }
+  }
+
+  /**
+   * Whether the transcript holds records and its head shows no Managed
+   * evidence, which makes it a Legacy session's. A missing or empty
+   * transcript is a new session, and an unreadable head tells nothing.
+   */
+  private isLegacyTranscript(): boolean {
+    const transcriptPath = this.getTranscriptPath();
+    try {
+      if (fs.statSync(transcriptPath).size === 0) return false;
+    } catch {
+      return false;
+    }
+    return readManagedExecutionEvidenceSync(transcriptPath) === false;
+  }
+
+  /**
+   * Ends the writer of a Managed session whose activation failed.
+   *
+   * - A log that was opened is sealed at the authority's position.
+   * - A lease that replaced a sealed lock gets that seal back.
+   * - A transcript that is missing or empty, or whose head shows no Managed
+   *   evidence, has its lock released: it holds nothing to guard.
+   * - Any other log is sealed at the committed position read from it. One
+   *   whose head or log cannot be read keeps its lock held until the process
+   *   exits, since nothing tells what it holds or where to seal it. The lease
+   *   may have reclaimed a crashed Managed writer's lock, which releasing
+   *   would drop.
+   */
+  private async finishManagedWriter(
+    lease: SessionWriterLease,
+    opened: ManagedSession | undefined,
+  ): Promise<void> {
+    if (opened) {
+      try {
+        await stopAdvancing(opened);
+      } catch {
+        // The seal is the at-rest barrier; an activation that reads as
+        // abandoned is the lesser loss.
+      }
+      await lease.sealForHandoff(managedCommitProof(opened));
+      return;
+    }
+    const takenOver = lease.takeoverCommitProof;
+    if (takenOver !== undefined) {
+      // The open checks the log against this seal before it writes anything.
+      // Sealing at the position read from the log instead would accept a log
+      // that changed behind the seal on the next attempt.
+      await lease.sealForHandoff(takenOver);
+      return;
+    }
+    const transcriptPath = this.getTranscriptPath();
+    const evidence = readManagedExecutionEvidenceSync(transcriptPath);
+    if (evidence === false) {
+      await lease.release();
+      return;
+    }
+    if (evidence === undefined) return;
+    let scan: Awaited<
+      ReturnType<typeof LocalJsonlManagedSessionJournalStore.read>
+    >;
+    try {
+      scan = await LocalJsonlManagedSessionJournalStore.read(
+        transcriptPath,
+        localManagedSessionKey(this.storage.getProjectRoot(), this.sessionId),
+      );
+    } catch {
+      return;
+    }
+    await lease.sealForHandoff({
+      last_commit_sequence: scan.committed,
+      committed_prefix_hash: scan.lastMarkerDigest ?? EMPTY_COMMIT_PREFIX_HASH,
+    });
+  }
+
+  /**
+   * Publishes the two resources a new Managed Session header references. They
+   * carry configuration identity only, never credentials.
+   */
+  private async publishManagedSessionRoot(
+    resources: LocalManagedSessionResourceStore,
+  ): Promise<{
+    definitionRef: ManagedSessionDurableRef;
+    rootSnapshotRef: ManagedSessionDurableRef;
+    createdBy: string;
+  }> {
+    const [definitionRef, rootSnapshotRef] = await Promise.all([
+      resources.publish(
+        'managed-session-definition',
+        Buffer.from(
+          JSON.stringify({
+            version: 1,
+            engine: 'managed',
+            model: this.getModel(),
+            approvalMode: this.getApprovalMode(),
+          }),
+          'utf8',
+        ),
+      ),
+      resources.publish(
+        'managed-session-root-snapshot',
+        Buffer.from(JSON.stringify({ version: 1, messages: [] }), 'utf8'),
+      ),
+    ]);
+    return {
+      definitionRef,
+      rootSnapshotRef,
+      createdBy: `qwen-code/${this.getCliVersion() || 'unknown'}`,
+    };
+  }
+
   private async activateChatRecording(): Promise<void> {
+    const managed = this.sessionExecutionEngine === 'managed';
+    if (
+      managed &&
+      (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled)
+    ) {
+      // A Managed session is its Managed Session log, which the recorder
+      // writes under the session writer lease.
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'managed execution requires chat recording and a writer lease',
+      );
+    }
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
       return;
+    }
+    if (managed && this.isLegacyTranscript()) {
+      // Refused before the lease is taken: a certified takeover would retire
+      // a Legacy session's seal, and the owner check after it could refuse
+      // the restore only once that seal was gone.
+      throw new SessionExecutionEngineError(
+        this.sessionId,
+        'belongs to legacy, cannot execute with managed',
+      );
     }
     if (this.sessionWriterShutdownRequested) {
       throw new SessionWriterShutdownError();
@@ -4431,7 +4927,23 @@ export class Config {
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
         reclaimPolicy: this.sessionWriterReclaimPolicy,
-        takeoverPolicy: this.sessionWriterTakeoverPolicy,
+        // A Managed writer pins its log format into the lock: a binary that
+        // does not know the Managed schema and takes the writer lease refuses
+        // the lock instead of writing into the log, and a sealed Managed lock
+        // is reopened only by a certified takeover that checks the log
+        // against the seal. Writers that take no lease, such as the TUI and
+        // the headless CLI, are refused by the log's own header instead.
+        takeoverPolicy: managed
+          ? 'certified'
+          : this.sessionWriterTakeoverPolicy,
+        ...(managed
+          ? {
+              lockSchema: {
+                schemaVersion: 3 as const,
+                formatVersion: MANAGED_SESSION_FORMAT_VERSION,
+              },
+            }
+          : {}),
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
@@ -4460,7 +4972,25 @@ export class Config {
           'after_writer_lease',
         );
         projection = await this.sessionRestoreProjectionSource();
+        if (managed) {
+          // Checked before the log is opened, which writes to it.
+          assertSessionExecutionEngine(
+            projection?.executionEngine,
+            this.sessionId,
+            'managed',
+          );
+        }
         this.setSessionRestoreProjection(projection);
+      } else if (
+        managed &&
+        (this.sessionData || lease.transcriptExistedAtAcquire)
+      ) {
+        // A Managed log restores from its projection; the Legacy loader would
+        // read its wrapper records as a conversation.
+        throw new SessionExecutionEngineError(
+          this.sessionId,
+          'managed restore requires a restore projection',
+        );
       } else if (this.sessionData || lease.transcriptExistedAtAcquire) {
         authoritative = await this.getSessionService().loadSession(
           this.sessionId,
@@ -4477,6 +5007,20 @@ export class Config {
         throw new SessionWriterShutdownError();
       }
       this.sessionData = authoritative;
+      if (managed) {
+        // Opened, and the recorder bound to it, before the recorder accepts a
+        // record: a record appended directly would be a raw line in the log.
+        this.managedSession = await this.openManagedSessionLog(lease);
+        if (this.sessionWriterShutdownRequested) {
+          throw new SessionWriterShutdownError();
+        }
+        recorder.bindManagedSink(
+          managedRecordWriter(this.managedSession, {
+            transcriptPath: this.getTranscriptPath(),
+            runtimeBaseDir: this.sessionRuntimeBaseDir,
+          }),
+        );
+      }
       recorder.activate(
         lease,
         authoritative,
@@ -4500,8 +5044,26 @@ export class Config {
       let failure: unknown = error;
       const ownedLease = lease ?? this.pendingSessionWriterLease;
       let releaseFailureAlreadyReported = false;
+      const abandonedManagedSession = this.managedSession;
+      this.managedSession = undefined;
+      if (managed && ownedLease) {
+        // Registered as this lease's release, so the cleanup below and any
+        // close waits for it instead of releasing the lease itself.
+        const finishing = this.finishManagedWriter(
+          ownedLease,
+          abandonedManagedSession,
+        );
+        void finishing.catch(() => undefined);
+        this.pendingSessionWriterRelease = {
+          lease: ownedLease,
+          promise: finishing,
+        };
+      }
       if (
         !(failure instanceof SessionWriterError) &&
+        // A Managed log's own errors say what is wrong with the log; they are
+        // not the writer contention this reports.
+        !(failure instanceof ManagedSessionRecordError) &&
         failure &&
         typeof failure === 'object' &&
         typeof (failure as NodeJS.ErrnoException).code === 'string'
@@ -4703,6 +5265,7 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
@@ -4720,6 +5283,7 @@ export class Config {
       fileCount,
       contextFilePaths,
       conditionalRules,
+      ignoredExtensionRules,
       projectRoot,
     } = await loadServerHierarchicalMemory(
       this.getWorkingDir(),
@@ -4736,8 +5300,17 @@ export class Config {
           () => this.hookSystem,
           signal,
         ),
+        extensionRuleSources: this.getExtensionRuleSources(),
       },
     );
+    // An extension rule with no `paths:` is dropped rather than loaded. Record
+    // it for `getWarnings()`, or its author reads "extensions can contribute
+    // rules" and sees nothing happen. Replaced, not appended to, so a memory
+    // refresh does not accumulate duplicates of the same warning.
+    // `?? []` on purpose: every test that mocks `loadServerHierarchicalMemory`
+    // returns the response shape it was written against, and `getWarnings()`
+    // maps over this field on every call.
+    this.ignoredExtensionRules = ignoredExtensionRules ?? [];
     if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -4825,6 +5398,29 @@ export class Config {
           }
         }
       }
+      // The readiness scan walks the frontmatter of every memory file, so run
+      // it only where its result is consumed — once, when the mode is settled.
+      // Skipping it while the structured protocol is opted out keeps a disabled
+      // feature from costing startup I/O; skipping it afterwards keeps an
+      // enabled one from re-walking the whole corpus on every refresh (this
+      // runs per user query) only to discard the result. Leaving corpusStatus
+      // undefined keeps the initialization below on 'legacy'.
+      if (!this.memoryRecallModeInitialized) {
+        const corpusStatus = this.getStructuredMemoryRecallEnabled()
+          ? await this.scanMemoryRecallCorpusStatus().catch(
+              (error: unknown) => {
+                this.debugLogger.warn(
+                  'memory metadata readiness scan failed; preserving the active recall protocol',
+                  error,
+                );
+                return undefined;
+              },
+            )
+          : undefined;
+        this.memoryRecallMode = corpusStatus?.ready ? 'structured' : 'legacy';
+        this.memoryCorpusRevision = corpusStatus?.revision ?? '';
+        this.memoryRecallModeInitialized = true;
+      }
       const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
         await Promise.all([
           readAutoMemoryIndexWithStats(this.getProjectRoot()),
@@ -4847,20 +5443,29 @@ export class Config {
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
-      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
-        getAutoMemoryRoot(this.getProjectRoot()),
-        managedAutoMemoryIndex,
-        {
-          memoryDir: getUserAutoMemoryRoot(),
-          indexContent: userAutoMemoryIndex,
-        },
-        teamMemoryEnabled
-          ? {
-              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-              indexContent: teamAutoMemoryIndex,
-            }
-          : undefined,
-      );
+      this.autoMemoryPrompt =
+        this.memoryRecallMode === 'structured'
+          ? buildStructuredAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              getUserAutoMemoryRoot(),
+              teamMemoryEnabled
+                ? getTeamAutoMemoryRoot(this.getProjectRoot())
+                : undefined,
+            )
+          : this.memoryManager.buildAutoMemoryPrompt(
+              getAutoMemoryRoot(this.getProjectRoot()),
+              managedAutoMemoryIndex,
+              {
+                memoryDir: getUserAutoMemoryRoot(),
+                indexContent: userAutoMemoryIndex,
+              },
+              teamMemoryEnabled
+                ? {
+                    memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+                    indexContent: teamAutoMemoryIndex,
+                  }
+                : undefined,
+            );
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
@@ -4897,18 +5502,28 @@ export class Config {
     }
 
     const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
-    const thresholdTokens = Math.floor(
+    const ratioTokens = Math.floor(
       contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    const thresholdTokens = Math.min(
+      ratioTokens,
+      MEMORY_CONTEXT_WARNING_MAX_TOKENS,
     );
     if (estimatedTokens <= thresholdTokens) {
       return undefined;
     }
 
+    // Lead with whichever bound actually fired, so the number the reader is
+    // asked to act on is the one that applies — but keep naming the window
+    // either way, since that is what tells them how the budget was derived.
+    const windowClause = `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this model's ${contextWindowSize.toLocaleString()} token context window`;
+    const bound =
+      thresholdTokens === ratioTokens
+        ? windowClause
+        : `${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens — the smaller of that and ${windowClause}`;
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
-      `${estimatedTokens.toLocaleString()} tokens, more than ` +
-      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
-      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +
       `Consider trimming long always-loaded context or moving details into ` +
       `on-demand files.`
     );
@@ -5118,6 +5733,7 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
     }
@@ -5194,6 +5810,8 @@ export class Config {
         `Successfully authenticated with ${authMethod}`,
         NotificationType.AuthSuccess,
         'Authentication successful',
+        undefined,
+        hookOwner,
       ).catch(() => {
         // Silently ignore errors - fireNotificationHook has internal error handling
         // and notification hooks should not block the auth flow
@@ -5296,6 +5914,51 @@ export class Config {
     }
   }
 
+  /**
+   * Gives this session the persona of the workspace agent it *is*.
+   *
+   * The bridge's spawn request carries no persona, so an agent session is told
+   * only its identity and resolves the rest itself at boot. The main prompt
+   * reads systemPrompt, and the tool guard intersects the resolved execution
+   * allowlist with the workspace-agent capability ceiling and host policy.
+   *
+   * Refuses on anything but an agent session, and refuses a second call. A
+   * session's prompt is part of what its transcript means; changing it under a
+   * running conversation would make the record a lie.
+   */
+  applyWorkspaceAgentPersona(
+    systemPrompt: string,
+    agentName: string,
+    executionAllowedTools?: readonly string[],
+  ): void {
+    if (this.sessionSourceType !== 'agent') {
+      throw new Error(
+        'A workspace-agent persona may only be applied to an agent session.',
+      );
+    }
+    if (this.systemPrompt !== undefined) {
+      throw new Error(
+        'This session already has a persona; it cannot be changed in place.',
+      );
+    }
+    this.systemPrompt = systemPrompt;
+    this.workspaceAgentName = agentName;
+    this.workspaceAgentExecutionAllowedTools = executionAllowedTools
+      ? new Set(executionAllowedTools)
+      : undefined;
+  }
+
+  /**
+   * The roster name of the agent this session is, once its persona is applied.
+   *
+   * Carried on the config rather than passed between the spawn steps because
+   * the persona is resolved before the recorder exists and read after: the
+   * identity outlives both, and this is the one place both can see.
+   */
+  getWorkspaceAgentName(): string | undefined {
+    return this.workspaceAgentName;
+  }
+
   setSessionSource(sourceType: string, sourceId?: string): void {
     this.sessionSourceType = sourceType;
     this.sessionSourceId = sourceId;
@@ -5322,9 +5985,17 @@ export class Config {
         .filter(Boolean)
         .join('\n\n'),
     );
-    return memoryContextWarning
-      ? [...this.warnings, memoryContextWarning]
-      : this.warnings;
+    const ruleWarnings = this.ignoredExtensionRules.map(
+      (displayPath) =>
+        `Extension rule ${displayPath} has no \`paths:\` and was skipped. ` +
+        `An extension's rules must be conditional: a baseline one would be sent ` +
+        `with every request, which is the cost a rule exists to avoid. Add ` +
+        `\`paths:\` to it, or move the content into the extension's context file.`,
+    );
+    const extra = memoryContextWarning
+      ? [...ruleWarnings, memoryContextWarning]
+      : ruleWarnings;
+    return extra.length > 0 ? [...this.warnings, ...extra] : this.warnings;
   }
 
   getDebugLogger(): DebugLogger {
@@ -5394,6 +6065,10 @@ export class Config {
       this.permissionManager?.clearSessionAllowRules();
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
+      // So does the Advisor budget, reset in place for the same reason the
+      // counter is an object: a derived Config must mutate this one, not
+      // shadow it with an own property.
+      this.advisorUsage.calls = 0;
     }
     this.clearSessionRestoreProjection();
     this.pendingRecoveredAgentsNotice = null;
@@ -5830,6 +6505,25 @@ export class Config {
     }
   }
 
+  onApprovalModeChange(
+    listener: (
+      mode: ApprovalMode,
+      prePlanMode: ApprovalMode | undefined,
+    ) => void,
+  ): () => void {
+    this.approvalModeChangeListeners.add(listener);
+    return () => {
+      this.approvalModeChangeListeners.delete(listener);
+    };
+  }
+
+  private notifyApprovalModeChangeListeners(): void {
+    if (isDerivedConfig(this)) return;
+    for (const listener of this.approvalModeChangeListeners) {
+      listener(this.approvalMode, this.prePlanMode);
+    }
+  }
+
   // Keeps QWEN_CODE_MODEL on the model that is actually active. A subprocess
   // has no other authoritative source: settings files miss /model switches and
   // describe the wrong home under QWEN_HOME isolation. Published per session —
@@ -5928,9 +6622,53 @@ export class Config {
     }
 
     const rawSelector = resolveModelId(this.fastModel);
-    return rawSelector?.authType
-      ? `${rawSelector.authType}:${selector.modelId}`
-      : selector.modelId;
+    if (!rawSelector?.authType) return selector.modelId;
+    const qualified = `${rawSelector.authType}:${selector.modelId}`;
+    const endpoint = this.pinnedAuxEndpoint(
+      this.fastModel,
+      selector.modelId,
+      available,
+    );
+    return endpoint ? `${qualified}\0${endpoint}` : qualified;
+  }
+
+  /**
+   * The endpoint a persisted aux selector (`authType:id\0<baseUrl>`) is pinned
+   * to, in the registry-identity form consumers of the selector compare
+   * against: the picker persists the row's effective baseUrl, while registry
+   * keys and the forked-runtime guard use the declared one. An entry that
+   * declares no endpoint needs no suffix — a bare selector resolves to it —
+   * and an endpoint matching no configured entry is dropped, which keeps the
+   * pre-existing first-match behaviour instead of unconfiguring the model.
+   *
+   * Matching is on the effective baseUrl (what the picker persists), which is
+   * not unique across same-id entries: a row declaring no baseUrl shares the
+   * auth type's default URL with a row that declares that same URL. When
+   * several rows match, prefer the one that declared the endpoint
+   * (`registryBaseUrl` set) so the pin deterministically re-attaches instead
+   * of collapsing to whichever entry the config listed first. Residual
+   * ambiguity: a pin on the no-declared-baseUrl row cannot be told apart from
+   * a pin on the declaring row and resolves to the declaring one.
+   */
+  private pinnedAuxEndpoint(
+    persisted: string | undefined,
+    modelId: string,
+    available: AvailableModel[],
+  ): string | undefined {
+    const endpoint = persisted?.trim().split('\0')[1];
+    if (!endpoint) return undefined;
+    const hits = available.filter(
+      (model) => model.id === modelId && model.baseUrl === endpoint,
+    );
+    const matched =
+      hits.find((model) => model.registryBaseUrl !== undefined) ?? hits[0];
+    if (!matched) {
+      this.debugLogger.warn(
+        `Aux endpoint pin dropped for "${modelId}": no configured entry at ${formatVisionModelSettingForLog(endpoint)}; falling back to the first same-id match.`,
+      );
+      return undefined;
+    }
+    return matched.registryBaseUrl;
   }
 
   /**
@@ -5982,6 +6720,44 @@ export class Config {
     this.fastModel = model || undefined;
   }
 
+  getAdvisorMaxUses(): number {
+    return this.advisorMaxUses;
+  }
+
+  getAdvisorUseCount(): number {
+    return this.advisorUsage.calls;
+  }
+
+  tryConsumeAdvisorUse(): boolean {
+    if (
+      this.advisorMaxUses > 0 &&
+      this.advisorUsage.calls >= this.advisorMaxUses
+    )
+      return false;
+    this.advisorUsage.calls += 1;
+    return true;
+  }
+
+  getAdvisorModel(): string | undefined {
+    return this.advisorModel;
+  }
+
+  async setAdvisorModel(model: string | undefined): Promise<boolean> {
+    const normalizedModel = normalizeAdvisorModel(model);
+    if (normalizedModel && this.getDisabledTools().has(ToolNames.ADVISOR)) {
+      return false;
+    }
+
+    this.advisorModel = normalizedModel;
+    if (!this.initialized || !this.toolRegistry) {
+      return true;
+    }
+
+    await this.syncAdvisorToolRegistration(this.toolRegistry);
+    await this.llmClient?.setTools();
+    return true;
+  }
+
   /**
    * Update the vision bridge model at runtime (e.g. `/model --vision <model>`).
    * Pass undefined or an empty string to clear the override and fall back to
@@ -6014,9 +6790,14 @@ export class Config {
         return undefined;
       }
       const rawSelector = resolveModelId(this.compactionModel);
-      return rawSelector?.authType
-        ? `${rawSelector.authType}:${selector.modelId}`
-        : selector.modelId;
+      if (!rawSelector?.authType) return selector.modelId;
+      const qualified = `${rawSelector.authType}:${selector.modelId}`;
+      const endpoint = this.pinnedAuxEndpoint(
+        this.compactionModel,
+        selector.modelId,
+        available,
+      );
+      return endpoint ? `${qualified}\0${endpoint}` : qualified;
     }
     return this.getModel();
   }
@@ -6726,6 +7507,9 @@ export class Config {
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
   }> {
+    if (this.shellExecutionSandbox) {
+      assertShellSandboxCwd(this.shellExecutionSandbox, path.resolve(newDir));
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
     }
@@ -6802,6 +7586,14 @@ export class Config {
     }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
+    this.memoryRecallMode = 'legacy';
+    this.memoryCorpusRevision = '';
+    this.memoryRecallModeInitialized = false;
+    // The prompt was built for the previous workspace's roots; when the
+    // refresh below throws (returned as memoryRefreshError), nothing
+    // reassigns it, and the stale text keeps routing to search_memory while
+    // the reset mode leaves that tool undeclared.
+    this.autoMemoryPrompt = '';
 
     let memoryRefreshError: unknown;
     try {
@@ -6974,6 +7766,7 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
@@ -7092,6 +7885,21 @@ export class Config {
 
   /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
+    if (this.shellExecutionSandbox)
+      return [
+        ToolNames.SHELL,
+        ToolNames.TASK_STOP,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+        ToolNames.MONITOR,
+        ToolNames.AGENT,
+        ToolNames.EXEC,
+        ToolNames.GLOB,
+        ToolNames.LS,
+        ToolNames.ASK_USER_QUESTION,
+        ToolNames.STRUCTURED_OUTPUT,
+      ];
     if (this.getBareMode()) {
       return DEFAULT_BARE_CORE_TOOLS;
     }
@@ -7415,6 +8223,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    if (this.executionEnvironment || this.shellExecutionSandbox) return {};
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -7503,6 +8312,8 @@ export class Config {
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
+    if (this.shellExecutionSandbox && Object.keys(servers).length)
+      throw new Error('Tool execution sandbox does not support MCP servers.');
     if (this.initialized) {
       throw new Error('Cannot modify mcpServers after initialization');
     }
@@ -7517,6 +8328,8 @@ export class Config {
    * {@link getMcpServers} still layers them on top. See sub-task 3.
    */
   setMcpServers(servers: Record<string, MCPServerConfig> | undefined): void {
+    if (this.shellExecutionSandbox && Object.keys(servers ?? {}).length)
+      throw new Error('Tool execution sandbox does not support MCP servers.');
     this.mcpServers = servers;
   }
 
@@ -7658,6 +8471,7 @@ export class Config {
   }
 
   private async refreshMcpServers(): Promise<void> {
+    if (this.shellExecutionSandbox) return;
     if (!this.initialized) {
       // No tool registry yet — boot-time discovery will pick up the new map.
       this.debugLogger.debug(
@@ -7731,6 +8545,8 @@ export class Config {
    * of the settings layer (Task 5).
    */
   addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    if (this.shellExecutionSandbox)
+      throw new Error('Tool execution sandbox does not support MCP servers.');
     this.runtimeMcpServers.set(name, config);
   }
 
@@ -7761,7 +8577,12 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled && !this.getBareMode() && !this.provisionalWorkspace;
+    return (
+      this.lspEnabled &&
+      !this.shellExecutionSandbox &&
+      !this.getBareMode() &&
+      !this.provisionalWorkspace
+    );
   }
 
   getLspClient(): LspClient | undefined {
@@ -7816,6 +8637,8 @@ export class Config {
    * Allows wiring an LSP client after Config construction but before initialize().
    */
   setLspClient(client: LspClient | undefined): void {
+    if (this.shellExecutionSandbox && client)
+      throw new Error('Tool execution sandbox does not support LSP.');
     if (this.initialized) {
       throw new Error('Cannot set LSP client after initialization');
     }
@@ -7917,6 +8740,103 @@ export class Config {
     return this.autoMemoryPrompt;
   }
 
+  getMemoryRecallMode(): MemoryRecallMode {
+    return this.memoryRecallMode;
+  }
+
+  async prepareMemoryRecallTransition(): Promise<
+    PreparedMemoryRecallTransition | undefined
+  > {
+    if (!this.getManagedAutoMemoryEnabled()) return undefined;
+    if (!this.getStructuredMemoryRecallEnabled()) return undefined;
+    if (this.memoryRecallMode === 'structured') return undefined;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    if (!status.ready) {
+      this.memoryCorpusRevision = status.revision;
+      return undefined;
+    }
+    const projectRoot = this.getProjectRoot();
+    const teamEnabled = this.getTeamMemoryEnabled() && this.isTrustedFolder();
+    const configuredProjectRoot = getAutoMemoryRoot(projectRoot);
+    // Index rebuilds refresh the legacy MEMORY.md artifacts; the structured
+    // prompt is built from scans, not these indexes, so a tier that cannot be
+    // read or written (EACCES, a rejected root) must not block the
+    // transition — the failed tier's staleness is visible to the next scan.
+    await Promise.all(
+      [
+        ...getProjectMetadataMigrationRoots(
+          projectRoot,
+          this.isTrustedFolder(),
+        ).map((root) =>
+          root === configuredProjectRoot
+            ? rebuildManagedAutoMemoryIndex(projectRoot)
+            : rebuildAutoMemoryIndexAtRoot(root, 'project'),
+        ),
+        rebuildUserAutoMemoryIndex(),
+        ...(teamEnabled ? [rebuildTeamAutoMemoryIndex(projectRoot)] : []),
+      ].map((pending) =>
+        pending.catch((error: unknown) => {
+          this.debugLogger.debug(
+            `Memory index rebuild failed during recall transition: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+      ),
+    );
+    const autoMemoryPrompt = await buildStructuredAutoMemoryPrompt(
+      getAutoMemoryRoot(projectRoot),
+      getUserAutoMemoryRoot(),
+      teamEnabled ? getTeamAutoMemoryRoot(projectRoot) : undefined,
+    );
+    const confirmed = await this.scanMemoryRecallCorpusStatus();
+    if (confirmed.revision !== status.revision) return undefined;
+    return {
+      from: 'legacy',
+      to: 'structured',
+      revision: confirmed.revision,
+      autoMemoryPrompt,
+      previousRevision: this.memoryCorpusRevision,
+      previousAutoMemoryPrompt: this.autoMemoryPrompt,
+    };
+  }
+
+  async confirmMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): Promise<boolean> {
+    if (transition.from !== this.memoryRecallMode) return false;
+    const status = await this.scanMemoryRecallCorpusStatus();
+    return (
+      status.revision === transition.revision &&
+      (status.ready ? 'structured' : 'legacy') === transition.to
+    );
+  }
+
+  commitMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (transition.from !== this.memoryRecallMode) return;
+    this.memoryRecallMode = transition.to;
+    this.memoryCorpusRevision = transition.revision;
+    this.autoMemoryPrompt = transition.autoMemoryPrompt;
+    this.memoryRecallModeInitialized = true;
+  }
+
+  rollbackMemoryRecallTransition(
+    transition: PreparedMemoryRecallTransition,
+  ): void {
+    if (this.memoryRecallMode !== transition.to) return;
+    this.memoryRecallMode = transition.from;
+    this.memoryCorpusRevision = transition.previousRevision;
+    this.autoMemoryPrompt = transition.previousAutoMemoryPrompt;
+  }
+
+  private scanMemoryRecallCorpusStatus(): Promise<MemoryMetadataCorpusStatus> {
+    return scanMemoryMetadataCorpusStatus({
+      projectRoot: this.getProjectRoot(),
+      teamMemoryEnabled: this.getTeamMemoryEnabled(),
+      trustedProject: this.isTrustedFolder(),
+    });
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -7961,6 +8881,8 @@ export class Config {
   }
 
   setArenaManager(manager: ArenaManager | null): void {
+    if (this.shellExecutionSandbox && manager)
+      throw new Error('Tool execution sandbox does not support agent arenas.');
     this.arenaManager = manager;
     this.arenaManagerChangeCallback?.(manager);
   }
@@ -7990,6 +8912,8 @@ export class Config {
   }
 
   setTeamManager(manager: TeamManager | null): void {
+    if (this.shellExecutionSandbox && manager)
+      throw new Error('Tool execution sandbox does not support agent teams.');
     this.teamManager = manager;
     for (const cb of this.teamManagerChangeCallbacks) {
       cb(manager);
@@ -8132,8 +9056,22 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
-    this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
-    this.planExecutionMode = enabled ? executionMode : undefined;
+    const previousMode = this.approvalMode;
+    const previousExecutionMode = this.planExecutionMode;
+    if (enabled) this.planExecutionMode = executionMode;
+    try {
+      this.setApprovalMode(enabled ? ApprovalMode.PLAN : executionMode);
+    } catch (error) {
+      this.planExecutionMode = previousExecutionMode;
+      throw error;
+    }
+    if (
+      enabled &&
+      previousMode === ApprovalMode.PLAN &&
+      previousExecutionMode !== executionMode
+    ) {
+      this.notifyApprovalModeChangeListeners();
+    }
   }
 
   getApprovalModeRevision(): number {
@@ -8182,6 +9120,8 @@ export class Config {
        * model was never told about, and queues a one-shot system reminder.
        */
       fromApprovedPlanExit?: boolean;
+      /** Suppress a synthetic restore exit notice without approving the plan. */
+      fromSessionRestore?: boolean;
     },
   ): void {
     // Specialized execution overlays install an own method that owns
@@ -8234,9 +9174,10 @@ export class Config {
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
       noticeEvent.version++;
-      noticeEvent.kind = options?.fromApprovedPlanExit
-        ? 'clear'
-        : 'manual-exit';
+      noticeEvent.kind =
+        options?.fromApprovedPlanExit || options?.fromSessionRestore
+          ? 'clear'
+          : 'manual-exit';
       if (
         options?.fromApprovedPlanExit &&
         Object.getPrototypeOf(this) === Config.prototype
@@ -8247,11 +9188,39 @@ export class Config {
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
       this.autoModeDenialState = resetDenialState();
+      // ...and the session-commit registry behind the AUTO-mode
+      // `git commit --amend` exemption, per its contract ("cleared on session
+      // end or mode switch"): exemptions must not carry across a boundary
+      // where the user re-decides how much the agent may do unattended.
+      // Clearing is fail-closed. Gated on a real transition so a no-op re-set,
+      // which several callers do, cannot drop registrations still in use.
+      // Root Config only, like the workflow-revision stamp above: a derived
+      // overlay's `setApprovalMode` delegates here, and a subagent flipping
+      // its own mode is child-local, not a decision about the root session's
+      // autonomy. Clearing there cost the root a false "not made by the agent
+      // in this session" block on its own commit.
+      //
+      // PLAN is excluded on both legs for the same reason. `enter_plan_mode`
+      // is model-callable from AUTO and `exit_plan_mode` restores it, so the
+      // round trip is two real transitions that end in the posture it started
+      // in — and PLAN cannot execute a commit, so the excursion cannot add an
+      // exemption either. Clearing on it bought nothing and cost the agent a
+      // false block on its own commit, with no escape from inside AUTO.
+      if (
+        !isDerivedConfig(this) &&
+        mode !== ApprovalMode.PLAN &&
+        fromMode !== ApprovalMode.PLAN
+      ) {
+        clearSessionCommits();
+      }
     }
     this.approvalMode = mode;
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      if (!isDerivedConfig(this)) {
+        this.notifyApprovalModeChangeListeners();
+      }
     }
   }
 
@@ -8823,6 +9792,7 @@ export class Config {
   }
 
   isCronEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
   }
@@ -8852,12 +9822,28 @@ export class Config {
   }
 
   isAgentTeamEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
   }
 
+  /**
+   * Whether persistent workspace Agents may collaborate on shared threads.
+   *
+   * Independent of {@link isAgentTeamEnabled}: neither flag implies the other,
+   * and enabling this one permits collaboration without opening any Agent to
+   * an outside caller — that stays a separate, explicit act.
+   */
+  isAgentCollaborationEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1') {
+      return true;
+    }
+    return this.agentCollaborationEnabled;
+  }
+
   isArtifactEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     // Publishing writes outside the project and opens a browser, so it is
     // limited to interactive or managed preview sessions, excluding SDK use.
     // Managed previews render in Web Shell instead of opening a host browser.
@@ -9076,6 +10062,7 @@ export class Config {
   }
 
   isImageGenerationEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return this.getImageGenerationConfig() !== undefined;
   }
 
@@ -9086,6 +10073,7 @@ export class Config {
   }
 
   isWorkflowsEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (this.provisionalWorkspace) return false;
     // Workflows are opt-in via settings, env, or the bundled review skill.
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
@@ -9100,6 +10088,7 @@ export class Config {
 
   async enableReviewWorkflow(): Promise<void> {
     if (
+      this.shellExecutionSandbox ||
       this.workflowsEnabled === false ||
       !isTopLevelSession() ||
       this.getBareMode() ||
@@ -9128,6 +10117,7 @@ export class Config {
    * destroying it.
    */
   isSessionWorkflowEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.sessionWorkflowEnabledProvider?.() ?? this.sessionWorkflowEnabled
     );
@@ -9168,7 +10158,7 @@ export class Config {
   }
 
   getExecutionEnvironment(): ExecutionEnvironment | undefined {
-    return undefined;
+    return this.executionEnvironment;
   }
 
   shutdownExecutionEnvironments(): Promise<void> {
@@ -9465,10 +10455,14 @@ export class Config {
   }
 
   getFileCheckpointingEnabled(): boolean {
-    return this.fileCheckpointingEnabled;
+    return !this.shellExecutionSandbox && this.fileCheckpointingEnabled;
   }
 
   enableFileCheckpointing(): void {
+    if (this.shellExecutionSandbox)
+      throw new Error(
+        'File checkpointing is unavailable with tools.executionSandbox.',
+      );
     this.fileCheckpointingEnabled = true;
     this.fileHistoryService = undefined;
   }
@@ -9477,7 +10471,7 @@ export class Config {
     if (!this.fileHistoryService) {
       const service = new FileHistoryService(
         this.sessionId,
-        this.fileCheckpointingEnabled,
+        this.getFileCheckpointingEnabled(),
         this.cwd,
         (snapshot) => {
           if (this.fileHistoryService !== service) return;
@@ -9524,6 +10518,24 @@ export class Config {
     return this.usageStatisticsEnabled;
   }
 
+  /**
+   * Active extensions' `rules/` directories, for conditional context rules.
+   *
+   * The counterpart to {@link getExtensionContextFilePaths}: a context file is
+   * resident on every request, while a rule is injected only when a tool call
+   * touches a path its `paths:` matches (#12030). Directories that do not
+   * exist are not filtered here — `loadRules` treats an unreadable directory as
+   * empty, so a stat per extension per session would buy nothing.
+   */
+  getExtensionRuleSources(): ExtensionRuleSource[] {
+    return this.getActiveExtensions()
+      .filter((extension) => Boolean(extension.path))
+      .map((extension) => ({
+        name: extension.name,
+        dir: path.join(extension.path, 'rules'),
+      }));
+  }
+
   getExtensionContextFilePaths(): string[] {
     const extensionContextFilePaths = this.getActiveExtensions().flatMap(
       (e) => e.contextFiles,
@@ -9568,6 +10580,7 @@ export class Config {
    * Returns undefined if hooks are not enabled.
    */
   getHookSystem(): HookSystem | undefined {
+    if (this.shellExecutionSandbox) return undefined;
     return this.hookSystem;
   }
 
@@ -9589,6 +10602,7 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
+    if (this.shellExecutionSandbox) return true;
     return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 
@@ -9597,6 +10611,7 @@ export class Config {
   }
 
   getManagedAutoMemoryEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.enableManagedAutoMemory && !this.getBareMode() && !this.isSafeMode()
     );
@@ -9608,6 +10623,7 @@ export class Config {
    * for tests / power users ('0' forces off, '1' forces on).
    */
   getTeamMemoryEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
@@ -9628,6 +10644,7 @@ export class Config {
    * Off by default since it mutates the repo and pushes. Inert in bare mode.
    */
   getTeamMemorySyncEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
@@ -9641,17 +10658,46 @@ export class Config {
     return this.enableTeamMemorySync;
   }
 
+  /**
+   * Whether the structured on-demand memory recall protocol may activate.
+   * Opt-in: off unless the `memory.enableStructuredRecall` setting is on.
+   * `QWEN_CODE_MEMORY_STRUCTURED_RECALL` overrides for tests / power users
+   * ('0' forces off, '1' forces on).
+   *
+   * While this is off the corpus stays on the legacy protocol *and* the
+   * metadata migration that would make it structured-ready is never
+   * scheduled, so a disabled feature costs no forked-agent calls. Callers
+   * that gate on it must not treat "off" as "migration still owed" — see the
+   * `migration_pending` dream gates, which would otherwise suppress
+   * consolidation for the life of the process.
+   */
+  getStructuredMemoryRecallEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
+    if (this.getBareMode() || this.isSafeMode()) return false;
+    const override = process.env['QWEN_CODE_MEMORY_STRUCTURED_RECALL'];
+    if (override === '0') {
+      return false;
+    }
+    if (override === '1') {
+      return true;
+    }
+    return this.enableStructuredMemoryRecall;
+  }
+
   isManagedMemoryAvailable(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.enableManagedAutoDream && !this.getBareMode() && !this.isSafeMode()
     );
   }
 
   getAutoSkillEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     return (
       this.enableAutoSkill &&
       !this.getBareMode() &&
@@ -9860,6 +10906,7 @@ export class Config {
   }
 
   getExtensions(): Extension[] {
+    if (this.shellExecutionSandbox) return [];
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
       const overrideExtensionNames = new Set(
@@ -9917,7 +10964,7 @@ export class Config {
   }
 
   getIdeMode(): boolean {
-    return this.ideMode;
+    return !this.shellExecutionSandbox && this.ideMode;
   }
 
   getFolderTrustFeature(): boolean {
@@ -9953,25 +11000,19 @@ export class Config {
   }
 
   isTrustedFolder(): boolean {
-    // isWorkspaceTrusted in cli/src/config/trustedFolder.js returns undefined
-    // when the file based trust value is unavailable, since it is mainly used
-    // in the initialization for trust dialogs, etc. Here we return true since
-    // config.isTrustedFolder() is used for the main business logic of blocking
-    // tool calls etc in the rest of the application.
-    //
-    // Default value is true since we load with trusted settings to avoid
-    // restarts in the more common path. If the user chooses to mark the folder
-    // as untrusted, the CLI will restart and we will have the trust value
-    // reloaded.
     const context = ideContextStore.get();
     if (context?.workspaceState?.isTrusted !== undefined) {
       return context.workspaceState.isTrusted;
     }
 
-    return this.trustedFolder ?? true;
+    return this.trustedFolder ?? !this.folderTrust;
   }
 
   setIdeMode(value: boolean): void {
+    if (this.shellExecutionSandbox && value)
+      throw new Error(
+        'Tool execution sandbox does not support IDE integration.',
+      );
     this.ideMode = value;
   }
 
@@ -10040,6 +11081,11 @@ export class Config {
    * Set a custom FileSystemService
    */
   setFileSystemService(fileSystemService: FileSystemService): void {
+    if (this.shellExecutionSandbox) {
+      throw new Error(
+        'Internal sandbox does not support delegated filesystem services.',
+      );
+    }
     this.fileSystemService = fileSystemService;
   }
 
@@ -10612,6 +11658,10 @@ export class Config {
     if (!lease) return undefined;
     const existing = this.pendingSessionWriterRelease;
     if (existing?.lease === lease) return existing.promise;
+    // A Managed writer is ended by its failed activation, which alone knows
+    // whether the log was written; releasing it early could delete the lock of
+    // a log that already holds its header.
+    if (this.sessionExecutionEngine === 'managed') return undefined;
     const promise = lease.release();
     this.pendingSessionWriterRelease = { lease, promise };
     void promise.catch(() => undefined);
@@ -10696,21 +11746,21 @@ export class Config {
 
   async resumeBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
-      initialMessage,
+      initialInput,
     );
   }
 
   async reviveCompletedBackgroundAgent(
     agentId: string,
-    initialMessage?: string,
+    initialInput?: import('../agents/runtime/agent-types.js').AgentExternalInput,
   ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().reviveCompletedBackgroundAgent(
       agentId,
-      initialMessage,
+      initialInput,
     );
   }
 
@@ -10864,8 +11914,30 @@ export class Config {
     return this.permissionManager;
   }
 
+  /**
+   * Whether this session runs as a workspace agent, inside the read-only
+   * capability boundary. The one source of truth for the tool registry, the
+   * invocation guard and skill side effects.
+   */
+  isWorkspaceAgentSession(): boolean {
+    return (
+      this.isAgentCollaborationEnabled() && this.sessionSourceType === 'agent'
+    );
+  }
+
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
-    return this.toolInvocationGuard;
+    return this.isWorkspaceAgentSession()
+      ? createAgentToolInvocationGuard(
+          this.toolInvocationGuard,
+          this.workspaceAgentExecutionAllowedTools,
+        )
+      : this.toolInvocationGuard;
+  }
+
+  getShellExecutionSandbox():
+    | Readonly<ShellExecutionSandboxPolicy>
+    | undefined {
+    return this.shellExecutionSandbox;
   }
 
   /**
@@ -10891,7 +11963,8 @@ export class Config {
     // PermissionManager handles the coreTools allowlist, deny rules, and
     // the `tools.eager` allowlist in a single check. A tool the active
     // eager allowlist omits comes back `deferred`, not `disabled`: it is
-    // still registered — listed in `/tools` and loadable via ToolSearch —
+    // still registered — listed in `/tools` and reachable through the
+    // `tool_search` + `tool_call` bridge —
     // but its schema stays out of the eager model request (#9827) without
     // the tool silently disappearing (#10075).
     let status: ToolRegistrationStatus = 'registered';
@@ -10971,6 +12044,25 @@ export class Config {
     }
   }
 
+  private async syncAdvisorToolRegistration(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    if (!this.getAdvisorModel() || this.getBareMode() || this.isSafeMode()) {
+      registry.unregisterTool(ToolNames.ADVISOR);
+      return;
+    }
+
+    if (this.getDisabledTools().has(ToolNames.ADVISOR)) return;
+
+    registry.unregisterTool(ToolNames.ADVISOR);
+    await this.registerLazyTool(registry, ToolNames.ADVISOR, async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      return new AdvisorTool(this);
+    });
+    // Consume the factory so disabling Advisor removes its registration completely.
+    await registry.ensureTool(ToolNames.ADVISOR);
+  }
+
   async registerSessionSourceTool(
     registry: ToolRegistry = this.toolRegistry,
   ): Promise<void> {
@@ -11026,31 +12118,6 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
-
-    const environment = this.getExecutionEnvironment();
-    if (environment) {
-      if (this.getCodeModeOnly()) {
-        throw new Error(
-          'Container execution cannot be combined with tools.codeModeOnly.',
-        );
-      }
-      const [{ createExecutionTools }, { wrapExecutionTool }] =
-        await Promise.all([
-          import('../services/local-execution-environment.js'),
-          import('../tools/execution-tool.js'),
-        ]);
-      for (const [name, tool] of createExecutionTools(this)) {
-        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
-        await registerLazy(name as ToolName, async () =>
-          wrapExecutionTool(tool, environment, this),
-        );
-      }
-      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
-        const { ToolSearchTool } = await import('../tools/tool-search.js');
-        return new ToolSearchTool(this);
-      });
-      return registry;
-    }
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
@@ -11114,6 +12181,139 @@ export class Config {
       });
     };
 
+    const registerHostSessionTools = async (): Promise<void> => {
+      if (this.isTodoWriteEnabled()) {
+        await registerLazy(ToolNames.TODO_WRITE, async () => {
+          const { TodoWriteTool } = await import('../tools/todoWrite.js');
+          return new TodoWriteTool(this);
+        });
+      }
+      await registerLazy(ToolNames.WEB_FETCH, async () => {
+        const { WebFetchTool } = await import('../tools/web-fetch.js');
+        return new WebFetchTool(this);
+      });
+      // WebSearch is opt-out: it registers whenever the gate can resolve a
+      // usable backend — either configured explicitly, or derived from the
+      // provider the main model runs on. `enabled: false` turns it off without
+      // importing anything. A gate failure surfaces a one-time startup notice
+      // only when the tool was actually asked for; a provider with no search
+      // backend fails silently (`gate.silent`), since warning about a feature
+      // the user never configured is noise.
+      const hasExplicitWebSearchBackend =
+        !!this.webSearchSettings?.model?.trim() ||
+        !!this.webSearchSettings?.baseUrl;
+      if (
+        !this.getBareMode() &&
+        !this.isSafeMode() &&
+        this.webSearchSettings?.enabled !== false &&
+        (this.webSearchSettings?.enabled === true ||
+          !hasExplicitWebSearchBackend)
+      ) {
+        const { evaluateWebSearchGate } = await import(
+          '../tools/web-search.js'
+        );
+        const gate = evaluateWebSearchGate(this);
+        if (gate.ok) {
+          await registerLazy(ToolNames.WEB_SEARCH, async () => {
+            const { WebSearchTool } = await import('../tools/web-search.js');
+            return new WebSearchTool(this);
+          });
+        } else if (
+          !gate.silent &&
+          !this.webSearchNoticeEmitted &&
+          !options?.forSubAgent
+        ) {
+          this.webSearchNoticeEmitted = true;
+          this.warnings.push(gate.notice);
+        }
+      }
+    };
+
+    const environment = this.getExecutionEnvironment();
+    if (environment) {
+      if (this.getCodeModeOnly()) {
+        throw new Error(
+          'Container execution cannot be combined with tools.codeModeOnly.',
+        );
+      }
+      const [{ createExecutionTools }, { wrapExecutionTool }] =
+        await Promise.all([
+          import('../services/local-execution-environment.js'),
+          import('../tools/execution-tool.js'),
+        ]);
+      for (const [name, tool] of createExecutionTools(this)) {
+        if (environment.toolNames && !environment.toolNames.has(name)) continue;
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
+        await registerLazy(name as ToolName, async () =>
+          wrapExecutionTool(tool, environment, this),
+        );
+      }
+      await registerLazy(ToolNames.TOOL_CALL, async () => {
+        const { ToolCallTool } = await import('../tools/tool-call.js');
+        return new ToolCallTool(registry);
+      });
+      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      });
+      if (this.executionEnvironment && !options?.forSubAgent) {
+        await registerStructuredOutputIfRequested();
+        await registerGoalWorkerTools();
+        if (!this.getBareMode()) await registerHostSessionTools();
+      }
+      return registry;
+    }
+
+    if (this.shellExecutionSandbox) {
+      await registerLazy(ToolNames.SHELL, async () => {
+        const { ShellTool } = await import('../tools/shell.js');
+        return new ShellTool(this);
+      });
+      await registerLazy(ToolNames.TASK_STOP, async () => {
+        const { TaskStopTool } = await import('../tools/task-stop.js');
+        return new TaskStopTool(this);
+      });
+      await registerLazy(ToolNames.READ_FILE, async () => {
+        const { ReadFileTool } = await import('../tools/read-file.js');
+        return new ReadFileTool(this);
+      });
+      await registerLazy(ToolNames.WRITE_FILE, async () => {
+        const { WriteFileTool } = await import('../tools/write-file.js');
+        return new WriteFileTool(this);
+      });
+      await registerLazy(ToolNames.EDIT, async () => {
+        const { EditTool } = await import('../tools/edit.js');
+        return new EditTool(this);
+      });
+      await registerLazy(ToolNames.MONITOR, async () => {
+        const { MonitorTool } = await import('../tools/monitor.js');
+        return new MonitorTool(this);
+      });
+      await registerLazy(ToolNames.AGENT, async () => {
+        const { AgentTool } = await import('../tools/agent/agent.js');
+        return new AgentTool(this);
+      });
+      await registerLazy(ToolNames.GLOB, async () => {
+        const { GlobTool } = await import('../tools/glob.js');
+        return new GlobTool(this);
+      });
+      await registerLazy(ToolNames.LS, async () => {
+        const { LSTool } = await import('../tools/ls.js');
+        return new LSTool(this);
+      });
+      if (resolveInteractionMode(this) !== 'headless') {
+        await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+          const { AskUserQuestionTool } = await import(
+            '../tools/askUserQuestion.js'
+          );
+          return new AskUserQuestionTool(this);
+        });
+      }
+      await registerExecIfEnabled();
+      await registerStructuredOutputIfRequested();
+      return registry;
+    }
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -11141,8 +12341,14 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerHostSessionTools();
     await registerExecIfEnabled();
     await registerGoalWorkerTools();
+    await this.syncAdvisorToolRegistration(registry);
+    await registerLazy(ToolNames.TOOL_CALL, async () => {
+      const { ToolCallTool } = await import('../tools/tool-call.js');
+      return new ToolCallTool(registry);
+    });
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);
@@ -11169,10 +12375,17 @@ export class Config {
       const { SendMessageTool } = await import('../tools/send-message.js');
       return new SendMessageTool(this);
     });
-    await registerLazy(ToolNames.SKILL, async () => {
-      const { SkillTool } = await import('../tools/skill.js');
-      return new SkillTool(this);
-    });
+    // A subagent whose tool policy withholds skills gets a Config with no
+    // SkillManager (#12424, SubagentManager.buildSubagentContextOverride).
+    // SkillTool cannot be constructed without one, and a factory that throws
+    // stays pending, so every warmAll() of that agent's registry would retry
+    // and log it. The agent cannot declare the tool anyway.
+    if (!options?.forSubAgent || this.getSkillManager()) {
+      await registerLazy(ToolNames.SKILL, async () => {
+        const { SkillTool } = await import('../tools/skill.js');
+        return new SkillTool(this);
+      });
+    }
     // list_directory is opt-in (disabled by default): glob covers directory
     // listing in most cases, so the tool only registers when explicitly
     // enabled via `tools.listDirectory.enabled` or the coreTools allowlist.
@@ -11185,6 +12398,14 @@ export class Config {
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
+    });
+    await registerLazy(ToolNames.MANAGE_MEMORY, async () => {
+      const { ManageMemoryTool } = await import('../tools/manage-memory.js');
+      return new ManageMemoryTool(this);
+    });
+    await registerLazy(ToolNames.SEARCH_MEMORY, async () => {
+      const { SearchMemoryTool } = await import('../tools/search-memory.js');
+      return new SearchMemoryTool(this);
     });
     await registerLazy(ToolNames.ZOOM_IMAGE, async () => {
       const { ZoomImageTool } = await import('../tools/zoom-image.js');
@@ -11250,12 +12471,6 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    if (this.isTodoWriteEnabled()) {
-      await registerLazy(ToolNames.TODO_WRITE, async () => {
-        const { TodoWriteTool } = await import('../tools/todoWrite.js');
-        return new TodoWriteTool(this);
-      });
-    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
@@ -11291,10 +12506,6 @@ export class Config {
       const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
       return new ExitWorktreeTool(this);
     });
-    await registerLazy(ToolNames.WEB_FETCH, async () => {
-      const { WebFetchTool } = await import('../tools/web-fetch.js');
-      return new WebFetchTool(this);
-    });
     if (
       resolveInteractionMode(this) === 'interactive' &&
       !this.sdkMode &&
@@ -11305,38 +12516,6 @@ export class Config {
         const { DisplayImageTool } = await import('../tools/display-image.js');
         return new DisplayImageTool(this);
       });
-    }
-    // WebSearch is opt-out: it registers whenever the gate can resolve a
-    // usable backend — either configured explicitly, or derived from the
-    // provider the main model runs on. `enabled: false` turns it off without
-    // importing anything. A gate failure surfaces a one-time startup notice
-    // only when the tool was actually asked for; a provider with no search
-    // backend fails silently (`gate.silent`), since warning about a feature
-    // the user never configured is noise.
-    const hasExplicitWebSearchBackend =
-      !!this.webSearchSettings?.model?.trim() ||
-      !!this.webSearchSettings?.baseUrl;
-    if (
-      !this.getBareMode() &&
-      !this.isSafeMode() &&
-      this.webSearchSettings?.enabled !== false &&
-      (this.webSearchSettings?.enabled === true || !hasExplicitWebSearchBackend)
-    ) {
-      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
-      const gate = evaluateWebSearchGate(this);
-      if (gate.ok) {
-        await registerLazy(ToolNames.WEB_SEARCH, async () => {
-          const { WebSearchTool } = await import('../tools/web-search.js');
-          return new WebSearchTool(this);
-        });
-      } else if (
-        !gate.silent &&
-        !this.webSearchNoticeEmitted &&
-        !options?.forSubAgent
-      ) {
-        this.webSearchNoticeEmitted = true;
-        this.warnings.push(gate.notice);
-      }
     }
     await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {
@@ -11371,6 +12550,49 @@ export class Config {
     // Same helper as the bare-mode branch above to keep the registration
     // shape and permission gating in sync between the two paths.
     await registerStructuredOutputIfRequested();
+
+    // The six thread tools are the collaboration surface, so they are gated
+    // on the collaboration opt-in — not merely on being a subagent or on a
+    // session calling itself an agent. `sourceType` is attribution, not
+    // authorization: a client can set it when creating a session, so the
+    // opt-in, plus the server-binding check the dispatcher applies, are what
+    // decide whether these tools exist. The flag alone is not enough.
+    //
+    // Deliberately NOT `|| options?.forSubAgent`. A subagent runs on a
+    // `deriveConfig` child, and that is `Object.create(parent)`, so an agent's
+    // own subagent reads `sourceType === 'agent'` straight off the prototype
+    // chain and lands here anyway. Adding `forSubAgent` only widened the gate
+    // to subagents of *ordinary* conversations, which have no agent run frame
+    // — every one of these tools would have thrown "requires an active agent
+    // run context" on first use. Observed both ways with the six-combination
+    // probe: dropping the clause takes the plain-subagent row from six tools
+    // to zero and leaves the agent-subagent row at six.
+    if (this.isWorkspaceAgentSession()) {
+      await registerLazy(ToolNames.THREAD_POST, async () => {
+        const { ThreadPostTool } = await import('../tools/thread-tools.js');
+        return new ThreadPostTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_WAIT, async () => {
+        const { ThreadWaitTool } = await import('../tools/thread-tools.js');
+        return new ThreadWaitTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_BLOCK, async () => {
+        const { ThreadBlockTool } = await import('../tools/thread-tools.js');
+        return new ThreadBlockTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_REVIEW, async () => {
+        const { ThreadReviewTool } = await import('../tools/thread-tools.js');
+        return new ThreadReviewTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_CREATE, async () => {
+        const { ThreadCreateTool } = await import('../tools/thread-tools.js');
+        return new ThreadCreateTool(this);
+      });
+      await registerLazy(ToolNames.THREAD_READ, async () => {
+        const { ThreadReadTool } = await import('../tools/thread-tools.js');
+        return new ThreadReadTool(this);
+      });
+    }
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {

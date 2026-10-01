@@ -21,11 +21,22 @@ import {
   readLastTranscriptRecordUuidSync,
   writeAgentMeta,
   type AgentMeta,
+  type AttachJsonlOptions,
 } from './agent-transcript.js';
-import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
+import {
+  AgentEventEmitter,
+  AgentEventType,
+  type AgentRoundTextEvent,
+  type AgentToolCallEvent,
+  type AgentToolResponsesFinalizedEvent as Finalized,
+} from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import type { Config } from '../config/config.js';
-import type { Content } from '@google/genai';
+import {
+  fnResponse,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 // Pin the git-branch annotation without spawning git: buildAgentTranscriptAttach
 // is the only consumer of getCachedGitBranch in this file's import graph.
@@ -148,22 +159,27 @@ describe('agent-transcript', () => {
 
   describe('writeAgentMeta', () => {
     let tempDir: string;
+    let metaPath: string;
 
     beforeEach(() => {
       tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-test-'));
+      metaPath = path.join(tempDir, 'subagents', 's1', 'agent-a.meta.json');
     });
 
     afterEach(() => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
+    const minimalMeta = (): AgentMeta => ({
+      agentId: 'a',
+      agentType: 'x',
+      description: 'd',
+      parentSessionId: 's',
+      parentAgentId: null,
+      createdAt: 'now',
+    });
+
     it('writes a JSON sidecar with the expected fields', () => {
-      const metaPath = path.join(
-        tempDir,
-        'subagents',
-        's1',
-        'agent-a.meta.json',
-      );
       const meta: AgentMeta = {
         agentId: 'a',
         agentType: 'explore',
@@ -178,38 +194,20 @@ describe('agent-transcript', () => {
     });
 
     it('creates parent directories that do not yet exist', () => {
-      const metaPath = path.join(
+      const nested = path.join(
         tempDir,
         'a',
         'deeply',
         'nested',
         'agent.meta.json',
       );
-      writeAgentMeta(metaPath, {
-        agentId: 'a',
-        agentType: 'x',
-        description: 'd',
-        parentSessionId: 's',
-        parentAgentId: null,
-        createdAt: 'now',
-      });
-      expect(fs.existsSync(metaPath)).toBe(true);
+      writeAgentMeta(nested, minimalMeta());
+      expect(fs.existsSync(nested)).toBe(true);
     });
 
     it('reads back a previously-written meta sidecar', () => {
-      const metaPath = path.join(
-        tempDir,
-        'subagents',
-        's1',
-        'agent-a.meta.json',
-      );
       writeAgentMeta(metaPath, {
-        agentId: 'a',
-        agentType: 'x',
-        description: 'd',
-        parentSessionId: 's',
-        parentAgentId: null,
-        createdAt: 'now',
+        ...minimalMeta(),
         status: 'running',
         subagentName: 'explore',
         resolvedApprovalMode: 'auto-edit',
@@ -249,59 +247,136 @@ describe('agent-transcript', () => {
 
   describe('attachJsonlTranscriptWriter (canonical)', () => {
     let tempDir: string;
+    let jsonlPath: string;
 
     beforeEach(() => {
       tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jsonl-test-'));
+      jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
     });
 
     afterEach(() => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
-    function readJsonl(p: string): ChatRecord[] {
-      return fs
-        .readFileSync(p, 'utf-8')
+    const exists = (suffix = '') => fs.existsSync(jsonlPath + suffix);
+    const lines = (suffix: string) =>
+      fs
+        .readFileSync(jsonlPath + suffix, 'utf8')
         .split('\n')
         .filter((l) => l.trim().length > 0)
-        .map((l) => JSON.parse(l) as ChatRecord);
-    }
+        .map((l) => JSON.parse(l));
+    const readJsonl = (): ChatRecord[] => lines('');
+    const kinds = (records: ChatRecord[]) =>
+      records.map((record) => [record.type, record.subtype]);
 
-    function makeWriter(
-      jsonlPath: string,
-      extra: {
-        initialUserPrompt?: string;
-        bootstrapHistory?: Content[];
-        launchTaskPrompt?: string;
-      } = {},
+    type Emit = (emitter: AgentEventEmitter) => void;
+    const ev = { subagentId: 'agent-x', round: 1 };
+    const roundText =
+      (text: string, more: Partial<AgentRoundTextEvent> = {}): Emit =>
+      (e) =>
+        e.emit(AgentEventType.ROUND_TEXT, {
+          ...ev,
+          text,
+          thoughtText: '',
+          timestamp: Date.now(),
+          ...more,
+        });
+    const streamText =
+      (text: string, thought: boolean, timestamp: number): Emit =>
+      (e) =>
+        e.emit(AgentEventType.STREAM_TEXT, { ...ev, text, thought, timestamp });
+    const toolCall =
+      (
+        callId: string,
+        name: string,
+        args: Record<string, unknown>,
+        description: string,
+        more: Partial<AgentToolCallEvent> = {},
+      ): Emit =>
+      (e) =>
+        e.emit(AgentEventType.TOOL_CALL, {
+          ...ev,
+          callId,
+          name,
+          args,
+          description,
+          timestamp: Date.now(),
+          ...more,
+        });
+    // One finalized response whose single functionResponse part answers callId.
+    const finalized =
+      (
+        callId: string,
+        name: string,
+        response: Record<string, unknown>,
+        extra: Pick<Finalized['responses'][number], 'durationMs'> = {},
+        timestamp = Date.now(),
+      ): Emit =>
+      (e) =>
+        e.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+          ...ev,
+          responses: [
+            {
+              callId,
+              ...extra,
+              responseParts: [fnResponse(name, response, callId)],
+            },
+          ],
+          timestamp,
+        });
+    // `kind` omitted means the key is absent (legacy events).
+    const external =
+      (
+        text: string,
+        kind?: 'message' | 'notification',
+        timestamp = 100,
+      ): Emit =>
+      (e) =>
+        e.emit(AgentEventType.EXTERNAL_MESSAGE, {
+          subagentId: 'agent-x',
+          ...(kind ? { kind } : {}),
+          text,
+          timestamp,
+        });
+    const usage = () => ({
+      promptTokenCount: 100,
+      candidatesTokenCount: 20,
+      cachedContentTokenCount: 40,
+      totalTokenCount: 120,
+    });
+
+    // Required attach options only; `named` adds the display fields.
+    const bare = {
+      agentId: 'agent-x',
+      sessionId: 'session-1',
+      cwd: '/proj',
+      version: '1.2.3',
+    };
+    const named = { ...bare, agentName: 'explore', agentColor: 'blue' };
+
+    /** Attaches a writer (`opts` + `extra`) and runs `events` through it. */
+    function start(
+      events: Emit[] = [],
+      extra: Partial<AttachJsonlOptions> = {},
+      opts: AttachJsonlOptions = { ...named, gitBranch: 'main' },
     ) {
       const emitter = new AgentEventEmitter();
       const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
-        agentId: 'agent-x',
-        agentName: 'explore',
-        agentColor: 'blue',
-        sessionId: 'session-1',
-        cwd: '/proj',
-        version: '1.2.3',
-        gitBranch: 'main',
+        ...opts,
         ...extra,
       });
+      events.forEach((emit) => emit(emitter));
       return { emitter, cleanup };
     }
 
+    /** start() + cleanup(); returns the records on disk ([] when no file). */
+    function write(...args: Parameters<typeof start>): ChatRecord[] {
+      start(...args).cleanup();
+      return exists() ? readJsonl() : [];
+    }
+
     it('stamps base fields on every subagent record', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'Hello',
-        thoughtText: '',
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([roundText('Hello')]);
       expect(records).toHaveLength(1);
       const r = records[0];
       expect(r.agentId).toBe('agent-x');
@@ -316,27 +391,15 @@ describe('agent-transcript', () => {
     });
 
     it('records fork bootstrap and launch prompt as system records before runtime events', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath, {
+      const records = write([roundText('started')], {
         bootstrapHistory: [
-          { role: 'user', parts: [{ text: 'bootstrap env' }] },
-          { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+          userText('bootstrap env'),
+          modelText('bootstrap ack'),
         ],
         initialUserPrompt: 'visible launch prompt',
         launchTaskPrompt: 'Begin.',
       });
-
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'started',
-        thoughtText: '',
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
-      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+      expect(kinds(records)).toEqual([
         ['system', 'agent_bootstrap'],
         ['user', undefined],
         ['system', 'agent_launch_prompt'],
@@ -344,10 +407,7 @@ describe('agent-transcript', () => {
       ]);
       expect(records[0]?.systemPayload).toMatchObject({
         kind: 'fork',
-        history: [
-          { role: 'user', parts: [{ text: 'bootstrap env' }] },
-          { role: 'model', parts: [{ text: 'bootstrap ack' }] },
-        ],
+        history: [userText('bootstrap env'), modelText('bootstrap ack')],
       });
       expect(records[2]?.systemPayload).toMatchObject({
         displayText: 'Begin.',
@@ -355,16 +415,11 @@ describe('agent-transcript', () => {
     });
 
     it('writes bootstrap records even when inherited history is empty', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { cleanup } = makeWriter(jsonlPath, {
+      const records = write([], {
         bootstrapHistory: [],
         launchTaskPrompt: 'Begin.',
       });
-
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
-      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+      expect(kinds(records)).toEqual([
         ['system', 'agent_bootstrap'],
         ['system', 'agent_launch_prompt'],
       ]);
@@ -378,37 +433,13 @@ describe('agent-transcript', () => {
     });
 
     it('seeds an agent_retry system marker at the retry seam', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const first = makeWriter(jsonlPath, { initialUserPrompt: 'task' });
-      first.emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'attempt one',
-        thoughtText: '',
-        timestamp: Date.now(),
-      });
-      first.cleanup();
-
-      const emitter = new AgentEventEmitter();
-      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
-        agentId: 'agent-x',
-        sessionId: 'session-1',
-        cwd: '/proj',
-        version: '1.2.3',
-        appendToExisting: true,
-        retryAttempt: 2,
-      });
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'attempt two',
-        thoughtText: '',
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
-      expect(records.map((record) => [record.type, record.subtype])).toEqual([
+      write([roundText('attempt one')], { initialUserPrompt: 'task' });
+      const records = write(
+        [roundText('attempt two')],
+        { appendToExisting: true, retryAttempt: 2 },
+        bare,
+      );
+      expect(kinds(records)).toEqual([
         ['user', undefined],
         ['assistant', undefined],
         ['system', 'agent_retry'],
@@ -420,25 +451,7 @@ describe('agent-transcript', () => {
     });
 
     it('writes a ROUND_TEXT event as an assistant record with text part', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'Hello',
-        thoughtText: '',
-        usageMetadata: {
-          promptTokenCount: 100,
-          candidatesTokenCount: 20,
-          cachedContentTokenCount: 40,
-          totalTokenCount: 120,
-        },
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([roundText('Hello', { usageMetadata: usage() })]);
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('assistant');
       expect(records[0].message?.parts?.[0]).toMatchObject({ text: 'Hello' });
@@ -450,76 +463,36 @@ describe('agent-transcript', () => {
     });
 
     it('persists thought content and live stream chunks separately', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.STREAM_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'thinking now',
-        thought: true,
-        timestamp: 1,
-      });
-      emitter.emit(AgentEventType.STREAM_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'x'.repeat(64 * 1024),
-        thought: false,
-        timestamp: 1,
-      });
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'answer',
-        thoughtText: 'thinking now',
-        timestamp: 2,
-      });
-      expect(readJsonl(jsonlPath)[0].message?.parts).toEqual([
+      const { cleanup } = start([
+        streamText('thinking now', true, 1),
+        streamText('x'.repeat(64 * 1024), false, 1),
+        roundText('answer', { thoughtText: 'thinking now', timestamp: 2 }),
+      ]);
+      expect(readJsonl()[0].message?.parts).toEqual([
         { text: 'thinking now', thought: true },
         { text: 'answer' },
       ]);
-      expect(
-        JSON.parse(
-          fs.readFileSync(`${jsonlPath}.stream`, 'utf8').trim().split('\n')[0]!,
-        ),
-      ).toMatchObject({
-        runId: readJsonl(jsonlPath)[0].agentRunId,
+      expect(lines('.stream')[0]).toMatchObject({
+        runId: readJsonl()[0].agentRunId,
         round: 1,
         text: 'thinking now',
         thought: true,
         timestamp: 1,
       });
-      expect(readJsonl(jsonlPath)[0].agentRound).toBe(1);
+      expect(readJsonl()[0].agentRound).toBe(1);
       cleanup();
-      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+      expect(exists('.stream')).toBe(false);
     });
 
     it('flushes live stream chunks when the pending buffer reaches 64 KiB', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
+      const { emitter, cleanup } = start([
+        streamText('x'.repeat(32 * 1024), false, 1),
+      ]);
+      expect(exists('.stream')).toBe(false);
+      streamText('y'.repeat(32 * 1024), false, 2)(emitter);
 
-      emitter.emit(AgentEventType.STREAM_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'x'.repeat(32 * 1024),
-        thought: false,
-        timestamp: 1,
-      });
-      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
-      emitter.emit(AgentEventType.STREAM_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'y'.repeat(32 * 1024),
-        thought: false,
-        timestamp: 2,
-      });
-
-      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(true);
-      const records = fs
-        .readFileSync(`${jsonlPath}.stream`, 'utf8')
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line));
+      expect(exists('.stream')).toBe(true);
+      const records = lines('.stream');
       expect(records).toHaveLength(2);
       expect(records[1]).toMatchObject({
         round: 1,
@@ -527,115 +500,75 @@ describe('agent-transcript', () => {
         timestamp: 2,
       });
       cleanup();
-      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+      expect(exists('.stream')).toBe(false);
     });
 
     it('replaces a stale stream sidecar when a writer starts', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
       fs.writeFileSync(`${jsonlPath}.stream`, 'stale\n');
 
-      const { cleanup } = makeWriter(jsonlPath);
+      const { cleanup } = start();
 
-      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+      expect(exists('.stream')).toBe(false);
       cleanup();
     });
 
     it('writes usage-only ROUND_TEXT with a model message for exporters', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        runId: 'run-1',
-        round: 1,
-        text: '',
-        thoughtText: '',
-        usageMetadata: {
-          promptTokenCount: 100,
-          candidatesTokenCount: 20,
-          cachedContentTokenCount: 40,
-          totalTokenCount: 120,
-        },
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([
+        roundText('', { runId: 'run-1', usageMetadata: usage() }),
+      ]);
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
         type: 'assistant',
         message: { role: 'model', parts: [] },
-        usageMetadata: {
-          promptTokenCount: 100,
-          candidatesTokenCount: 20,
-          cachedContentTokenCount: 40,
-          totalTokenCount: 120,
-        },
+        usageMetadata: usage(),
         agentRunId: 'run-1',
         agentRound: 1,
       });
     });
 
     it('drops ROUND_TEXT with no text, thought, or usage', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: '',
-        thoughtText: '',
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      expect(fs.existsSync(jsonlPath)).toBe(false);
+      write([roundText('')]);
+      expect(exists()).toBe(false);
     });
 
     it('writes TOOL_CALL events as assistant records with functionCall parts', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.TOOL_CALL, {
-        subagentId: 'agent-x',
-        round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        args: { file_path: '/x.txt' },
-        description: 'read x',
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([
+        toolCall('c1', 'read_file', { file_path: '/x.txt' }, 'read x'),
+      ]);
       expect(records).toHaveLength(1);
-      const part = records[0].message?.parts?.[0] as {
-        functionCall?: { id: string; name: string; args: unknown };
-      };
-      expect(part.functionCall).toMatchObject({
+      expect(records[0].message?.parts?.[0]?.functionCall).toMatchObject({
         id: 'c1',
         name: 'read_file',
         args: { file_path: '/x.txt' },
       });
     });
 
-    it('persists only nested session readiness transitions and removes the listener', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-      emitter.emit(AgentEventType.TOOL_CALL, {
-        subagentId: 'agent-x',
-        round: 1,
-        callId: 'nested',
-        name: 'agent',
-        description: 'nested',
-        args: {},
-        timestamp: Date.now(),
+    it('persists the model-facing identity for bridged tool calls', () => {
+      const bridged = {
+        name: 'mcp__docs__read',
+        arguments: { path: 'README.md' },
+      };
+      const [record] = write([
+        toolCall('c1', 'mcp__docs__read', { path: 'README.md' }, 'read docs', {
+          modelFacingName: 'tool_call',
+          modelFacingArgs: bridged,
+        }),
+      ]);
+      expect(record?.message?.parts?.[0]?.functionCall).toEqual({
+        id: 'c1',
+        name: 'tool_call',
+        args: { name: 'mcp__docs__read', arguments: { path: 'README.md' } },
       });
+    });
+
+    it('persists only nested session readiness transitions and removes the listener', () => {
+      const { emitter, cleanup } = start([
+        toolCall('nested', 'agent', {}, 'nested'),
+      ]);
       const update = (ready: boolean) =>
         emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-          subagentId: 'agent-x',
-          round: 1,
+          ...ev,
           callId: 'nested',
           outputChunk: {
             type: 'task_execution',
@@ -652,7 +585,7 @@ describe('agent-transcript', () => {
       update(true);
       cleanup();
       update(false);
-      const records = readJsonl(jsonlPath);
+      const records = readJsonl();
       expect(records.map((record) => record.type)).toEqual([
         'assistant',
         'system',
@@ -663,53 +596,21 @@ describe('agent-transcript', () => {
           subtype: record.subtype,
           payload: record.systemPayload,
         })),
-      ).toEqual([
-        {
+      ).toEqual(
+        [false, true].map((subagentSessionReady) => ({
           subtype: 'agent_session_ready',
-          payload: { callId: 'nested', subagentSessionReady: false },
-        },
-        {
-          subtype: 'agent_session_ready',
-          payload: { callId: 'nested', subagentSessionReady: true },
-        },
-      ]);
+          payload: { callId: 'nested', subagentSessionReady },
+        })),
+      );
       expect(records[1].parentUuid).toBe(records[0].uuid);
       expect(records[2].parentUuid).toBe(records[1].uuid);
     });
 
     it('preserves a nested launch failure in its finalized result', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-      emitter.emit(AgentEventType.TOOL_CALL, {
-        subagentId: 'agent-x',
-        round: 1,
-        callId: 'nested',
-        name: 'agent',
-        description: 'nested',
-        args: {},
-        timestamp: Date.now(),
-      });
-      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
-        subagentId: 'agent-x',
-        round: 1,
-        timestamp: Date.now(),
-        responses: [
-          {
-            callId: 'nested',
-            responseParts: [
-              {
-                functionResponse: {
-                  id: 'nested',
-                  name: 'agent',
-                  response: { error: 'Registration failed' },
-                },
-              },
-            ],
-          },
-        ],
-      });
-      cleanup();
-      const records = readJsonl(jsonlPath);
+      const records = write([
+        toolCall('nested', 'agent', {}, 'nested'),
+        finalized('nested', 'agent', { error: 'Registration failed' }),
+      ]);
       expect(records[1].systemPayload).toEqual({
         callId: 'nested',
         subagentSessionReady: false,
@@ -721,58 +622,26 @@ describe('agent-transcript', () => {
     });
 
     it('does not persist provisional TOOL_RESULT response parts', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.TOOL_RESULT, {
-        subagentId: 'agent-x',
-        round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        success: true,
-        responseParts: [
-          {
-            functionResponse: {
-              id: 'c1',
-              name: 'read_file',
-              response: { output: 'unfinalized' },
-            },
-          },
-        ],
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      expect(fs.existsSync(jsonlPath)).toBe(false);
+      write([
+        (e) =>
+          e.emit(AgentEventType.TOOL_RESULT, {
+            ...ev,
+            callId: 'c1',
+            name: 'read_file',
+            success: true,
+            responseParts: [
+              fnResponse('read_file', { output: 'unfinalized' }, 'c1'),
+            ],
+            timestamp: Date.now(),
+          }),
+      ]);
+      expect(exists()).toBe(false);
     });
 
     it('writes finalized tool responses with toolCallResult metadata', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
-        subagentId: 'agent-x',
-        round: 1,
-        responses: [
-          {
-            callId: 'c1',
-            durationMs: 7,
-            responseParts: [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'read_file',
-                  response: { output: 'done' },
-                },
-              },
-            ],
-          },
-        ],
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([
+        finalized('c1', 'read_file', { output: 'done' }, { durationMs: 7 }),
+      ]);
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('tool_result');
       expect(records[0].toolCallResult).toMatchObject({
@@ -782,72 +651,20 @@ describe('agent-transcript', () => {
     });
 
     it('preserves finalized responseParts', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      const responseParts = [
-        {
-          functionResponse: {
-            id: 'c1',
-            name: 'read_file',
-            response: { output: 'line1\nline2\n' },
-          },
-        },
-      ];
-      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
-        subagentId: 'agent-x',
-        round: 1,
-        responses: [{ callId: 'c1', responseParts }],
-        timestamp: Date.now(),
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
-      expect(records[0].message?.parts).toEqual(responseParts);
+      const records = write([
+        finalized('c1', 'read_file', { output: 'line1\nline2\n' }),
+      ]);
+      expect(records[0].message?.parts).toEqual([
+        fnResponse('read_file', { output: 'line1\nline2\n' }, 'c1'),
+      ]);
     });
 
     it('chains parentUuid across multiple records', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'hi',
-        thoughtText: '',
-        timestamp: 1,
-      });
-      emitter.emit(AgentEventType.TOOL_CALL, {
-        subagentId: 'agent-x',
-        round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        args: {},
-        description: '',
-        timestamp: 2,
-      });
-      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
-        subagentId: 'agent-x',
-        round: 1,
-        responses: [
-          {
-            callId: 'c1',
-            responseParts: [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'read_file',
-                  response: { output: 'done' },
-                },
-              },
-            ],
-          },
-        ],
-        timestamp: 3,
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([
+        roundText('hi', { timestamp: 1 }),
+        toolCall('c1', 'read_file', {}, '', { timestamp: 2 }),
+        finalized('c1', 'read_file', { output: 'done' }, {}, 3),
+      ]);
       expect(records).toHaveLength(3);
       expect(records[0].parentUuid).toBeNull();
       expect(records[1].parentUuid).toBe(records[0].uuid);
@@ -855,145 +672,67 @@ describe('agent-transcript', () => {
     });
 
     it('seeds the JSONL with the launching prompt as a user-role record', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { cleanup } = makeWriter(jsonlPath, {
+      const records = write([], {
         initialUserPrompt: 'Find all TODO comments',
       });
-
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('user');
-      expect(records[0].message).toEqual({
-        role: 'user',
-        parts: [{ text: 'Find all TODO comments' }],
-      });
+      expect(records[0].message).toEqual(userText('Find all TODO comments'));
       expect(records[0].isSidechain).toBe(true);
       expect(records[0].parentUuid).toBeNull();
     });
 
     it('skips an empty initialUserPrompt so the chain stays clean', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { cleanup } = makeWriter(jsonlPath, { initialUserPrompt: '' });
-
-      cleanup();
-
-      expect(fs.existsSync(jsonlPath)).toBe(false);
+      write([], { initialUserPrompt: '' });
+      expect(exists()).toBe(false);
     });
 
     it('writes EXTERNAL_MESSAGE events as user records chained after the seed', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath, {
+      const records = write([external('follow-up from parent', 'message')], {
         initialUserPrompt: 'initial prompt',
       });
-
-      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
-        subagentId: 'agent-x',
-        kind: 'message',
-        text: 'follow-up from parent',
-        timestamp: 100,
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
       expect(records).toHaveLength(2);
       expect(records[1].type).toBe('user');
-      expect(records[1].message).toEqual({
-        role: 'user',
-        parts: [{ text: 'follow-up from parent' }],
-      });
+      expect(records[1].message).toEqual(userText('follow-up from parent'));
       expect(records[1].externalInputKind).toBe('message');
       expect(records[1].parentUuid).toBe(records[0].uuid);
     });
 
     it('preserves notification kind for EXTERNAL_MESSAGE records', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
-        subagentId: 'agent-x',
-        kind: 'notification',
-        text: '<task-notification />',
-        timestamp: 100,
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([
+        external('<task-notification />', 'notification'),
+      ]);
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('user');
-      expect(records[0].message).toEqual({
-        role: 'user',
-        parts: [{ text: '<task-notification />' }],
-      });
+      expect(records[0].message).toEqual(userText('<task-notification />'));
       expect(records[0].externalInputKind).toBe('notification');
     });
 
     it('defaults legacy EXTERNAL_MESSAGE events without kind to message records', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
-      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
-        subagentId: 'agent-x',
-        text: 'legacy follow-up from parent',
-        timestamp: 100,
-      });
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      const records = write([external('legacy follow-up from parent')]);
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('user');
-      expect(records[0].message).toEqual({
-        role: 'user',
-        parts: [{ text: 'legacy follow-up from parent' }],
-      });
+      expect(records[0].message).toEqual(
+        userText('legacy follow-up from parent'),
+      );
       expect(records[0].externalInputKind).toBe('message');
     });
 
     it('stops writing after cleanup', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { emitter, cleanup } = makeWriter(jsonlPath);
-
+      const { emitter, cleanup } = start();
       cleanup();
-      emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'agent-x',
-        round: 1,
-        text: 'late',
-        thoughtText: '',
-        timestamp: 1,
-      });
-      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
-        subagentId: 'agent-x',
-        kind: 'notification',
-        text: 'late injection',
-        timestamp: 2,
-      });
-
-      expect(fs.existsSync(jsonlPath)).toBe(false);
+      roundText('late', { timestamp: 1 })(emitter);
+      external('late injection', 'notification', 2)(emitter);
+      expect(exists()).toBe(false);
     });
 
     it('appends onto an existing transcript when appendToExisting is enabled', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const first = makeWriter(jsonlPath, {
-        initialUserPrompt: 'initial prompt',
-      });
-      first.cleanup();
-
-      const emitter = new AgentEventEmitter();
-      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
-        agentId: 'agent-x',
-        agentName: 'explore',
-        agentColor: 'blue',
-        sessionId: 'session-1',
-        cwd: '/proj',
-        version: '1.2.3',
-        appendToExisting: true,
-        initialUserPrompt: 'resume prompt',
-      });
-
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
+      write([], { initialUserPrompt: 'initial prompt' });
+      const records = write(
+        [],
+        { appendToExisting: true, initialUserPrompt: 'resume prompt' },
+        named,
+      );
       expect(records).toHaveLength(2);
       expect(records[1].parentUuid).toBe(records[0].uuid);
       expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(records[1].uuid);
@@ -1038,61 +777,30 @@ describe('agent-transcript', () => {
 
     it('returns complete, filtered lineage and marks missing parents', async () => {
       const sessionId = 'session-1';
-      const write = (meta: AgentMeta) =>
-        writeAgentMeta(
-          getAgentMetaPath(projectDir, sessionId, meta.agentId),
-          meta,
-        );
-      write({
-        agentId: 'root',
-        agentType: 'reviewer',
-        description: 'root task',
-        parentSessionId: sessionId,
-        parentAgentId: null,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        status: 'completed',
-      });
-      write({
-        agentId: 'child',
-        agentType: 'tester',
-        description: 'child task',
-        parentSessionId: sessionId,
-        parentAgentId: 'root',
-        createdAt: '2026-01-01T00:00:01.000Z',
-        status: 'running',
-      });
-      write({
-        agentId: 'orphan',
-        agentType: 'tester',
-        description: 'orphan task',
-        parentSessionId: sessionId,
-        parentAgentId: 'missing',
-        createdAt: '2026-01-01T00:00:02.000Z',
-      });
-      write({
-        agentId: 'cycle-a',
-        agentType: 'tester',
-        description: 'cycle a',
-        parentSessionId: sessionId,
-        parentAgentId: 'cycle-b',
-        createdAt: '2026-01-01T00:00:03.000Z',
-      });
-      write({
-        agentId: 'cycle-b',
-        agentType: 'tester',
-        description: 'cycle b',
-        parentSessionId: sessionId,
-        parentAgentId: 'cycle-a',
-        createdAt: '2026-01-01T00:00:04.000Z',
-      });
-      write({
-        agentId: '0-cycle-child',
-        agentType: 'tester',
-        description: 'cycle child',
-        parentSessionId: sessionId,
-        parentAgentId: 'cycle-a',
-        createdAt: '2026-01-01T00:00:05.000Z',
-      });
+      // [agentId, agentType, description, parentAgentId, status?]; createdAt
+      // ticks one second per row, and rows without a status omit the key.
+      const rows: Array<
+        [string, string, string, string | null, AgentMeta['status']?]
+      > = [
+        ['root', 'reviewer', 'root task', null, 'completed'],
+        ['child', 'tester', 'child task', 'root', 'running'],
+        ['orphan', 'tester', 'orphan task', 'missing'],
+        ['cycle-a', 'tester', 'cycle a', 'cycle-b'],
+        ['cycle-b', 'tester', 'cycle b', 'cycle-a'],
+        ['0-cycle-child', 'tester', 'cycle child', 'cycle-a'],
+      ];
+      rows.forEach(
+        ([agentId, agentType, description, parentAgentId, status], i) =>
+          writeAgentMeta(getAgentMetaPath(projectDir, sessionId, agentId), {
+            agentId,
+            agentType,
+            description,
+            parentSessionId: sessionId,
+            parentAgentId,
+            createdAt: `2026-01-01T00:00:0${i}.000Z`,
+            ...(status ? { status } : {}),
+          }),
+      );
 
       const trace = await readAgentTrace(projectDir, sessionId, 'root');
 

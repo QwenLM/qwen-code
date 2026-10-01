@@ -1088,7 +1088,8 @@ button.treeRow:hover {
 }
 
 .htmlPreviewWrap {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1175,8 +1176,9 @@ button.treeRow:hover {
 
 .htmlPreview {
   width: 100%;
+  height: 100%;
   flex: 1 1 auto;
-  min-height: 520px;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
@@ -1190,7 +1192,9 @@ button.treeRow:hover {
 }
 
 .filePreviewWrap {
-  min-height: 100%;
+  position: absolute;
+  inset: 12px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1198,7 +1202,7 @@ button.treeRow:hover {
 .codeMirrorFile {
   min-width: 0;
   flex: 1 1 auto;
-  min-height: 520px;
+  min-height: 0;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1206,13 +1210,14 @@ button.treeRow:hover {
 }
 
 .codeMirrorFile :global(.cm-editor) {
-  min-height: 520px;
+  height: 100%;
   font-size: 12px;
   background: var(--background);
   color: var(--foreground);
 }
 
 .codeMirrorFile :global(.cm-scroller) {
+  overflow: auto;
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
     'Courier New', monospace;

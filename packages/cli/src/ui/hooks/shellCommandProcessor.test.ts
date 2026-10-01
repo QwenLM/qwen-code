@@ -18,6 +18,11 @@ import {
 
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const runtimeShellMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: runtimeShellMock,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -64,6 +69,9 @@ describe('useShellCommandProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeShellMock.mockImplementation((_runtime, ...args) =>
+      mockShellExecutionService(...args),
+    );
 
     addItemToHistoryMock = vi.fn();
     setPendingHistoryItemMock = vi.fn();
@@ -124,6 +132,35 @@ describe('useShellCommandProcessor', () => {
     pid: 12345,
     executionMethod: 'child_process',
     ...overrides,
+  });
+
+  it('binds sandboxed shell mode to its Config without a host pwd file', async () => {
+    mockConfig.getShellExecutionSandbox = () =>
+      ({ filesystem: 'read-only', network: 'closed' }) as ReturnType<
+        Config['getShellExecutionSandbox']
+      >;
+    const { result } = renderProcessorHook();
+    act(() => {
+      result.current.handleShellCommand(
+        'echo sandbox',
+        new AbortController().signal,
+      );
+    });
+    expect(runtimeShellMock).toHaveBeenCalledWith(
+      mockConfig,
+      'echo sandbox',
+      '/test/dir',
+      expect.any(Function),
+      expect.any(AbortSignal),
+      false,
+      expect.any(Object),
+    );
+    expect(crypto.randomBytes).not.toHaveBeenCalled();
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveExecutionPromise(createMockServiceResult());
+      await onExecMock.mock.calls[0][0];
+    });
   });
 
   it('should initiate command execution and set pending state', async () => {

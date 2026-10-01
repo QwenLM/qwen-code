@@ -82,13 +82,14 @@ export type {
   ChannelLoopStatus,
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
+export { resolvePrivatePolicy } from './private-policy.js';
 export { PairingStore } from './PairingStore.js';
 export type {
   CreatePairingRequestResult,
   PairingRequest,
   PairingSubject,
 } from './PairingStore.js';
-export { GroupGate } from './GroupGate.js';
+export { GroupGate, lowercaseGroupAllowedUsers } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
@@ -157,6 +158,8 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrivatePolicy,
+  GroupSenderPolicy,
   ObservedChannelIdentity,
   ObservedChannelContactObservation,
   ObservedChannelContact,
@@ -171,3 +174,5 @@ export type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
+export { matchMessageRoute } from './message-routes.js';
+export type { MatchedMessageRoute } from './message-routes.js';

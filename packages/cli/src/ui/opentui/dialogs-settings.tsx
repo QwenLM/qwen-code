@@ -49,6 +49,7 @@ import {
   type SettingsType,
   type SettingsValue,
 } from '../../config/settingsSchema.js';
+import { formatSettingRowValue } from '../../utils/aux-model-selector.js';
 import { isAutoLanguage } from '../../i18n/languageUtils.js';
 import {
   getExtendedSystemInfo,
@@ -58,6 +59,7 @@ import { getSystemInfoFields } from '../systemInfoFields.js';
 import { ICON } from '../constants.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -100,6 +102,11 @@ export const SUB_DIALOG_SETTING_KEYS = [
 export function isSubDialogSetting(key: string): boolean {
   return (SUB_DIALOG_SETTING_KEYS as readonly string[]).includes(key);
 }
+
+// The rule itself lives in `utils/aux-model-selector.ts` next to the rest of
+// the selector-scrub surface, so the ink and OpenTUI `/settings` rows cannot
+// drift apart. Re-exported here for this dialog's existing unit test.
+export { formatSettingRowValue };
 
 export interface SettingsListItem {
   key: string;
@@ -261,7 +268,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
     SettingScope.User,
   );
-  const [activeSettingIndex, setActiveSettingIndex] = useState(0);
+  const {
+    cursor: activeSettingIndex,
+    cursorRef: activeSettingIndexRef,
+    setCursor: setActiveSettingIndex,
+  } = useBatchSafeCursor();
   const [scrollOffset, setScrollOffset] = useState(0);
   const [activeTab, setActiveTab] = useState<SettingsTab>('settings');
   const [focusZone, setFocusZone] = useState<'tabs' | 'search' | 'list'>(
@@ -320,7 +331,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   useEffect(() => {
     setActiveSettingIndex(0);
     setScrollOffset(0);
-  }, [searchQuery]);
+  }, [searchQuery, setActiveSettingIndex]);
 
   const allItems = buildSettingsListItems({
     excludeWorkspaceRestricted: selectedScope === SettingScope.Workspace,
@@ -398,7 +409,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
   };
 
   const resetCurrentToDefault = (key: string) => {
-    const currentSetting = items[activeSettingIndex];
+    const currentSetting = items[activeSettingIndexRef.current];
     if (!currentSetting || currentSetting.key !== key) return;
     const defaultValue = getDefaultValue(key);
     applySettingValue(key, defaultValue);
@@ -576,23 +587,25 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       return;
     }
     if (keyMatchers[Command.SELECTION_UP](original)) {
-      if (activeSettingIndex === 0) {
+      if (activeSettingIndexRef.current === 0) {
         setFocusZone('search');
         setScrollOffset(0);
       } else {
-        const newIndex = activeSettingIndex - 1;
+        const newIndex = activeSettingIndexRef.current - 1;
         setActiveSettingIndex(newIndex);
         if (newIndex < scrollOffset) setScrollOffset(newIndex);
       }
     } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
       const newIndex =
-        activeSettingIndex < items.length - 1 ? activeSettingIndex + 1 : 0;
+        activeSettingIndexRef.current < items.length - 1
+          ? activeSettingIndexRef.current + 1
+          : 0;
       setActiveSettingIndex(newIndex);
       if (newIndex === 0) setScrollOffset(0);
       else if (newIndex >= scrollOffset + maxItemsToShow)
         setScrollOffset(newIndex - maxItemsToShow + 1);
     } else if (name === 'return' || name === 'space') {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (!currentItem) return;
       if (isSubDialogSetting(currentItem.key)) {
         if (name === 'return') onSelect(currentItem.key, selectedScope);
@@ -607,12 +620,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         toggleCurrent(currentItem.key);
       }
     } else if (name === 'right') {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (currentItem && isSubDialogSetting(currentItem.key)) {
         onSelect(currentItem.key, selectedScope);
       }
     } else if (/^[0-9]$/.test(original.sequence)) {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (isNumericSettingType(currentItem?.type)) {
         startEditing(currentItem.key, original.sequence);
       } else {
@@ -620,7 +633,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         setSearchQuery((q) => q + original.sequence);
       }
     } else if (ctrl && (name === 'c' || name === 'l')) {
-      const currentItem = items[activeSettingIndex];
+      const currentItem = items[activeSettingIndexRef.current];
       if (currentItem) resetCurrentToDefault(currentItem.key);
     } else if (showRestartPrompt && name === 'r') {
       applyRestart();
@@ -719,7 +732,8 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             onWheel={(direction) =>
               scopeList.setActiveIndex(
-                scopeList.activeIndex + (direction === 'down' ? 1 : -1),
+                scopeList.activeIndexRef.current +
+                  (direction === 'down' ? 1 : -1),
               )
             }
             renderLabel={(item, { titleColor }) => (
@@ -777,7 +791,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
                 effectiveCurrentValue !== undefined &&
                 effectiveCurrentValue !== null
               ) {
-                displayValue = String(effectiveCurrentValue);
+                displayValue = formatSettingRowValue(
+                  item.key,
+                  effectiveCurrentValue,
+                );
               } else {
                 displayValue = '';
               }

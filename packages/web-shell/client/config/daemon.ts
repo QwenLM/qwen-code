@@ -230,7 +230,7 @@ export function removeDaemonTokenFromUrl(): void {
       changed = true;
     }
   }
-  if (changed) window.history.replaceState(null, '', url);
+  if (changed) window.history.replaceState(window.history.state, '', url);
 }
 
 export function getDaemonAuthHeaders(): HeadersInit | undefined {
@@ -253,8 +253,9 @@ export function getAllowedDaemonOrigin(raw: string): string {
       return '';
     }
     // A bracketed IPv6 literal is not a valid CSP host-source (CSP3 host-part
-    // excludes '[', ']' and ':'), so a remote http://[::1]:4170 target would
-    // be served a connect-src every browser drops, and the gate would loop on
+    // excludes '[', ']' and ':'). The invalid source expression is ignored
+    // while the rest of connect-src stays in effect, so a remote
+    // http://[::1]:4170 target remains blocked and the gate would loop on
     // "unreachable" with only a console violation as evidence. Exempt the
     // page's own origin: 'self' covers it, and qwen serve --hostname '[::1]'
     // is a documented deployment.
@@ -283,6 +284,7 @@ export function buildDaemonConnectionUrl(
   url.searchParams.delete('context');
   url.searchParams.delete('addWorkspace');
   url.searchParams.delete('workspaceReturn');
+  url.searchParams.delete('addRemoteWorkspace');
   url.searchParams.delete('token');
   // Session-scoped like the rest: a `?split=` deep link names sessions of the
   // daemon being left behind.
@@ -296,7 +298,8 @@ export function buildDaemonConnectionUrl(
   return url.toString();
 }
 
-// ponytail: remember one target in this tab; no persistent host catalog.
+// Target confirmation is separate from the persistent Connections catalog:
+// only the last confirmed origin is trusted automatically in this tab.
 const DAEMON_TARGET_CONFIRMATION_KEY = 'qwen-daemon-target-confirmed';
 
 export function confirmDaemonTarget(origin: string): void {
@@ -318,10 +321,26 @@ export function isKnownDaemonTarget(origin: string): boolean {
   }
 }
 
-export function navigateToDaemon(raw: string, token?: string): boolean {
+export function navigateToDaemon(
+  raw: string,
+  token?: string,
+  options?: {
+    continueFlow?: 'workspace' | 'connection';
+  },
+): boolean {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
-  const nextUrl = buildDaemonConnectionUrl(raw, window.location.href);
-  if (!daemonOrigin || !nextUrl) return false;
+  const builtUrl = buildDaemonConnectionUrl(raw, window.location.href);
+  if (!daemonOrigin || !builtUrl) return false;
+  const nextUrl = new URL(builtUrl);
+  const continuation =
+    options?.continueFlow === 'workspace'
+      ? (['addRemoteWorkspace', 'browse'] as const)
+      : options?.continueFlow === 'connection'
+        ? (['addRemoteConnection', 'verify'] as const)
+        : undefined;
+  if (continuation) {
+    nextUrl.searchParams.set(continuation[0], continuation[1]);
+  }
   // Read before the assign: getDaemonBaseUrl() follows the live URL.
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
   if (token !== undefined) persistDaemonToken(token.trim(), daemonOrigin);
@@ -346,6 +365,11 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
     // Unless the credential cannot outlive it: with storage disabled the
     // reloaded page would boot with no token at all, so stay on this one.
     if (token !== undefined && !hasReloadSurvivableDaemonToken()) return false;
+    if (continuation) {
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set(continuation[0], continuation[1]);
+      window.history.replaceState(window.history.state, '', currentUrl);
+    }
     window.location.reload();
     return true;
   }
@@ -379,6 +403,6 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
   ) {
     return false;
   }
-  window.location.assign(nextUrl);
+  window.location.assign(nextUrl.toString());
   return true;
 }

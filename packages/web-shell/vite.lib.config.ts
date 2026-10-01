@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -150,8 +150,55 @@ function injectCssModules(): Plugin {
 // renderer. Built alongside the root entry, it would inherit the full
 // component stylesheet (editor, sidebar, …) that the `/export html`
 // document renderer inlines into every exported file (#11031).
+// The transcript renderer is inlined into every `/export html` document, under
+// a byte budget that web-templates enforces at build time. Strings for
+// surfaces the read-only transcript can never render have no business there:
+// the Live Voice dialog and setup card alone are ~200 entries. Matching on the
+// resolved id (not the specifier) keeps this working however the module is
+// imported. Vite's ids use forward slashes on every platform while
+// `path.resolve` returns backslashes on Windows, so both sides go through
+// `normalizePath`: compared raw, the stub would never apply there and the
+// Windows build would blow the budget this exists to protect.
+const TRANSCRIPT_DEAD_MESSAGES = new Map(
+  [
+    ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
+    [
+      './client/components/workspace-agents/messages.ts',
+      './client/components/workspace-agents/messages.transcript-stub.ts',
+    ],
+    [
+      './client/settings/messages.ts',
+      './client/settings/messages.transcript-stub.ts',
+    ],
+  ].map(([module, stub]) => [
+    normalizePath(resolve(__dirname, module)),
+    normalizePath(resolve(__dirname, stub)),
+  ]),
+);
+
+function stubTranscriptDeadMessages(): Plugin {
+  return {
+    name: 'web-shell-stub-transcript-dead-messages',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      });
+      return resolved
+        ? (TRANSCRIPT_DEAD_MESSAGES.get(normalizePath(resolved.id)) ?? null)
+        : null;
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), injectCssModules()],
+  plugins: [
+    ...(mode === 'transcript' ? [stubTranscriptDeadMessages()] : []),
+    react(),
+    tailwindcss(),
+    injectCssModules(),
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -182,6 +229,7 @@ export default defineConfig(({ mode }) => ({
           : {
               index: 'client/index.tsx',
               'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+              'code-highlighter': 'client/code-highlighter.ts',
             },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,

@@ -5,13 +5,17 @@
  */
 
 import type { Response } from 'express';
+import { trace, type Span } from '@opentelemetry/api';
 import { RequestError } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AcpChildCapacityExceededError,
+  ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import {
   InvalidSessionTranscriptTurnAnchorError,
   SessionIdCaseConflictError,
@@ -22,6 +26,7 @@ import {
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { SessionAttachmentUploadError } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   WorkspaceRuntimeInitializationError,
   WorkspaceRuntimeStillStartingError,
@@ -51,6 +56,110 @@ function responseMock(): {
   return { response: response as unknown as Response, set, status, json };
 }
 
+describe('session attachment upload errors', () => {
+  it('records storage failures with their cause without exposing it to clients', () => {
+    const { response, status, json } = responseMock();
+    const cause = Object.assign(new Error('EACCES: data.csv'), {
+      code: 'EACCES',
+    });
+    const daemonLog = {
+      error: vi.fn(),
+      warn: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new SessionAttachmentUploadError(
+        500,
+        'attachment_upload_storage_failed',
+        'Could not store attachment',
+        cause,
+      ),
+      { route: 'POST /session/:id/attachment-uploads/:uploadId/complete' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      cause.message,
+      cause,
+      expect.objectContaining({
+        route: 'POST /session/:id/attachment-uploads/:uploadId/complete',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Could not store attachment',
+      code: 'attachment_upload_storage_failed',
+    });
+  });
+
+  it('records capacity failures as expected errors', () => {
+    const { response, status } = responseMock();
+    const daemonLog = {
+      error: vi.fn(),
+      warn: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new SessionAttachmentUploadError(
+        429,
+        'attachment_upload_capacity_exceeded',
+        'Attachment upload capacity is exhausted',
+      ),
+      undefined,
+      daemonLog,
+    );
+
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'Attachment upload capacity is exhausted',
+      expect.objectContaining({ errorType: 'SessionAttachmentUploadError' }),
+    );
+    expect(daemonLog.error).not.toHaveBeenCalled();
+    expect(status).toHaveBeenCalledWith(429);
+  });
+
+  it('marks a busy store as retryable', () => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new SessionAttachmentUploadError(
+        503,
+        'attachment_upload_store_busy',
+        'Session attachments are being copied',
+      ),
+      undefined,
+      daemonLog,
+    );
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Session attachments are being copied',
+      code: 'attachment_upload_store_busy',
+      retryable: true,
+    });
+    expect(daemonLog.error).toHaveBeenCalled();
+  });
+});
+
+describe('startup errors across bundle boundaries', () => {
+  it.each([
+    ['invalid_startup_config', 400],
+    ['startup_config_rejected', 422],
+  ] as const)('maps %s by its stable contract', (code, httpStatus) => {
+    const error = Object.assign(new Error('startup rejected'), {
+      name: 'SessionStartupConfigError',
+      code,
+    });
+    const { response, status, json } = responseMock();
+    sendBridgeError(response, error);
+    expect(status).toHaveBeenCalledWith(httpStatus);
+    expect(json).toHaveBeenCalledWith({ code, error: 'startup rejected' });
+  });
+});
+
 describe('workflow parameter errors', () => {
   it.each(['request', 'wire'] as const)(
     'preserves parameter details from a %s error',
@@ -74,6 +183,42 @@ describe('workflow parameter errors', () => {
       });
     },
   );
+
+  it.each([
+    'workflow_journal_unavailable',
+    'workflow_args_unavailable',
+    'workflow_run_live_elsewhere',
+  ])('answers %s with 409 and its message', (errorKind) => {
+    const source = RequestError.invalidParams(
+      { errorKind },
+      'Workflow run wf_1234abcd has no journal on disk',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: errorKind,
+    });
+  });
+
+  it('answers workflow_not_recorded with 503 and its message', () => {
+    const source = RequestError.invalidParams(
+      { errorKind: 'workflow_not_recorded' },
+      'Could not record that workflow run wf_1234abcd is running again',
+    );
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, source);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: source.message,
+      code: 'workflow_not_recorded',
+    });
+  });
 
   it.each([
     new Error('Unexpected workflow failure'),
@@ -450,6 +595,124 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps a Managed engine rejection to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+    const error = new RequestError(-32024, 'belongs to managed', {
+      errorKind: 'session_execution_engine_unavailable',
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: 'session_execution_engine_unavailable',
+      errorKind: 'session_execution_engine_unavailable',
+    });
+  });
+
+  it('maps a paired host owner rejection to the same HTTP 409', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new SessionExecutionEngineError('session-1', 'conflicting owners'),
+    );
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'This session cannot be resumed with the current execution engine.',
+      code: 'session_execution_engine_unavailable',
+      errorKind: 'session_execution_engine_unavailable',
+    });
+  });
+
+  it('logs why an execution engine rejection happened', () => {
+    const daemonLog = { warn: vi.fn() } as unknown as DaemonLogger;
+    const ctx = { route: 'POST /session/:id/load', sessionId: 'session-1' };
+
+    sendBridgeError(
+      responseMock().response,
+      new SessionExecutionEngineError('session-1', 'incomplete transcript'),
+      ctx,
+      daemonLog,
+    );
+    sendBridgeError(
+      responseMock().response,
+      new RequestError(-32024, 'belongs to managed', {
+        errorKind: 'session_execution_engine_unavailable',
+      }),
+      ctx,
+      daemonLog,
+    );
+
+    expect(daemonLog.warn).toHaveBeenNthCalledWith(
+      1,
+      'Session execution engine for session-1: incomplete transcript.',
+      {
+        route: 'POST /session/:id/load',
+        sessionId: 'session-1',
+        errorType: 'SessionExecutionEngineError',
+      },
+    );
+    expect(daemonLog.warn).toHaveBeenNthCalledWith(
+      2,
+      'belongs to managed',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+  });
+
+  it('maps a Bridge rejection of an invalid requested ID to HTTP 400', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new RequestedSessionIdRejectedError('invalid_session_id'),
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: Requested session ID is invalid',
+      code: 'invalid_session_id',
+    });
+  });
+
+  it('maps a Bridge rejection of a live requested ID to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new RequestedSessionIdRejectedError('session_id_conflict', 'session-1'),
+    );
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: Session session-1 is already live',
+      code: 'session_id_conflict',
+      sessionId: 'session-1',
+      conflict: 'live',
+    });
+  });
+
+  it('maps an unsupported Managed branch to HTTP 409', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(
+      response,
+      new ManagedSessionBranchUnsupportedError('session-1'),
+    );
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'Session session-1 runs on the Managed execution engine, which does not support branching',
+      code: 'managed_session_branch_unsupported',
+      sessionId: 'session-1',
+    });
+  });
+
   it('maps an invalid transcript turn anchor to the public 400 contract', () => {
     const { response, status, json } = responseMock();
 
@@ -667,4 +930,59 @@ describe('sendBridgeError session writer errors', () => {
       code,
     });
   });
+});
+
+describe('standalone telemetry fidelity', () => {
+  it.each([false, true])(
+    'preserves stack and exception code for creation=%s',
+    (creation) => {
+      const original = new StandaloneSessionServiceError(
+        creation
+          ? 'standalone_creation_rolled_back'
+          : 'transcript_deletion_failed',
+        '11111111-1111-4111-8111-111111111111',
+        'Safe public failure',
+        true,
+        undefined,
+        { cause: new Error('SECRET_CAUSE') },
+      );
+      original.stack = `${original.name}: ${original.message}\n    at originalThrowSite (service.ts:42:1)`;
+      if (creation)
+        original.creationDiagnostic = {
+          sessionId: original.sessionId!,
+          phase: 'spawn_pre_dispatch',
+          reason: 'unknown',
+          dispatchState: 'not_dispatched',
+          cleanupOutcome: 'rolled_back',
+        };
+      Object.assign(original, { privatePayload: 'SECRET_PAYLOAD' });
+      const recordException = vi.fn();
+      const span = {
+        recordException,
+        setAttributes: vi.fn(),
+        setStatus: vi.fn(),
+      } as unknown as Span;
+      const getSpan = vi.spyOn(trace, 'getSpan').mockReturnValue(span);
+      try {
+        const { response, status } = responseMock();
+        sendBridgeError(response, original);
+        expect(status).toHaveBeenCalledWith(500);
+        expect(recordException).toHaveBeenCalledOnce();
+        const recorded = recordException.mock.calls[0][0] as Error & {
+          code: string;
+        };
+        expect(recorded.stack).toBe(original.stack);
+        expect(recorded.name).toBe(original.name);
+        expect(recorded.code).toBe(original.code);
+        if (creation) {
+          expect(recorded).not.toBe(original);
+          expect(recorded.cause).toBeUndefined();
+          expect(JSON.stringify(recorded)).not.toContain('SECRET_');
+          expect(original.cause).toBeInstanceOf(Error);
+        } else expect(recorded).toBe(original);
+      } finally {
+        getSpan.mockRestore();
+      }
+    },
+  );
 });

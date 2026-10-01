@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
+  type MarkdownRenderContext,
   type WebShellCodeBlockRenderInfo,
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
@@ -1398,6 +1399,7 @@ describe('Markdown custom code block rendering', () => {
 
     expect(transformMarkdown).toHaveBeenCalledWith('**raw chart**', {
       source: 'assistant',
+      isStreaming: false,
     });
     expect(container.textContent).toContain('transformed chart');
     expect(container.textContent).not.toContain('raw chart');
@@ -1436,6 +1438,7 @@ describe('Markdown custom code block rendering', () => {
     ).not.toBeNull();
     expect(transformMarkdown).toHaveBeenCalledWith(rawContent, {
       source: 'assistant',
+      isStreaming: true,
     });
     expect(container.textContent).toContain('transformed prefix');
     expect(container.textContent).not.toContain('raw prefix');
@@ -1444,6 +1447,168 @@ describe('Markdown custom code block rendering', () => {
       root.unmount();
     });
     container.remove();
+  });
+});
+
+describe('Markdown customization message completion', () => {
+  it.each(['assistant', 'thinking'] as const)(
+    'retransforms unchanged %s content when that message completes',
+    (source) => {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const content = 'Answer [source](https://example.com/incomplete';
+      const transformMarkdown = vi.fn(
+        (_content: string, context: MarkdownRenderContext) =>
+          context.isStreaming ? 'citation pending' : 'citation settled',
+      );
+      const customization = { markdown: { transformMarkdown } };
+      const render = (isStreaming: boolean) => {
+        act(() => {
+          root.render(
+            createElement(
+              WebShellCustomizationProvider,
+              { value: customization },
+              createElement(Markdown, { content, source, isStreaming }),
+            ),
+          );
+        });
+      };
+
+      try {
+        render(true);
+        expect(container.textContent).toBe('citation pending');
+        expect(transformMarkdown).toHaveBeenLastCalledWith(content, {
+          source,
+          isStreaming: true,
+        });
+        const streamingCalls = transformMarkdown.mock.calls.length;
+
+        render(false);
+        expect(transformMarkdown.mock.calls.length).toBeGreaterThan(
+          streamingCalls,
+        );
+        expect(transformMarkdown).toHaveBeenLastCalledWith(content, {
+          source,
+          isStreaming: false,
+        });
+        expect(container.textContent).toBe('citation settled');
+        expect(container.textContent).not.toContain('pending');
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+      }
+    },
+  );
+
+  it('keeps completed and historical messages settled while another message streams', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const transformMarkdown = vi.fn(
+      (content: string, context: MarkdownRenderContext) =>
+        `${content} ${context.isStreaming ? 'pending' : 'settled'}`,
+    );
+    const customization = { markdown: { transformMarkdown } };
+    const render = (active: boolean) => {
+      act(() => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: customization },
+            createElement(Markdown, {
+              key: 'completed',
+              content: 'completed',
+              source: 'assistant',
+              isStreaming: false,
+            }),
+            createElement(Markdown, {
+              key: 'historical',
+              content: 'historical',
+              source: 'assistant',
+            }),
+            active &&
+              createElement(Markdown, {
+                key: 'active',
+                content: 'active',
+                source: 'assistant',
+                isStreaming: true,
+              }),
+          ),
+        );
+      });
+    };
+
+    try {
+      render(false);
+      render(true);
+      expect(container.textContent).toContain('completed settled');
+      expect(container.textContent).toContain('historical settled');
+      expect(container.textContent).toContain('active pending');
+      expect(transformMarkdown).toHaveBeenCalledWith('completed', {
+        source: 'assistant',
+        isStreaming: false,
+      });
+      expect(transformMarkdown).toHaveBeenCalledWith('historical', {
+        source: 'assistant',
+        isStreaming: false,
+      });
+      expect(transformMarkdown).toHaveBeenCalledWith('active', {
+        source: 'assistant',
+        isStreaming: true,
+      });
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('flushes a closing link fragment with completed context before the throttle expires', () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const incomplete = '[source](https://example.com';
+    const complete = `${incomplete})`;
+    const transformMarkdown = vi.fn((content: string) => content);
+    const customization = { markdown: { transformMarkdown } };
+    const render = (content: string, isStreaming: boolean) => {
+      act(() => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: customization },
+            createElement(Markdown, {
+              content,
+              source: 'assistant',
+              isStreaming,
+            }),
+          ),
+        );
+      });
+    };
+
+    try {
+      render(incomplete, true);
+      transformMarkdown.mockClear();
+      render(complete, true);
+      expect(transformMarkdown).not.toHaveBeenCalled();
+      expect(container.querySelector('a')?.textContent).not.toBe('source');
+
+      render(complete, false);
+      expect(transformMarkdown).toHaveBeenLastCalledWith(complete, {
+        source: 'assistant',
+        isStreaming: false,
+      });
+      expect(container.querySelector('a')?.getAttribute('href')).toBe(
+        'https://example.com',
+      );
+      expect(container.querySelector('a')?.textContent).toBe('source');
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      vi.useRealTimers();
+    }
   });
 });
 

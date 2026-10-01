@@ -89,6 +89,8 @@ function resolveTier(
   if (method === 'POST' && p.startsWith('/session/') && p.endsWith('/prompt'))
     return 'prompt';
 
+  if (method === 'POST' && /^\/sessions\/catalog$/i.test(p)) return 'read';
+
   // Mutation tier: all remaining non-GET/HEAD
   if (method !== 'GET' && method !== 'HEAD') return 'mutation';
 

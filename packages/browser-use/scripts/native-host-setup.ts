@@ -34,4 +34,16 @@ if (!result) {
   );
   process.exit(2);
 }
-process.stdout.write(JSON.stringify({ command, ...result }) + '\n');
+process.stdout.write(
+  JSON.stringify({
+    command,
+    ...result,
+    ...(command === 'install'
+      ? {
+          activation: 'next-host-start',
+          notice:
+            'Running Native Hosts and sessions remain active. Reconnect the extension after those sessions finish to use the installed Host.',
+        }
+      : {}),
+  }) + '\n',
+);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  extractRawOutputText,
   formatToolDisplayName,
   getAgentCurrentToolHint,
   getSubagentDetailsUnavailableReason,
@@ -89,6 +90,90 @@ describe('toolFormatting', () => {
       ),
     ).toBe('README.md');
   });
+
+  it.each([
+    { name: 'bare empty-object title', title: '{}', args: {}, expected: '' },
+    {
+      name: 'trimmed empty-object title',
+      title: '  {}  ',
+      args: {},
+      expected: '',
+    },
+    {
+      name: 'MCP display-name prefix',
+      title: 'ping (sample MCP Server): {}',
+      args: {},
+      expected: 'ping (sample MCP Server)',
+    },
+    {
+      name: 'provider-normalized MCP server key',
+      title: 'ask_question (mcp.deepwiki.com MCP Server): {}',
+      toolName: 'mcp__mcp_deepwiki_com__ask_question_0gk4gom',
+      args: {},
+      expected: 'ask_question (mcp.deepwiki.com MCP Server)',
+    },
+    {
+      name: 'mismatched MCP tool name',
+      title: 'ping (sample MCP Server): {}',
+      toolName: 'mcp__sample__ping_other',
+      args: {},
+      expected: 'ping (sample MCP Server): {}',
+    },
+    {
+      name: 'provider-normalized overlength MCP server key',
+      title:
+        'list_pull_request_review_comments (github-enterprise.internal.example.com MCP Server): {}',
+      toolName:
+        'mcp__github-enterprise_internal_example_com__list_pull__031yve4',
+      args: {},
+      expected:
+        'list_pull_request_review_comments (github-enterprise.internal.example.com MCP Server)',
+    },
+    {
+      name: 'meaningful title',
+      title: 'Check server health',
+      args: {},
+      expected: 'Check server health',
+    },
+    {
+      name: 'prose ending in an empty object',
+      title: 'Expected response: {}',
+      args: {},
+      expected: 'Expected response: {}',
+    },
+    {
+      name: 'nonempty input with a {} title',
+      title: '{}',
+      args: { target: 'health' },
+      expected: '{}',
+    },
+    {
+      name: 'prose containing an MCP display name',
+      title: 'Expected response from ping (sample MCP Server): {}',
+      args: {},
+      expected: 'Expected response from ping (sample MCP Server): {}',
+    },
+    {
+      name: 'missing input with a {} title',
+      title: '{}',
+      args: undefined,
+      expected: '{}',
+    },
+    {
+      name: 'non-MCP tool',
+      toolName: 'custom_tool',
+      title: '{}',
+      args: {},
+      expected: '{}',
+    },
+  ])(
+    'renders the expected transcript description: $name',
+    ({ toolName = 'mcp__sample__ping', title, args, expected }) => {
+      const call = tool({ toolName, title, args });
+      expect(getToolDescription(call)).toBe(expected);
+      expect(getToolSummaryDescription(call)).toBe(expected);
+    },
+  );
 
   it('normalizes absolute paths from daemon title descriptions', () => {
     expect(
@@ -330,6 +415,19 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
+  it('ignores blank or non-string file descriptions', () => {
+    for (const description of ['   ', 42, {}]) {
+      expect(
+        getToolDescription(
+          tool({
+            toolName: 'read_file',
+            args: { file_path: 'src/orders.ts', description },
+          }),
+        ),
+      ).toBe('src/orders.ts');
+    }
+  });
+
   it('uses semantic shell descriptions for summaries', () => {
     const shellTool = tool({
       toolName: 'run_shell_command',
@@ -384,6 +482,34 @@ describe('toolFormatting', () => {
         }),
       ),
     ).toBe('3 line(s)');
+  });
+
+  it('extracts free-form Advisor advice without JSON wrappers', () => {
+    expect(
+      extractRawOutputText({
+        type: 'advisor_advice',
+        model: 'advisor-model',
+        text: 'Check the retry boundary.',
+      }),
+    ).toBe('Check the retry boundary.');
+  });
+
+  it('formats structured Advisor output as readable markdown', () => {
+    const advisor = tool({
+      toolName: 'advisor',
+      rawOutput: {
+        type: 'advisor_review',
+        verdict: 'Sound approach.',
+        risks: 'Retry handling is unclear.',
+        missingEvidence: 'No integration result.',
+        recommendation: 'Run the integration test.',
+      },
+    });
+
+    expect(extractRawOutputText(advisor.rawOutput)).toContain(
+      '## Verdict\nSound approach.',
+    );
+    expect(getToolResultSummary(advisor)).toBe('Sound approach.');
   });
 
   it('keeps long shell commands in full instead of capping at one line', () => {

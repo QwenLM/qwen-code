@@ -30,6 +30,7 @@ import { Storage } from '../config/storage.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import { hasRootlessMarker } from '../utils/container-runtime.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type {
@@ -701,6 +702,12 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
               ];
         if (typeof result.returnDisplay === 'string') {
           result.returnDisplay += notice;
+        } else if (isShellResultDisplay(result.returnDisplay)) {
+          result.returnDisplay = {
+            ...result.returnDisplay,
+            text: result.returnDisplay.text + notice,
+            notices: [...result.returnDisplay.notices, notice.trim()],
+          };
         }
         if (result.error) result.error.message += notice;
       }
