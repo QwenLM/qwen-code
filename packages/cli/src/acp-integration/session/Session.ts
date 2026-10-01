@@ -2215,6 +2215,7 @@ export class Session implements SessionContext {
   #boundaryExclusive = false;
   #boundaryTurnIndex: number | null = null;
   #activeCompressionPromptId: string | undefined;
+  #activeCompressionStream: AsyncGenerator<StreamEvent> | undefined;
   #userPromptInHistory = false;
   #userPromptInHistoryFor: string | undefined;
   private midTurnDrainUnavailable = false;
@@ -4563,6 +4564,14 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    const compressionStream = this.#activeCompressionStream;
+    this.#activeCompressionStream = undefined;
+    this.#activeCompressionPromptId = undefined;
+    // A caller that never iterates the send stream never runs its finally.
+    // Closing it here still clears the prompt id on dispose.
+    if (compressionStream) {
+      void compressionStream.return(undefined);
+    }
     this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -4810,6 +4819,27 @@ export class Session implements SessionContext {
     const survivingSnapshots = rewindFiles
       ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
       : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+    // A lap-1 boundary is the first live snapshot, and a conversation-only
+    // rewind to `start` drops that snapshot. Point the boundary at the
+    // predecessor and mark it exclusive so the same start still resolves.
+    if (
+      !rewindFiles &&
+      !this.#boundaryExclusive &&
+      this.#boundaryPromptId &&
+      targetTurnIndex === rewindWindow.start &&
+      rewindWindow.start > 0 &&
+      !survivingSnapshots.some(
+        (snapshot) => snapshot.promptId === this.#boundaryPromptId,
+      )
+    ) {
+      const predecessor = snapshotsBeforeRewind[rewindWindow.start - 1];
+      if (predecessor) {
+        this.#boundaryPromptId = predecessor.promptId;
+        this.#boundaryExclusive = true;
+        this.#absorbedSnapshotOffset = rewindWindow.start;
+        this.#persistRewindOffset();
+      }
+    }
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();
@@ -4997,10 +5027,13 @@ export class Session implements SessionContext {
     if (typeof turnCount === 'number') {
       if (boundaryExclusive) {
         boundaryTurnIndex = turnCount;
-      } else if (boundaryPromptId) {
-        boundaryTurnIndex =
-          recorder?.recordedTurnIndexForPrompt?.(boundaryPromptId) ??
-          Math.max(0, turnCount - visible);
+      } else if (boundaryPromptId && recorder?.recordedTurnIndexForPrompt) {
+        const found = recorder.recordedTurnIndexForPrompt(boundaryPromptId);
+        if (found === undefined) {
+          this.#clearRewindOffset();
+          return;
+        }
+        boundaryTurnIndex = found;
       }
     }
     this.#absorbedSnapshotOffset = absorbed;
@@ -9202,6 +9235,7 @@ export class Session implements SessionContext {
     this.#userPromptInHistory = true;
     const clearCompressionPromptId = () => {
       this.#activeCompressionPromptId = undefined;
+      this.#activeCompressionStream = undefined;
     };
     const responseStream = (async function* () {
       let committed = false;
@@ -9242,6 +9276,7 @@ export class Session implements SessionContext {
         clearCompressionPromptId();
       }
     })();
+    this.#activeCompressionStream = responseStream;
     return { responseStream, requestRouteKey };
   }
 
