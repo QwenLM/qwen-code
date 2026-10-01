@@ -482,10 +482,17 @@ export function resolveBootstrapRoute(
     // that stops the subcommand from EXECUTING with the version request
     // shadowed (the demote-then-execute direction this intercept exists
     // to prevent).
+    // A prompt-LED argv (`qwen audit this --bg -v`) sits between the two:
+    // its first positional names no parser-honoured command, so the gate
+    // below DOES see it and declines `-v` by name — intercepting here
+    // would print the version and cancel the launch with exit 0.
     const firstPositional = firstPositionalArgIndex(argv);
-    const flagLedBackgroundLaunch =
-      backgroundFlag !== -1 &&
-      (firstPositional === -1 || firstPositional > backgroundFlag);
+    const parserOwnsLaunch =
+      firstPositional !== -1 &&
+      firstPositional < backgroundFlag &&
+      (TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositional]!) ||
+        lastPositionalArg(argv) === HELP_COMMAND);
+    const flagLedBackgroundLaunch = backgroundFlag !== -1 && !parserOwnsLaunch;
     if (!flagLedBackgroundLaunch || versionToken < backgroundFlag) {
       return 'version';
     }
@@ -714,16 +721,16 @@ export async function runCliEntry(
     // positional before the flag, and without the trailing-arity term it
     // hijacked the requested launch into the same silent foreground
     // daemon.
-    const firstRoutablePositional = firstPositionalArgIndex(routableArgv);
     // `trailing` counts the tokens AFTER the flag rather than an absolute
     // argv length: both spawners build the child argv through
     // buildCurrentQwenCliArgv, whose DEV branch prepends [execPath,
     // tsxCli, entrypoint], and the child reads the same args back at
-    // slice(2).
+    // slice(2). The flag must be the FIRST routable token — a dash-led
+    // token before it (`qwen --yolo --internal-agent-view-supervisor`) is
+    // not a positional, so the old "no positional before the flag" term
+    // admitted it and hijacked the launch into the supervisor runtime.
     const isSpawnShaped = (flagAt: number, trailing: number): boolean =>
-      flagAt !== -1 &&
-      (firstRoutablePositional === -1 || firstRoutablePositional > flagAt) &&
-      routableArgv.length - flagAt - 1 === trailing;
+      flagAt === 0 && routableArgv.length - 1 === trailing;
 
     // This process may have been spawned to BE the Agent View supervisor.
     // The flag that says so is internal — the strict parser below would

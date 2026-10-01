@@ -305,6 +305,30 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['foo', '-v', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '-v', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('version');
+    // A version token after a prompt-led --bg is a prompt word the gate
+    // declines by name on the default route, not a version request: the
+    // first positional names no parser-honoured command, so the launch
+    // stays visible to the gate. Intercepting here printed the version
+    // and cancelled the launch with exit 0 (#10943 R10-3).
+    expect(
+      resolveBootstrapRoute(['audit', 'this', BACKGROUND_FLAG, '-v']),
+    ).toBe('default');
+    // The subcommand-led sibling keeps the intercept: `mcp add` owns
+    // that argv and the gate never sees it.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'victim',
+        'node',
+        BACKGROUND_FLAG,
+        '-v',
+      ]),
+    ).toBe('version');
+    // Flag-led stays with the gate too.
+    expect(resolveBootstrapRoute([BACKGROUND_FLAG, '-v', 'audit'])).toBe(
+      'default',
+    );
     // Help still wins when no exact version token exists.
     expect(resolveBootstrapRoute(['--model', 'gpt-4', '--help'])).toBe('help');
     expect(resolveBootstrapRoute(['-p', 'hello', '-h'])).toBe('help');
@@ -1115,6 +1139,29 @@ describe('runCliEntry', () => {
       // value slot, so it is data, not a spawn.
       await runCliEntry([
         '-p',
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not spawn the supervisor for a flag-led argv (#10943 R13-2)', async () => {
+      // `qwen --yolo --internal-agent-view-supervisor`: the flag is not
+      // the first routable token, so this is a user launch carrying an
+      // internal flag — not a spawn. The old shape test only excluded
+      // preceding *positionals*, and dash-led tokens slipped through.
+      await runCliEntry(['--yolo', INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not spawn the pty host for a flag-led argv (#10943 R13-2)', async () => {
+      await runCliEntry([
+        '--debug',
         INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
         '/path/to/launch.json',
         '/path/to/pty-host.sock',
