@@ -9,6 +9,7 @@ import { AuthType, type AvailableModel } from '@qwen-code/qwen-code-core';
 import {
   isSelectableVoiceModel,
   isTranscribableVoiceModel,
+  resolveVoiceTransport,
 } from './voice-model.js';
 
 function model(overrides: Partial<AvailableModel>): AvailableModel {
@@ -50,5 +51,69 @@ describe('voice model guards', () => {
     expect(
       isSelectableVoiceModel(model({ id: 'qwen3-asr-flash-filetrans' })),
     ).toBe(false);
+  });
+
+  it('isSelectableVoiceModel accepts the qwen-audio Token Plan ASR family', () => {
+    expect(
+      isSelectableVoiceModel(model({ id: 'qwen-audio-3.0-asr-flash' })),
+    ).toBe(true);
+    expect(
+      isSelectableVoiceModel(model({ id: 'qwen-audio-3.0-realtime-plus' })),
+    ).toBe(true);
+  });
+});
+
+describe('resolveVoiceTransport', () => {
+  it('routes the qwen-audio Token Plan ASR family', () => {
+    // Bare and date-suffixed asr ids use the batch chat shape (#10932).
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash')).toBe(
+      'qwen-asr-chat',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-2026-09-01')).toBe(
+      'qwen-asr-chat',
+    );
+    // Streaming variants speak the OpenAI realtime WebSocket dialect.
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-streaming')).toBe(
+      'qwen-asr-realtime',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-realtime')).toBe(
+      'qwen-asr-realtime',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-realtime-plus')).toBe(
+      'qwen-asr-realtime',
+    );
+    expect(resolveVoiceTransport('Qwen-Audio-3.0-ASR-Flash')).toBe(
+      'qwen-asr-chat',
+    );
+  });
+
+  it('keeps routing the legacy qwen3-asr and dashscope ids', () => {
+    expect(resolveVoiceTransport('qwen3-asr-flash')).toBe('qwen-asr-chat');
+    expect(resolveVoiceTransport('qwen3-asr-flash-2025-08-20')).toBe(
+      'qwen-asr-chat',
+    );
+    expect(resolveVoiceTransport('qwen3-asr-flash-realtime')).toBe(
+      'qwen-asr-realtime',
+    );
+    expect(resolveVoiceTransport('fun-asr-realtime')).toBe(
+      'dashscope-task-realtime',
+    );
+    expect(resolveVoiceTransport('paraformer-realtime-v2')).toBe(
+      'dashscope-task-realtime',
+    );
+  });
+
+  it('rejects non-ASR ids, including filetrans and tts in the family', () => {
+    expect(resolveVoiceTransport('gpt-4o')).toBe('unsupported');
+    expect(resolveVoiceTransport('custom:asr')).toBe('unsupported');
+    expect(resolveVoiceTransport('qwen3-asr-flash-filetrans')).toBe(
+      'unsupported',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-asr-flash-filetrans')).toBe(
+      'unsupported',
+    );
+    expect(resolveVoiceTransport('qwen-audio-3.0-tts-plus')).toBe(
+      'unsupported',
+    );
   });
 });
