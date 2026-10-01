@@ -1898,14 +1898,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             blockRecovery(bindingId, operationGeneration);
                             return failed(step.error());
                         default:
+                            // The loop's renewal owns claim liveness, so
+                            // the transport's own timeout bounds attestation.
                             return adoptObservation(bindingId,
-                                    operationGeneration, step.observation());
+                                    operationGeneration, step.observation(), 0);
                     }
                 });
     }
 
     private CompletionStage<BindingContext> adoptObservation(String bindingId,
-            long operationGeneration, RuntimeObservation observation) {
+            long operationGeneration, RuntimeObservation observation,
+            long attestBoundMillis) {
         RuntimeBindingRecord current = bindingRepository.findById(bindingId);
         if (current == null || !ownsOperation(current, operationGeneration)
                 || !canReconcile(current)) {
@@ -1933,12 +1936,19 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 observation.getRuntimeInstanceId(), observation.getEndpoint(),
                 seed.getToken(), observation.getLeaseId(),
                 observation.getEpoch());
-        return mapFailure(safeStage(() -> transport.attest(lease, request,
-                seed))
-                        .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
-                        .exceptionally(error -> {
-                            throw mapStepTimeout(error);
-                        }), "runtime_broker_recovery_failed",
+        CompletionStage<RuntimeAttestation> attesting =
+                safeStage(() -> transport.attest(lease, request, seed));
+        if (attestBoundMillis > 0) {
+            // Only legs without a live renewal are bounded here; a caller
+            // holding one (the reconcile loop) lets the transport's own
+            // request timeout bound the call instead.
+            attesting = attesting.toCompletableFuture().orTimeout(
+                    attestBoundMillis, TimeUnit.MILLISECONDS)
+                    .exceptionally(error -> {
+                        throw mapStepTimeout(error);
+                    });
+        }
+        return mapFailure(attesting, "runtime_broker_recovery_failed",
                 "Managed Runtime attestation failed")
                 .whenComplete((ignored, error) -> {
                     Throwable cause = unwrap(error);
@@ -2040,26 +2050,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
             }
             CompletionStage<RuntimeObservation> observation = recovered.hasStoppedWriters()
                     ? CompletableFuture.completedFuture(null)
-                    : safeStage(() -> {
+                    : renewingStepOrNull(claimed, () -> {
                         // The claim may already be partly spent (e.g. the
                         // reconcile loop's last renewal tick), so stretch it
-                        // before a provisioner call that may run for most of
-                        // a lease; a lapsed claim fails the renew below instead.
+                        // before the provisioner call; a lapsed claim fails
+                        // the renew below instead.
                         renewRecoveryClaim(claimed);
                         return provisioner.reconcile(recovered.getRequest(),
                                 recovered.getProvisionSeed(), recovered.getResourceHandle(), recovered.getLease());
-                    })
-                            .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
-                            .exceptionally(error -> {
-                                // A step cut short by our own bound is not
-                                // "the provisioner observed nothing": name it
-                                // so the caller retries instead of proceeding
-                                // without the observation.
-                                if (unwrap(error) instanceof TimeoutException) {
-                                    throw mapStepTimeout(error);
-                                }
-                                return null;
-                            });
+                    });
             return observation.thenCompose(observed -> {
                 // Renew, never just re-read: the provisioner call above may
                 // have run for most of the lease, and the guarded writes below
@@ -2085,11 +2084,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 // step, and hand the provisioner the renewed record: its
                 // version is what the stores match the cleanup against.
                 RuntimeBindingRecord refreshed = renewRecoveryClaim(claimed);
-                return safeStage(() -> provisioner.recoverResources(refreshed))
-                        .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
-                        .exceptionally(error -> {
-                            throw mapStepTimeout(error);
-                        })
+                return renewingStep(claimed,
+                        () -> provisioner.recoverResources(refreshed))
                         .thenApply(ignored -> {
                             RuntimeBindingRecord finished = bindingRepository.finishLostRecovery(
                                     sessionRepository, executionRepository, renewRecoveryClaim(claimed));
@@ -2124,17 +2120,64 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "Managed Runtime reconciliation timed out.");
     }
 
+    /** Whether a step failure is the step bound cutting it short. */
+    private static boolean isStepTimeout(Throwable error) {
+        return unwrap(error) instanceof TimeoutException;
+    }
+
     /**
      * Names a step the cleanup bound cut short, so callers see a named,
      * retryable reconcile timeout rather than a raw {@link TimeoutException};
      * any other failure passes through unchanged.
      */
     private RuntimeException mapStepTimeout(Throwable error) {
-        if (unwrap(error) instanceof TimeoutException) {
+        if (isStepTimeout(error)) {
             return reconcileTimeout();
         }
         return error instanceof RuntimeException runtime
                 ? runtime : new CompletionException(error);
+    }
+
+    /**
+     * Runs one provisioner step under its own renewal, so the step may take
+     * as long as the provisioner's declared waits — well past one lease —
+     * without the claim lapsing. The bound is only the backstop for a
+     * provisioner that never answers: half the operation deadline, which at
+     * the production lease comfortably exceeds every shipped callee timeout.
+     * The renewal stops when the step settles, so the inline renewal after
+     * the step again sees no ticks and its fresh snapshot CASes
+     * deterministically.
+     */
+    private <T> CompletionStage<T> renewingStep(RuntimeBindingRecord claimed,
+            Supplier<CompletionStage<T>> step) {
+        BindingRenewal renewal = new BindingRenewal(claimed);
+        renewal.start();
+        return safeStage(step).toCompletableFuture()
+                .orTimeout(stepCallTimeoutMillis(), TimeUnit.MILLISECONDS)
+                .whenComplete((value, error) -> renewal.close())
+                .exceptionally(error -> {
+                    throw mapStepTimeout(error);
+                });
+    }
+
+    /**
+     * The observation-leg variant: a step cut short by our own bound is not
+     * "the provisioner observed nothing" and is named, but any other failure
+     * still degrades to no observation, as before.
+     */
+    private <T> CompletionStage<T> renewingStepOrNull(
+            RuntimeBindingRecord claimed, Supplier<CompletionStage<T>> step) {
+        BindingRenewal renewal = new BindingRenewal(claimed);
+        renewal.start();
+        return safeStage(step).toCompletableFuture()
+                .orTimeout(stepCallTimeoutMillis(), TimeUnit.MILLISECONDS)
+                .whenComplete((value, error) -> renewal.close())
+                .exceptionally(error -> {
+                    if (isStepTimeout(error)) {
+                        throw mapStepTimeout(error);
+                    }
+                    return null;
+                });
     }
 
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
@@ -2172,12 +2215,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (!canReconcile(claimed) && claimed.getState() != RuntimeBindingRecord.State.DRAINING) {
                 return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime cannot be observed"));
             }
-            return safeStage(() -> provisioner.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
+            return renewingStep(claimed, () -> provisioner.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
                     claimed.getResourceHandle(), claimed.getLease()))
-                    .toCompletableFuture().orTimeout(cleanupStepTimeoutMillis(), TimeUnit.MILLISECONDS)
-                    .exceptionally(error -> {
-                        throw mapStepTimeout(error);
-                    })
                     .thenCompose(observed -> {
                         RuntimeBindingRecord current = renewRecoveryClaim(claimed);
                         if (observed == null) {
@@ -2194,7 +2233,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         }
                         if (observed.getOutcome() == RuntimeObservation.Outcome.READY
                                 && current.getState() != RuntimeBindingRecord.State.DRAINING) {
-                            return adoptObservation(bindingId, claimed.getOperationGeneration(), observed)
+                            return adoptObservation(bindingId, claimed.getOperationGeneration(), observed,
+                                    cleanupStepTimeoutMillis())
                                     .thenApply(context -> {
                                         adopted.set(context);
                                         return context.record();
@@ -3275,14 +3315,24 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     /**
-     * The bound for a single cleanup step. Each step starts from a claim
-     * renewed immediately before it, so the bound stays one renewal tick
-     * below the full lease, leaving margin for the inline renewal that
-     * follows the step. A provisioner's internal waits must fit inside it.
+     * The bound for a step that runs WITHOUT its own renewal (currently only
+     * the maintenance path's attestation leg): it must stay one renewal tick
+     * below the lease so the claim is still live at the guarded write that
+     * follows. Steps with a renewal use {@link #stepCallTimeoutMillis()}.
      */
     private long cleanupStepTimeoutMillis() {
         return Math.max(1, operationLeaseDuration.toMillis()
                 - renewalDelayMillis(operationLeaseDuration));
+    }
+
+    /**
+     * The backstop for a step running under its own renewal: liveness is
+     * covered by the renewal ticks, so this only bounds a provisioner that
+     * never answers at all, and is sized to exceed the shipped callees'
+     * declared waits at the production lease.
+     */
+    private long stepCallTimeoutMillis() {
+        return Math.max(1, operationDeadlineMillis() / 2);
     }
 
     private static <T> CompletionStage<T> safeStage(
@@ -3458,10 +3508,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
             // stopped is per-instance: cancel(false) cannot retract a tick
             // already waiting on this monitor, so once close() ran the tick
             // must return here rather than renew a claim its owner has
-            // started renewing inline. The window it closes — a tick
-            // dispatched while another holder sits on this monitor — cannot
-            // be staged deterministically in a test (monitor entry order is
-            // unspecified), so the flag is unpinned by a mutation witness.
+            // started renewing inline. The window is staged and pinned for
+            // the provision-path shape, where persistResourceHandle can hold
+            // this monitor while a tick queues behind it
+            // (DurableRuntimeRecoveryTest.stoppedFlagRetractsATickQueuedBehindClose);
+            // the LOST-branch shape has no third monitor holder, so there it
+            // remains a timing-only guarantee.
             if (stopped.get() || closed.get()) {
                 close();
                 return;

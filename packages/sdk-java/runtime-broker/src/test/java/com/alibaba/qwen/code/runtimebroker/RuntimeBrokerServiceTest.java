@@ -1456,13 +1456,13 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
-    void reclaimReleasesAfterAnObservationInsideTheStepBand()
+    void reclaimReleasesAnObservationAtThreeQuartersOfTheLease()
             throws Exception {
         var bindings = new InMemoryRuntimeBindingRepository();
         var sessions = new InMemoryRuntimeSessionRepository();
         var executions = new InMemoryToolExecutionRepository();
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
-                executions, "step-band");
+                executions, "three-quarters");
         RuntimeBindingRecord lost = fixture.lose(false);
         bindings.releaseOperation(lost.getBindingId(), "recovery",
                 lost.getOperationGeneration());
@@ -1472,19 +1472,20 @@ class RuntimeBrokerServiceTest {
                     RuntimeProvisionRequest request,
                     RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
                     RuntimeLease lease) {
-                // Real elapsed time just over half the 6s lease: the step
-                // bound must admit the band between half a lease and the
-                // renewal tick before it, or this observation is discarded
-                // and the binding stays LOST on every attempt. The future
-                // must complete asynchronously: a synchronous sleep inside
-                // the supplier only delays arming orTimeout instead of
-                // tripping it, and MutableClock cannot move the delayer.
+                // 3000ms of a 4s lease (0.75L) — the latency band the
+                // shipped callees' declared waits live in. The step's own
+                // renewal keeps the claim alive through it, so the chain
+                // must finish RELEASED rather than cut the observation and
+                // pin the binding LOST on every attempt. The future must
+                // complete asynchronously: a synchronous sleep inside the
+                // supplier only delays arming orTimeout instead of tripping
+                // it, and MutableClock cannot move the delayer.
                 return CompletableFuture.supplyAsync(
                         () -> RuntimeObservation.notFound(
                                 lost.getLossEvidence(),
                                 RuntimeRecoveryContract.evidence(lost,
                                         RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
-                        CompletableFuture.delayedExecutor(3400,
+                        CompletableFuture.delayedExecutor(3000,
                                 TimeUnit.MILLISECONDS));
             }
 
@@ -1498,8 +1499,59 @@ class RuntimeBrokerServiceTest {
                 ignored -> CompletableFuture.completedFuture(
                         lost.getRequest().getScope()),
                 provisioner, new FakeTransport(), bindings, sessions,
-                executions, "restarted", Duration.ofSeconds(6),
-                Duration.ofSeconds(6), Clock.systemUTC(), () -> "execution")) {
+                executions, "restarted", Duration.ofSeconds(4),
+                Duration.ofSeconds(4), Clock.systemUTC(), () -> "execution")) {
+            RuntimeBindingRecord recovered = service.recoverBinding(
+                    lost.getBindingId(), lost.getGeneration())
+                    .toCompletableFuture().get(15, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    recovered.getState());
+            assertEquals(0, sessions.countActiveByBinding(
+                    recovered.getBindingId(), recovered.getGeneration()));
+        }
+    }
+
+    @Test
+    void reclaimKeepsItsClaimAliveAcrossAPastLeaseObservation()
+            throws Exception {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var sessions = new InMemoryRuntimeSessionRepository();
+        var executions = new InMemoryToolExecutionRepository();
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
+                executions, "past-lease");
+        RuntimeBindingRecord lost = fixture.lose(false);
+        bindings.releaseOperation(lost.getBindingId(), "recovery",
+                lost.getOperationGeneration());
+        RuntimeProvisioner provisioner = new LostDomainProvisioner() {
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+                    RuntimeLease lease) {
+                // 3.5s of a 3s lease: without the step's own renewal ticks
+                // the claim lapses mid-wait and the post-step renewal
+                // fences; with them the chain finishes RELEASED.
+                return CompletableFuture.supplyAsync(
+                        () -> RuntimeObservation.notFound(
+                                lost.getLossEvidence(),
+                                RuntimeRecoveryContract.evidence(lost,
+                                        RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED)),
+                        CompletableFuture.delayedExecutor(3500,
+                                TimeUnit.MILLISECONDS));
+            }
+
+            @Override
+            public boolean supportsStartupRecovery(
+                    RuntimeResourceHandle handle) {
+                return true;
+            }
+        };
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(
+                        lost.getRequest().getScope()),
+                provisioner, new FakeTransport(), bindings, sessions,
+                executions, "restarted", Duration.ofSeconds(3),
+                Duration.ofSeconds(3), Clock.systemUTC(), () -> "execution")) {
             RuntimeBindingRecord recovered = service.recoverBinding(
                     lost.getBindingId(), lost.getGeneration())
                     .toCompletableFuture().get(15, TimeUnit.SECONDS);
@@ -1580,11 +1632,11 @@ class RuntimeBrokerServiceTest {
                 ignored -> CompletableFuture.completedFuture(
                         fixture.binding.getRequest().getScope()),
                 provisioner, new FakeTransport(), bindings, sessions,
-                executions, "restarted", Duration.ofSeconds(6),
-                Duration.ofSeconds(6), Clock.systemUTC(), () -> "execution")) {
-            // The observation hangs; the inner step bound (2/3 of the 6s
-            // lease) must settle the maintenance call with a named timeout
-            // well before the outer 4x-lease backstop would.
+                executions, "restarted", Duration.ofSeconds(2),
+                Duration.ofSeconds(2), Clock.systemUTC(), () -> "execution")) {
+            // The observation hangs; the step backstop (2x the 2s lease)
+            // must settle the maintenance call with a named timeout well
+            // before the 4x-lease outer backstop would.
             RuntimeBrokerException timeout = assertTimeoutPreemptively(
                     Duration.ofMillis(5200),
                     () -> failure(service.recoverBinding(
@@ -4847,8 +4899,8 @@ class RuntimeBrokerServiceTest {
     /**
      * A managed-context binding lost with full stop evidence and one READY
      * session — the fixture shape that drives cleanupLost all the way to
-     * the recoverResources leg. The caller owns releasing the "recovery"
-     * claim before driving a service against the returned record.
+     * the recoverResources leg. The "recovery" claim is released here, so a
+     * service can claim it immediately against the returned record.
      */
     private static RuntimeBindingRecord managedStoppedLostBinding(
             RuntimeBindingRepository bindings,

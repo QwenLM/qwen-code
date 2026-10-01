@@ -1161,6 +1161,36 @@ class DurableRuntimeRecoveryTest {
     }
 
     @Test
+    void stoppedFlagRetractsATickQueuedBehindClose() throws Exception {
+        ReclaimWatchRepository bindings = new ReclaimWatchRepository(
+                new InMemoryRuntimeBindingRepository());
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        DurableProvisioner provisioner = new DurableProvisioner();
+        // persistResourceHandle's write holds the renewal monitor for 2.5s
+        // of the 3s lease, so the tick dispatched at 1s queues on the
+        // monitor; the write then fails, and persistResourceHandle calls
+        // close() reentrantly. The queued tick must see the stopped flag
+        // and never call renewOperation — without the flag it renews here.
+        bindings.holdResourceHandleCasMillis = 2500;
+        try (RuntimeBrokerService service = new RuntimeBrokerService(
+                ignored -> CompletableFuture.completedFuture(SCOPE),
+                provisioner, new TestTransport(), bindings, sessions,
+                executions, "broker", Duration.ofSeconds(3),
+                Duration.ofSeconds(3))) {
+            Exception failure = assertThrows(Exception.class,
+                    () -> service.warm("harness").toCompletableFuture()
+                            .get(15, TimeUnit.SECONDS));
+            assertEquals("runtime_provision_fenced",
+                    brokerFailure(failure).getCode());
+            assertEquals(0, bindings.ticks.get(),
+                    "a tick queued behind close() renewed the claim");
+        }
+    }
+
+    @Test
     void lateEnsureResultCannotOverwriteANewOperationOwner()
             throws Exception {
         MutableClock clock = new MutableClock();
@@ -1724,6 +1754,7 @@ class DurableRuntimeRecoveryTest {
         final AtomicInteger ticks = new AtomicInteger();
         final AtomicBoolean holdEvidenceCas = new AtomicBoolean();
         volatile RuntimeBindingRecord staleRead;
+        volatile long holdResourceHandleCasMillis;
 
         ReclaimWatchRepository(InMemoryRuntimeBindingRepository delegate) {
             super(delegate);
@@ -1743,6 +1774,23 @@ class DurableRuntimeRecoveryTest {
         public RuntimeBindingRecord compareAndSet(
                 RuntimeBindingRecord expected,
                 RuntimeBindingRecord replacement) {
+            if (holdResourceHandleCasMillis > 0
+                    && expected.getResourceHandle() == null
+                    && replacement.getResourceHandle() != null) {
+                // persistResourceHandle runs this write on the renewal
+                // monitor; holding it queues a dispatched tick behind the
+                // monitor, and failing it makes persistResourceHandle call
+                // close() reentrantly — the only deterministic staging of
+                // the stopped flag's window.
+                long millis = holdResourceHandleCasMillis;
+                holdResourceHandleCasMillis = 0;
+                try {
+                    Thread.sleep(millis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }
             if (holdEvidenceCas.get() && expected.getLossEvidence() == null
                     && replacement.getLossEvidence() != null) {
                 // Give a live background renewal one tick to land in the

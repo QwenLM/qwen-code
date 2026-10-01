@@ -53,11 +53,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
      * creating or replacing it. The default proves nothing, so a restored
      * binding waits and never guesses.
      * <p>
-     * The broker bounds each call to its per-step budget (the operation
-     * lease minus one renewal tick); a call that exceeds it is cut short and
-     * surfaced as a retryable {@code runtime_broker_reconcile_timeout}. A
-     * provisioner whose observation is deterministically over budget never
-     * converges, so internal waits must fit inside the budget.
+     * The broker keeps the recovery claim renewed for the duration of the
+     * call, so a slow observation may take as long as the provisioner's own
+     * declared waits. A call that never answers at all is backstopped well
+     * past those waits and surfaces as a retryable
+     * {@code runtime_broker_reconcile_timeout}.
      */
     default CompletionStage<RuntimeObservation> reconcile(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -68,8 +68,8 @@ public interface RuntimeProvisioner extends AutoCloseable {
 
     /**
      * Clears only physical holders of the saved generation after durable stop proof.
-     * The same per-step budget as {@link #reconcile} applies: an over-budget
-     * call is cut short and retried later.
+     * The same backstop as {@link #reconcile} applies: the claim stays
+     * renewed for the call, and a never-answering call is retried later.
      */
     default CompletionStage<Void> recoverResources(RuntimeBindingRecord binding) {
         if (binding.getRequest().isManagedContext()) {
