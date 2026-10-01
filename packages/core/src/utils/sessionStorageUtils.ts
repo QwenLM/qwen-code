@@ -883,10 +883,17 @@ function lastCommittedDomainRecord(
     // A crash mid-append glues two records onto one line, so a line can hold
     // more than one record and a bare JSON.parse would throw away every
     // record around the tear.
-    for (const record of parseLineTolerant<ManagedDomainEvent>(
-      line,
-      filePath,
-    )) {
+    //
+    // Newest record first, like the recovered-record walk above: a transaction
+    // is appended events first and marker last, so the tear a crash mid-append
+    // most often leaves is an event sharing a line with the very marker that
+    // authorises it. Reading that line forwards reaches the event before the
+    // marker, with `committed` still undefined or still carrying an older
+    // window, and skips it. The writer's order is the authority here, so the
+    // reader has to follow it backwards instead of reordering the layout.
+    const records = parseLineTolerant<ManagedDomainEvent>(line, filePath);
+    for (let i = records.length - 1; i >= 0; i--) {
+      const record = records[i];
       const body = record.managedSession;
       if (record.subtype === 'managed_session_commit_v1') {
         const first = body?.firstSequence;
