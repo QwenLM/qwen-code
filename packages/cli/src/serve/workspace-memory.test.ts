@@ -233,7 +233,7 @@ describe('workspace memory routes', () => {
 
       expect(res.status).toBe(200);
       const [file] = res.body.files as Array<Record<string, unknown>>;
-      expect(file.path).toBe(globalFile);
+      expect(file['path']).toBe(globalFile);
       expect(file).not.toHaveProperty('content');
     });
 
@@ -244,17 +244,15 @@ describe('workspace memory routes', () => {
       const wsFile = path.join(workspace, 'QWEN.md');
       await fs.writeFile(wsFile, 'x'.repeat(100), 'utf8');
       const realReadFile = fs.readFile;
-      const readSpy = vi
-        .spyOn(fs, 'readFile')
-        .mockImplementation((async (
-          target: Parameters<typeof fs.readFile>[0],
-          ...rest: unknown[]
-        ) => {
-          if (String(target) === wsFile) {
-            return Buffer.from('x'.repeat(40));
-          }
-          return Reflect.apply(realReadFile, fs, [target, ...rest]);
-        }) as typeof fs.readFile);
+      const readSpy = vi.spyOn(fs, 'readFile').mockImplementation((async (
+        target: Parameters<typeof fs.readFile>[0],
+        ...rest: unknown[]
+      ) => {
+        if (String(target) === wsFile) {
+          return Buffer.from('x'.repeat(40));
+        }
+        return Reflect.apply(realReadFile, fs, [target, ...rest]);
+      }) as typeof fs.readFile);
       try {
         const bridge = buildBridgeStub();
         const app = buildApp({ bridge, boundWorkspace: workspace });
