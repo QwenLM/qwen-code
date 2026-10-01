@@ -25,6 +25,8 @@ let settingsPath = path.join(homedir(), '.qwen', 'settings.json');
 let sessionFailover = false;
 let inflightFailover = false;
 let continuationFailover = false;
+let harnessOnly = false;
+let freeze = false;
 
 for (let index = 0; index < argumentsList.length; index += 1) {
   const argument = argumentsList[index];
@@ -44,9 +46,13 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     inflightFailover = true;
   } else if (argument === '--continuation-failover') {
     continuationFailover = true;
+  } else if (argument === '--harness-only') {
+    harnessOnly = true;
+  } else if (argument === '--freeze') {
+    freeze = true;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover] [--harness-only] [--freeze]',
     );
   }
 }
@@ -59,13 +65,26 @@ if (
     '--session-failover, --inflight-failover, and --continuation-failover are exclusive',
   );
 }
+if (
+  harnessOnly &&
+  !(sessionFailover || inflightFailover || continuationFailover)
+) {
+  throw new Error('--harness-only requires one of the failover modes');
+}
+if (freeze && (!continuationFailover || harnessOnly)) {
+  throw new Error(
+    '--freeze requires --continuation-failover without --harness-only',
+  );
+}
 
 const durableFailover =
   sessionFailover || inflightFailover || continuationFailover;
 const workspaceTurns = inflightFailover || continuationFailover;
 // The tool-driven modes take over a dead Runtime binding, which needs the
-// durable local-Worker reclaim from the W0e line — Linux-only today.
-if (workspaceTurns && process.platform !== 'linux') {
+// durable local-Worker reclaim from the W0e line — Linux-only today. With
+// --harness-only the Spring and its Broker stay alive, the worker is never
+// orphaned, and no reclaim is needed.
+if (workspaceTurns && !harnessOnly && process.platform !== 'linux') {
   throw new Error(
     `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted MySQL CI job or a Linux container.`,
   );
@@ -1127,18 +1146,38 @@ try {
       originalExecutionCallId = execution[0];
     }
 
-    await Promise.all([
-      crashChild(harness.child, 'Hosted Harness A'),
-      inflightFailover || continuationFailover
-        ? crashProcess(spring.child, 'Spring Managed Agent Server A')
-        : crashChild(spring.child, 'Spring Managed Agent Server A'),
-    ]);
+    if (freeze) {
+      // SIGSTOP the original owners instead of killing them: the takeover
+      // fences must hold against a former owner that is very much alive.
+      await Promise.all([
+        signalProcessTree(harness.child, 'SIGSTOP'),
+        signalProcessTree(spring.child, 'SIGSTOP'),
+      ]);
+    } else if (harnessOnly) {
+      // Kill only the Harness: a live control plane must adopt the next
+      // generation instead of failing every bound Session (G3).
+      await crashChild(harness.child, 'Hosted Harness A');
+    } else {
+      await Promise.all([
+        crashChild(harness.child, 'Hosted Harness A'),
+        inflightFailover || continuationFailover
+          ? crashProcess(spring.child, 'Spring Managed Agent Server A')
+          : crashChild(spring.child, 'Spring Managed Agent Server A'),
+      ]);
+    }
     acceptReplacementContinuation = true;
     releaseContinuationHold();
     await heldStartProxy?.close();
     heldStartProxy = undefined;
-    rmSync(harnessHome, { recursive: true, force: true });
-    rmSync(runtimeHome, { recursive: true, force: true });
+    if (!freeze) {
+      // Frozen owners keep their homes so they can wake none the wiser.
+      rmSync(harnessHome, { recursive: true, force: true });
+      if (!harnessOnly) {
+        // The live Spring still runs out of runtimeHome; only a replaced
+        // owner's disk is scrapped.
+        rmSync(runtimeHome, { recursive: true, force: true });
+      }
+    }
     await waitUntil(
       'Managed Session writer lease expiry',
       () =>
@@ -1160,76 +1199,97 @@ try {
       );
     }
 
-    const replacementSpringPort = await freePort();
-    const replacementHarnessPort = await freePort();
-    const replacementBrokerPort = await freePort();
-    const replacementSpringUrl = `http://127.0.0.1:${replacementSpringPort}`;
-    const replacementSpring = start(
-      java,
-      springArguments,
-      {
-        env: {
-          ...cleanEnvironment,
-          HOME: replacementRuntimeHome,
-          LANG: process.env['LANG'] ?? 'C',
-          LC_ALL: process.env['LC_ALL'] ?? 'C',
-          NO_PROXY: '127.0.0.1,localhost',
-          QWEN_HOME: path.join(replacementRuntimeHome, '.qwen'),
-          TMPDIR: temporary,
-          no_proxy: '127.0.0.1,localhost',
-          SERVER_PORT: String(replacementSpringPort),
-          SPRING_DATASOURCE_PASSWORD: '',
-          SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
-          SPRING_DATASOURCE_USERNAME: 'root',
-          QWEN_MANAGED_AGENT_APPROVAL_MODE: 'yolo',
-          QWEN_MANAGED_AGENT_CAPABILITY_DIGEST: capabilityDigest,
-          QWEN_MANAGED_AGENT_HARNESS_BASE_URL: `http://127.0.0.1:${replacementHarnessPort}`,
-          QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
-          QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
-          QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
-          ...(workspaceTurns
-            ? {
-                QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
-                QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-                QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
-              }
-            : {}),
-          QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
-          QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',
-          QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
-          QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: replacementSpringUrl,
-          QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
-          QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
-          QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
-          QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
-          QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(replacementBrokerPort),
-          QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
-          QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
-          QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
-          QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
-          QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
-          QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
-          QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
-          QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
+    let replacementSpring: typeof spring;
+    let replacementSpringUrl: string;
+    let replacementHarnessPort: number;
+    let replacementBrokerUrl: string;
+    if (harnessOnly) {
+      // The live Spring keeps its fixed Harness base URL, so the next
+      // generation must answer on the same port; the same audit selectors
+      // then read the original control plane.
+      replacementSpring = spring;
+      replacementSpringUrl = springUrl;
+      replacementHarnessPort = harnessPort;
+      replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+    } else {
+      const replacementSpringPort = await freePort();
+      replacementHarnessPort = await freePort();
+      const replacementBrokerPort = await freePort();
+      replacementSpringUrl = `http://127.0.0.1:${replacementSpringPort}`;
+      replacementSpring = start(
+        java,
+        springArguments,
+        {
+          env: {
+            ...cleanEnvironment,
+            HOME: replacementRuntimeHome,
+            LANG: process.env['LANG'] ?? 'C',
+            LC_ALL: process.env['LC_ALL'] ?? 'C',
+            NO_PROXY: '127.0.0.1,localhost',
+            QWEN_HOME: path.join(replacementRuntimeHome, '.qwen'),
+            TMPDIR: temporary,
+            no_proxy: '127.0.0.1,localhost',
+            SERVER_PORT: String(replacementSpringPort),
+            SPRING_DATASOURCE_PASSWORD: '',
+            SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${mysqlPort}/qwen_managed_agent?useSSL=false&allowPublicKeyRetrieval=true`,
+            SPRING_DATASOURCE_USERNAME: 'root',
+            QWEN_MANAGED_AGENT_APPROVAL_MODE: 'yolo',
+            QWEN_MANAGED_AGENT_CAPABILITY_DIGEST: capabilityDigest,
+            QWEN_MANAGED_AGENT_HARNESS_BASE_URL: `http://127.0.0.1:${replacementHarnessPort}`,
+            QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
+            QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
+            QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
+            ...(workspaceTurns
+              ? {
+                  QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
+                  QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
+                  QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+                }
+              : {}),
+            QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
+            QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',
+            QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
+            QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: replacementSpringUrl,
+            QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
+            QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '1s',
+            QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
+            QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED: 'true',
+            QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT: String(
+              replacementBrokerPort,
+            ),
+            QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN: brokerToken,
+            QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY: credentialKey,
+            QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
+            QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
+            QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
+            QWEN_MANAGED_AGENT_NODE_EXECUTABLE: process.execPath,
+            QWEN_MANAGED_AGENT_CLI_ENTRY: cliBundle,
+            QWEN_MANAGED_AGENT_WORKSPACE_CWD: workspace,
+          },
         },
-      },
-      'Replacement Spring Managed Agent Server',
-    );
-    await waitUntil(
-      'Replacement Spring Managed Agent Server',
-      async () => {
-        const response = await fetch(`${replacementSpringUrl}/actuator/health`);
-        return response.ok;
-      },
-      60_000,
-      replacementSpring,
-    );
-
-    if (inflightFailover) {
-      replacementBrokerProxy = await startHeldExecutionStartProxy(
-        `http://127.0.0.1:${replacementBrokerPort}`,
-        false,
+        'Replacement Spring Managed Agent Server',
       );
+      await waitUntil(
+        'Replacement Spring Managed Agent Server',
+        async () => {
+          const response = await fetch(
+            `${replacementSpringUrl}/actuator/health`,
+          );
+          return response.ok;
+        },
+        60_000,
+        replacementSpring,
+      );
+
+      if (inflightFailover) {
+        replacementBrokerProxy = await startHeldExecutionStartProxy(
+          `http://127.0.0.1:${replacementBrokerPort}`,
+          false,
+        );
+      }
+      replacementBrokerUrl =
+        replacementBrokerProxy?.baseUrl ??
+        `http://127.0.0.1:${replacementBrokerPort}`;
     }
 
     const replacementHarness = start(
@@ -1250,8 +1310,7 @@ try {
         ...(workspaceTurns
           ? [
               '--managed-runtime-broker-url',
-              replacementBrokerProxy?.baseUrl ??
-                `http://127.0.0.1:${replacementBrokerPort}`,
+              replacementBrokerUrl,
               `--managed-runtime-broker-token=${brokerToken}`,
             ]
           : []),
@@ -1271,9 +1330,7 @@ try {
           OPENAI_MODEL: 'fake-model',
           QWEN_MODEL: 'fake-model',
           QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
-          QWEN_RUNTIME_BROKER_URL:
-            replacementBrokerProxy?.baseUrl ??
-            `http://127.0.0.1:${replacementBrokerPort}`,
+          QWEN_RUNTIME_BROKER_URL: replacementBrokerUrl,
         },
       },
       'Replacement Hosted Harness',
@@ -1347,7 +1404,11 @@ try {
         recoveredExecution.length !== 4 ||
         recoveredExecution[0] !== originalExecutionCallId ||
         recoveredExecution[1] !== 'SETTLED' ||
-        Number(recoveredExecution[2]) !== 1 ||
+        // A replaced Broker bumps the re-dispatch to generation 1; a live
+        // Broker re-dispatches on the generation it already owned.
+        (harnessOnly
+          ? Number(recoveredExecution[2]) > 1
+          : Number(recoveredExecution[2]) !== 1) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
         replacementBootId.length === 0 ||
@@ -1447,7 +1508,10 @@ try {
         recoveredExecution.length !== 4 ||
         recoveredExecution[0] !== originalExecutionCallId ||
         recoveredExecution[1] !== 'SETTLED' ||
-        Number(recoveredExecution[2]) !== 1 ||
+        // See the in-flight arm: a live Broker keeps the generation it owns.
+        (harnessOnly
+          ? Number(recoveredExecution[2]) > 1
+          : Number(recoveredExecution[2]) !== 1) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
         replacementBootId.length === 0 ||
@@ -1479,6 +1543,72 @@ try {
           2,
         ),
       );
+
+      if (freeze) {
+        // Wake the frozen owners only after the replacement finished: the
+        // fences the takeover installed must hold against a very alive
+        // former owner. The Turn is terminal by now, so nothing but a
+        // fencing defect could mutate the binding or the journal.
+        const headBeforeWake = runMysql(
+          mysqlPort,
+          `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+        );
+        signalProcessTree(spring.child, 'SIGCONT');
+        signalProcessTree(harness.child, 'SIGCONT');
+        if (
+          !processTreeExists(spring.child) ||
+          !processTreeExists(harness.child)
+        ) {
+          throw new Error(
+            'Frozen owners did not survive the freeze: the fencing proof below would be vacuous',
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        const headAfterWake = runMysql(
+          mysqlPort,
+          `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
+        );
+        const bootAfterWake = runMysql(
+          mysqlPort,
+          `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+        );
+        const awakeEvents = await fetchJson<PublicList<PublicEvent>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
+          { headers: tenantHeaders(tenant) },
+        );
+        const awakeText = awakeEvents.data
+          .filter((event) => event.type === 'item.output_text.delta')
+          .map((event) => eventText(event))
+          .join('');
+        const awakeTerminalCount = Number(
+          runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.managed_agent_event WHERE ${sessionFilter} AND terminal=TRUE`,
+          ),
+        );
+        if (
+          headAfterWake !== headBeforeWake ||
+          bootAfterWake !== replacementBootId ||
+          awakeText !== visibleText ||
+          awakeTerminalCount !== terminalCount
+        ) {
+          throw new Error(
+            `Frozen former owner mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
+          );
+        }
+        console.log(
+          JSON.stringify(
+            {
+              fencedFormerOwner: true,
+              journalHead: headAfterWake,
+              harnessBootId: bootAfterWake,
+              visibleText: awakeText,
+            },
+            null,
+            2,
+          ),
+        );
+      }
     } else {
       const secondResponse = await fetch(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,

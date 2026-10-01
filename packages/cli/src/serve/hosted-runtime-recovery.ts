@@ -50,6 +50,42 @@ export interface HostedRecoveryTurn {
   acquiredRuntime: boolean;
 }
 
+/**
+ * Why a takeover load cannot continue the parked Turn. Every reason is a
+ * deterministic function of the durable journal: retrying the load will
+ * never change it, so the caller answers a typed terminal refusal instead
+ * of the retriable `hosted_turn_recovery_required`.
+ */
+export type HostedRecoveryDeclineReason =
+  /** The parked Turn waits on an approval that died with the owner. */
+  | 'await_action'
+  /** Parked at a model start phase (first model round or a no-tool Turn). */
+  | 'model_start'
+  /** The Turn settled but its terminal event was not projected yet. */
+  | 'turn_settled'
+  /** A Shell execution was in flight; its drives cannot be rebuilt. */
+  | 'shell_in_flight'
+  /** A batch was prepared but its arguments never became durable. */
+  | 'batch_not_durable'
+  /** The checkpoint cannot be parsed back into a runnable state. */
+  | 'checkpoint_blocked'
+  /** The recovered state still does not authorize this Turn. */
+  | 'unresolved_after_settle';
+
+export type HostedRuntimeRecoveryOutcome =
+  | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
+  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason };
+
+function declined(
+  reason: HostedRecoveryDeclineReason,
+): HostedRuntimeRecoveryOutcome {
+  return { kind: 'declined', reason };
+}
+
+function recovered(turn: HostedRecoveryTurn): HostedRuntimeRecoveryOutcome {
+  return { kind: 'recovered', turn };
+}
+
 function toolResultParts(
   item: HarnessToolItem,
   result: ManagedToolResultPayload,
@@ -210,8 +246,10 @@ export async function stopParkedRuntimeExecutions(input: {
  * `results_ready` before the caller answers. A passive load only reads
  * execution states for the cancellation path and never dispatches.
  *
- * Returns undefined when this is not a Runtime wait the session can take over;
- * the caller then keeps its plain refusal.
+ * A parked state that can be taken over answers `recovered`; one that is
+ * deterministically unrecoverable answers `declined` with a typed reason.
+ * Thrown errors are transient: the caller keeps its plain retriable
+ * refusal for them.
  */
 export async function recoverHostedRuntimeTurn(input: {
   session: ManagedSession;
@@ -220,17 +258,28 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
-}): Promise<HostedRecoveryTurn | undefined> {
+}): Promise<HostedRuntimeRecoveryOutcome> {
   const { session, promptId, passive } = input;
   const authorization = await session.authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return undefined;
+  // A submitted prompt with no checkpoint yet is parked in its first model
+  // round; one whose checkpoint no longer parses cannot be driven either.
+  if (authorization.status === 'initial') return declined('model_start');
+  if (authorization.status === 'blocked') return declined('checkpoint_blocked');
   const checkpoint = authorization.checkpoint;
+  if (checkpoint.identity.turnId !== promptId)
+    return declined('unresolved_after_settle');
   if (
-    checkpoint.identity.turnId !== promptId ||
-    (checkpoint.continuation.phase !== 'await_runtime' &&
-      checkpoint.continuation.phase !== 'results_ready')
+    checkpoint.continuation.phase !== 'await_runtime' &&
+    checkpoint.continuation.phase !== 'results_ready'
   ) {
-    return undefined;
+    if (
+      checkpoint.approval !== null &&
+      checkpoint.approval.state === 'requested'
+    )
+      return declined('await_action');
+    if (checkpoint.continuation.phase === 'turn_settled')
+      return declined('turn_settled');
+    return declined('model_start');
   }
   const items = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',
@@ -256,7 +305,7 @@ export async function recoverHostedRuntimeTurn(input: {
       // The Shell profile's drives need the original publisher, which a
       // replacement cannot rebuild; refuse rather than risk a replay.
       if (pending.some((item) => item.toolName === 'run_shell_command')) {
-        return undefined;
+        return declined('shell_in_flight');
       }
       try {
         await broker.acquire();
@@ -364,7 +413,8 @@ export async function recoverHostedRuntimeTurn(input: {
           );
         });
         acquiredRuntime = false;
-        if (cause instanceof RecoveryDeclined) return undefined;
+        if (cause instanceof RecoveryDeclined)
+          return declined('batch_not_durable');
         throw cause;
       }
     }
@@ -410,7 +460,7 @@ export async function recoverHostedRuntimeTurn(input: {
         );
       });
     }
-    return undefined;
+    return declined('unresolved_after_settle');
   }
   const finalCheckpoint = finalAuthorization.checkpoint;
   const executions: HostedRuntimeRecoveryExecution[] = items.map((item) => {
@@ -429,7 +479,7 @@ export async function recoverHostedRuntimeTurn(input: {
           : { status: state }),
     };
   });
-  return {
+  return recovered({
     promptId,
     acquiredRuntime,
     report: {
@@ -441,5 +491,5 @@ export async function recoverHostedRuntimeTurn(input: {
       activationId: session.activation.activationId,
       executions,
     },
-  };
+  });
 }

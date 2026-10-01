@@ -36,6 +36,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   hosted_harness_private_v1: { since: 'v1' },
+  // The Hosted Harness can open journals containing message.delta records;
+  // a control plane refuses older Harness builds at negotiation instead of
+  // failing every Session open (G3).
+  managed_session_journal_delta_v1: { since: 'v1' },
   session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
@@ -680,6 +684,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
+  [
+    'managed_session_journal_delta_v1',
+    (toggles) => toggles.hostedHarness === true,
+  ],
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
     'agent_collaboration_v1',

@@ -46,14 +46,17 @@ class HostedHarnessClientTest {
     private HttpServer server;
     private ExecutorService serverExecutor;
     private URI baseUri;
+    private AtomicReference<String> capabilitiesBody;
 
     @BeforeEach
     void setUp() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         serverExecutor = Executors.newCachedThreadPool();
         server.setExecutor(serverExecutor);
+        capabilitiesBody =
+                new AtomicReference<>(capabilitiesJson(DIGEST, BOOT_ID));
         server.createContext("/capabilities", exchange -> sendJson(exchange,
-                200, capabilitiesJson(DIGEST, BOOT_ID), false));
+                200, capabilitiesBody.get(), false));
         server.start();
         baseUri = URI.create("http://127.0.0.1:"
                 + server.getAddress().getPort());
@@ -716,6 +719,27 @@ class HostedHarnessClientTest {
                 .build();
     }
 
+    // The journal-contract marker is part of negotiation: a build too old to
+    // open message.delta journals is refused once here, not per Session.
+    @Test
+    void refusesAHarnessWithoutTheJournalContractToken() {
+        capabilitiesBody.set(
+                capabilitiesJsonWithoutJournalToken(DIGEST, BOOT_ID));
+        DaemonProtocolException error = assertThrows(
+                DaemonProtocolException.class, this::newClient);
+        assertTrue(error.getMessage()
+                .contains("managed_session_journal_delta_v1"));
+    }
+
+    // The load timeout is a distinct builder knob, validated like the other
+    // timeouts; its effect on the load request is covered by the E2E arms.
+    @Test
+    void loadTimeoutMustBePositive() {
+        assertThrows(IllegalArgumentException.class,
+                () -> HostedHarnessClient.builder()
+                        .loadTimeout(Duration.ZERO));
+    }
+
     private void createSessionRoute() {
         server.createContext("/session", exchange ->
                 sendSessionJson(exchange, 200, sessionJson()));
@@ -740,6 +764,17 @@ class HostedHarnessClientTest {
     }
 
     private static String capabilitiesJson(String digest, String bootId) {
+        return "{\"v\":1,\"mode\":\"http-bridge\","
+                + "\"features\":[\"hosted_harness_private_v1\","
+                + "\"managed_session_journal_delta_v1\"],"
+                + "\"transports\":[\"rest\"],\"hostedHarness\":{"
+                + "\"protocolVersions\":{\"current\":1,"
+                + "\"supported\":[1]},\"bootId\":\"" + bootId
+                + "\",\"capabilityDigest\":\"" + digest + "\"}}";
+    }
+
+    private static String capabilitiesJsonWithoutJournalToken(String digest,
+            String bootId) {
         return "{\"v\":1,\"mode\":\"http-bridge\","
                 + "\"features\":[\"hosted_harness_private_v1\"],"
                 + "\"transports\":[\"rest\"],\"hostedHarness\":{"

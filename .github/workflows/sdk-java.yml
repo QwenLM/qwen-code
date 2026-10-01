@@ -270,9 +270,11 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (12+10+20) leave room for the uncapped setup steps;
-    # a healthy run measured ~20 min end to end.
-    timeout-minutes: 60
+    # The step ceilings (12+10+10+10+5×10) leave room for the uncapped setup
+    # steps; a healthy run measured ~20 min end to end before the G3 arms
+    # (session failover, three Harness-restart arms, one frozen-owner arm)
+    # were added.
+    timeout-minutes: 90
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -353,6 +355,26 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run session owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-session-failover
+      - name: 'Run Harness-restart session failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-failover
+      - name: 'Run Harness-restart in-flight failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-inflight-failover
+      - name: 'Run Harness-restart continuation failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-failover
+      - name: 'Run frozen former-owner fencing E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-frozen-owner-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1

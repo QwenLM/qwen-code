@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
+import com.alibaba.qwen.code.managedagent.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
@@ -169,15 +170,25 @@ public class HarnessCoordinator {
         boolean terminal = false;
         AtomicBoolean submissionAttempted = new AtomicBoolean(
                 claimed.submissionAttempted());
+        AtomicBoolean recoveryPath = new AtomicBoolean();
         try {
             terminal = runClaimed(claimed, leaseLost,
-                    submissionAttempted);
+                    submissionAttempted, recoveryPath);
         } catch (HostedHarnessCapabilityMismatchException error) {
             terminal = fail(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.");
+        } catch (HostedHarnessRecoveryDeclinedException error) {
+            terminal = fail(claimed, "managed_runtime_recovery_blocked",
+                    "The prior Harness generation parked a Turn this"
+                            + " Harness cannot take over ("
+                            + error.getReason() + ").");
         } catch (HostedHarnessGenerationException error) {
-            terminal = fail(claimed, error.getCode(),
-                    "Hosted Harness generation changed.");
+            // G3: a generation change is adopted, not failed. The next
+            // dispatch attempt re-attaches through the takeover load; the
+            // wait is bounded by the prior generation's lease, so the
+            // pre-admission retry budget does not apply.
+            terminal = transientFailure(claimed,
+                    submissionAttempted.get(), error, true);
         } catch (DaemonProtocolException error) {
             terminal = fail(claimed, "hosted_harness_protocol_error",
                     "Hosted Harness returned an invalid protocol response.");
@@ -189,15 +200,17 @@ public class HarnessCoordinator {
                         "Hosted Harness rejected the Turn.");
             } else {
                 terminal = transientFailure(claimed,
-                        submissionAttempted.get(), error);
+                        submissionAttempted.get(), error,
+                        recoveryPath.get());
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
                     ? fail(claimed, error.getCode(), error.getMessage())
-                    : transientFailure(claimed, submissionAttempted.get(), error);
+                    : transientFailure(claimed, submissionAttempted.get(),
+                            error, recoveryPath.get());
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
-                    submissionAttempted.get(), error);
+                    submissionAttempted.get(), error, recoveryPath.get());
         } finally {
             renewal.cancel(false);
             if (!terminal) {
@@ -207,9 +220,14 @@ public class HarnessCoordinator {
     }
 
     private boolean runClaimed(TurnRecord claimed,
-            AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
+            AtomicBoolean leaseLost, AtomicBoolean submissionAttempted,
+            AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        // A bound Session re-attaches through the takeover load: failures
+        // here wait on the prior generation's lease, a wait bounded by that
+        // lease itself rather than by the pre-admission retry budget.
+        recoveryPath.set(session.harnessBootId() != null);
         if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
@@ -320,8 +338,26 @@ public class HarnessCoordinator {
                         current.sessionId(), current.turnId()).orElseThrow();
             }
         } else {
-            if (!store.bindHarness(session.tenantId(), session.sessionId(),
-                    claimed.turnId(), owner, attachment.bootId())) {
+            boolean bound = store.bindHarness(session.tenantId(),
+                    session.sessionId(), claimed.turnId(), owner,
+                    attachment.bootId());
+            if (!bound && claimed.submissionAttempted()
+                    && claimed.harnessEventEpoch() == null
+                    && session.harnessBootId() != null
+                    && !attachment.bootId().equals(session.harnessBootId())
+                    && store.withdrawSubmissionAttempted(claimed.tenantId(),
+                            claimed.sessionId(), claimed.turnId(), owner)) {
+                // G3: the mark came from a generation that provably never
+                // admitted the prompt (the Turn carries no event epoch);
+                // withdraw it so the adopted generation may submit. A lost
+                // old-generation admission replays idempotently on the
+                // journal under the same commandId.
+                submissionAttempted.set(false);
+                bound = store.bindHarness(session.tenantId(),
+                        session.sessionId(), claimed.turnId(), owner,
+                        attachment.bootId());
+            }
+            if (!bound) {
                 return fail(claimed, "hosted_harness_generation_mismatch",
                         "Hosted Harness generation changed.");
             }
@@ -579,7 +615,14 @@ public class HarnessCoordinator {
 
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error) {
+        return transientFailure(turn, submissionAttempted, error, false);
+    }
+
+    private boolean transientFailure(TurnRecord turn,
+            boolean submissionAttempted, RuntimeException error,
+            boolean exemptFromPreAdmissionBudget) {
         if (!submissionAttempted
+                && !exemptFromPreAdmissionBudget
                 && turn.retryCount() >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",

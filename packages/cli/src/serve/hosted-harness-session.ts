@@ -62,6 +62,7 @@ import {
   recoverHostedRuntimeTurn,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
+  type HostedRecoveryDeclineReason,
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
 import {
@@ -117,6 +118,11 @@ interface HostedSession {
   /** A recovery load acquired the Runtime Session for this promptId;
    * whichever terminal route runs must release it. */
   runtimeLeaseHeld?: string;
+  /** The snapshot a takeover load answered, kept until its prompt's
+   * continue/cancel is admitted, so a repeated takeover load that lost the
+   * original reply can fetch it again instead of meeting a bare
+   * `hosted_session_already_attached`. */
+  recoverySnapshot?: { promptId: string; report: HostedRuntimeRecoveryReport };
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -127,6 +133,19 @@ function object(value: unknown): Record<string, unknown> | null {
 
 function error(res: Response, status: number, code: string): void {
   res.status(status).json({ error: code, code });
+}
+
+/** A takeover refusal that cannot change under retry: distinct from
+ * `hosted_turn_recovery_required`, which stays retriable. */
+function recoveryDeclined(
+  res: Response,
+  reason: HostedRecoveryDeclineReason,
+): void {
+  res.status(409).json({
+    error: 'hosted_turn_recovery_declined',
+    code: 'hosted_turn_recovery_declined',
+    reason,
+  });
 }
 
 function identity(
@@ -922,7 +941,38 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_harness_generation_mismatch');
       return;
     }
-    if (sessions.has(sessionId) || opening.has(sessionId)) {
+    // Cold loads stay inert: only an explicit takeover request may touch
+    // the Broker or settle anything.
+    const takeover =
+      body?.['passiveManagedRuntimeRecovery'] === true ||
+      body?.['driveRuntimeRecovery'] === true;
+    const attached = sessions.get(sessionId);
+    if (attached) {
+      // An idempotent takeover reload: the original reply was presumably
+      // lost after attach, so hand the same snapshot back while the parked
+      // prompt is still unsettled.
+      const snapshot = attached.recoverySnapshot;
+      if (takeover && snapshot) {
+        if (unsettledPromptId(attached) === snapshot.promptId) {
+          res.status(200).json({
+            sessionId,
+            clientId: attached.clientId,
+            workspaceCwd: attached.cwd,
+            lastEventId: attached.managed.authority.committedSequence,
+            eventEpoch: epoch,
+            ...(attached.approval
+              ? { approvalMode: attached.approval.mode }
+              : {}),
+            _meta: { 'qwen.daemon.managedRuntimeRecovery': snapshot.report },
+          });
+          return;
+        }
+        attached.recoverySnapshot = undefined;
+      }
+      error(res, 409, 'hosted_session_already_attached');
+      return;
+    }
+    if (opening.has(sessionId)) {
       error(res, 409, 'hosted_session_already_attached');
       return;
     }
@@ -1073,13 +1123,9 @@ export function registerHostedHarnessSessionRoutes(
       if (pinned) session.approval = pinned;
       // A takeover recovers exactly the parked Turn, including the file
       // history it left pending; only refuse a stranger's pending state.
+      // A bare load of a parked Session keeps refusing with 409 so it never
+      // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
-      // Cold loads stay inert: only an explicit takeover request may touch
-      // the Broker or settle anything. A bare load of a parked Session keeps
-      // refusing with 409 so it never drives a Runtime by accident.
-      const takeover =
-        body?.['passiveManagedRuntimeRecovery'] === true ||
-        body?.['driveRuntimeRecovery'] === true;
       const fileHistory = await readHostedFileHistory(managed);
       if (
         fileHistory?.pendingUndo ||
@@ -1128,14 +1174,17 @@ export function registerHostedHarnessSessionRoutes(
       ) {
         // A parked Runtime turn is taken over, not refused: settle its
         // executions under their original ids (or report them for a
-        // cancellation) and answer with the recovery snapshot.
+        // cancellation) and answer with the recovery snapshot. A Turn with
+        // no Runtime work (a model round, or every Turn of a no-tool
+        // Session) cannot be driven here: refuse it with a typed terminal
+        // decline rather than a refusal the coordinator retries forever.
         if (toolProfile === undefined || !brokerOptions) {
           await managed.close();
-          error(res, 409, 'hosted_turn_recovery_required');
+          recoveryDeclined(res, 'model_start');
           return;
         }
         try {
-          const recovered = await recoverHostedRuntimeTurn({
+          const outcome = await recoverHostedRuntimeTurn({
             session: managed,
             sessionId,
             cwd,
@@ -1143,14 +1192,18 @@ export function registerHostedHarnessSessionRoutes(
             brokerOptions,
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
           });
-          if (recovered === undefined) {
+          if (outcome.kind === 'declined') {
             await managed.close();
-            error(res, 409, 'hosted_turn_recovery_required');
+            recoveryDeclined(res, outcome.reason);
             return;
           }
-          recovery = recovered.report;
-          if (recovered.acquiredRuntime)
-            session.runtimeLeaseHeld = recovered.promptId;
+          recovery = outcome.turn.report;
+          session.recoverySnapshot = {
+            promptId: outcome.turn.promptId,
+            report: outcome.turn.report,
+          };
+          if (outcome.turn.acquiredRuntime)
+            session.runtimeLeaseHeld = outcome.turn.promptId;
         } catch (cause) {
           await managed.close();
           writeStderrLineSafe(
@@ -1886,6 +1939,8 @@ export function registerHostedHarnessSessionRoutes(
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
     });
+    if (session.recoverySnapshot?.promptId === promptId)
+      session.recoverySnapshot = undefined;
     res.status(200).json({
       accepted: true,
       promptId,
@@ -2124,6 +2179,8 @@ export function registerHostedHarnessSessionRoutes(
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
     });
+    if (session.recoverySnapshot?.promptId === promptId)
+      session.recoverySnapshot = undefined;
     session.active = { promptId, digest: '', abort: new AbortController() };
     void (async () => {
       try {

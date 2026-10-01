@@ -48,6 +48,9 @@ qwen:
       approval-timeout: '${QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT:10m}'
       connect-timeout: '5s'
       request-timeout: '30s'
+      # A takeover load may settle parked Runtime executions and can take
+      # far longer than a steady-state call.
+      load-timeout: '${QWEN_MANAGED_AGENT_HARNESS_LOAD_TIMEOUT:120s}'
       heartbeat-interval: '30s'
     dispatch:
       scan-delay: '1s'

@@ -19,6 +19,8 @@ import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-co
 import {
   stopParkedRuntimeExecutions,
   recoverHostedRuntimeTurn,
+  type HostedRecoveryTurn,
+  type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 
@@ -26,6 +28,16 @@ const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 const EXECUTION_ID = 'exec-1';
 const DIGEST = 'a'.repeat(64);
+
+function mustRecover(
+  outcome: HostedRuntimeRecoveryOutcome,
+): HostedRecoveryTurn {
+  if (outcome.kind !== 'recovered')
+    throw new Error(
+      `expected a recovery, got ${outcome.kind} (${outcome.kind === 'declined' ? outcome.reason : ''})`,
+    );
+  return outcome.turn;
+}
 
 describe('recoverHostedRuntimeTurn', () => {
   let root: string;
@@ -262,14 +274,16 @@ describe('recoverHostedRuntimeTurn', () => {
       } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       expect(execute).toHaveBeenCalledOnce();
       expect(execute.mock.calls[0]?.[0]).toBe(EXECUTION_ID);
@@ -320,14 +334,16 @@ describe('recoverHostedRuntimeTurn', () => {
       } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       // Each execution re-dispatches under its own id with its own arguments.
       expect(execute.mock.calls.map((call) => call[0])).toEqual([
@@ -363,14 +379,16 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       // Nothing to re-dispatch, but the dead owner's Runtime Session still
       // pins the Workspace — the takeover must hold it so the terminal route
       // can hand it back.
@@ -393,14 +411,16 @@ describe('recoverHostedRuntimeTurn', () => {
     });
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(recovered).toBeDefined();
       expect(execute).not.toHaveBeenCalled();
       // A passive load only reads: nothing may be journaled for the prompt.
@@ -440,14 +460,16 @@ describe('recoverHostedRuntimeTurn', () => {
     );
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       expect(recovered!.report.executions).toEqual([
         expect.objectContaining({
           executionCallId: EXECUTION_ID,
@@ -466,10 +488,10 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('refuses a turn whose checkpoint is not a Runtime wait', async () => {
+  it('declines a turn without a Runtime checkpoint as model_start', async () => {
     const session = await open('boot-1', true);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session,
         sessionId: SESSION_ID,
         cwd: root,
@@ -477,7 +499,7 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
     } finally {
       await session.close();
     }
@@ -492,7 +514,7 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -500,7 +522,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'unresolved_after_settle',
+      });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
     } finally {
@@ -519,7 +544,7 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -527,7 +552,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'batch_not_durable',
+      });
       expect(execute).not.toHaveBeenCalled();
       // The decline happens after the lease was acquired, so it must hand it
       // back — the caller never learns about it otherwise.
@@ -594,7 +622,7 @@ describe('recoverHostedRuntimeTurn', () => {
     const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
+      const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
         cwd: root,
@@ -602,7 +630,10 @@ describe('recoverHostedRuntimeTurn', () => {
         brokerOptions,
         passive: false,
       });
-      expect(recovered).toBeUndefined();
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'shell_in_flight',
+      });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
     } finally {
@@ -619,14 +650,16 @@ describe('recoverHostedRuntimeTurn', () => {
     } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       expect(recovered!.report.phase).toBe('results_ready');
       const projected = await replacement.sink.project();
@@ -649,14 +682,16 @@ describe('recoverHostedRuntimeTurn', () => {
     } as never);
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: false,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
       expect(recovered).toBeDefined();
       // The retry skipped only the duplicate write: the resolve still ran, so
       // the checkpoint reached results_ready and the report says so.
@@ -685,14 +720,16 @@ describe('recoverHostedRuntimeTurn', () => {
     });
     const replacement = await open('boot-2', false);
     try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
       // A passive load only reads: nothing may be journaled for the prompt.
       expect(
         (await replacement.sink.project()).filter(

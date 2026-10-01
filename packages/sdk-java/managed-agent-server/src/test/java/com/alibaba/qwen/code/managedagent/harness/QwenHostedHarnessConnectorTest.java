@@ -18,8 +18,10 @@ import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
+import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
@@ -30,6 +32,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
@@ -41,6 +44,14 @@ class QwenHostedHarnessConnectorTest {
             "33333333-3333-4333-8333-333333333333";
     private static final String BOOT_ID =
             "11111111-1111-4111-8111-111111111111";
+    private static final String NEW_BOOT_ID =
+            "55555555-5555-4555-8555-555555555555";
+    private static final String SUBMIT_PROMPT_ID =
+            "66666666-6666-4666-8666-666666666666";
+    private static final List<Map<String, Object>> SUBMIT_CONTENT =
+            List.of(Map.of("type", "text", "text", "hi"));
+    private static final String SUBMIT_DIGEST =
+            SubmitHarnessTurn.computePayloadDigest(SUBMIT_CONTENT);
 
     @Test
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant() {
@@ -405,6 +416,126 @@ class QwenHostedHarnessConnectorTest {
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
                 .containsEntry("passiveManagedRuntimeRecovery", true)
                 .doesNotContainKey("driveRuntimeRecovery");
+    }
+
+    // G3: a generation change adopts instead of pinning the Session. The
+    // discovering call closes the pinned client and drops every cached
+    // attachment, so the next call re-attaches on the rebuilt client.
+    @Test
+    void generationMismatchClosesClientAndAdoptsOnNextCall() {
+        HostedHarnessClient oldClient = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities oldCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef staleRef = mock(HarnessSessionRef.class);
+        when(oldCapabilities.getBootId()).thenReturn(BOOT_ID);
+        when(oldClient.capabilities()).thenReturn(oldCapabilities);
+        when(oldClient.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(staleRef);
+        when(staleRef.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(oldClient);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        HostedHarnessGenerationException mismatch =
+                mock(HostedHarnessGenerationException.class);
+        when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
+        doThrow(mismatch).when(oldClient).submitTurn(any());
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
+                SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST))
+                .isSameAs(mismatch);
+        verify(oldClient).close();
+
+        // The rebuilt client (injected in place of a real renegotiation)
+        // finds no cached attachment and re-loads before serving new work.
+        HostedHarnessClient newClient = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities newCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef freshRef = mock(HarnessSessionRef.class);
+        PromptReceipt receipt = mock(PromptReceipt.class);
+        when(newCapabilities.getBootId()).thenReturn(NEW_BOOT_ID);
+        when(newClient.capabilities()).thenReturn(newCapabilities);
+        when(newClient.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(freshRef);
+        when(newClient.submitTurn(any())).thenReturn(receipt);
+        when(freshRef.getHarnessBootId()).thenReturn(NEW_BOOT_ID);
+        ReflectionTestUtils.setField(connector, "client", newClient);
+
+        connector.submit("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID,
+                SUBMIT_CONTENT, SUBMIT_DIGEST);
+        verify(newClient).loadSession(any(LoadHarnessSession.class));
+        verify(newClient).submitTurn(any());
+    }
+
+    // A stale cached ref used against an already-adopted client answers with
+    // the client's own boot as the actual id: nothing to rebuild.
+    @Test
+    void staleRefAgainstAdoptedClientDoesNotRebuild() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        HostedHarnessGenerationException mismatch =
+                mock(HostedHarnessGenerationException.class);
+        when(mismatch.getActualBootId()).thenReturn(BOOT_ID);
+        doThrow(mismatch).when(client).submitTurn(any());
+        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
+                SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST))
+                .isSameAs(mismatch);
+        verify(client, never()).close();
+    }
+
+    // The one code-aware call site: a takeover refusal that cannot change
+    // under retry surfaces as the typed terminal exception.
+    @Test
+    void takeoverDeclineMapsToTypedTerminalException() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException declined = mock(DaemonHttpException.class);
+        when(declined.getStatusCode()).thenReturn(409);
+        when(declined.getErrorCode())
+                .thenReturn(HostedHarnessRecoveryDeclinedException.CODE);
+        when(declined.getBodyField("reason")).thenReturn("shell_in_flight");
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenThrow(declined);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason())
+                                .isEqualTo("shell_in_flight"));
+        verify(client, never()).close();
+    }
+
+    @Test
+    void otherTakeoverConflictsStayOpaqueToErrorCodes() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode())
+                .thenReturn("hosted_turn_recovery_required");
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenThrow(conflict);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a",
+                SESSION_ID, false)).isSameAs(conflict);
+        verify(client, never()).close();
     }
 
     private static QwenHostedHarnessConnector connector(

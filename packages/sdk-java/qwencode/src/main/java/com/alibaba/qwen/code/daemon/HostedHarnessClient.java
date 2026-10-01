@@ -60,6 +60,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private final String baseUrl;
     private final String bearerToken;
     private final Duration requestTimeout;
+    private final Duration loadTimeout;
     private final Duration heartbeatInterval;
     private final int maximumSseFrameBytes;
     private final ExecutorService httpExecutor;
@@ -82,6 +83,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         String expectedDigest = requireDigest(
                 builder.capabilityDigest, "capabilityDigest");
         this.requestTimeout = builder.requestTimeout;
+        this.loadTimeout = builder.loadTimeout != null
+                ? builder.loadTimeout : builder.requestTimeout;
         this.heartbeatInterval = builder.heartbeatInterval;
         this.maximumSseFrameBytes = builder.maximumSseFrameBytes;
         long number = CLIENT_SEQUENCE.incrementAndGet();
@@ -165,7 +168,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         ensureOpen();
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
         HttpSupport.Response response = sendMutation(path,
-                request.toJson(), null, "POST /session/:id/load");
+                request.toJson(), null, "POST /session/:id/load",
+                loadTimeout);
         try {
             DaemonClient.requireStatus(response, 200,
                     "POST /session/:id/load");
@@ -701,6 +705,14 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException(
                     "Endpoint does not advertise hosted_harness_private_v1");
         }
+        // A build that predates message.delta records cannot open the
+        // journals one now writes; refuse it once here instead of failing
+        // every Session open.
+        if (!features.contains("managed_session_journal_delta_v1")) {
+            throw new DaemonProtocolException(
+                    "Endpoint does not advertise"
+                            + " managed_session_journal_delta_v1");
+        }
         Map<String, Object> hosted = JsonSupport.requiredObject(json,
                 "hostedHarness", "capabilities");
         Map<String, Object> versions = JsonSupport.requiredObject(hosted,
@@ -904,9 +916,15 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     private HttpSupport.Response sendMutation(String path,
             Map<String, Object> body, String clientId, String operation) {
+        return sendMutation(path, body, clientId, operation, requestTimeout);
+    }
+
+    private HttpSupport.Response sendMutation(String path,
+            Map<String, Object> body, String clientId, String operation,
+            Duration timeout) {
         HttpResponse<HttpSupport.Body> raw;
         try {
-            raw = send(path, "POST", body, clientId);
+            raw = send(path, "POST", body, clientId, timeout);
         } catch (IOException | InterruptedException e) {
             restoreInterrupt(e);
             throw new MutationOutcomeUnknownException(operation, e);
@@ -930,10 +948,16 @@ public final class HostedHarnessClient implements AutoCloseable {
     private HttpResponse<HttpSupport.Body> send(String path, String method,
             Map<String, Object> body, String clientId)
             throws IOException, InterruptedException {
+        return send(path, method, body, clientId, requestTimeout);
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId, Duration timeout)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
-                .timeout(requestTimeout);
+                .timeout(timeout);
         if (body == null) {
             builder.method(method, HttpRequest.BodyPublishers.noBody());
         } else {
@@ -1241,6 +1265,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         private String capabilityDigest;
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(30);
+        private Duration loadTimeout;
         private Duration heartbeatInterval = Duration.ofMinutes(1);
         private int maximumSseFrameBytes = 16 * 1024 * 1024;
 
@@ -1269,6 +1294,14 @@ public final class HostedHarnessClient implements AutoCloseable {
 
         public Builder requestTimeout(Duration requestTimeout) {
             this.requestTimeout = positive(requestTimeout, "requestTimeout");
+            return this;
+        }
+
+        /** A takeover load can take far longer than a steady-state call
+         * (it may settle parked Runtime executions), so it gets its own
+         * ceiling; unset falls back to {@link #requestTimeout}. */
+        public Builder loadTimeout(Duration loadTimeout) {
+            this.loadTimeout = positive(loadTimeout, "loadTimeout");
             return this;
         }
 

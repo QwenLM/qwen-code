@@ -16,12 +16,14 @@ import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
+import com.alibaba.qwen.code.managedagent.harness.HostedHarnessRecoveryDeclinedException;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -175,6 +177,139 @@ class HarnessCoordinatorTest {
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // G3: a Harness process generation change is adopted, not failed. The
+    // retry is exempt from the pre-admission budget (claimed here at its
+    // cap of 5): the wait is bounded by the prior generation's lease, and
+    // the next attempt re-attaches through the takeover load.
+    @Test
+    void adoptsNextHarnessGenerationInsteadOfFailing() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", false, 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        HostedHarnessGenerationException mismatch =
+                mock(HostedHarnessGenerationException.class);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(mismatch);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), anyLong());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    // A takeover refusal that cannot change under retry ends the Turn with
+    // the existing blocked code instead of parking it forever.
+    @Test
+    void declinedTakeoverEndsTurnAsRecoveryBlocked() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", true, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(new HostedHarnessRecoveryDeclinedException(
+                        "shell_in_flight"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_runtime_recovery_blocked"),
+                argThat(message -> message.contains("shell_in_flight")));
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // G3: a Turn marked by a generation that never admitted it withdraws the
+    // mark so the adopted generation may bind and submit it. The journal's
+    // commandId idempotency absorbs a lost old-generation admission.
+    @Test
+    void withdrawsSubmissionMarkAndSubmitsOnAdoptedGeneration() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
+                null, 0, "RUNNING", true, 0);
+        TurnRecord admitted = turn("tenant", "session", "turn", "prompt",
+                "epoch-new", 5);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot-new", null, 0L,
+                        "epoch-new"));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-new"))).thenReturn(false, true);
+        when(store.withdrawSubmissionAttempted(eq("tenant"), eq("session"),
+                eq("turn"), anyString())).thenReturn(true);
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed), Optional.of(admitted));
+        when(harness.submit(eq("tenant"), eq("session"), eq("prompt"),
+                any(), anyString())).thenReturn(new Admission(5,
+                        "epoch-new"));
+        when(harness.stream("tenant", "session", 5, "epoch-new"))
+                .thenReturn(terminalStream("prompt"));
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        InOrder order = inOrder(store, harness);
+        order.verify(store).bindHarness(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("boot-new"));
+        order.verify(store).withdrawSubmissionAttempted(eq("tenant"),
+                eq("session"), eq("turn"), anyString());
+        order.verify(store).bindHarness(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("boot-new"));
+        order.verify(store).markSubmissionAttempted(eq("tenant"),
+                eq("session"), eq("turn"), anyString());
+        order.verify(harness).submit(eq("tenant"), eq("session"),
+                eq("prompt"), any(), anyString());
+        verify(store).recordHarnessEvents(eq("tenant"), eq("session"),
+                eq("turn"), anyString(), eq("epoch-new"), any());
+        verify(store, never()).failTurn(anyString(), anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(store, never()).bindRecoveredHarness(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
     }
 
