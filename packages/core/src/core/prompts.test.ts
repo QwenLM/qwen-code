@@ -488,7 +488,8 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = getCoreSystemPrompt();
     expect(prompt).not.toContain('# Git Repository');
-    expect(prompt).not.toMatch(/\bgit (?:log|blame|status|diff|show)\b/);
+    expect(prompt).not.toContain('Git as Source of Truth');
+    expect(prompt).not.toMatch(/\bgit (?:log|blame|status|diff|show|add)\b/);
     expect(prompt).toMatchSnapshot();
   });
 
