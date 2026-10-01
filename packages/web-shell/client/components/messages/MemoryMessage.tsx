@@ -46,7 +46,7 @@ export function MemoryMessage({
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
-  const { files, loading, error, readMemoryFile, reload, writeMemory } =
+  const { files, status, loading, error, readMemoryFile, reload, writeMemory } =
     useMemory({
       autoLoad: true,
     });
@@ -88,6 +88,14 @@ export function MemoryMessage({
 
   const selectedEntry =
     entries.find((entry) => entry.scope === selectedScope) ?? entries[0];
+
+  // Replace needs both the file's full text and the list that says whether
+  // the file exists. While the status load is outstanding (`status` is
+  // undefined on first paint, in flight, and after a failure) `files` is
+  // empty, so the create path below would offer replace over a file that is
+  // really on disk. Keying on the load having succeeded — never on `files`
+  // being empty — keeps the legitimate first-memory-file create path working.
+  const canReplace = editable && status !== undefined;
 
   const loadContent = useCallback(
     (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
@@ -184,7 +192,7 @@ export function MemoryMessage({
   };
 
   const handleSave = () => {
-    if (!selectedEntry || !editable) return;
+    if (!selectedEntry || !canReplace) return;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
@@ -249,7 +257,7 @@ export function MemoryMessage({
             <button
               type="button"
               className={styles.actionButton}
-              disabled={!editable}
+              disabled={!canReplace}
               onClick={handleEdit}
             >
               {t('settings.action.edit')}
@@ -286,7 +294,7 @@ export function MemoryMessage({
               <button
                 type="button"
                 className={styles.primaryButton}
-                disabled={saving || contentLoading || !editable}
+                disabled={saving || contentLoading || !canReplace}
                 onClick={handleSave}
               >
                 {saving ? t('memory.saving') : t('memory.save')}

@@ -212,6 +212,30 @@ describe('workspace memory routes', () => {
       expect(file.truncated).toBe(true);
       expect(file.content).toHaveLength(1024 * 1024);
     });
+
+    it('omits content for a memory file that is not valid UTF-8', async () => {
+      await fs.mkdir(globalDir, { recursive: true });
+      const globalFile = path.join(globalDir, 'QWEN.md');
+      // What PowerShell `>` redirection writes. Serving it as lossy text
+      // would still look complete to the panel, whose `mode=replace` save
+      // then rewrites the real bytes with no backup.
+      await fs.writeFile(
+        globalFile,
+        Buffer.concat([
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from('# Memory 中文\n', 'utf16le'),
+        ]),
+      );
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      const [file] = res.body.files as Array<Record<string, unknown>>;
+      expect(file.path).toBe(globalFile);
+      expect(file).not.toHaveProperty('content');
+    });
   });
 
   describe('POST /workspace/memory', () => {

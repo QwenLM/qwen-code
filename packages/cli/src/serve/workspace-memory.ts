@@ -645,15 +645,26 @@ async function walkWorkspaceForMemory(
 
 async function readMemoryFileContent(
   filePath: string,
-): Promise<{ content: string; truncated: boolean }> {
+): Promise<{ content?: string; truncated?: boolean }> {
   const buffer = await fs.readFile(filePath);
   const truncated = buffer.length > MAX_MEMORY_CONTENT_BYTES;
-  return {
-    content: buffer
-      .subarray(0, truncated ? MAX_MEMORY_CONTENT_BYTES : buffer.length)
-      .toString('utf8'),
-    truncated,
-  };
+  const slice = buffer.subarray(
+    0,
+    truncated ? MAX_MEMORY_CONTENT_BYTES : buffer.length,
+  );
+  try {
+    return {
+      content: new TextDecoder('utf-8', { fatal: true }).decode(slice),
+      truncated,
+    };
+  } catch {
+    // Not valid UTF-8 (GBK, Shift_JIS, UTF-16LE from PowerShell `>`). A
+    // lenient decode would hand the client U+FFFD text that still looks
+    // complete, and its `mode=replace` save rewrites the real bytes with no
+    // backup. Omit `content` so the client falls back to the encoding-aware
+    // file route instead.
+    return {};
+  }
 }
 
 function isEnoent(err: unknown): boolean {

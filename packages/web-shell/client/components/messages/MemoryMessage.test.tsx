@@ -8,7 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonWorkspaceMemoryFile } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonWorkspaceMemoryFile,
+  DaemonWorkspaceMemoryStatus,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -17,6 +20,7 @@ const GLOBAL_PATH = '/home/u/.qwen/QWEN.md';
 
 const memory = vi.hoisted(() => ({
   files: [] as DaemonWorkspaceMemoryFile[],
+  status: undefined as DaemonWorkspaceMemoryStatus | undefined,
   readMemoryFile: vi.fn(),
   writeMemory: vi.fn(),
   reload: vi.fn(),
@@ -31,6 +35,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     ...actual,
     useMemory: () => ({
       files: memory.files,
+      status: memory.status,
       loading: false,
       error: undefined,
       readMemoryFile: memory.readMemoryFile,
@@ -75,6 +80,17 @@ function button(label: string): HTMLButtonElement {
   return match;
 }
 
+function type(textarea: HTMLTextAreaElement, text: string) {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!;
+    setter.call(textarea, text);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
     cb(0);
@@ -83,6 +99,15 @@ beforeEach(() => {
   memory.files = [
     { kind: 'memory_file', path: GLOBAL_PATH, scope: 'global', bytes: 42 },
   ];
+  memory.status = {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    files: memory.files,
+    totalBytes: 42,
+    fileCount: memory.files.length,
+    ruleCount: 0,
+  };
   memory.readMemoryFile.mockReset();
   memory.writeMemory.mockReset();
   memory.reload.mockReset().mockResolvedValue(undefined);
@@ -131,13 +156,16 @@ describe('MemoryMessage', () => {
 
     const editor = container.querySelector('textarea')!;
     expect(editor.value).toBe('existing\n');
+    // An actual edit: asserting only that the read text comes back would
+    // also pass for a panel that ignores the editor entirely.
+    type(editor, 'existing\none typed line\n');
     act(() => button('Save Memory').click());
     await flush();
 
     expect(memory.writeMemory).toHaveBeenCalledWith({
       scope: 'global',
       mode: 'replace',
-      content: 'existing\n',
+      content: 'existing\none typed line\n',
     });
   });
 
@@ -151,5 +179,41 @@ describe('MemoryMessage', () => {
 
     expect(container.textContent).toContain('partial');
     expect(button('Edit').disabled).toBe(true);
+  });
+
+  // #13100's destructive step: an outstanding status load makes `files`
+  // empty, which looks exactly like "no memory file yet" and used to open
+  // the create path with Edit + Save enabled over a file that is on disk.
+  it('does not offer replace while the memory list has not loaded', async () => {
+    memory.files = [];
+    memory.status = undefined;
+
+    await mountOnUserTab();
+
+    expect(button('Edit').disabled).toBe(true);
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  // The gate must key on the load having succeeded, not on `files` being
+  // empty: a genuinely empty list is the first-memory-file create path.
+  it('still offers creating the first memory file once the list loaded', async () => {
+    memory.files = [];
+    memory.status = {
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: false,
+      files: [],
+      totalBytes: 0,
+      fileCount: 0,
+      ruleCount: 0,
+    };
+
+    await mountOnUserTab();
+
+    expect(button('Edit').disabled).toBe(false);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')).not.toBeNull();
   });
 });
