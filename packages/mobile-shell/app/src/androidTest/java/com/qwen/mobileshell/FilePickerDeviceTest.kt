@@ -66,6 +66,22 @@ class FilePickerDeviceTest {
         override fun createIntent() = Intent()
     }
 
+    private class CountingContext(base: Context) : ContextWrapper(base) {
+        var providerManagerReads = 0
+        var permissionChecks = 0
+
+        // The picker obtains PackageManager only when resolving a provider.
+        override fun getPackageManager(): PackageManager {
+            providerManagerReads++
+            return super.getPackageManager()
+        }
+
+        override fun checkUriPermission(uri: Uri, pid: Int, uid: Int, flags: Int): Int {
+            permissionChecks++
+            return super.checkUriPermission(uri, pid, uid, flags)
+        }
+    }
+
     @Test fun intentUsesReadOnlyDocumentsAndPreservesMultipleMimeHints() {
         var launched: Intent? = null
         val picker = NativeFilePicker(context) { launched = it }
@@ -144,6 +160,31 @@ class FilePickerDeviceTest {
         assertArrayEquals(uris.take(100).toTypedArray(), delivered(selection(uris.take(100))))
         assertNull(delivered(selection(uris)))
         assertNull(delivered(selection(uris.take(100)).setData(uris.last())))
+    }
+
+    @Test fun sameProviderIsResolvedOncePerSelectionAndEveryGrantIsChecked() {
+        val uris = (0 until 100).map { document(it) }
+        val countingContext = CountingContext(context)
+        val picker = NativeFilePicker(countingContext) { }
+        repeat(2) { index ->
+            var calls = 0
+            picker.open(Params(FileChooserParams.MODE_OPEN_MULTIPLE), { true }) {
+                assertArrayEquals(uris.toTypedArray(), it)
+                calls++
+            }
+            picker.result(Activity.RESULT_OK, selection(uris))
+            assertEquals(1, calls)
+            assertEquals(index + 1, countingContext.providerManagerReads)
+            assertEquals((index + 1) * uris.size, countingContext.permissionChecks)
+        }
+    }
+
+    @Test fun cachedProviderDoesNotAllowAnotherDocumentWithoutItsOwnGrant() {
+        val uris = listOf(document(0), document(1, granted = false))
+        val countingContext = CountingContext(context)
+        assertNull(delivered(selection(uris), pickerContext = countingContext))
+        assertEquals(1, countingContext.providerManagerReads)
+        assertEquals(2, countingContext.permissionChecks)
     }
 
     @Test fun unsupportedModeAndStaleDocumentCancelWithoutLaunching() {
