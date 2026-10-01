@@ -197,6 +197,47 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('keeps the shown approval while a reload has not returned the Session yet', async () => {
+    let hold = false;
+    let release: (() => void) | undefined;
+    mocks.client.getSession.mockImplementation(async (id: string) => {
+      if (hold) await new Promise<void>((resolve) => (release = resolve));
+      return summary(id, {
+        phase: 'agent_running',
+        capabilities: { canSend: false, canCancel: true, actions: true },
+      });
+    });
+    const listPending = vi.fn().mockResolvedValue([pendingAction]);
+    provider = { ...provider, actions: { listPending, respond: vi.fn() } };
+
+    await render('s1');
+    await act(async () => flush());
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+
+    hold = true;
+    const refresh = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Refresh',
+    );
+    await act(async () => {
+      refresh!.click();
+      await flush();
+    });
+    // The reload has not returned the Session summary, so the capability is
+    // unknown: the card stays and nothing is read yet.
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).not.toBeNull();
+    expect(listPending).toHaveBeenCalledTimes(1);
+
+    hold = false;
+    await act(async () => {
+      release?.();
+      await flush();
+    });
+  });
+
   it('shows a pending Hosted approval and answers it with the chosen option', async () => {
     mocks.client.getSession.mockImplementation(async (id: string) =>
       summary(id, {
