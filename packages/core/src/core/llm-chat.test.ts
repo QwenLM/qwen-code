@@ -706,6 +706,7 @@ describe('LlmChat', async () => {
       expect.arrayContaining([
         expect.objectContaining({ role: 'user', parts: [searchResponse] }),
       ]),
+      chat,
     );
   });
 

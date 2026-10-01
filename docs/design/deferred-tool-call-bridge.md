@@ -28,7 +28,7 @@ resolves. A name that matches several registered tools only by case resolves to
 none of them — registration order decides nothing — and both halves refuse it:
 `tool_search` reports it as ambiguous and lists the spellings that do resolve,
 `tool_call` refuses and asks for the exact name. Name resolution alone does not
-permit invocation: a complete reviewed schema must remain in the caller's history.
+permit invocation: the caller must retain a `tool_search` schema block and a review established from its complete schema.
 
 When `tool_search` returns a tool, it records a fingerprint of that tool's
 invocation contract — its MCP server (empty for a built-in), the name in its
@@ -49,7 +49,7 @@ the initialized primary chat outside an agent run. This uses the existing agent
 execution frame rather than treating a registry instance as a conversation owner.
 An inherited history can establish a review in a new registry; independent chats
 sharing a registry cannot lend or erase each other's resident schema evidence.
-Removing the schema from the caller's history makes the bridge refuse again.
+A truncated block may retain only the fingerprint already reviewed by that same chat; a fresh or independent chat cannot establish a review from the fragment. Removing the entire block from the caller's history makes the bridge refuse again.
 Query and missing-name echoes escape tag delimiters so they cannot establish
 schema evidence by containing a forged `<function>` block.
 
@@ -122,8 +122,8 @@ in the same `tool_call` bucket as a malformed envelope.
 ## Known limitations
 
 Review evidence is a schema-availability check, not a permission grant. A hidden
-tool without a complete schema in the caller's history is refused even when the
-startup catalog lists its name. Existing permission checks still decide whether
+tool without its own retained schema review is refused even when the startup
+catalog lists its name. Existing permission checks still decide whether
 the reviewed tool may execute.
 
 A change limited to a tool's `description` is not detected, deliberately: those
@@ -136,10 +136,7 @@ with arguments written against the previous connection. Telling a connection
 identity apart from a name label needs a channel the registry does not have
 today; it is tracked in the #11321 discussion rather than approximated here.
 
-The registry map caches review fingerprints, but the caller's current history
-is authoritative at invocation. `/clear`, compaction, and history replacement
-remove reviews whose complete schema blocks are no longer resident. Changed
-parameter contracts continue to require a fresh `tool_search` result.
+Review fingerprints are cached per chat, but the caller's current history is authoritative at invocation. `/clear` clears all reviews; compaction and history replacement remove reviews whose blocks are no longer present. A surviving truncated block retains only that chat's prior fingerprint, so another chat's re-review cannot authorize a changed parameter contract or MCP server. Those changes still require the caller to obtain a fresh `tool_search` result.
 
 ## Verification
 
@@ -158,6 +155,7 @@ parameter contracts continue to require a fresh `tool_search` result.
   and reviewed as two tools when both spellings are named explicitly.
 - A hidden tool whose recorded fingerprint no longer matches the live one is
   refused until `tool_search` returns it again.
+- A chat retaining a truncated schema still refuses a changed parameter contract or MCP server after another chat reviews the replacement.
 - Inherited and shared-registry chats use their own resident schema evidence;
   a task-only chat cannot borrow a parent's review.
 - A schema larger than the generic output budgets remains complete and callable

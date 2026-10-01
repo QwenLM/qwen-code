@@ -883,6 +883,74 @@ describe('ToolSearchTool', () => {
     ).resolves.toMatchObject({ tool: hidden });
   });
 
+  it.each(['schema', 'server'])(
+    'does not borrow another chat review after a truncated %s changes',
+    async (change) => {
+      const name = 'mcp__srv__changing';
+      const schema = (key: string) => ({
+        type: 'object',
+        properties: { [key]: { type: 'string' } },
+        required: [key],
+      });
+      const original = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'srv',
+        'changing',
+        'A discovered MCP tool.',
+        schema('original'),
+        undefined,
+        name,
+      );
+      registry.registerTool(original);
+      const chat = new LlmChat(config, {}, await searchHistory(name));
+      const call = (owner: LlmChat, arguments_: Record<string, string>) =>
+        runWithAgentChat(owner, () =>
+          resolveDeferredToolCall(registry, { name, arguments: arguments_ }),
+        );
+      expect(await call(chat, { original: 'value' })).toMatchObject({
+        tool: original,
+      });
+      const history = chat.getHistory();
+      const response = history[1]!.parts![0]!.functionResponse!;
+      const output = String(response.response!['output']);
+      response.response!['output'] = output.slice(
+        0,
+        output.indexOf('"parametersJsonSchema"'),
+      );
+      chat.setHistory(history);
+
+      registry.unregisterTool(name);
+      const replacement = new DiscoveredMCPTool(
+        {} as CallableTool,
+        change === 'server' ? 'replacement-server' : 'srv',
+        'changing',
+        'A discovered MCP tool.',
+        schema(change === 'schema' ? 'replacement' : 'original'),
+        undefined,
+        name,
+      );
+      registry.registerTool(replacement);
+      const arguments_: Record<string, string> =
+        change === 'schema' ? { replacement: 'value' } : { original: 'value' };
+      expect(await call(chat, arguments_)).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      });
+      const other = new LlmChat(config);
+      other.setHistory(
+        await runWithAgentChat(other, () => searchHistory(name)),
+      );
+      expect(await call(other, arguments_)).toMatchObject({
+        tool: replacement,
+      });
+      expect(await call(chat, arguments_)).toMatchObject({
+        errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        error: {
+          message: expect.stringContaining('changed since tool_search'),
+        },
+      });
+    },
+  );
+
   it('still forgets a review when its tool_search block leaves the history entirely', async () => {
     // The carry-over is for present-but-unreadable evidence only: an empty
     // retained window means the model can no longer see the schema at all,

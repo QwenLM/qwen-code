@@ -32,6 +32,7 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { getCurrentAgentChat } from '../agents/runtime/agent-context.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import {
   buildExecDeclaration,
   getToolExposure,
@@ -251,6 +252,10 @@ export class ToolRegistry {
   // reconnect is compared by fingerprint, so an identical republish still
   // matches while a changed one asks for a fresh review.
   private reviewedDeferredDeclarations: Map<string, string> = new Map();
+  private reviewedDeclarationsByChat = new WeakMap<
+    LlmChat,
+    Map<string, string>
+  >();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
@@ -1023,17 +1028,29 @@ export class ToolRegistry {
     this.revealedDeferred.delete(name);
   }
 
+  private getReviewedChat(): LlmChat | undefined {
+    const chat = getCurrentAgentChat();
+    if (chat) return chat;
+    const client = this.config.getLlmClient?.();
+    return client?.isInitialized?.() ? client.getChat?.() : undefined;
+  }
+
   /** Records the declaration tool_search just returned. */
   recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
-    this.reviewedDeferredDeclarations.set(
-      tool.name,
-      deferredDeclarationFingerprint(tool),
-    );
+    const chat = this.getReviewedChat();
+    const reviewed = chat
+      ? (this.reviewedDeclarationsByChat.get(chat) ?? new Map<string, string>())
+      : this.reviewedDeferredDeclarations;
+    reviewed.set(tool.name, deferredDeclarationFingerprint(tool));
+    if (chat) this.reviewedDeclarationsByChat.set(chat, reviewed);
+    // Unscoped callers must not mutate a chat's review map through an alias.
+    this.reviewedDeferredDeclarations = chat ? new Map(reviewed) : reviewed;
   }
 
   /** Forgets every review when starting a different session. */
   clearReviewedDeclarations(): void {
     this.reviewedDeferredDeclarations.clear();
+    this.reviewedDeclarationsByChat = new WeakMap();
   }
 
   /**
@@ -1047,10 +1064,17 @@ export class ToolRegistry {
    * fails the parse without meaning the review never happened: the model
    * did receive the full schema when the response arrived. Such a name is
    * recovered from the block's intact head and its in-memory review carries
-   * over; a name absent from every tool_search block in history is still
+   * over only for that same chat; another chat cannot supply it. A name
+   * absent from every tool_search block in history is still
    * forgotten.
    */
-  syncReviewedDeclarations(history: readonly Content[]): void {
+  syncReviewedDeclarations(
+    history: readonly Content[],
+    chat = this.getReviewedChat(),
+  ): void {
+    const previousReviews = chat
+      ? this.reviewedDeclarationsByChat.get(chat)
+      : this.reviewedDeferredDeclarations;
     const derived = new Map<string, string>();
     // Names mentioned by a tool_search block, recoverable from the block's
     // head even when truncation cut the JSON tail.
@@ -1073,7 +1097,7 @@ export class ToolRegistry {
             ) as Record<string, unknown>;
             if (typeof name !== 'string') continue;
             const suffix = `\u0000${name}\u0000${JSON.stringify(parametersJsonSchema)}`;
-            const previous = this.reviewedDeferredDeclarations.get(name);
+            const previous = previousReviews?.get(name);
             if (typeof serverName === 'string') {
               derived.set(name, `${serverName}${suffix}`);
             } else if (previous?.endsWith(suffix)) {
@@ -1113,12 +1137,13 @@ export class ToolRegistry {
       if (derived.has(name)) continue;
       // Present but unreadable (truncated mid-block): keep the review the
       // model genuinely received rather than disarming the tool.
-      const existing = this.reviewedDeferredDeclarations.get(name);
+      const existing = previousReviews?.get(name);
       if (existing !== undefined) {
         derived.set(name, existing);
       }
     }
-    this.reviewedDeferredDeclarations = derived;
+    if (chat) this.reviewedDeclarationsByChat.set(chat, derived);
+    this.reviewedDeferredDeclarations = chat ? new Map(derived) : derived;
   }
 
   /**
@@ -1127,13 +1152,17 @@ export class ToolRegistry {
    * history.
    */
   getReviewedDeclaration(name: string): string | undefined {
-    const agentChat = getCurrentAgentChat();
+    const chat = this.getReviewedChat();
     const client = this.config.getLlmClient?.();
     const history =
-      agentChat?.getHistoryShallow(true) ??
+      chat?.getHistoryShallow(true) ??
       (client?.isInitialized?.() ? client.getHistoryShallow(true) : undefined);
-    if (history !== undefined) this.syncReviewedDeclarations(history);
-    return this.reviewedDeferredDeclarations.get(name);
+    if (history !== undefined) this.syncReviewedDeclarations(history, chat);
+    return (
+      chat
+        ? this.reviewedDeclarationsByChat.get(chat)
+        : this.reviewedDeferredDeclarations
+    )?.get(name);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */

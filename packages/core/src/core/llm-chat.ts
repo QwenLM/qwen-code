@@ -5536,7 +5536,9 @@ export class LlmChat {
         (part) => part.functionResponse?.name === ToolNames.TOOL_SEARCH,
       )
     ) {
-      this.config.getToolRegistry()?.syncReviewedDeclarations?.(this.history);
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
   }
 
@@ -5680,7 +5682,9 @@ export class LlmChat {
     // body costs at most one duplicate injection on the next invoke.
     if (!this.isForkedChat) {
       clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
-      this.config.getToolRegistry()?.syncReviewedDeclarations?.(this.history);
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
   }
 
@@ -5701,7 +5705,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'truncateHistory',
       );
-      this.config.getToolRegistry()?.syncReviewedDeclarations?.(this.history);
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
   }
@@ -5773,7 +5779,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'stripOrphanedUserEntries',
       );
-      this.config.getToolRegistry()?.syncReviewedDeclarations?.(this.history);
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
     return strippedEntries;
