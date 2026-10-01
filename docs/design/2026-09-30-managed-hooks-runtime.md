@@ -293,3 +293,5 @@ prompt activation and unchanged no-Hook behavior. Run `npm run build`,
 Two clean self-audit passes and independent review follow integration verification.
 Unknown physical or model outcomes remain blocked with their original evidence;
 passing a mocked event test alone does not establish a missing producer's support.
+
+When the pinned catalog contains Stop or MessageDisplay, model text stays buffered until the Hooks accept the answer; no durable text deltas can publish an answer that the Hooks later discard or hide. Other catalogs retain streaming. Explicit Runtime takeover retains the Runtime Session named by each original durable tool input, including a shared Hook owner, rather than substituting the prompt ID. Missing or conflicting owner evidence remains a recovery refusal. Raw Shell intents without routing evidence can only use the prompt owner when the saved definition has no shared Hook or MCP owner.

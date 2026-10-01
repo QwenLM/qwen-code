@@ -224,3 +224,5 @@ command 排空。
 回归。运行 `npm run build`、`npm run typecheck`、`npm run bundle`、包内定向测试与 Java
 契约测试。集成验证后进行两轮无新问题的自审及独立评审。未知物理或模型结果保留原证据并
 阻塞；仅模拟事件的测试通过，不代表缺少生产者的能力已经受支持。
+
+固定 catalog 包含 Stop 或 MessageDisplay 时，模型文本保持缓冲，直到 Hook 接受最终回答；持久文本 delta 不能提前发布随后被 Hook 丢弃或隐藏的回答。其他 catalog 保留流式输出。显式 Runtime 接管保留原始持久工具输入声明的 Runtime Session（包括 Hook 共用 owner），不替换为 prompt ID。所有权证据缺失或冲突时继续拒绝恢复。Raw Shell intent 缺少路由证据时，仅在保存的定义没有共用 Hook 或 MCP owner 的情况下使用 prompt owner。

@@ -20,6 +20,17 @@ public interface HarnessConnector extends AutoCloseable {
         return createOrLoad(tenantId, sessionId, loadExisting);
     }
 
+    /**
+     * Loads a previously attached Session for a Turn takeover, settling or
+     * reporting its parked Runtime executions. A plain cold load must stay
+     * inert, so only this path may touch the Broker for a parked Turn.
+     */
+    default Attachment recoverManagedRuntime(String tenantId, String sessionId,
+            boolean cancellation) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime recovery is unavailable");
+    }
+
     Admission submit(String tenantId, String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 
