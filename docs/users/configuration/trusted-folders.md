@@ -28,7 +28,7 @@ Once the feature is enabled, the first time you run the Qwen Code from a folder,
 
 Your choice is saved in a central file (`~/.qwen/trustedFolders.json`), so you will only be asked once per folder.
 
-The feature fails closed: until you make a choice, a folder counts as **untrusted**, not as trusted-by-default. If that file is missing — a new machine, a restored home directory, a synced dotfiles setup — every folder starts untrusted, including folders you trusted before. A malformed or unreadable file is different: it is a hard configuration error, not a blank slate. The CLI stops with "Please fix the configuration file and try again.", and the daemon's trust routes answer `500 trusted_folders_invalid`, so repair or remove the file by hand before trusting anything.
+The feature fails closed: until you make a choice, a folder counts as **untrusted**, not as trusted-by-default. If that file is missing — a new machine, a restored home directory, a synced dotfiles setup — every folder that no higher-priority signal decides (see "The Trust Check Process (Advanced)" below) starts untrusted, including folders you trusted before. A malformed or unreadable file is different: it is a hard configuration error, not a blank slate. The CLI stops with "Please fix the configuration file and try again."; the daemon's v1 trust status, trust request, and trust grant routes answer `500 trusted_folders_invalid` (the v2 status route reports the same condition as `200` with `configured.state: "error"`), so repair or remove the file by hand, then restart the daemon: a running daemon caches the failed load and keeps refusing the Trust action until it restarts.
 
 ## Why Trust Matters: The Impact of an Untrusted Workspace
 
@@ -52,7 +52,7 @@ If you need to change a decision or see all your settings, you have a couple of 
 
 - **Change the Current Folder's Trust**: Run the `/permissions` command from within the CLI. This will bring up the same interactive dialog, allowing you to change the trust level for the current folder.
 
-- **Trust a Workspace From the Web Shell**: Open the workspaces overview and use the **Trust** action on an untrusted workspace. This records the same decision without needing a terminal, which is the way back if every workspace came up untrusted because no rule decided them. The action appears when the connected daemon supports it; a daemon that does not advertise the capability shows no such action, so use the CLI instead. The workspace finishes becoming trusted once the daemon has rebuilt its runtime, which takes a moment.
+- **Trust a Workspace From the Web Shell**: Open the workspaces overview and use the **Trust** action on an untrusted workspace. This records the same decision without needing a terminal, which is the way back if every workspace came up untrusted because no rule decided them. The action appears when the connected daemon supports it. On a daemon that serves the grant routes but has not wired trust hot-reload, no writer applies the decision live in that configuration — a grant recorded here (or through the terminal folder-trust prompt) takes effect only at the next daemon restart; a daemon without the routes shows no such action. The workspace finishes becoming trusted once the daemon has rebuilt its runtime, which takes a moment.
 
 - **View All Trust Rules**: To see a complete list of all your trusted and untrusted folder rules, you can inspect the contents of the `~/.qwen/trustedFolders.json` file in your home directory.
 
