@@ -40,6 +40,8 @@ import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.io.CleanupMode;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
@@ -83,10 +85,11 @@ class HostedPublicWorkspaceIT {
         assertThat(answered).hasSize(8);
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @EnabledOnOs(OS.LINUX)
     @Timeout(150)
-    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles() throws Exception {
+    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles(boolean crash) throws Exception {
         durableClose = true;
         runFiles();
         List<String> sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
@@ -101,6 +104,23 @@ class HostedPublicWorkspaceIT {
             long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
             var worker = ProcessHandle.of(pid).orElseThrow();
             assertThat(worker.isAlive()).isTrue();
+            if (crash) {
+                worker.destroyForcibly();
+                worker.onExit().get(5, TimeUnit.SECONDS);
+                if (index == 1) {
+                    jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                            + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
+                    String failedTurn = request("POST", "/v1/agents/sessions/" + session + "/events",
+                            Map.of("type", "agent.session.input.message", "input",
+                                    List.of(Map.of("type", "input_text", "text", "G0_AGAIN"))),
+                            "after-crash", "actor", 202).path("turn_id").asText();
+                    await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                            "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                            String.class, session, failedTurn)).isEqualTo("FAILED"));
+                }
+                assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+                        String.class, binding)).isEqualTo(index == 0 ? "READY" : "LOST");
+            }
             var retained = jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource"
                     + " WHERE tenant_id = ? AND session_id = ? ORDER BY resource_id", tenant, session);
             assertThat(retained).isNotEmpty();
@@ -132,6 +152,19 @@ class HostedPublicWorkspaceIT {
                     .resolve("child/proof.txt"))).isEqualTo("after");
             assertThat(request("POST", route, body, "close", "actor", 202)
                     .path(webShell ? "operationId" : "id").asText()).isEqualTo(operation);
+            if (crash) {
+                jdbc.update("UPDATE managed_workspace_registry SET config_ref = ? WHERE tenant_id = ?"
+                        + " AND workspace_id = ?", WorkspaceExecutionProfile.CONFIG_REF, tenant, "workspace-" + index);
+                String nextSession = request("POST", "/v1/agents/sessions",
+                        Map.of("agent_id", "qwen-code", "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                                "workspace", Map.of("workspace_id", "workspace-" + index, "cwd_relative", "child")),
+                        "after-close-" + index, "actor", 202).path("id").asText();
+                await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                        "SELECT status FROM managed_agent_turn WHERE session_id = ?", String.class, nextSession))
+                        .isEqualTo("COMPLETED"));
+                assertThat(Files.readString(temporary.resolve(index == 0 ? "workspace-a" : "workspace-b")
+                        .resolve("child/proof.txt"))).isEqualTo("after");
+            }
         }
     }
 
@@ -536,7 +569,8 @@ class HostedPublicWorkspaceIT {
                 String role = message.path("role").asText();
                 if ("user".equals(role) && message.path("content").toString().contains("G0_")) {
                     results.clear();
-                    prompt.set(message.path("content").toString());
+                    String content = message.path("content").toString();
+                    prompt.set(content.substring(content.lastIndexOf("G0_")));
                 } else if ("tool".equals(role)) {
                     results.add(message);
                 }

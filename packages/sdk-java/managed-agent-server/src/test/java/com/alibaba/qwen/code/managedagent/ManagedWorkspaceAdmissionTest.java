@@ -665,6 +665,10 @@ class ManagedWorkspaceAdmissionTest {
         // stays admitted.
         assertThat(enabled.getWebShellSession(tenant, "actor-a", controlId)
                 .capabilities().workspaceTurns()).isTrue();
+        ManagedAgentService disabled = new ManagedAgentService(store,
+                new RequestDigests(), null, new UnavailableHarnessConnector(), registry);
+        assertThat(disabled.getWebShellSession(tenant, "actor-a", controlId)
+                .capabilities().workspaceTurns()).isFalse();
     }
 
     @Test
@@ -734,6 +738,21 @@ class ManagedWorkspaceAdmissionTest {
                         + " managed_agent_command WHERE tenant_id = ?"
                         + " AND session_id = ? AND command_status = 'PENDING'",
                 Integer.class, tenant, sessionId)).isZero();
+
+        transaction.executeWithoutResult(status -> gated.beginSessionMutation(
+                tenant, "RENAME_SESSION", "rename-blocker", digest, sessionId,
+                SessionMutationKind.RENAME));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.renameSession(tenant,
+                        "actor-a", "rename-1", sessionId, "first"))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode()).isEqualTo("session_operation_active")));
+        assertThat(jdbc.queryForObject("SELECT command_status FROM managed_agent_command"
+                        + " WHERE tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = 'rename-1'",
+                String.class, tenant)).isEqualTo("FAILED");
+        transaction.executeWithoutResult(status -> gated.completeSessionMutation(
+                tenant, "RENAME_SESSION", "rename-blocker", sessionId,
+                SessionMutationKind.RENAME, "intermediate", "boot"));
 
         // The freed key stays re-usable: a same-key retry re-attempts the
         // mutation instead of colliding on the requested event the refused
