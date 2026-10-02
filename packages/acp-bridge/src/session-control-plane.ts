@@ -162,6 +162,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_AGENT_RUN_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -4616,6 +4617,7 @@ export function createSessionControlPlane(
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      entry.attachments.cancelClientUploads(clientId);
       for (const call of entry.mcpAppCalls?.values() ?? []) {
         if (call.clientId === clientId) call.cancel();
       }
@@ -7127,6 +7129,33 @@ export function createSessionControlPlane(
     });
   };
 
+  const syncRestoreStateApprovalMode = (
+    entry: SessionEntry,
+    mode: string,
+    planExecutionMode: string | undefined,
+  ): void => {
+    const state = entry.restoreState;
+    if (!state) return;
+    if (state.modes) {
+      state.modes = { ...state.modes, currentModeId: mode };
+      const metadata: Record<string, unknown> = { ...state.modes._meta };
+      delete metadata['planExecutionMode'];
+      if (planExecutionMode) {
+        metadata['planExecutionMode'] = planExecutionMode;
+      }
+      if (Object.keys(metadata).length > 0) {
+        state.modes._meta = metadata;
+      } else {
+        delete state.modes._meta;
+      }
+    }
+    if (Array.isArray(state.configOptions)) {
+      state.configOptions = state.configOptions.map((option) =>
+        option.id === 'mode' ? { ...option, currentValue: mode } : option,
+      );
+    }
+  };
+
   const publishApprovalModeChanged = (
     entry: SessionEntry,
     payload: {
@@ -7140,6 +7169,7 @@ export function createSessionControlPlane(
     entry.currentApprovalMode = payload.next;
     entry.planExecutionMode =
       payload.next === 'plan' ? payload.planExecutionMode : undefined;
+    syncRestoreStateApprovalMode(entry, payload.next, entry.planExecutionMode);
     entry.approvalModePublishGeneration++;
     // See `publishModelSwitched`: `publish()` never throws, so no wrapper.
     entry.events.publish({
@@ -11289,6 +11319,11 @@ export function createSessionControlPlane(
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  // Stripped from every caller for the same reason as the
+                  // delivery above: an agent's thread tools act on whatever
+                  // this names, so a caller that could set it could make one
+                  // agent post under another's name.
+                  delete meta[DAEMON_AGENT_RUN_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[SUBMITTED_PROMPT_META_KEY];
                   delete meta[DAEMON_SUBMITTED_PROMPT_META_KEY];
@@ -11330,6 +11365,9 @@ export function createSessionControlPlane(
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (context?.agentRun) {
+                    meta[DAEMON_AGENT_RUN_META_KEY] = context.agentRun;
                   }
                   if (promptDisplayText !== undefined) {
                     meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
@@ -14569,6 +14607,44 @@ export function createSessionControlPlane(
       return { sessionId, state: 'idle' as const };
     },
 
+    createSessionAttachmentUpload(sessionId, metadata, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.createUpload(metadata, clientId);
+    },
+
+    appendSessionAttachmentUpload(sessionId, uploadId, offset, data, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.appendUpload(uploadId, offset, data, clientId);
+    },
+
+    async completeSessionAttachmentUpload(
+      sessionId,
+      uploadId,
+      context,
+      assertCanCommit,
+    ) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      return entry.attachments.completeUpload(uploadId, clientId, () => {
+        assertCanCommit?.();
+        if (byId.get(sessionId) !== entry)
+          throw new SessionNotFoundError(sessionId);
+        resolveTrustedClientId(entry, clientId);
+      });
+    },
+
+    cancelSessionAttachmentUpload(sessionId, uploadId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      entry.attachments.cancelUpload(uploadId, clientId);
+    },
+
     async storeSessionAttachment(sessionId, data, mimeType, context, name) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -14847,6 +14923,9 @@ export function createSessionControlPlane(
         eventDetailMode,
         messageId,
         text: trimmed,
+        ...(options?.queueOnly && !originatorClientId && context?.agentRun
+          ? { agentRun: context.agentRun }
+          : {}),
         ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly
@@ -16234,7 +16313,7 @@ export function createSessionControlPlane(
         );
         const teardownResults = await Promise.allSettled([
           ...channels.map((ci) => harness.terminate(ci)),
-          ...[...byId.values()].map((entry) => entry.attachments.close()),
+          ...entries.map((entry) => entry.attachments.close()),
           ...inFlightSessionAwaits,
           ...inFlightRestoreAwaits,
           ...abandonedNewSessionAwaits,

@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import java.util.HashMap;
+import java.time.Instant;
+import java.util.Comparator;
 import java.util.Map;
 
 /** Process-local logical Session repository for tests and single-node use. */
@@ -8,6 +10,16 @@ public final class InMemoryRuntimeSessionRepository
         implements RuntimeSessionRepository {
     private final Map<RuntimeScope, Map<String, RuntimeSessionRecord>> records =
             new HashMap<>();
+
+    synchronized void releaseLost(RuntimeBindingRecord binding, Instant now) {
+        records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(RuntimeSessionRecord::isActive)
+                .filter(record -> record.getBindingId().equals(binding.getBindingId())
+                        && record.getRuntimeGeneration() == binding.getGeneration())
+                .sorted(Comparator.comparing(RuntimeSessionRecord::getRuntimeSessionId))
+                .limit(100).toList().forEach(record -> compareAndSet(record,
+                        record.withState(RuntimeSessionRecord.State.RELEASED, now)));
+    }
 
     @Override
     public synchronized RuntimeSessionRecord findOrCreate(
@@ -68,6 +80,19 @@ public final class InMemoryRuntimeSessionRepository
                 expected.getVersion() + 1);
         scopedRecords.put(updated.getRuntimeSessionId(), updated);
         return updated;
+    }
+
+    @Override
+    public synchronized java.util.List<RuntimeSessionRecord> findByBinding(String bindingId,
+            long generation, String afterSessionId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Drain batch must contain 1-100 Sessions");
+        }
+        return records.values().stream().flatMap(scoped -> scoped.values().stream())
+                .filter(record -> bindingId.equals(record.getBindingId())
+                        && generation == record.getRuntimeGeneration()
+                        && (afterSessionId == null || record.getRuntimeSessionId().compareTo(afterSessionId) > 0))
+                .sorted(Comparator.comparing(RuntimeSessionRecord::getRuntimeSessionId)).limit(limit).toList();
     }
 
     @Override

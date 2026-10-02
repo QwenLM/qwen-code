@@ -49,6 +49,9 @@ Legacy host 回执、owner 持久化和冷恢复选择器见 B2a 后续设计
 [双引擎 owner 选择与类型化拒绝](./2026-09-26-paired-engine-owner-selection.zh-CN.md)。
 宿主接线与新会话的选择规则见 B2d 设计
 [双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)。
+[普通宿主的 Managed 引擎](./2026-09-27-ordinary-host-managed-engine.zh-CN.md)
+设计确定了二者的关系：Managed 会话是一份 Managed Session log，其第一个事务先记录
+owner，再记录 header。
 
 ### 通道与准入
 
@@ -128,7 +131,10 @@ Managed branch/side-task 在修改历史前拒绝。
 | 会话路由 | `session-control-plane.ts`、`BridgeClient` 回调                             |
 | 验证     | 同目录 Bridge/lifecycle 测试与隔离进程脚本                                  |
 
-现有 daemon、Channels 与嵌入构造方保持单 factory 路径，不增加 daemon route。
+除非启用双引擎，所有构造方保持单 factory 路径：`qwen serve --experimental-paired-engines`
+为 daemon 的普通工作区 runtime 配对，设置同一 serve 选项的嵌入方为 serve app 的默认
+Bridge 配对（见[双引擎宿主接线](./2026-09-26-paired-engine-host-wiring.zh-CN.md)）。
+不增加 daemon route。
 工作区控制归工作区，所有会话操作归活跃 Session owner。Managed owner 缺失或失败
 时绝不回退到 Legacy 或 primary runtime。
 
@@ -148,5 +154,5 @@ Managed branch/side-task 在修改历史前拒绝。
 主要风险是清理完成前释放准入，或把一个引擎的 current channel 当作整个工作区。
 测试必须观察真实 factory/connection 调用和未完成清理，而不只检查最终 Session 数量。
 Owner 持久化依赖与生产 host 回执实现仍是 #12380 中待对齐的接线问题；在此期间可通过
-Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器；宿主接线已在
-B2d 中设计，尚未实现。
+Bridge 注入接口验证契约。B2a 后续设计实现了 Legacy 回执与恢复选择器；B2d 在实验性
+开关之后把双引擎接入普通宿主，目前尚未注册 Managed 引擎。

@@ -635,6 +635,85 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  describe('aux-model selector credential scrubbing', () => {
+    // visionModel / imageModel / advisorModel / fastModel persist as
+    // `authType:id\0baseUrl`; a userinfo-bearing baseUrl is a credential and
+    // must never leave this route verbatim.
+    const AUX_VALUE = 'openai:vm\0https://user:sk-secret@host.example/v1';
+    const SCRUBBED = 'openai:vm\0https://host.example/v1';
+
+    it('redacts userinfo from aux-model selectors served by GET /workspace/settings', async () => {
+      const { app } = makeApp({
+        userSettings: {
+          visionModel: AUX_VALUE,
+          imageModel: AUX_VALUE,
+          advisorModel: AUX_VALUE,
+          fastModel: AUX_VALUE,
+        },
+      });
+
+      const res = await request(app).get('/workspace/settings');
+
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(res.body)).not.toContain('sk-secret');
+      const byKey = new Map<string, { values: { effective: unknown } }>(
+        res.body.settings.map(
+          (s: { key: string; values: { effective: unknown } }) => [s.key, s],
+        ),
+      );
+      for (const key of [
+        'visionModel',
+        'imageModel',
+        'advisorModel',
+        'fastModel',
+      ]) {
+        expect(byKey.get(key)?.values.effective).toBe(SCRUBBED);
+      }
+    });
+
+    it('persists the raw selector but answers and broadcasts the scrubbed value', async () => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+      const res = await request(app).post('/workspace/settings').send({
+        scope: 'user',
+        key: 'imageModel',
+        value: AUX_VALUE,
+      });
+
+      expect(res.status).toBe(200);
+      // Persistence keeps the raw selector: the suffix is the endpoint
+      // disambiguator runtime routing resolves against.
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        expect.anything(),
+        'imageModel',
+        AUX_VALUE,
+      );
+      expect(JSON.stringify(res.body)).not.toContain('sk-secret');
+      expect(res.body.value).toBe(SCRUBBED);
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'imageModel',
+        SCRUBBED,
+        'user',
+        undefined,
+      );
+    });
+
+    it('serves a clean aux-model selector byte-identically', async () => {
+      const { app } = makeApp({
+        userSettings: { visionModel: SCRUBBED },
+      });
+
+      const res = await request(app).get('/workspace/settings');
+
+      expect(res.status).toBe(200);
+      const descriptor = res.body.settings.find(
+        (s: { key: string }) => s.key === 'visionModel',
+      );
+      expect(descriptor?.values.effective).toBe(SCRUBBED);
+    });
+  });
+
   it('rejects a security-sensitive key even at user scope', async () => {
     // Enabling user-scope writes must not expose SECURITY_SENSITIVE_SETTINGS
     // (e.g. tools.approvalMode) — getAllowedKeys() filters them out regardless

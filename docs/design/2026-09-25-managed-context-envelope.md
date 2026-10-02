@@ -110,6 +110,8 @@ One request installs one Session's context on a Runtime and returns a receipt. W
 | `binding`         | an object closed to the seven `ContextBinding` fields, each with its W0a rule, as W0a's wire strings       |
 | `contextDigest`   | a string matching `sha256:[0-9a-f]{64}`                                                                    |
 
+The Broker acquires only the narrower Runtime Session IDs that [Broker Provider Control](2026-09-27-broker-provider-control.md) admits.
+
 The worker checks the request in this order and stops at the first failure:
 
 1. A request that breaks the shape is 400 `managed_runtime_attestation_invalid`.

@@ -8,7 +8,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.security.Principal;
-import java.util.Map;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -21,6 +20,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
     public static final String ATTRIBUTE = TenantContext.class.getName();
     private static final String MANAGED_SESSION_STORE_PREFIX =
             "/internal/managed-session-store/v1/";
+    private static final String TOOL_PUBLICATION_PREFIX =
+            "/internal/managed-tool-publications/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -34,7 +35,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         return !path.startsWith("/v1/agents/")
                 && !path.startsWith("/api/agent/web-shell/v1/")
-                && !path.startsWith(MANAGED_SESSION_STORE_PREFIX);
+                && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
+                && !path.startsWith(TOOL_PUBLICATION_PREFIX);
     }
 
     @Override
@@ -42,19 +44,21 @@ public class TenantContextFilter extends OncePerRequestFilter {
             HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         if (request.getRequestURI()
-                .startsWith(MANAGED_SESSION_STORE_PREFIX)) {
+                .startsWith(MANAGED_SESSION_STORE_PREFIX)
+                || request.getRequestURI().startsWith(TOOL_PUBLICATION_PREFIX)
+                || request.getRequestURI().startsWith("/v1/agents/workspaces")
+                || request.getRequestURI().startsWith(
+                        "/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         }
         String tenantId = request.getHeader(HEADER);
         if (tenantId == null || !TENANT_PATTERN.matcher(tenantId).matches()) {
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-            objectMapper.writeValue(response.getOutputStream(), Map.of(
-                    "error", Map.of(
-                            "code", "invalid_tenant",
-                            "message", HEADER
-                                    + " is required and must contain 1-128"
-                                    + " safe characters.")));
+            objectMapper.writeValue(response.getOutputStream(),
+                    ApiExceptionHandler.envelope(request, "invalid_tenant",
+                            HEADER + " is required and must contain 1-128"
+                                    + " safe characters."));
             return;
         }
         Principal principal = request.getUserPrincipal();
@@ -65,9 +69,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
                     || !validActorId(tenantId, claimedActorId)) {
                 response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-                objectMapper.writeValue(response.getOutputStream(), Map.of(
-                        "error", Map.of("code", "actor_scope_mismatch",
-                                "message", "Authenticated actor scope is invalid.")));
+                objectMapper.writeValue(response.getOutputStream(),
+                        ApiExceptionHandler.envelope(request,
+                                "actor_scope_mismatch",
+                                "Authenticated actor scope is invalid."));
                 return;
             }
             actorId = claimedActorId;

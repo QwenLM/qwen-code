@@ -77,6 +77,10 @@ describe('auto-memory topic scanning', () => {
     );
 
     expect(parsed).toEqual({
+      scope: 'project',
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: ['Project context'],
       type: 'project',
       filePath: '/tmp/project.md',
       relativePath: 'project.md',
