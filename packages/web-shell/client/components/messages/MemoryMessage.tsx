@@ -202,10 +202,11 @@ export function MemoryMessage({
     // The <textarea> value API normalizes CRLF to LF, so a one-line edit
     // would otherwise rewrite every line ending in the file. Restore the
     // loaded file's own endings — only when they are uniformly CRLF, so a
-    // mixed-ending file is never double-CR'd by a blanket re-expansion.
+    // mixed-ending file is never double-CR'd, and idempotently (`\r?`), so a
+    // draft that was never typed into still holds the file's own CRLF.
     const restoreCrlf =
       content.includes('\r\n') && !content.replace(/\r\n/g, '').includes('\n');
-    const payload = restoreCrlf ? draft.replace(/\n/g, '\r\n') : draft;
+    const payload = restoreCrlf ? draft.replace(/\r?\n/g, '\r\n') : draft;
     writeMemory({
       scope: selectedEntry.scope,
       mode: 'replace',

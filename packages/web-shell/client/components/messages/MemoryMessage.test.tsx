@@ -249,4 +249,34 @@ describe('MemoryMessage', () => {
       content: 'a\r\nb\r\nc\r\n',
     });
   });
+
+  // Edit then Save with zero keystrokes: `draft` never went through the
+  // textarea, so it still holds the file's own CRLF. A `\n`-keyed expansion
+  // doubles every CR, and `mode:'replace'` writes that straight to disk.
+  it('leaves a CRLF file untouched when saved without editing', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'a\r\nb\r\n',
+      truncated: false,
+    });
+    memory.writeMemory.mockResolvedValue({
+      ok: true,
+      filePath: GLOBAL_PATH,
+      bytesWritten: 8,
+      mode: 'replace',
+      changed: false,
+    });
+
+    await mountOnUserTab();
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')!.value).toBe('a\nb\n');
+
+    act(() => button('Save Memory').click());
+    await flush();
+    expect(memory.writeMemory).toHaveBeenLastCalledWith({
+      scope: 'global',
+      mode: 'replace',
+      content: 'a\r\nb\r\n',
+    });
+  });
 });
