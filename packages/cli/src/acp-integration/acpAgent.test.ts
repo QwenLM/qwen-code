@@ -2940,6 +2940,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getSessionExecutionEngine: vi.fn().mockReturnValue('managed'),
         // A slow stop: the handoff must wait for it.
         closeManagedRuntime: vi.fn(async () => {
+          order.push('runtime-start');
           await new Promise((resolve) => setTimeout(resolve, 50));
           order.push('runtime');
           if (!stops) throw new Error('process groups survived');
@@ -2948,6 +2949,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       vi.mocked(innerConfig.closeSessionWriter).mockImplementation(async () => {
         expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
         order.push('writer');
+      });
+      vi.mocked(mockConfig.closeSessionWriter).mockImplementation(async () => {
+        order.push('host-writer');
       });
       vi.mocked(innerConfig.shutdown).mockImplementation(async (options) => {
         expect(options).toMatchObject({
@@ -2989,11 +2993,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
         handoff: true,
       });
-      // The host's own Config has no Runtime: its writer is handed off at once.
+      // The host's own Config has no Runtime: its writer is handed off at
+      // once, before the session's Runtime starts to stop.
       expect(mockConfig.closeSessionWriter).toHaveBeenCalledWith({
         handoff: true,
       });
-      expect(order).toEqual(['runtime', 'writer', 'resources']);
+      expect(order).toEqual([
+        'host-writer',
+        'runtime-start',
+        'runtime',
+        'writer',
+        'resources',
+      ]);
+      // A stop that failed is on record.
+      const logged = mockDebugLogger.error.mock.calls.filter(
+        ([message]) =>
+          message === '[ACP] Managed Runtime worker shutdown error:',
+      );
+      expect(logged).toEqual(
+        stops
+          ? []
+          : [[expect.any(String), new Error('process groups survived')]],
+      );
       expect(mockRunExitCleanup).toHaveBeenCalledOnce();
     },
   );
@@ -4770,6 +4791,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             sessionId: 'managed-host-close',
           });
           expect(order.slice(0, 2)).toEqual(['runtime', 'finalize']);
+          // A stop that failed is on record.
+          const logged = mockDebugLogger.error.mock.calls.filter(
+            ([message]) =>
+              message ===
+              'Session managed-host-close Managed Runtime worker shutdown error:',
+          );
+          expect(logged).toEqual(
+            stops
+              ? []
+              : [[expect.any(String), new Error('process groups survived')]],
+          );
         } finally {
           mockConnectionState.resolve();
           await agentPromise;

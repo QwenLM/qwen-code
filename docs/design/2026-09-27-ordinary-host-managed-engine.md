@@ -861,7 +861,9 @@ parts, in this order, each with its own exit check:
   died before the registry saw its process tree, is logged and the log is
   still finished; M5c keeps the engine quarantined on it. Once the worker
   exited, the host sends nothing to the port it held, which any process may
-  take: a call in flight then has an unknown outcome. A worker that exited
+  take: a call in flight then has an unknown outcome. Since the exit is seen
+  only after the port is free, the host also takes no answer that does not
+  name the worker's incarnation, which no request carries. A worker that exited
   between calls is replaced at the next call, and after the close the session
   has no environment, so a registry made later has no Runtime-backed tools.
 
@@ -932,6 +934,9 @@ parts, in this order, each with its own exit check:
 - The registry admits exactly the Runtime-backed tools, as the M2 contract
   foresaw.
 - Prior-read enforcement and read elision do not apply to Managed sessions.
+- The tool v2 routes name the worker's incarnation in a response header once a
+  request is authorized. The addition is backward compatible: other clients
+  ignore it.
 
 #### Risks for later slices
 

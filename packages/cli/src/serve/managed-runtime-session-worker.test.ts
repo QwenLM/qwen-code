@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -44,7 +44,12 @@ const server = http.createServer(async (req, res) => {
   for await (const chunk of req) body += chunk;
   const request = JSON.parse(body);
   const send = (status, value) => {
-    res.writeHead(status, { 'content-type': 'application/json' });
+    // The incarnation the real worker names on every authorized answer.
+    const incarnation = mode === 'anonymous' ? {} : {
+      'x-qwen-managed-runtime-incarnation':
+        mode === 'answers-as-another' ? 'another incarnation' : boot.runtimeIncarnation,
+    };
+    res.writeHead(status, { 'content-type': 'application/json', ...incarnation });
     res.end(JSON.stringify(value));
   };
   if (req.headers.authorization !== 'Bearer ' + boot.token) return send(401, {});
@@ -64,10 +69,13 @@ const server = http.createServer(async (req, res) => {
   if (route === 'execute') {
     if (mode === 'lost-response' || mode === 'unknown') return req.socket.destroy();
     if (mode === 'dies-mid-execute') {
-      // A crash: the connection breaks and the port is free for anyone.
+      // A crash: the port is free for anyone, then the connection breaks.
       server.close();
-      req.socket.destroy();
-      return setTimeout(() => process.exit(1), 5);
+      log({ closed: true });
+      return process.once('SIGUSR2', () => {
+        req.socket.destroy();
+        setTimeout(() => process.exit(1), 5);
+      });
     }
     if (mode === 'refuse') return send(409, { code: 'managed_runtime_identity_conflict', error: 'Refused before it ran.' });
     if (mode === 'never-settles' || mode === 'settles-late') return;
@@ -199,6 +207,7 @@ describe.skipIf(process.platform === 'win32')(
         boot?: string;
         pid?: number;
         port?: number;
+        closed?: boolean;
         route?: string;
         request?: unknown;
       }>
@@ -211,7 +220,9 @@ describe.skipIf(process.platform === 'win32')(
 
     /** The boots and requests the fake workers logged. */
     async function logged() {
-      return (await entries()).filter((entry) => entry.port === undefined);
+      return (await entries()).filter(
+        (entry) => entry.port === undefined && entry.closed === undefined,
+      );
     }
 
     function isAlive(pid: number): boolean {
@@ -400,16 +411,10 @@ describe.skipIf(process.platform === 'win32')(
         new AbortController().signal,
       );
       void running.catch(() => undefined);
-      const port = await (async () => {
-        while (true) {
-          const found = (await entries()).find((entry) => entry.port);
-          if (found) return found.port!;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
-      })();
-      while (!(await logged()).some((entry) => entry.route === 'execute')) {
+      while (!(await entries()).some((entry) => entry.closed)) {
         await new Promise((resolve) => setTimeout(resolve, 2));
       }
+      const [{ pid }, { port }] = await entries();
       // Another process takes the port the moment it is free and answers
       // every question with an outcome of its own.
       const heard: string[] = [];
@@ -427,16 +432,16 @@ describe.skipIf(process.platform === 'win32')(
           }),
         );
       });
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline) {
-        const bound = await new Promise<boolean>((resolve) => {
-          stranger.once('error', () => resolve(false));
-          stranger.listen(port, '127.0.0.1', () => resolve(true));
+      await new Promise<void>((resolve, reject) => {
+        stranger.once('error', reject);
+        stranger.listen(port, '127.0.0.1', () => {
+          stranger.off('error', reject);
+          resolve();
         });
-        if (bound) break;
-        await new Promise((resolve) => setTimeout(resolve, 1));
-      }
+      });
       try {
+        // The stranger listens before the worker dies and its call breaks.
+        process.kill(pid!, 'SIGUSR2');
         await expect(running).rejects.toBeInstanceOf(
           ManagedRuntimeOutcomeUnknownError,
         );
@@ -444,6 +449,26 @@ describe.skipIf(process.platform === 'win32')(
       } finally {
         await new Promise((resolve) => stranger.close(resolve));
       }
+    });
+
+    it.each([
+      ['names no incarnation', 'anonymous'],
+      ['names another incarnation', 'answers-as-another'],
+    ])('takes no outcome from an answer that %s', async (_label, mode) => {
+      // The worker answers both questions with a result: neither counts.
+      await expect(
+        worker(mode).execute(
+          'read_file',
+          { file_path: 'a.txt' },
+          new AbortController().signal,
+        ),
+      ).rejects.toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
+      expect((await logged()).map((entry) => entry.route)).toEqual([
+        undefined,
+        'attest',
+        'execute',
+        'status',
+      ]);
     });
 
     it.each([
@@ -652,6 +677,22 @@ describe.skipIf(process.platform === 'win32')(
       await rm(root, { recursive: true, force: true });
     });
 
+    /** The execute requests the fake worker received. */
+    async function executeRequests() {
+      return (await readFile(logFile, 'utf8'))
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              route?: string;
+              request?: { input?: Record<string, unknown> };
+            },
+        )
+        .filter((entry) => entry.route === 'execute')
+        .map((entry) => entry.request);
+    }
+
     function create(mode: string) {
       environment = createManagedRuntimeEnvironment(config, () => ({
         command: process.execPath,
@@ -736,6 +777,55 @@ describe.skipIf(process.platform === 'win32')(
         ),
       ).rejects.toThrow(`only in ${root}`);
       expect(await readFile(logFile, 'utf8')).toBe('');
+    });
+
+    it('runs a command in a directory below the session directory', async () => {
+      const env = create('ok');
+      const below = path.join(root, 'below');
+      await mkdir(below);
+      await env.prepare(
+        {
+          id: 'below',
+          toolName: 'run_shell_command',
+          params: { command: 'pwd', directory: below },
+        },
+        signal,
+      );
+      const result = await env.execute('below', signal);
+      const execute = (await executeRequests())[0];
+      expect(execute?.input).toMatchObject({
+        command: 'pwd',
+        directory: below,
+      });
+      expect(result.llmContent).toEqual([
+        { text: `ran ${JSON.stringify(execute?.input)}` },
+      ]);
+    });
+
+    it('prepares an edit here and makes it in the worker', async () => {
+      const env = create('ok');
+      const file = path.join(root, 'edited.txt');
+      await writeFile(file, 'before');
+      const params = {
+        file_path: file,
+        old_string: 'before',
+        new_string: 'after',
+      };
+      const prepared = await env.prepare(
+        { id: 'edit', toolName: 'edit', params },
+        signal,
+      );
+      expect(prepared.locations?.map((location) => location.path)).toEqual([
+        file,
+      ]);
+      expect(await env.permission('edit', signal)).toBe('ask');
+      const result = await env.execute('edit', signal);
+      expect((await executeRequests())[0]?.input).toEqual(params);
+      expect(result.llmContent).toEqual([
+        { text: `ran ${JSON.stringify(params)}` },
+      ]);
+      // The host prepared it but never changed the file.
+      expect(await readFile(file, 'utf8')).toBe('before');
     });
 
     it('shows no copy of a file it read', async () => {

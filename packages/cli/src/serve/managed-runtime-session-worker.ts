@@ -57,6 +57,8 @@ interface StartedWorker {
   readonly url: URL;
   readonly boot: ManagedRuntimeWorkerBoot;
   readonly routes: ReadonlyMap<string, string>;
+  /** The header in which the worker names its incarnation, in lower case. */
+  readonly incarnationHeader: string;
   /**
    * Aborted once the worker exited: its port may then belong to any process,
    * so nothing is sent there again.
@@ -409,9 +411,8 @@ export class ManagedSessionRuntimeWorker {
       isolationClass: 'session',
     };
     // Loaded on first use: the route table brings the worker's HTTP stack.
-    const { OWNED_MANAGED_RUNTIME_ROUTES } = await import(
-      './managed-runtime-attestation-contract.js'
-    );
+    const { MANAGED_RUNTIME_INCARNATION_HEADER, OWNED_MANAGED_RUNTIME_ROUTES } =
+      await import('./managed-runtime-attestation-contract.js');
     const routes = new Map<string, string>(
       OWNED_MANAGED_RUNTIME_ROUTES.map((route) => [route.key, route.path]),
     );
@@ -458,6 +459,7 @@ export class ManagedSessionRuntimeWorker {
         url: new URL(ready.url),
         boot,
         routes,
+        incarnationHeader: MANAGED_RUNTIME_INCARNATION_HEADER.toLowerCase(),
         gone: gone.signal,
       };
       const attested = await this.request(worker, 'attest', {
@@ -518,6 +520,21 @@ export class ManagedSessionRuntimeWorker {
           },
         },
         (response) => {
+          // Attestation proved who listens on the port; from then on only
+          // the worker can name its incarnation, which no request carries.
+          if (
+            route !== 'attest' &&
+            response.headers[worker.incarnationHeader] !==
+              worker.boot.runtimeIncarnation
+          ) {
+            reject(
+              new WorkerTransportError(
+                'The Runtime worker did not answer as itself.',
+              ),
+            );
+            request.destroy();
+            return;
+          }
           const chunks: Buffer[] = [];
           let size = 0;
           response.on('data', (chunk: Buffer) => {
