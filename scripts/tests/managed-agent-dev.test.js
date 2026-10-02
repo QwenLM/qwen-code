@@ -182,6 +182,23 @@ describe('findAvailablePort', () => {
       await new Promise((resolveClose) => blocker.close(resolveClose));
     }
   });
+
+  it('walks past a port Vite already holds on the localhost family', async () => {
+    // Vite binds 'localhost'; on IPv6-first hosts that is ::1 only, so a
+    // 127.0.0.1 probe would call the held port free and Vite would silently
+    // bump past the probed value (observed in a two-launcher dry run).
+    const viteStandIn = net.createServer();
+    await new Promise((resolveListen) =>
+      viteStandIn.listen(0, 'localhost', resolveListen),
+    );
+    const held = viteStandIn.address().port;
+    try {
+      const found = await findAvailablePort(held, new Set(), 'localhost');
+      expect(found).not.toBe(held);
+    } finally {
+      await new Promise((resolveClose) => viteStandIn.close(resolveClose));
+    }
+  });
 });
 
 describe('buildKillPlan', () => {

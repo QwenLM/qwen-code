@@ -207,7 +207,11 @@ export function buildWebShellUrl({ host, port, webShellPath }) {
   return `http://${host}:${port}${webShellPath}`;
 }
 
-export function findAvailablePort(startPort, excludedPorts = new Set()) {
+export function findAvailablePort(
+  startPort,
+  excludedPorts = new Set(),
+  probeHost = HOST,
+) {
   return new Promise((resolveFind, rejectFind) => {
     let attempt = 0;
     const tryNext = () => {
@@ -241,7 +245,7 @@ export function findAvailablePort(startPort, excludedPorts = new Set()) {
           rejectFind(err);
         }
       });
-      probe.listen(port, HOST, () => {
+      probe.listen(port, probeHost, () => {
         probe.close(() => resolveFind(port));
       });
     };
@@ -566,9 +570,13 @@ async function main() {
     tenant: options.tenant,
     daemonToken,
   });
+  // Vite binds 'localhost', which on IPv6-first hosts is ::1 only — probing
+  // 127.0.0.1 would call a held port free and Vite would silently bump past
+  // the probed value (any printed URL then names the wrong port).
   const webPort = await findAvailablePort(
     DEFAULT_WEB_PORT,
     new Set([daemonPort, harnessPort]),
+    'localhost',
   );
 
   const tsxLoaderUrl = pathToFileURL(
@@ -685,8 +693,10 @@ async function main() {
   }
 
   if (process.stdout.isTTY) {
+    // 'localhost', not 127.0.0.1: on IPv6-first hosts Vite binds ::1 only,
+    // and the IPv4 spelling would not connect.
     console.log(
-      `web-shell: ${buildWebShellUrl({ host: HOST, port: webPort, webShellPath })}`,
+      `web-shell: ${buildWebShellUrl({ host: 'localhost', port: webPort, webShellPath })}`,
     );
     console.log('  (the URL contains the daemon token — treat it as secret)');
   }
