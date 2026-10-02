@@ -401,6 +401,8 @@ async function crashProcess(child: ChildProcess, name: string): Promise<void> {
   }
 }
 
+const allocatedPorts = new Set<number>();
+
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -415,6 +417,8 @@ async function freePort(): Promise<number> {
   await new Promise<void>((resolve, reject) =>
     server.close((error) => (error ? reject(error) : resolve())),
   );
+  if (allocatedPorts.has(address.port)) return freePort();
+  allocatedPorts.add(address.port);
   return address.port;
 }
 
@@ -500,9 +504,10 @@ async function startHeldExecutionStartProxy(
       response.end(String(error));
     });
   });
+  const port = await freePort();
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(port, '127.0.0.1', () => {
       server.off('error', reject);
       resolve();
     });
@@ -673,11 +678,6 @@ let replacementBrokerProxy: HeldExecutionStartProxy | undefined;
 let failure: unknown;
 let dumpPort: number | undefined;
 try {
-  const mysqlPort = await freePort();
-  dumpPort = mysqlPort;
-  const springPort = await freePort();
-  const harnessPort = await freePort();
-  const brokerPort = await freePort();
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
   const credentialKey = randomBytes(32).toString('base64');
@@ -761,6 +761,12 @@ try {
   if (durableFailover && fakeBaseUrl === undefined) {
     throw new Error('Fake model server did not start');
   }
+
+  const mysqlPort = await freePort();
+  dumpPort = mysqlPort;
+  const springPort = await freePort();
+  const harnessPort = await freePort();
+  const brokerPort = await freePort();
 
   const initialized = spawnSync(
     mysqld,
