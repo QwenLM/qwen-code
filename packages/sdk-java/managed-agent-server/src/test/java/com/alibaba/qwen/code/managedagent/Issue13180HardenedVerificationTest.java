@@ -206,7 +206,7 @@ class Issue13180HardenedVerificationTest {
         String tenant = "tenant-g4-" + UUID.randomUUID();
         String session = createSession(tenant, "owner");
 
-        // The durable creator record must exist (V31 creator_actor_key).
+        // The durable creator record must exist (V33 creator_actor_key).
         byte[] creator = jdbc.queryForObject(
                 "SELECT creator_actor_key FROM managed_agent_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
