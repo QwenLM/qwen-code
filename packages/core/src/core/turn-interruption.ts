@@ -151,16 +151,17 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * both records carry `provenance: 'system'` + `subtype: 'notification'`.
  * `backgroundTurn` cannot separate them — the `channelTask` admission branch
  * runs the turn with `backgroundTurnContext.exit(...)` — so the recorder
- * stamps the turn's own entry `deliveredTurn: true` when `client.ts` sends it
- * (chatRecordingService.ts), and the projection's count excludes delivered
- * entries. Wherever that count is forwarded — today only the record-derived
- * `buildSessionRecoveryPlan` callers (the TUI's resume and session-switch
- * paths) — a failed delivered turn is left in place and classifies as the
- * textbook `interrupted_prompt` documented above. Callers that hold only raw
- * `Content[]` (headless `continueInterrupted`/`continue_last_turn`, and the
- * daemon) forward no count, keep the shape-only trim, and still trim a
- * stamped envelope; only records whose turn never ran are trimmed, and only
- * when the count is supplied.
+ * stamps the turn's own entry `deliveredTurn: true` when the `client.ts` send
+ * path admits it (chatRecordingService.ts), and the projection's count
+ * excludes stamped entries. Wherever that count is forwarded — today only the
+ * record-derived `buildSessionRecoveryPlan` callers (the TUI's resume and
+ * session-switch paths) — a failed stamped turn is left in place and
+ * classifies as the textbook `interrupted_prompt` documented above. Callers
+ * that hold only raw `Content[]` (headless
+ * `continueInterrupted`/`continue_last_turn`, and the daemon) forward no
+ * count, keep the shape-only trim, and still trim a stamped envelope; only
+ * unstamped records — cold copies persisted before any turn ran — are
+ * trimmed, and only when the count is supplied.
  *
  * The stamp is written on the `LlmClient.sendMessageStream` send path — the
  * TUI and headless runtimes. The ACP/serve daemon sends its notification
@@ -179,7 +180,10 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * commits or a daemon-side re-drive, not a stamp at either existing site.
  * Stamping the cold record itself is not an option: it is written before
  * `assertCanStartTurn()`, so turns later refused or deferred would carry the
- * stamp too.
+ * stamp too. The `LlmClient` stamp sits after admission but still above that
+ * path's own pre-send refusal gates, so it carries the same imprecision on a
+ * narrower set of exits; that residual is accepted and quantified on
+ * `ChatRecord.deliveredTurn` rather than restated here.
  *
  * Needed at all because the record's `subtype: 'notification'` and
  * `provenance: 'system'` cannot ride along on `Content` (that type comes from
@@ -209,10 +213,10 @@ function isSystemNotificationContent(content: Content): boolean {
  * @param history - Chat history in Gemini `Content[]` form, oldest first.
  * @param trailingSystemNotifications - Optional authoritative count of trailing
  *   `history` entries whose source record the recorder stamped
- *   `provenance: 'system'` + `subtype: 'notification'` AND whose turn never
- *   ran (`deliveredTurn !== true`; see `isSystemNotificationRecord` in
- *   `session-api-history.ts`), as reported by
- *   `buildSessionHistoryFromConversation`. A delivered-but-unanswered entry is
+ *   `provenance: 'system'` + `subtype: 'notification'` AND that is a cold copy
+ *   persisted before any turn ran (`deliveredTurn !== true`; see
+ *   `isSystemNotificationRecord` in `session-api-history.ts`), as reported by
+ *   `buildSessionHistoryFromConversation`. A stamped-but-unanswered entry is
  *   an `interrupted_prompt`, not a cold notification, so it is excluded from
  *   the count and survives the trim. When supplied it NARROWS the trim:
  *   an entry is only trimmed if its shape matches AND it falls inside that

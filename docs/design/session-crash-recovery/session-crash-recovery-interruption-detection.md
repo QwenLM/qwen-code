@@ -218,10 +218,10 @@ Covered immediately:
   (`packages/core/src/services/session-api-history.ts`) also returns
   `trailingSystemNotifications`: the count of trailing entries whose source
   record was stamped `provenance: 'system'` + `subtype: 'notification'` AND
-  whose turn never ran (`deliveredTurn !== true`), reported even when it is
-  `0`. `deliveredTurn` has exactly one producer —
+  that is a cold copy persisted before any turn ran (`deliveredTurn !== true`),
+  reported even when it is `0`. `deliveredTurn` has exactly one producer —
   `LlmClient.sendMessageStream` (`packages/core/src/core/client.ts`) stamping
-  the user entry of a notification turn it is sending right now — so the
+  the user entry of a notification turn its send path admitted — so the
   stamp is written on the TUI and headless send paths only, and the
   count-based exclusion reaches only callers that forward the count: today
   the record-derived `buildSessionRecoveryPlan` callers (the TUI's resume
@@ -262,20 +262,41 @@ Not covered yet:
   notification turn, not only the reminder-less subset. On the `LlmClient`
   path reminders do not reach the record either (they are built for
   `UserQuery`/`Cron` sends, and the todo reminder is taken after the record
-  write); what keeps a delivered entry untrimmed there is the `deliveredTurn`
+  write); what keeps a stamped entry untrimmed there is the `deliveredTurn`
   stamp, not a reminder. Tracked in #12042 (shape A, daemon residual).
 - The headless `continueInterrupted`/`continue_last_turn` half of the same
   shape. Headless writes the stamp on send, but its recovery callers
   (`nonInteractiveCli.ts`, `nonInteractive/session.ts`) build the plan from
   live `Content[]` via `buildSessionRecoveryPlanFromApiHistory` and forward
   no `trailingSystemNotifications` count, so the trim stays shape-only and a
-  stamped, failed delivered turn still reports `clean` ("No interrupted turn
+  stamped, failed turn still reports `clean` ("No interrupted turn
   to continue."). The closure this PR lands reaches only the record-derived
   `buildSessionRecoveryPlan` callers (the TUI's resume and session-switch
-  paths): the stamp excludes the delivered entry from the projection's count
+  paths): the stamp excludes that entry from the projection's count
   there and the plan classifies it `interrupted_prompt` with a
   `retry_user_parts` continuation — which no consumer acts on yet (both
   callers read only `kind`/`visibleNotice`).
+- A notification turn the `LlmClient` send path **admitted but never offered to
+  the model**. The stamp is written where the turn's user entry is recorded,
+  which sits above every pre-send refusal gate in `LlmClient.sendMessageStream`
+  — `MaxSessionTurns`, `!boundedTurns`, the session token limit and the arena
+  control signal all return after the write, and an abort before the first
+  token does too. Such a turn is stamped, excluded from
+  `trailingSystemNotifications`, and recovered as `interrupted_prompt`: a
+  banner on a session whose last real turn ended cleanly. `deliveredTurn`
+  therefore means "admitted and sent", not "the model accepted a request".
+  Accepted rather than fixed: the record cannot move below the gates without
+  losing the resumed info item it exists to restore, and an appended JSONL
+  record cannot be mutated afterwards. Only the abort arm needs no setup — the
+  gates are off or unreachable by default (`maxSessionTurns` is `-1`, the arena
+  client is unset, `boundedTurns` reaches 0 only once the turn recursion is
+  exhausted) — the only observable symptom today is that one banner line
+  because no consumer of a record-derived plan reads `continuation`, and the
+  `retry_user_parts` continuation it advertises would be refused again by the
+  same gate. Closing it properly needs a delivery
+  marker written after the send commits — a new persisted record kind plus a
+  reader change. Pinned by the cap-refusal case in
+  `packages/core/src/core/client.test.ts`.
 
 Completeness here does not come from adding a large amount of code at once. It
 comes from consolidating current capabilities into a unified plan so the states
