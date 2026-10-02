@@ -171,9 +171,6 @@ public final class ToolPublicationStore {
             byte[] record = jdbc.queryForObject("SELECT record_bytes FROM qwen_managed_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ? FOR UPDATE",
                     byte[].class, tenant, session, revision);
-            if (record == null) {
-                continue;
-            }
             String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
             for (int index = lines.length - 1; index >= 0; index--) {
                 JsonNode event = ToolPublicationContract.readJson(lines[index].getBytes(StandardCharsets.UTF_8));

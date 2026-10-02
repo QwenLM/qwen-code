@@ -1023,13 +1023,22 @@ class Issue13181QueryBudgetTest {
                 event(sequence + 1, "activation.changed", expired) + "{}\n",
                 1, List.of(resource(binding.get("checkpointRef"), checkpoint)),
                 "checkpoint-1");
+        fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().apply(request("renew"),
                 WRITER_TOKEN, PUBLICATION_TOKEN))
                 .hasMessageContaining("Activation is not active");
+        // The head answered the activation term: only the intent's own
+        // revision was read (3 statements), never the scan.
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx"))
+                .isEqualTo(3);
+        fixture.ledger.reset();
         assertThatThrownBy(() -> publication.store().verifyDispatch(
                 publication.executions().findByExecutionCallId("execution-1"),
                 "pub-1", PUBLICATION_TOKEN))
                 .hasMessageContaining("Original activation is fenced");
+        // Through the head columns: no locked journal read at all.
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isZero();
     }
 
     @Test
@@ -1146,8 +1155,10 @@ class Issue13181QueryBudgetTest {
                 + " revisions behind the head: " + reads
                 + " journal statements");
         // The revision range read plus the one verified page: constant,
-        // independent of the filler depth.
+        // independent of the filler depth, and none of them locked.
         assertThat(reads).isEqualTo(3);
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx",
+                "for update")).isZero();
     }
 
     @Test
