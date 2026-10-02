@@ -359,7 +359,7 @@ const ScrollableSessionTab: React.FC<{ height: number }> = ({ height }) => {
 
   return (
     <Box flexDirection="column">
-      <Box height={viewportHeight} overflowY="hidden" flexDirection="column">
+      <Box maxHeight={viewportHeight} overflowY="hidden" flexDirection="column">
         <Box
           ref={contentRef}
           flexShrink={0}

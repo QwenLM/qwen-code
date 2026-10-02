@@ -19,6 +19,8 @@ import type { Config } from '@qwen-code/qwen-code-core';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    // Rows the body reports through onSizeChange, as OpenTUI layout would.
+    contentRows: 100,
     scroller: {
       scrollBy: vi.fn(),
       scrollTo: vi.fn(),
@@ -45,12 +47,26 @@ const mocks = vi.hoisted(() => {
         props.children,
       );
     };
+    // Stands in for the measured body box: reports its layout height once.
+    const Measured = (props: {
+      onSizeChange?: (this: { height: number }) => void;
+      children?: React.ReactNode;
+    }) => {
+      React.useEffect(() => {
+        props.onSizeChange?.call({ height: state.contentRows });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return React.createElement('div', null, props.children);
+    };
     const jsx = (
       type: unknown,
       props: Record<string, unknown> | null,
       key?: React.Key,
     ) => {
       const children = (props?.['children'] ?? null) as React.ReactNode;
+      if (type === 'box' && props?.['onSizeChange']) {
+        return React.createElement(Measured, { ...props, key }, children);
+      }
       if (type === 'box' || type === 'text') {
         return React.createElement(
           type === 'box' ? 'div' : 'span',
@@ -114,6 +130,7 @@ const send = (name: string, shift = false) => {
 describe('OpenTuiStatsDialog scrolling', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.contentRows = 100;
     mocks.state.scroller.scrollBy.mockClear();
     mocks.state.scroller.scrollTo.mockClear();
   });
@@ -135,6 +152,26 @@ describe('OpenTuiStatsDialog scrolling', () => {
     // The last Session sections, the ones a short terminal used to clip,
     // live inside the scrolled region.
     expect(box.textContent).toContain('Tokens');
+    expect(getByText('tab · ↑↓ scroll · esc')).toBeTruthy();
+  });
+
+  it('is content-sized and hides the scroll hint when the body fits', () => {
+    mocks.state.contentRows = 20;
+    const { getByTestId, getByText, queryByText } = render(
+      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={40} />,
+    );
+    // Not padded out to the 40-row budget.
+    expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('20');
+    expect(getByText('tab · esc')).toBeTruthy();
+    expect(queryByText('tab · ↑↓ scroll · esc')).toBeNull();
+  });
+
+  it('caps at the budget and shows the hint when the body overflows', () => {
+    mocks.state.contentRows = 30;
+    const { getByTestId, getByText } = render(
+      <OpenTuiStatsDialog config={CONFIG} onClose={() => {}} bodyRows={7} />,
+    );
+    expect(getByTestId('scrollbox').getAttribute('data-height')).toBe('7');
     expect(getByText('tab · ↑↓ scroll · esc')).toBeTruthy();
   });
 

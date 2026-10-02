@@ -137,6 +137,8 @@ export function OpenTuiStatsDialog(props: {
 }) {
   const { config, onClose, isFocused = true, bodyRows } = props;
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  // Rows the body wants, reported by layout; 0 until the first layout pass.
+  const [contentRows, setContentRows] = useState(0);
   const [tab, setTabState] = useState<StatsTabName>('session');
   // A held Tab hands the whole burst to the handler from the last render, so
   // the cycle must read where the previous key of the burst landed.
@@ -437,17 +439,31 @@ export function OpenTuiStatsDialog(props: {
       ) : (
         <scrollbox
           ref={scrollRef}
-          height={bodyRows}
+          // Content-sized when the body fits the budget, so tall terminals
+          // are not padded with blank rows; the budget caps it otherwise.
+          height={contentRows > 0 ? Math.min(contentRows, bodyRows) : bodyRows}
+          flexGrow={0}
           stickyScroll={false}
           focusable={false}
         >
-          {body}
+          <box
+            flexGrow={0}
+            flexShrink={0}
+            flexDirection="column"
+            onSizeChange={function (this: { height: number }) {
+              setContentRows(this.height);
+            }}
+          >
+            {body}
+          </box>
         </scrollbox>
       )}
 
       <box marginTop={1}>
         <text fg={C.dim}>
-          {bodyRows === undefined ? 'tab · esc' : 'tab · ↑↓ scroll · esc'}
+          {bodyRows !== undefined && contentRows > bodyRows
+            ? 'tab · ↑↓ scroll · esc'
+            : 'tab · esc'}
         </text>
       </box>
     </box>

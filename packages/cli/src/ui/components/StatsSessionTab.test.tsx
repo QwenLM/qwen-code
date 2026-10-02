@@ -201,4 +201,12 @@ describe('<SessionTab /> height budget', () => {
     expect(output).toContain('qwen3-coder');
     expect(output).not.toContain('Use ↑/↓ to scroll');
   });
+
+  it('is content-sized, not padded to the budget, when the content fits', () => {
+    const fitted = renderSessionTab(metricsWithModel(), 60) ?? '';
+    const unbudgeted = renderSessionTab(metricsWithModel()) ?? '';
+    const rows = (frame: string) => frame.split('\n').length;
+    expect(rows(fitted)).toBe(rows(unbudgeted));
+    expect(rows(fitted)).toBeLessThan(60);
+  });
 });
