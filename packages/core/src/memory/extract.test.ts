@@ -391,11 +391,38 @@ describe('auto-memory extraction', () => {
   });
 
   it.each([
-    { userText: '', extractorRan: undefined },
-    { userText: 'Remember: use isolated runtimes.', extractorRan: true },
+    {
+      label: 'reminder only',
+      userParts: [
+        { text: '<system-reminder>Continue the task.</system-reminder>' },
+      ],
+      extractorRan: undefined,
+    },
+    {
+      label: 'reminder and user text in one part',
+      userParts: [
+        {
+          text: '<system-reminder>Continue the task.</system-reminder>\nRemember: use isolated runtimes.',
+        },
+      ],
+      extractorRan: true,
+    },
+    {
+      label: 'unclosed reminder and user text in separate parts',
+      userParts: [
+        { text: '<system-reminder>Continue the task.' },
+        { text: 'Remember: use isolated runtimes.' },
+      ],
+      extractorRan: true,
+    },
+    {
+      label: 'hidden reasoning only',
+      userParts: [{ thought: true, text: 'Hidden reasoning.' }],
+      extractorRan: undefined,
+    },
   ])(
-    'ignores runtime reminders while preserving user text: $userText',
-    async ({ userText, extractorRan }) => {
+    'ignores runtime reminders while preserving user text: $label',
+    async ({ userParts, extractorRan }) => {
       vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
         touchedTopics: [],
         touchedProjectScope: false,
@@ -419,9 +446,7 @@ describe('auto-memory extraction', () => {
                   response: { output: 'Read-only result.' },
                 },
               },
-              {
-                text: `<system-reminder>Continue the task.</system-reminder>\n${userText}`,
-              },
+              ...userParts,
             ],
           },
         ],

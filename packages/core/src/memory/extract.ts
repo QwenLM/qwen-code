@@ -9,7 +9,6 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { partToString } from '../utils/partUtils.js';
 import { stripSystemReminderBlocks } from '../core/environmentContext.js';
 import {
   getAutoMemoryExtractCursorPath,
@@ -242,12 +241,17 @@ export async function runAutoMemoryExtract(params: {
   const pendingHistory = params.history.slice(startOffset, endOffset);
 
   // Skip if there are no new, non-empty user messages in the unprocessed
-  // slice. Strip runtime reminders as the planner does, so a reminder-only
-  // tool response cannot trigger extraction after its text is removed.
+  // slice. Strip runtime reminders per part as the planner does, so a
+  // reminder-only tool response cannot trigger extraction after its text is removed.
   const hasNewUserMessages = pendingHistory.some(
     (m) =>
       m.role === 'user' &&
-      stripSystemReminderBlocks(partToString(m.parts ?? [])).trim().length > 0,
+      (m.parts ?? []).some(
+        (part) =>
+          !part.thought &&
+          typeof part.text === 'string' &&
+          stripSystemReminderBlocks(part.text).trim().length > 0,
+      ),
   );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
