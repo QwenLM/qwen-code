@@ -48,7 +48,10 @@ import type {
   ManagedSessionEvent,
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionDurableRef,
+  assertManagedSessionStableId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
@@ -869,11 +872,36 @@ async function recoverShellReceipts(
       envelope.executionStatus === 'not_started'
     )
       continue;
+    const intent = events.findLast(
+      (event) =>
+        event.sequence < receipt.sequence &&
+        event.kind === 'tool.intent' &&
+        event.payload['executionCallId'] === executionCallId,
+    );
+    const inputRef = assertManagedSessionDurableRef(
+      intent?.payload['argsRef'],
+      'original Shell input',
+    );
+    if (inputRef.kind !== 'managed-tool-input')
+      throw new Error('Original Shell Runtime owner conflicts.');
+    const input = object(
+      JSON.parse((await session.managed.resources.read(inputRef)).toString()),
+    );
+    if (
+      input?.['harnessSessionId'] !==
+        authority.sessionHeader.sessionKey.sessionId ||
+      typeof input['runtimeSessionId'] !== 'string'
+    )
+      throw new Error('Original Shell Runtime owner conflicts.');
+    const runtimeSessionId = assertManagedSessionStableId(
+      input['runtimeSessionId'],
+      'original Shell Runtime owner',
+    );
     try {
       const broker = new HostedWorkspaceBroker(
         options,
         authority.sessionHeader.sessionKey,
-        receiptPromptId,
+        runtimeSessionId,
       );
       await broker.acknowledgeV3(executionCallId, {
         executionCallId,
@@ -1719,7 +1747,9 @@ export function registerHostedHarnessSessionRoutes(
         eventEpoch: epoch,
         // A Harness older than approvals omits this, so a caller can tell.
         ...(pinned ? { approvalMode: pinned.mode } : {}),
-        ...(session.blocked ? { recoveryRequired: true } : {}),
+        ...(session.blocked || session.hooks?.hasPendingOperations
+          ? { recoveryRequired: true }
+          : {}),
         ...(recovery
           ? { _meta: { 'qwen.daemon.managedRuntimeRecovery': recovery } }
           : {}),
@@ -2859,7 +2889,9 @@ export function registerHostedHarnessSessionRoutes(
       sessionId: req.params['id'],
       hasActivePrompt: !!session.active,
       recoveryBlocked:
-        session.blocked || (session.mcp?.recoveryBlocked ?? false),
+        session.blocked ||
+        (session.mcp?.recoveryBlocked ?? false) ||
+        (session.hooks?.hasPendingOperations ?? false),
     });
   });
   app.get('/session/:id/transcript', (req, res) => {

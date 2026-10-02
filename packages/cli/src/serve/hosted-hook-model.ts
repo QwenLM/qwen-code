@@ -11,6 +11,7 @@ import { PromptHookRunner } from '@qwen-code/qwen-code-core/hooks/promptHookRunn
 import type { ManagedHookModelScope } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import type { HostedPromptHookRunner } from './hosted-hook-session.js';
 
 function validateResponse(response: GenerateContentResponse): void {
@@ -175,9 +176,15 @@ export async function runHostedHookOperation<T>(
     await input.scope.bindBudget(config.getTurnBudget());
     return await run(createHostedPromptHookRunner(config, input.scope));
   } finally {
-    await config.shutdown({
-      shutdownTelemetry: false,
-      strictResourceCleanup: true,
-    });
+    try {
+      await config.shutdown({
+        shutdownTelemetry: false,
+        strictResourceCleanup: true,
+      });
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Hook model cleanup failed: ${String(cause)}`,
+      );
+    }
   }
 }

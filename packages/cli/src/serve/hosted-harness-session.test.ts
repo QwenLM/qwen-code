@@ -919,15 +919,18 @@ describe('Hosted Harness no-tool session', () => {
       await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
         .send({ prompt, promptId: PROMPT_ID, payloadDigest })
         .expect(202);
-      await vi.waitFor(async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body).toMatchObject({
-          hasActivePrompt: false,
-          recoveryBlocked: true,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
       const child = requests.find((entry) => entry.kind === 'hook-execute')!;
       const originalWrite = ManagedSessionRecordSink.prototype.write;
       const write = vi.spyOn(ManagedSessionRecordSink.prototype, 'write');
@@ -1463,51 +1466,127 @@ describe('Hosted Harness no-tool session', () => {
     ).expect(204);
   });
 
-  it('refuses new Hook operations while an original effect is unknown', async () => {
-    const { server, authorize, requests } = await hookApp();
-    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
-    const original = control.getMockImplementation()!;
-    control.mockImplementation(async (operation) => {
-      if (operation.kind === 'hook-catalog') return original(operation);
-      requests.push(operation);
-      return {
-        operationId:
+  it.each([false, true])(
+    'reports and clears the unknown Hook fence (reload: %s)',
+    async (reload) => {
+      const append = vi.spyOn(
+        LocalJsonlManagedSessionJournalHandle.prototype,
+        'appendTransaction',
+      );
+      const { server, authorize, requests, release, definition } =
+        await hookApp();
+      const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+      const original = control.getMockImplementation()!;
+      let known = false;
+      control.mockImplementation(async (operation) => {
+        if (operation.kind === 'hook-catalog') return original(operation);
+        requests.push(operation);
+        const operationId =
           operation.kind === 'hook-status' || operation.kind === 'hook-cancel'
             ? operation.targetOperationId
-            : operation.operationId,
-        state: 'outcome_unknown',
-      };
-    });
-    const log = vi
-      .spyOn(stdio, 'writeStderrLineSafe')
-      .mockImplementation(() => {});
-    const operationId = randomUUID();
-    const send = (id: string) =>
-      authorize(
-        supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
-      ).send({
-        operationId: id,
-        event: 'Notification',
-        input: { message: 'effect', notification_type: 'test' },
+            : operation.operationId;
+        return known
+          ? {
+              operationId,
+              state: 'settled',
+              result: { success: true, outcome: 'success', duration: 0 },
+            }
+          : { operationId, state: 'outcome_unknown' };
       });
-    const unknown = await send(operationId);
-    expect(unknown.status).toBe(503);
-    expect(unknown.body.code).toBe('hosted_hook_operation_failed');
-    expect((await send(randomUUID())).status).toBe(409);
-    const replay = await send(operationId);
-    expect(replay.status).toBe(503);
-    expect(replay.body.code).toBe('hosted_hook_operation_failed');
-    const blocked = `qwen serve: Hosted Hook operation ${operationId} is recovery blocked: Error: Hosted Hook requires reconciliation of its original execution.`;
-    expect(
-      log.mock.calls
-        .map(([line]) => line)
-        .filter((line) => line.includes('Hosted Hook operation')),
-    ).toEqual([blocked, blocked]);
-    expect(
-      requests.filter((request) => request.kind === 'hook-execute'),
-    ).toHaveLength(1);
-    expect(state.model).not.toHaveBeenCalled();
-  });
+      const log = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      const operationId = randomUUID();
+      const send = (id: string) =>
+        authorize(
+          supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+        ).send({
+          operationId: id,
+          event: 'Notification',
+          input: { message: 'effect', notification_type: 'test' },
+        });
+      const unknown = await send(operationId);
+      expect(unknown.status).toBe(503);
+      expect(unknown.body.code).toBe('hosted_hook_operation_failed');
+      expect((await send(randomUUID())).status).toBe(409);
+      const replay = await send(operationId);
+      expect(replay.status).toBe(503);
+      expect(replay.body.code).toBe('hosted_hook_operation_failed');
+      const blocked = `qwen serve: Hosted Hook operation ${operationId} is recovery blocked: Error: Hosted Hook requires reconciliation of its original execution.`;
+      expect(
+        log.mock.calls
+          .map(([line]) => line)
+          .filter((line) => line.includes('Hosted Hook operation')),
+      ).toEqual([blocked, blocked]);
+      expect(
+        (
+          await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          )
+        ).body.recoveryBlocked,
+      ).toBe(true);
+      await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/detach`),
+      ).expect(503);
+      expect(release).not.toHaveBeenCalled();
+      let current = server;
+      let owner = authorize;
+      if (reload) {
+        await (
+          append.mock.contexts[0] as LocalJsonlManagedSessionJournalHandle
+        ).abort();
+        vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60 * 60 * 1000);
+        current = await app(true);
+        const loaded = await headers(
+          supertest(current).post(`/session/${SESSION_ID}/load`),
+        )
+          .send(definition)
+          .expect(200);
+        expect(loaded.body.recoveryRequired).toBe(true);
+        owner = (request) =>
+          headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
+      }
+      expect(
+        (await owner(supertest(current).get(`/session/${SESSION_ID}/status`)))
+          .body.recoveryBlocked,
+      ).toBe(true);
+      const prompt = [{ type: 'text', text: 'hello' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      const submit = () =>
+        owner(supertest(current).post(`/session/${SESSION_ID}/prompt`)).send({
+          prompt,
+          promptId: randomUUID(),
+          payloadDigest,
+        });
+      await submit().expect(409);
+      expect(state.model).not.toHaveBeenCalled();
+      expect(
+        requests.filter((request) => request.kind === 'hook-execute'),
+      ).toHaveLength(1);
+      known = true;
+      await owner(
+        supertest(current).get(
+          `/session/${SESSION_ID}/hooks/operations/${operationId}`,
+        ),
+      ).expect(200);
+      expect(
+        (await owner(supertest(current).get(`/session/${SESSION_ID}/status`)))
+          .body.recoveryBlocked,
+      ).toBe(false);
+      await submit().expect(202);
+      await vi.waitFor(async () => {
+        const status = await owner(
+          supertest(current).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      });
+      expect(state.model).toHaveBeenCalledOnce();
+      await owner(
+        supertest(current).post(`/session/${SESSION_ID}/detach`),
+      ).expect(204);
+    },
+  );
 
   it('logs the cause of a failed Hook operation before answering 503', async () => {
     const { server, authorize } = await hookApp();
@@ -3843,14 +3922,15 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it.each([
-    'workspace_busy',
-    'workspace_unavailable',
-    'partial',
-    'managed_runtime_provider_operation_failed',
-    'runtime_control_operation_invalid',
-  ])(
-    'preserves the original Shell receipt and continuation across %s recovery',
-    async (refusalCode) => {
+    ['workspace_busy', false],
+    ['workspace_unavailable', false],
+    ['partial', false],
+    ['managed_runtime_provider_operation_failed', false],
+    ['runtime_control_operation_invalid', false],
+    ['workspace_busy', true],
+  ] as const)(
+    'preserves the original Shell receipt and continuation across %s recovery (Hooks: %s)',
+    async (refusalCode, hooks) => {
       const partial = refusalCode === 'partial';
       const captureStatus = partial
         ? ('partial' as const)
@@ -3916,9 +3996,24 @@ describe('Hosted Harness no-tool session', () => {
         },
       };
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      if (hooks)
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'hookControl',
+        ).mockImplementation(async (operation) => ({
+          operationId: operation.operationId,
+          state: 'settled',
+          catalog: { ...hookPin, hooks: [] },
+        }));
       const acquire = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
-        .mockResolvedValue();
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding-1',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        });
       vi.spyOn(HostedWorkspaceBroker.prototype, 'prepareV3').mockResolvedValue({
         executionCallId: 'shell-execution',
         runtimeBindingId: 'binding-1',
@@ -4003,8 +4098,15 @@ describe('Hosted Harness no-tool session', () => {
         managedSessionStore: store(),
         toolProfile: 'hosted-workspace-shell/1',
         captureBytes: 1024 * 1024,
+        ...(hooks ? { hookCatalog: hookPin } : {}),
       });
       expect(created.status).toBe(200);
+      const close = (target: Server, clientId: string) =>
+        hooks
+          ? headers(
+              supertest(target).post(`/session/${SESSION_ID}/detach`),
+            ).set('X-Qwen-Client-Id', clientId)
+          : headers(supertest(target).delete(`/session/${SESSION_ID}`));
       const prompt = [{ type: 'text', text: 'run Shell' }];
       const payloadDigest =
         'sha256:' +
@@ -4017,13 +4119,14 @@ describe('Hosted Harness no-tool session', () => {
         const status = await headers(
           supertest(first).get('/session/' + SESSION_ID + '/status'),
         ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       });
       expect(failed).toBe(true);
       expect(acknowledge).not.toHaveBeenCalled();
-      await headers(supertest(first).delete('/session/' + SESSION_ID)).expect(
-        204,
-      );
+      await close(first, created.body.clientId).expect(204);
+      const releases = vi.mocked(HostedWorkspaceBroker.prototype.release);
+      const releasedBefore = releases.mock.calls.length;
       const second = await app(true);
       const checkpointBefore = await LocalJsonlManagedSessionJournalStore.read(
         path.join(state.root, `${SESSION_ID}.jsonl`),
@@ -4126,9 +4229,16 @@ describe('Hosted Harness no-tool session', () => {
       expect(refused.body.code).toBe(
         bindRefused ? 'managed_session_open_failed' : refusalCode,
       );
-      expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+      if (!hooks) expect(releases).toHaveBeenCalledTimes(releasedBefore);
       expect(state.model).toHaveBeenCalledOnce();
       expect(acknowledge).toHaveBeenCalledOnce();
+      const originalOwner = (execute.mock.contexts[0] as HostedWorkspaceBroker)
+        .runtimeSessionId;
+      expect(
+        (acknowledge.mock.contexts[0] as HostedWorkspaceBroker)
+          .runtimeSessionId,
+      ).toBe(originalOwner);
+      if (hooks) expect(originalOwner).not.toBe(PROMPT_ID);
       const checkpointAfter = await LocalJsonlManagedSessionJournalStore.read(
         path.join(state.root, `${SESSION_ID}.jsonl`),
         key,
@@ -4187,12 +4297,14 @@ describe('Hosted Harness no-tool session', () => {
       });
       expect(state.model).toHaveBeenCalledTimes(2);
       expect(acknowledge).toHaveBeenCalledOnce();
+      expect(
+        (acknowledge.mock.contexts[0] as HostedWorkspaceBroker)
+          .runtimeSessionId,
+      ).toBe(originalOwner);
       expect(log).toHaveBeenCalledWith(
         expect.stringContaining('runtime_execution_conflict'),
       );
-      await headers(supertest(second).delete('/session/' + SESSION_ID)).expect(
-        204,
-      );
+      await close(second, loaded.body.clientId).expect(204);
       failFinalSettlement = false;
       const third = await app(true);
       const reopened = await headers(

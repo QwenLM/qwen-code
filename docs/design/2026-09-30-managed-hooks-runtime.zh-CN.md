@@ -121,8 +121,12 @@ Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime ow
 目录/模型操作和非 active activation。冷加载时，先用匹配 checkpoint 工具输入中
 保存的原 Runtime owner 观察未决文件历史，再释放此前的 Hook owner。缺失或冲突的
 owner 证据继续阻塞恢复，不增加新的持久化字段。
+Shell 回执恢复确认 capture 投递时，也从已提交的工具输入读取原 Runtime owner；
+prompt ID 和接管后的 Hook owner 都不能标识原执行。
 
 HTTP 使用原生 URL/DNS、凭据环境变量与超时策略，拒绝重定向。收到失败响应可以结算；
+Runtime URL 白名单与 HTTP 执行器使用相同的允许变量插值，仍限制内部密钥并执行原生
+SSRF 检查。
 执行器在派发前构造失败时，按保存的失败策略结算；
 发送后丢失响应保持 unknown，不自动重试。Managed HTTP Hook 已派发后，用户取消
 保留原请求及响应体读取，最多等待配置的 HTTP 超时，用完整响应作为结算证据；
@@ -172,6 +176,7 @@ HTTP journal 提交遇到临时传输失败、429 或 5xx 时，最多尝试三�
 模型尝试和用量关联原 Hook operation，并在存在时关联原 turn。预算记账沿用 Session
 与 turn 的现有语义；Hook operation 不得重置原预算。本变更不增加金额预算策略或独立
 Hook token 池。
+隔离模型的 Config 清理错误单独记录，不替换已返回的 Hook 结果或原操作错误。
 
 ## 事件接线
 
@@ -201,6 +206,9 @@ Session 创建/加载可提交 `hookCatalog: {catalogId, catalogRevision, defini
 同时需要 Hosted Workspace tool profile 和 Broker。加载时省略初始 pin 会恢复保存值，
 显式提供时必须相同；后续已提交 registration 保持权威性。Workspace 冷加载在 attach
 前校验 Hook 记录资源及完整 function messages 快照闭包，并保留原 owner 恢复屏障。
+Hook scope 标识符兼容现有 Broker 字符语法，包括开头的标点。Hook 操作阻塞 prompt
+准入期间，Session status 返回 `recoveryBlocked`，load 返回 `recoveryRequired`。
+已保存的操作实际结算后，对账会清除此诊断。
 
 Runtime-only 接管标志仍让 Hook Session 使用现有的 Hook 感知加载与核对路径。
 Runtime-only continue/cancel 路由在修改记录或 Runtime owner 前，以
