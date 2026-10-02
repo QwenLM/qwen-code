@@ -52,7 +52,15 @@ function truncateIndexField(value: string, limit: number): string {
   if (value.length <= limit) {
     return value;
   }
-  const head = value.slice(0, limit - 1);
+  let head = value.slice(0, limit - 1);
+  // Back off one unit when the cut lands inside a surrogate pair: a lone high
+  // surrogate does not survive the write to MEMORY.md (the file carries U+FFFD
+  // instead), so the index stops round-tripping and the team rebuild's
+  // unchanged-content skip can never fire again.
+  const lastUnit = head.charCodeAt(head.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+    head = head.slice(0, -1);
+  }
   // Back off to a word boundary only when the boundary keeps most of the
   // window (the same guard compressFindingSummary applies): an unconditional
   // backoff deletes everything after the last whitespace, collapsing a field

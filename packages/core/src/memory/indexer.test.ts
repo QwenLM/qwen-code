@@ -665,6 +665,11 @@ describe('managed auto-memory indexer', () => {
     // The description yields instead: both siblings are listed, every path
     // resolves, and the line still respects the budget.
     expect(line.length).toBeLessThanOrEqual(150);
+    // Exact text on purpose: cutting the hook at 96 units instead of backing
+    // off to the word boundary yields "…enough to fill the…", which satisfies
+    // the budget above and every path assertion below — only the hook text
+    // pins the boundary preference itself.
+    expect(line).toContain('enough to fill…');
     expect(decodeURIComponent(linkTarget(line))).toBe('alice/a.md');
     expect(alsoTargets(line).map(decodeURIComponent)).toEqual([
       'bob/b.md',
@@ -767,5 +772,36 @@ describe('managed auto-memory indexer', () => {
     expect(line).toContain('登录问题'.repeat(10));
     // …rather than collapsing to the 3-character stub "- [修复…](…)".
     expect(line).not.toContain('[修复…]');
+  });
+
+  it('drops an astral character whole instead of splitting it at the cut', () => {
+    // Regression: the field truncator sliced by UTF-16 code unit, so a cut
+    // landing inside a surrogate pair emitted a lone high surrogate — not a
+    // character, and it does not survive the write to MEMORY.md, which then
+    // carries U+FFFD where the author's character was.
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: '/tmp/feedback/astral.md',
+        relativePath: 'feedback/astral.md',
+        filename: 'astral.md',
+        // 118 filler units put U+1D54F across units 118-119, exactly where the
+        // 120-char field cap cuts.
+        title: `${'a'.repeat(118)}\u{1d54f} tail words here`,
+        description: 'd',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    expect(line).toContain(`${'a'.repeat(118)}…`);
+    // The invariant that actually breaks: what lands on disk must be what the
+    // builder returned.
+    expect(Buffer.from(line, 'utf8').toString('utf8')).toBe(line);
   });
 });
