@@ -320,7 +320,7 @@ class WorkspaceSessionRetentionMySqlIT {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         String tenant = "upgrade";
-        String session = closed(store, tenant, false);
+        String session = closed(store, tenant, createAtLegacySchema(tenant), false);
         Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
         assertThat(store.hasCompletedWorkspaceClose(tenant, session)).isTrue();
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED");
@@ -363,7 +363,10 @@ class WorkspaceSessionRetentionMySqlIT {
     }
 
     private String closed(ManagedAgentStore store, String tenant, boolean journal) {
-        String session = create(store, tenant);
+        return closed(store, tenant, create(store, tenant), journal);
+    }
+
+    private String closed(ManagedAgentStore store, String tenant, String session, boolean journal) {
         if (journal) {
             var sessions = new ManagedSessionStore(jdbc);
             var grant = transaction(() -> sessions.acquireWriter(tenant, session, TOKEN,
@@ -374,6 +377,36 @@ class WorkspaceSessionRetentionMySqlIT {
         var close = transaction(() -> store.beginWorkspaceClose(tenant, session, OWNER, ACTOR_DIGEST, "close-" + session, "close-digest", true));
         var claim = transaction(() -> store.claimOperation(tenant, session, close.operation().operationId(), "close-worker", Duration.ofMinutes(1))).orElseThrow();
         transaction(() -> store.completeOperation(tenant, session, claim.operationId(), "close-worker", claim.claimGeneration(), true));
+        return session;
+    }
+
+    // Writes the session with the pre-V34 column set: the current store insert
+    // always names creator_actor_key, which a database at the prerequisite
+    // version does not have yet.
+    private String createAtLegacySchema(String tenant) {
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_registry WHERE tenant_id = ?", Integer.class, tenant) == 0) {
+            jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+                    + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
+                    tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                    + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
+        }
+        String session = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        String contextRef = "sha256:" + java.util.HexFormat.of().formatHex(
+                sha256(WorkspaceExecutionProfile.CONFIG_REF + "\u0000" + WorkspaceExecutionProfile.POLICY_REF));
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, agent_revision, title,"
+                + " status, created_at, updated_at, workspace_id, workspace_generation, workspace_storage_id,"
+                + " cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref,"
+                + " approval_mode) VALUES (?, ?, 'qwen-code', '1', NULL, 'ACTIVE', ?, ?, 'workspace', 1, 'storage',"
+                + " '.', ?, 1, ?, ?, 'yolo')",
+                tenant, session, now, now, contextRef,
+                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_agent_consumer_progress (tenant_id, session_id, consumer_name,"
+                + " covered_sequence, updated_at) VALUES (?, ?, 'message_projection', 0, ?)", tenant, session, now);
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id, idempotency_key,"
+                + " request_digest, session_id, turn_id, created_at) VALUES (?, ?, ?, 'create-digest', ?, NULL, ?)",
+                tenant, OWNER.getBytes(StandardCharsets.UTF_8), UUID.randomUUID().toString(), session, now);
         return session;
     }
 
