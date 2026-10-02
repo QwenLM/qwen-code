@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -412,6 +413,39 @@ class ManagedSessionLifecycleTest {
             harness.setAvailable(true);
         }
         awaitCompleted(tenant, sessionId, closeId);
+    }
+
+    @Test
+    void unavailableHarnessDoesNotBlockLaterRenameOrCompletedReplay()
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        harness.setAvailable(false);
+        try {
+            lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"title\":\"offline\"}"), tenant, "offline")
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.error.code")
+                            .value("hosted_harness_disabled"));
+        } finally {
+            harness.setAvailable(true);
+        }
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"online\"}"), tenant, "online")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("online"));
+        harness.setAvailable(false);
+        try {
+            lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"title\":\"online\"}"), tenant, "online")
+                    .andExpect(status().isOk())
+                    .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
+        } finally {
+            harness.setAvailable(true);
+        }
     }
 
     /**

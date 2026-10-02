@@ -274,10 +274,10 @@ public class ManagedAgentService {
                 RENAME, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.RENAME);
         if (!"COMPLETED".equals(command.status())) {
-            requireHarness();
             SessionRecord session = store.requireSession(tenantId, sessionId);
             HarnessConnector.Attachment attachment;
             try {
+                requireHarness();
                 attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null);
                 harness.rename(tenantId, sessionId, effectiveTitle);
@@ -291,6 +291,9 @@ public class ManagedAgentService {
                 // status and code instead of a transient 503.
                 store.abandonSessionMutation(tenantId, RENAME,
                         idempotencyKey, sessionId);
+                if (error instanceof ApiException failure) {
+                    throw failure;
+                }
                 if (error instanceof RuntimeBrokerException refusal
                         && !refusal.isRetryable()) {
                     HttpStatus status = HttpStatus.resolve(
