@@ -185,8 +185,10 @@ Harness 的 home，等 lease 过期（现有 SQL 等待对冻结的 writer 照�
 工作），让 replacement 把 Turn 续完，再对被冻结的 Harness 发
 SIGCONT 并断言：
 
-- journal head 显示接管后没有来自旧 writer 代数的新事务（writer
-  代数、revision 与 committed sequence 都属于 replacement）；
+- 苏醒后**旧 writer 代数零新增事务**（直接数
+  `qwen_managed_session_journal_tx` 的行；journal head 的 revision 与
+  sequence 会随 replacement 自己的合法写入（心跳等）继续走，所以
+  fencing 的度量是身份而不是 revision）；
 - 公开 transcript 仍然只有 replacement 的回答和一个终态事件；
 - `managed_agent_session.harness_boot_id` 仍是 replacement 的。
 

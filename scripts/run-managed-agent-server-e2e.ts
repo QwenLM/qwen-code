@@ -1556,6 +1556,10 @@ try {
           mysqlPort,
           `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
         );
+        const oldGenerationTxBeforeWake = runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
+        );
         signalProcessTree(harness.child, 'SIGCONT');
         if (!processTreeExists(harness.child)) {
           throw new Error(
@@ -1570,6 +1574,14 @@ try {
         const bootAfterWake = runMysql(
           mysqlPort,
           `SELECT harness_boot_id FROM qwen_managed_agent.managed_agent_session WHERE ${sessionFilter}`,
+        );
+        // The fencing claim the exit check words: no transaction out of the
+        // old writer generation after it wakes. The head's revision moves
+        // with the replacement's own legal writes (heartbeats, lifecycle),
+        // so identity, not revision, is what fencing proofs may freeze on.
+        const oldGenerationTxAfterWake = runMysql(
+          mysqlPort,
+          `SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
         );
         const awakeEvents = await fetchJson<PublicList<PublicEvent>>(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
@@ -1586,20 +1598,22 @@ try {
           ),
         );
         if (
-          headAfterWake !== headBeforeWake ||
+          headAfterWake.split('\t')[0] !== headBeforeWake.split('\t')[0] ||
+          oldGenerationTxAfterWake !== oldGenerationTxBeforeWake ||
           bootAfterWake !== replacementBootId ||
           awakeText !== visibleText ||
           awakeTerminalCount !== terminalCount
         ) {
           throw new Error(
-            `Frozen former Harness mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
+            `Frozen former Harness mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} oldWriterTx=${oldGenerationTxBeforeWake}->${oldGenerationTxAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
           );
         }
         console.log(
           JSON.stringify(
             {
-              fencedFormerOwner: true,
+              fencedFormerWriter: true,
               journalHead: headAfterWake,
+              oldGenerationTx: oldGenerationTxAfterWake,
               harnessBootId: bootAfterWake,
               visibleText: awakeText,
             },

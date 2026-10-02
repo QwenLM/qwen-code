@@ -207,9 +207,10 @@ the Harness home, let the leases lapse (the existing SQL waits work
 unchanged against a frozen writer), let the replacement finish the Turn,
 then SIGCONT the frozen Harness and assert:
 
-- the journal head shows no transaction from the old writer generation after
-  the takeover (writer generation, revision and committed sequence belong to
-  the replacement),
+- no journal transaction from the _old writer generation_ after the wake
+  (counted straight off `qwen_managed_session_journal_tx`; the head's
+  revision and sequence keep moving with the replacement's own legal
+  writes such as heartbeats, so identity, not revision, is the fence),
 - the public transcript still holds only the replacement's answer and one
   terminal event,
 - `managed_agent_session.harness_boot_id` is still the replacement's.
