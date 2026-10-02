@@ -3321,14 +3321,34 @@ export class CoreToolScheduler {
             // error; name it so the model does not blame the envelope. If the
             // bridge delivered no arguments at all, also declare the target
             // directly so the model can fill its real schema (#12889).
+            //
+            // A truncated turn is not that state: turn.ts marks *every* pending
+            // call of a MAX_TOKENS turn, and a truncated `arguments` buffer
+            // falls back to `{}` (streamingToolCallParser.ts,
+            // responses-converter.ts), so empty args here do not prove the
+            // model cannot fill the schema. A reveal stays declared for the
+            // rest of the session, so truncation must not buy one; the
+            // TRUNCATION_PARAM_GUIDANCE below already drives the retry. The
+            // target naming stays — it is accurate either way, and dropping
+            // `describeDirectDeclaration` with the reveal removes the "call it
+            // by name, not through tool_call" directive that would contradict
+            // that guidance.
             const declaredDirectly =
               reqInfo.modelFacingName !== undefined &&
+              !reqInfo.wasOutputTruncated &&
               (await declareTargetAfterEmptyBridgedCall(
                 this.toolRegistry,
                 this.config.getLlmClient?.(),
                 reqInfo.name,
                 reqInfo.args,
               ));
+            // The declaration refresh above is this loop's only await with no
+            // sibling re-check: it reaches client.setTools() -> warmAll(). An
+            // abort inside it must book a cancellation, not an
+            // INVALID_TOOL_PARAMS error whose retry strike survives the batch
+            // (clearRetryCountsForTool runs only on a successful validation)
+            // and trips VALIDATION_RETRY_LOOP_THRESHOLD one call early later.
+            if (recordPrevalidationCancellation()) continue;
             const targetMessage =
               reqInfo.modelFacingName !== undefined
                 ? describeBridgedArgumentError(
