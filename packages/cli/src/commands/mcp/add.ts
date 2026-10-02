@@ -16,7 +16,9 @@ import type {
 // yargs reports a list flag in three shapes without usable values, and an
 // unset list (no filter) differs from an empty one (allow none): an omitted
 // flag is `undefined` (unset), a negated flag such as `--no-include-tools` is
-// `[false]` (unset), and a flag given with no value is `[]` (empty).
+// `[false]` (unset), and a flag given with no value is `[]` (empty). A
+// negation given alongside values (`['a', false]`) is ignored: the explicit
+// values win.
 function splitCommaList(values: unknown[] | undefined): string[] | undefined {
   if (values === undefined) return undefined;
   const strings = values.filter(

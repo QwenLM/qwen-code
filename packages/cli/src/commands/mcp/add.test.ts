@@ -276,6 +276,22 @@ describe('mcp add command', () => {
     });
   });
 
+  it.each([
+    '--include-tools a --no-include-tools',
+    '--no-include-tools --include-tools a',
+  ])(
+    'should keep values given alongside a negated tool flag (%s)',
+    async (flags) => {
+      await parser.parseAsync(`add my-server /path/to/server ${flags}`);
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        { 'my-server': expect.objectContaining({ includeTools: ['a'] }) },
+      );
+    },
+  );
+
   it('should drop empty segments from comma-separated tool lists', async () => {
     await parser.parseAsync(
       'add my-server /path/to/server --include-tools "a,,b" --exclude-tools write_file,',
