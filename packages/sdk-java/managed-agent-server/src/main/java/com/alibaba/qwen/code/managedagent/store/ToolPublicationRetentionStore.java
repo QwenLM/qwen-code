@@ -157,7 +157,10 @@ public final class ToolPublicationRetentionStore {
             ReadLease lease, Runnable guard) {
         lease.check();
         guard.run();
-        var input = objects.open(objectKey);
+        var input = objects.open(objectKey, () -> {
+            lease.check();
+            guard.run();
+        });
         return new java.io.FilterInputStream(input) {
             @Override
             public int read() throws java.io.IOException {

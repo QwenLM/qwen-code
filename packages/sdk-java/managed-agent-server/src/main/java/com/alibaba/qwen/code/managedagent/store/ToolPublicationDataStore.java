@@ -1671,7 +1671,10 @@ public final class ToolPublicationDataStore {
         MessageDigest hash = sha256();
         lease.check();
         try (InputStream input = resource.objectKey() == null
-                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey())) {
+                ? new java.io.ByteArrayInputStream(resource.inlineBytes()) : objects.open(resource.objectKey(), () -> {
+                    lease.check();
+                    heartbeat.run();
+                })) {
             byte[] buffer = new byte[64 * 1024];
             long position = 0;
             for (;;) {
