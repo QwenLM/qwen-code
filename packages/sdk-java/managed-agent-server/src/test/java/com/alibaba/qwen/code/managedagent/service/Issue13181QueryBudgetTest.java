@@ -639,10 +639,20 @@ class Issue13181QueryBudgetTest {
                             new WorkspaceSelection("workspace", "."))).sessionId());
         }
         // One workspace session opts out of yolo: its actions capability
-        // must differ from the other rows'.
+        // must differ from the other rows'. Another holds a completed close:
+        // its retention capabilities must differ per row, not per page.
         fixture.jdbc.update("UPDATE managed_agent_session SET approval_mode ="
                 + " 'confirm' WHERE tenant_id = ? AND session_id = ?",
                 bound, boundIds.get(3));
+        fixture.jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state, admission_stage,"
+                + " delivery_state, session_status_before, receipt_id,"
+                + " available_at, created_at, updated_at, completed_at)"
+                + " VALUES (?, ?, ?, 'CLOSE', '', 'close-key', 'digest',"
+                + " 'COMPLETED', 'JAVA_DURABLE', 'DELIVERED', 'CLOSED',"
+                + " 'rcpt', 0, 0, 0, 0)",
+                bound, boundIds.get(5), "op_" + UUID.randomUUID());
         fixture.ledger.reset();
         var boundPublic = fixture.service.listPublicSessions(bound, "actor",
                 null, 20).data();
@@ -661,6 +671,8 @@ class Issue13181QueryBudgetTest {
             int index = boundIds.indexOf(row.id());
             assertThat(row.metadata()).containsEntry("title", "w-" + index);
             assertThat(row.capabilities().actions()).isEqualTo(index == 3);
+            assertThat(row.capabilities().sessionDelete())
+                    .isEqualTo(index == 5);
         }
 
         fixture.ledger.reset();
@@ -680,6 +692,8 @@ class Issue13181QueryBudgetTest {
             int index = boundIds.indexOf(row.sessionId());
             assertThat(row.title()).isEqualTo("w-" + index);
             assertThat(row.capabilities().actions()).isEqualTo(index == 3);
+            assertThat(row.capabilities().sessionDelete())
+                    .isEqualTo(index == 5);
         }
     }
 
