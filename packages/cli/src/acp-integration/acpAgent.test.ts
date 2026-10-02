@@ -19655,8 +19655,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const previousUpdateImplementation = vi
         .mocked(coreApi.updateSetting)
         .getMockImplementation()!;
-      const root = await realFsPromises.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-acp-managed-read-'),
+      const root = await realFsPromises.realpath(
+        await realFsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-acp-managed-read-'),
+        ),
       );
       const previousManagedRoot = mockArgv.managedExtensions;
       const keychainAvailable = vi

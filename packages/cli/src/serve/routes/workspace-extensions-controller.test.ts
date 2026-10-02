@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -105,7 +106,9 @@ describe('createExtensionsController', () => {
   });
 
   it('uses the deployment root for managers in every selected workspace', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'qwen-managed-controller-'));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'qwen-managed-controller-')),
+    );
     try {
       const managedExtensionsDir = join(root, 'prepared');
       await mkdir(join(managedExtensionsDir, 'bundle'), { recursive: true });

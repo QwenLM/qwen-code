@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -147,7 +154,9 @@ describe('workspace managed extension reads', () => {
   ] as const)(
     'preserves managed secrets and user activation during a $read read before $mutation',
     async ({ read, mutation }) => {
-      const root = await mkdtemp(join(tmpdir(), 'qwen-managed-reads-'));
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), 'qwen-managed-reads-')),
+      );
       try {
         const {
           managedExtensionsDir,
@@ -268,7 +277,9 @@ describe('workspace managed extension reads', () => {
   ] as const)(
     'projects the user skill override $expected without consuming the managed override $managed',
     async ({ user, managed: managedOverride, expected }) => {
-      const root = await mkdtemp(join(tmpdir(), 'qwen-managed-skill-reads-'));
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), 'qwen-managed-skill-reads-')),
+      );
       try {
         const { controller, manager, workspace, store, managed, diskPolicy } =
           await createManagedEpisode(root, { user, managed: managedOverride });

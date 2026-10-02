@@ -477,7 +477,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       fsp.stat(path.join(qwenHome, 'extensions')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
     const provider = createWorkspaceSkillsStatusProvider({
-      managedExtensionsDir,
+      managedExtensionsDir: await fsp.realpath(managedExtensionsDir),
     });
     const status = await provider(qwenHome);
     expect(status.initialized).toBe(true);
@@ -516,7 +516,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await fsp.mkdir(storeDir, { recursive: true });
     await fsp.writeFile(path.join(storeDir, 'state.json'), '{broken');
     const provider = createWorkspaceSkillsStatusProvider({
-      managedExtensionsDir,
+      managedExtensionsDir: await fsp.realpath(managedExtensionsDir),
     });
 
     const status = await provider(qwenHome);
@@ -533,8 +533,8 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     async () => {
       // EACCES on mkdir is what a hardened container or read-only mount
       // gives a status GET; chmod cannot model that on win32 or as root.
-      const managedExtensionsDir = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-catalog-managed-'),
+      const managedExtensionsDir = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-managed-')),
       );
       const skillDir = path.join(
         managedExtensionsDir,
@@ -584,8 +584,8 @@ describe('createWorkspaceSkillsStatusProvider', () => {
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'answers a read-only store-only home without creating state directories',
     async () => {
-      const managedExtensionsDir = await fsp.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-catalog-managed-'),
+      const managedExtensionsDir = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-managed-')),
       );
       const skillDir = path.join(
         managedExtensionsDir,

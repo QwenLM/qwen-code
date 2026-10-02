@@ -82,8 +82,8 @@ describe('managed extension activation migration', () => {
   }
 
   beforeEach(() => {
-    temporary = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-managed-migration-'),
+    temporary = fs.realpathSync.native(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-migration-')),
     );
     const home = path.join(temporary, 'home');
     workspace = path.join(temporary, 'workspace');

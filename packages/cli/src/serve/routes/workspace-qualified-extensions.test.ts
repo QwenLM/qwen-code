@@ -585,8 +585,8 @@ describe('extension management v2 REST', () => {
   });
 
   it('serves managed catalog identity without transferring its policy to a shadowed user copy', async () => {
-    const qwenHome = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-managed-catalog-'),
+    const qwenHome = await fsp.realpath(
+      await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-managed-catalog-')),
     );
     vi.stubEnv('QWEN_HOME', qwenHome);
     const managedExtensions = path.join(qwenHome, 'managed-packages');

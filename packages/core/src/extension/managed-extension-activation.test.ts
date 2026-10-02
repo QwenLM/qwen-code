@@ -45,8 +45,8 @@ async function createConfig(
 
 describe('managed user activation outside the home directory', () => {
   beforeEach(() => {
-    temporary = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'qwen-managed-activation-'),
+    temporary = fs.realpathSync.native(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-managed-activation-')),
     );
     const home = path.join(temporary, 'home');
     managedExtensionsDir = path.join(temporary, 'prepared');
