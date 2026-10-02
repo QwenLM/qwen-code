@@ -102,6 +102,55 @@ describe('memory file change hook', () => {
     }
   });
 
+  it('keeps secondary project roots out of configured-root document keys', async () => {
+    const projectRoot = await setup();
+    const originalLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const configured = path.join(getAutoMemoryRoot(projectRoot), 'a.md');
+    const secondary = path.join(projectRoot, '.qwen', 'memory', 'a.md');
+    const listener = vi.fn();
+    const stop = registerMemoryChangedListener(projectRoot, listener);
+    try {
+      for (const file of [configured, secondary]) {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, 'before');
+        await notifyMemoryFileChange(file, projectRoot, 'update', stop.id);
+      }
+      expect(describeMemoryFileChange(secondary, projectRoot)).toBeUndefined();
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          relativePaths: ['a.md'],
+          paths: [await fs.realpath(configured)],
+        }),
+        undefined,
+      );
+      listener.mockClear();
+      await withCoalescedMemoryChanges(projectRoot, stop.id, () =>
+        fs.rm(secondary),
+      );
+      expect(listener).not.toHaveBeenCalled();
+      await withCoalescedMemoryChanges(projectRoot, stop.id, () =>
+        fs.rm(configured),
+      );
+      expect(listener).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          scope: 'project',
+          operation: 'delete',
+          relativePaths: ['a.md'],
+        }),
+        undefined,
+      );
+    } finally {
+      stop();
+      if (originalLocal === undefined)
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      else process.env['QWEN_CODE_MEMORY_LOCAL'] = originalLocal;
+      clearAutoMemoryRootCache();
+    }
+  });
+
   it('notifies listeners only for managed memory files', async () => {
     const projectRoot = await setup();
     const seen: MemoryChangedNotice[] = [];

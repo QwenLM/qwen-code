@@ -12,7 +12,6 @@ import { Mutex } from 'async-mutex';
 import {
   AUTO_MEMORY_DIRNAME,
   getAutoMemoryRoot,
-  getProjectAutoMemoryRoots,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryRoot,
   isMemoryDocumentFilename,
@@ -168,12 +167,9 @@ function relativeInside(root: string, filePath: string): string | undefined {
 function isProjectRootAllowed(
   projectRoot: string,
   resolvedRoot: string,
-  root = getAutoMemoryRoot(projectRoot),
 ): boolean {
   return (
-    (path.resolve(root) !==
-      path.resolve(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME) &&
-      process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1') ||
+    process.env['QWEN_CODE_MEMORY_LOCAL'] !== '1' ||
     resolvedRoot ===
       path.join(
         realpathNearestExisting(projectRoot),
@@ -215,10 +211,10 @@ export function describeMemoryFileChange(
       scope: 'user',
       root: getUserAutoMemoryRoot(),
     },
-    ...getProjectAutoMemoryRoots(projectRoot, true).map((root) => ({
-      scope: 'project' as const,
-      root,
-    })),
+    {
+      scope: 'project',
+      root: getAutoMemoryRoot(projectRoot),
+    },
     {
       scope: 'team',
       root: getTeamAutoMemoryRoot(projectRoot),
@@ -228,7 +224,7 @@ export function describeMemoryFileChange(
     const resolvedRoot = realpathNearestExisting(candidate.root);
     if (
       candidate.scope === 'project' &&
-      !isProjectRootAllowed(projectRoot, resolvedRoot, candidate.root)
+      !isProjectRootAllowed(projectRoot, resolvedRoot)
     )
       continue;
     if (candidate.scope === 'team') {

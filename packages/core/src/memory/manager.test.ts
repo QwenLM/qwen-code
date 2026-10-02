@@ -2588,6 +2588,7 @@ describe('MemoryManager', () => {
     });
 
     it('keeps drain pending through dream scheduling and execution', async () => {
+      const { projectRoot } = tmp;
       let enterScanner!: () => void;
       const scannerEntered = new Promise<void>((resolve) => {
         enterScanner = resolve;
@@ -2655,6 +2656,7 @@ describe('MemoryManager', () => {
     });
 
     it('keeps drain pending through manual dream preparation and execution', async () => {
+      const { projectRoot } = tmp;
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;

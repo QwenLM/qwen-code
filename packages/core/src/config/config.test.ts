@@ -8073,86 +8073,104 @@ describe('Server Config (config.ts)', () => {
     expect(config.getContextFilePaths()).toEqual([]);
   });
 
-  it.each([false, true])(
-    'guards and rolls back the memory recall mode transition by revision (trusted=%s)',
-    async (trusted) => {
-      const config = Object.create(Config.prototype) as Config;
-      Object.assign(config, {
-        memoryHookDeliveryId: Symbol('transition-owner'),
-        memoryRecallMode: 'legacy',
-        memoryRecallModeInitialized: true,
-        memoryCorpusRevision: 'legacy-revision',
-        autoMemoryPrompt: 'legacy prompt',
-      });
-      vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
-      vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
-      vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(
-        true,
-      );
-      vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
-      vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
-      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(trusted);
-      const scan = vi
-        .fn()
-        .mockResolvedValue({ ready: true, revision: 'structured-revision' });
-      Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
+  it.each([
+    { trusted: false, local: '0' },
+    { trusted: true, local: '0' },
+    { trusted: false, local: '1' },
+    { trusted: true, local: '1' },
+  ])(
+    'guards and rolls back the memory recall mode transition by revision (trusted=$trusted, local=$local)',
+    async ({ trusted, local }) => {
+      vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', local);
+      clearAutoMemoryRootCache();
+      try {
+        const config = Object.create(Config.prototype) as Config;
+        Object.assign(config, {
+          memoryHookDeliveryId: Symbol('transition-owner'),
+          memoryRecallMode: 'legacy',
+          memoryRecallModeInitialized: true,
+          memoryCorpusRevision: 'legacy-revision',
+          autoMemoryPrompt: 'legacy prompt',
+        });
+        vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
+        vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
+        vi.spyOn(config, 'getStructuredMemoryRecallEnabled').mockReturnValue(
+          true,
+        );
+        vi.spyOn(config, 'getProjectRoot').mockReturnValue('/tmp/project');
+        vi.spyOn(config, 'getTeamMemoryEnabled').mockReturnValue(true);
+        vi.spyOn(config, 'isTrustedFolder').mockReturnValue(trusted);
+        const scan = vi
+          .fn()
+          .mockResolvedValue({ ready: true, revision: 'structured-revision' });
+        Object.assign(config, { scanMemoryRecallCorpusStatus: scan });
 
-      scan.mockResolvedValueOnce({
-        ready: false,
-        revision: 'not-ready-revision',
-      });
-      await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
-        undefined,
-      );
-      expect(config.getMemoryRecallMode()).toBe('legacy');
+        scan.mockResolvedValueOnce({
+          ready: false,
+          revision: 'not-ready-revision',
+        });
+        await expect(config.prepareMemoryRecallTransition()).resolves.toBe(
+          undefined,
+        );
+        expect(config.getMemoryRecallMode()).toBe('legacy');
 
-      const transition = await config.prepareMemoryRecallTransition();
-      expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledWith(
-        '/tmp/project',
-        config.getMemoryHookDeliveryId(),
-      );
-      expect(transition).toMatchObject({
-        from: 'legacy',
-        to: 'structured',
-        revision: 'structured-revision',
-        previousRevision: 'not-ready-revision',
-        previousAutoMemoryPrompt: 'legacy prompt',
-      });
-      expect(transition?.autoMemoryPrompt).toContain(
-        'Use the complete tree and focused metadata for routing.',
-      );
-      if (trusted) {
-        expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+        const transition = await config.prepareMemoryRecallTransition();
+        expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledWith(
           '/tmp/project',
           config.getMemoryHookDeliveryId(),
         );
-        expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledWith(
-          '/tmp/project',
-          {
-            deliveryId: config.getMemoryHookDeliveryId(),
-          },
+        expect(transition).toMatchObject({
+          from: 'legacy',
+          to: 'structured',
+          revision: 'structured-revision',
+          previousRevision: 'not-ready-revision',
+          previousAutoMemoryPrompt: 'legacy prompt',
+        });
+        expect(transition?.autoMemoryPrompt).toContain(
+          'Use the complete tree and focused metadata for routing.',
         );
-      } else {
-        expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
-        expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
-        expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
+        if (trusted || local === '0') {
+          expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(
+            '/tmp/project',
+            config.getMemoryHookDeliveryId(),
+          );
+        } else {
+          expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+        }
+        if (trusted) {
+          expect(rebuildTeamAutoMemoryIndex).toHaveBeenCalledWith(
+            '/tmp/project',
+            {
+              deliveryId: config.getMemoryHookDeliveryId(),
+            },
+          );
+        } else {
+          expect(transition?.autoMemoryPrompt).not.toContain('TEAM:');
+          expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
+        }
+        await expect(
+          config.confirmMemoryRecallTransition(transition!),
+        ).resolves.toBe(true);
+
+        config.commitMemoryRecallTransition(transition!);
+        expect(config.getMemoryRecallMode()).toBe('structured');
+        expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
+
+        config.rollbackMemoryRecallTransition(transition!);
+        expect(config.getMemoryRecallMode()).toBe('legacy');
+        expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+
+        scan.mockResolvedValueOnce({
+          ready: true,
+          revision: 'changed-revision',
+        });
+        await expect(
+          config.confirmMemoryRecallTransition(transition!),
+        ).resolves.toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+        clearAutoMemoryRootCache();
       }
-      await expect(
-        config.confirmMemoryRecallTransition(transition!),
-      ).resolves.toBe(true);
-
-      config.commitMemoryRecallTransition(transition!);
-      expect(config.getMemoryRecallMode()).toBe('structured');
-      expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
-
-      config.rollbackMemoryRecallTransition(transition!);
-      expect(config.getMemoryRecallMode()).toBe('legacy');
-      expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
-
-      scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
-      await expect(
-        config.confirmMemoryRecallTransition(transition!),
-      ).resolves.toBe(false);
     },
   );
 

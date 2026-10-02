@@ -224,12 +224,16 @@ describe('memory metadata migration', () => {
   });
 
   it.each([false, true])(
-    'notifies legacy local migration after commit (cancelled=%s)',
+    'notifies only the configured root while migrating both project roots (cancelled=%s)',
     async (cancelled) => {
       const file = await write('project/local.md', legacyContent());
       await write('project/second.md', legacyContent());
       delete process.env['QWEN_CODE_MEMORY_LOCAL'];
       clearAutoMemoryRootCache();
+      const configuredRoot = getAutoMemoryRoot(projectRoot);
+      const configuredFile = path.join(configuredRoot, 'project/local.md');
+      await fs.mkdir(path.dirname(configuredFile), { recursive: true });
+      await fs.writeFile(configuredFile, legacyContent());
       const listener = vi.fn();
       const stop = registerMemoryChangedListener(projectRoot, listener);
       const controller = new AbortController();
@@ -242,11 +246,11 @@ describe('memory metadata migration', () => {
         const pending = runMemoryMetadataMigration({
           config,
           projectRoot,
-          roots: [getAutoMemoryRoot(projectRoot), memoryRoot],
+          roots: [configuredRoot, memoryRoot],
           scope: 'project',
           abortSignal: controller.signal,
           generateMetadata: async (_config, candidate) => {
-            if (cancelled && ++calls === 2) {
+            if (cancelled && ++calls === 3) {
               controller.abort();
               controller.signal.throwIfAborted();
             }
@@ -255,23 +259,27 @@ describe('memory metadata migration', () => {
         });
         if (cancelled)
           await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-        else expect((await pending).committed).toBe(2);
+        else expect((await pending).committed).toBe(3);
         expect(await fs.readFile(file, 'utf8')).toContain(
           'name: Migrated memory',
         );
-        expect(listener).toHaveBeenCalledWith(
-          expect.objectContaining({
-            operation: 'update',
-            paths: [await fs.realpath(file)],
-          }),
-          undefined,
+        expect(await fs.readFile(configuredFile, 'utf8')).toContain(
+          'name: Migrated memory',
         );
-        expect(listener).toHaveBeenCalledWith(
-          expect.objectContaining({
-            paths: [await fs.realpath(path.join(memoryRoot, 'MEMORY.md'))],
-          }),
-          undefined,
+        expect(
+          await fs.readFile(path.join(memoryRoot, 'MEMORY.md'), 'utf8'),
+        ).toContain('Migrated memory');
+        expect(
+          listener.mock.calls.flatMap(([change]) => change.paths).sort(),
+        ).toEqual(
+          [
+            await fs.realpath(path.join(configuredRoot, 'MEMORY.md')),
+            await fs.realpath(configuredFile),
+          ].sort(),
         );
+        expect(
+          listener.mock.calls.every(([, signal]) => signal === undefined),
+        ).toBe(true);
       } finally {
         stop();
       }
