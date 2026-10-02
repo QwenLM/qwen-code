@@ -8613,6 +8613,79 @@ describe('Session', () => {
       },
     );
 
+    it.each([
+      {
+        scenario: 'a workspace-only auth choice',
+        selectedType: undefined,
+        wires: ['responses'],
+      },
+      {
+        scenario: 'the same id at endpoints with different wires',
+        selectedType: AuthType.USE_OPENAI,
+        wires: ['responses', 'chat-completions'],
+      },
+    ] as const)(
+      'keeps the effective auth for $scenario',
+      async ({ selectedType, wires }) => {
+        const providers = wires.map((wireApi) => ({
+          id: 'shared-model',
+          baseUrl: `https://${wireApi}.example/v1`,
+          wireApi,
+        }));
+        mockSettings.user.settings = {
+          security: { auth: { selectedType } },
+          modelProviders: { openai: providers },
+        };
+        mockSettings.workspace.settings = {
+          security: { auth: { selectedType: AuthType.USE_OPENAI } },
+        };
+        Object.assign(mockSettings, {
+          isTrusted: true,
+          merged: {
+            ...mockSettings.user.settings,
+            security: mockSettings.workspace.settings.security,
+          },
+        });
+        const models = providers.map(({ wireApi, ...model }) => ({
+          ...model,
+          label: wireApi,
+          registryBaseUrl: model.baseUrl,
+          authType:
+            wireApi === 'responses'
+              ? AuthType.USE_OPENAI_RESPONSES
+              : AuthType.USE_OPENAI,
+        }));
+        vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(models);
+        const target = buildAcpModelOptions(models).find(
+          (option) => option.model.authType === AuthType.USE_OPENAI_RESPONSES,
+        )!;
+
+        await session.setModel({
+          sessionId: 'test-session-id',
+          modelId: target.modelId,
+        });
+
+        expect(
+          vi
+            .mocked(mockSettings.setValue)
+            .mock.calls.filter(
+              ([, key]) => key === 'security.auth.selectedType',
+            ),
+        ).toEqual([
+          [
+            SettingScope.User,
+            'security.auth.selectedType',
+            AuthType.USE_OPENAI_RESPONSES,
+          ],
+        ]);
+        expect(mockSettings.setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'model.baseUrl',
+          'https://responses.example/v1',
+        );
+      },
+    );
+
     it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
       const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
       await session.setModel({

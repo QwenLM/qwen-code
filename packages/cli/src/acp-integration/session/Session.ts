@@ -12223,13 +12223,15 @@ export class Session implements SessionContext {
       const scopeSettings = this.settings.forScope(persistScope).settings;
       const authChoice =
         scopeSettings.security?.auth?.selectedType ??
-        this.settings.merged.security?.auth?.selectedType;
+        (persistScope === SettingScope.Workspace
+          ? this.settings.user.settings.security?.auth?.selectedType
+          : undefined);
       const persistedBaseUrl =
         resolvedRoute && !resolvedRoute.isRuntime
           ? (resolvedRoute.baseUrl ?? '')
           : '';
-      // Keep the OpenAI credential choice when startup can recover Responses.
-      // Raw models and identical id/URL routes still need the effective type.
+      // Keep the OpenAI choice when id-only startup can recover Responses.
+      // Raw models and same-id routes across wires need the effective type.
       let persistedAuthType = effectiveAuthType;
       if (
         !isRuntime &&
@@ -12243,7 +12245,6 @@ export class Session implements SessionContext {
               effectiveModelId,
               this.settings.merged.modelProviders,
               this.settings.merged.providerProtocol,
-              persistedBaseUrl,
             ) === effectiveAuthType
           ) {
             persistedAuthType = authChoice;
