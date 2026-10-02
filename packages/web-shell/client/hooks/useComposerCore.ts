@@ -873,10 +873,20 @@ class ComposerTagWidget extends WidgetType {
   }
 
   destroy() {
-    this.contentRoot?.unmount();
-    this.tooltipRoot?.unmount();
+    const contentRoot = this.contentRoot;
+    const tooltipRoot = this.tooltipRoot;
     this.contentRoot = null;
     this.tooltipRoot = null;
+    if (!contentRoot && !tooltipRoot) return;
+    // WidgetType.destroy() runs inside CodeMirror's update cycle. React's
+    // Root.unmount() flushes pending sync work across ALL roots
+    // (flushSyncWorkAcrossRoots), which would re-enter the editor mid-update
+    // ("Calls to EditorView.update are not allowed while an update is in
+    // progress", #12826). Defer the unmount out of the update cycle.
+    queueMicrotask(() => {
+      contentRoot?.unmount();
+      tooltipRoot?.unmount();
+    });
   }
 
   ignoreEvent(): boolean {
@@ -1348,6 +1358,7 @@ function handleMultilineHistoryBoundary(
  */
 export interface MobileComposerBackend {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  expandedTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   value: string;
   onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onBlur: () => void;
@@ -1355,7 +1366,7 @@ export interface MobileComposerBackend {
 }
 
 export interface ComposerImageTransferHandlers {
-  onPasteCapture: ClipboardEventHandler<HTMLDivElement>;
+  onPasteCapture: ClipboardEventHandler<HTMLDivElement | HTMLTextAreaElement>;
   onDragEnterCapture: DragEventHandler<HTMLDivElement>;
   onDragOverCapture: DragEventHandler<HTMLDivElement>;
   onDragLeaveCapture: DragEventHandler<HTMLDivElement>;
@@ -1514,6 +1525,7 @@ export function useComposerCore(
   // mirrored into a ref so submit/getText read synchronously.
   const isTouchComposer = useIsTouchComposer();
   const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const expandedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const mobileMaxHeightRef = useRef<number | null>(null);
   const [mobileText, setMobileTextState] = useState(() =>
     isTouchComposer ? (loadComposerDraft(composerDraftStorageKey) ?? '') : '',
@@ -1968,43 +1980,48 @@ export function useComposerCore(
    * and a disabled composer, a shell command, or a host with attachments turned
    * off has no card to fold into, so each leaves today's behavior alone.
    */
-  const foldPastedTextIntoCard = useCallback((text: string): boolean => {
-    // The exemptions are checked before the measurement: sizing a paste costs a
-    // full UTF-8 encode, which a multi-megabyte paste in shell mode should not
-    // pay for something that is about to be discarded.
-    if (
-      disabledRef.current ||
-      shellModeRef.current ||
-      !attachmentsEnabledRef.current
-    ) {
-      return false;
-    }
-    const view = viewRef.current;
-    const textarea = mobileTextareaRef.current;
-    if (
-      view?.state.selection.ranges.some((range) => !range.empty) ||
-      (textarea && textarea.selectionStart !== textarea.selectionEnd)
-    ) {
-      return false;
-    }
-    const draft = view?.state.doc.toString() ?? mobileTextRef.current;
-    const caret =
-      view?.state.selection.main.from ?? textarea?.selectionStart ?? 0;
-    if (
-      /^[!/]/.test(draft.trimStart()) ||
-      /^[!/]/.test(
-        (draft.slice(0, caret) + text + draft.slice(caret)).trimStart(),
-      )
-    ) {
-      return false;
-    }
-    if (!shouldFoldPastedText(text)) return false;
-    const taken = new Set(pastedFilesRef.current.map((file) => file.name));
-    const next = [...pastedFilesRef.current, createPastedTextFile(text, taken)];
-    pastedFilesRef.current = next;
-    setPastedFiles(next);
-    return true;
-  }, []);
+  const foldPastedTextIntoCard = useCallback(
+    (text: string, textarea = mobileTextareaRef.current): boolean => {
+      // The exemptions are checked before the measurement: sizing a paste costs a
+      // full UTF-8 encode, which a multi-megabyte paste in shell mode should not
+      // pay for something that is about to be discarded.
+      if (
+        disabledRef.current ||
+        shellModeRef.current ||
+        !attachmentsEnabledRef.current
+      ) {
+        return false;
+      }
+      const view = viewRef.current;
+      if (
+        view?.state.selection.ranges.some((range) => !range.empty) ||
+        (textarea && textarea.selectionStart !== textarea.selectionEnd)
+      ) {
+        return false;
+      }
+      const draft = view?.state.doc.toString() ?? mobileTextRef.current;
+      const caret =
+        view?.state.selection.main.from ?? textarea?.selectionStart ?? 0;
+      if (
+        /^[!/]/.test(draft.trimStart()) ||
+        /^[!/]/.test(
+          (draft.slice(0, caret) + text + draft.slice(caret)).trimStart(),
+        )
+      ) {
+        return false;
+      }
+      if (!shouldFoldPastedText(text)) return false;
+      const taken = new Set(pastedFilesRef.current.map((file) => file.name));
+      const next = [
+        ...pastedFilesRef.current,
+        createPastedTextFile(text, taken),
+      ];
+      pastedFilesRef.current = next;
+      setPastedFiles(next);
+      return true;
+    },
+    [],
+  );
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
@@ -2014,8 +2031,15 @@ export function useComposerCore(
           // controls that take text of their own (the history search box), so
           // only a paste aimed at the editor may be folded.
           if (
-            pastedInEditor(event.target) &&
-            foldPastedTextIntoCard(pastedText)
+            (pastedInEditor(event.target) ||
+              (event.target === event.currentTarget &&
+                event.currentTarget instanceof HTMLTextAreaElement)) &&
+            foldPastedTextIntoCard(
+              pastedText,
+              event.target instanceof HTMLTextAreaElement
+                ? event.target
+                : undefined,
+            )
           ) {
             event.preventDefault();
             event.stopPropagation();
@@ -2607,10 +2631,13 @@ export function useComposerCore(
     setSearchMatches(getSearchMatches(''));
     setSearchActiveIndex(0);
     history.resetSearch();
-    setTimeout(() => searchInputRef.current?.focus(), 0);
   }, [closeAtMenu, closeSlashMenu, getSearchMatches, isTouchComposer]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
+
+  useEffect(() => {
+    if (searchMode) searchInputRef.current?.focus();
+  }, [searchMode]);
 
   const navigatePrevHistory = useCallback(() => {
     if (disabledRef.current) return;
@@ -2834,9 +2861,22 @@ export function useComposerCore(
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
+    // Inline chip placements are offsets into the pre-substitution editor
+    // document; they stay valid for `text` only while substitution preserves
+    // their length, and the annotation generator validates each range (with
+    // a unique-match fallback) for anything else. Shift them past the prompt
+    // prefix (top tags plus the blank separator, and the shell-mode `!`) so
+    // annotations land on the chips instead of earlier plain text spelled
+    // the same (#12980).
+    const promptPrefixLength = promptText.length - text.length;
     const generatedInputAnnotations = createInputAnnotationsFromComposerTags(
       promptText,
-      [...tags, ...normalizedInlineTags.map((placement) => placement.tag)],
+      tags,
+      normalizedInlineTags.map((placement) => ({
+        start: placement.start + promptPrefixLength,
+        end: placement.end + promptPrefixLength,
+        tag: placement.tag,
+      })),
     );
     const inputAnnotations = [...generatedInputAnnotations];
     const annotationKeys = new Set(
@@ -4042,7 +4082,7 @@ export function useComposerCore(
 
   const focus = useCallback(() => {
     if (isTouchComposer) {
-      mobileTextareaRef.current?.focus();
+      (expandedTextareaRef.current ?? mobileTextareaRef.current)?.focus();
       return;
     }
     viewRef.current?.focus();
@@ -4051,13 +4091,13 @@ export function useComposerCore(
   const insertText = useCallback(
     (text: string, options?: WebShellComposerTextOptions) => {
       if (isTouchComposer) {
+        const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
         if (text) {
           if (options?.mode === 'replace') {
             setMobileText(text);
           } else {
             // No slash/at menus on the textarea backend: '/' and '@' are
             // inserted literally and interpreted from the submitted text.
-            const el = mobileTextareaRef.current;
             const current = mobileTextRef.current;
             const start = el ? el.selectionStart : current.length;
             const end = el ? el.selectionEnd : current.length;
@@ -4067,7 +4107,7 @@ export function useComposerCore(
             // value changes; put it back after React re-renders, matching
             // the CodeMirror path's explicit selection anchor.
             const restoreCaret = () => {
-              mobileTextareaRef.current?.setSelectionRange(caret, caret);
+              el?.setSelectionRange(caret, caret);
             };
             if (typeof requestAnimationFrame === 'function') {
               requestAnimationFrame(restoreCaret);
@@ -4076,7 +4116,7 @@ export function useComposerCore(
             }
           }
         }
-        mobileTextareaRef.current?.focus();
+        el?.focus();
         return;
       }
       const view = viewRef.current;
@@ -4551,11 +4591,9 @@ export function useComposerCore(
         ? shellHistoryActionsRef.current
         : historyActionsRef.current;
       history.resetSearch();
-      if (keepFocus) {
-        viewRef.current?.focus();
-      }
+      if (keepFocus) focus();
     },
-    [replaceEditorText],
+    [focus, replaceEditorText],
   );
 
   useEffect(() => {
@@ -4815,6 +4853,7 @@ export function useComposerCore(
     mobileComposer: isTouchComposer
       ? {
           textareaRef: mobileTextareaRef,
+          expandedTextareaRef,
           value: mobileText,
           onChange: handleMobileChange,
           onBlur: () => saveCurrentDraftRef.current(),

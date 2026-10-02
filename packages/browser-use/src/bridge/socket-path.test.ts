@@ -5,7 +5,7 @@
  */
 
 import fs from 'node:fs';
-import { connect, type Socket } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,12 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // A scripted lstat returns the directory seen after mkdir, including a
 // concurrent creator that supplied unsafe ownership or permissions.
 const lstatMock = vi.hoisted(() => vi.fn());
-// A scripted chmod fails the post-listen step of start() while the socket is
-// already bound and accepting.
-const chmodMock = vi.hoisted(() => vi.fn());
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, lstat: lstatMock, chmod: chmodMock };
+  return { ...actual, lstat: lstatMock };
 });
 
 // The transport deliberately imports its timers from node:timers (the global
@@ -72,7 +69,6 @@ import {
   CDP_REQUEST_TIMEOUT_MS,
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
-  type BridgeRequest,
 } from './protocol.js';
 import { ChromeExtensionTransport } from './transport/chrome-extension-transport.js';
 import { prepareSocketDirectory } from './socket-path.js';
@@ -80,23 +76,21 @@ import { encodeFrame, FrameDecoder } from './transport/framing.js';
 
 const roots: string[] = [];
 const transports: ChromeExtensionTransport[] = [];
+const servers: Server[] = [];
 
 beforeEach(() => {
   lstatMock.mockImplementation(
     async (target: string) => await fs.promises.lstat(target),
   );
-  chmodMock.mockImplementation(
-    async (target: string, mode: number) =>
-      await fs.promises.chmod(target, mode),
-  );
 });
 
 afterEach(async () => {
   for (const transport of transports.splice(0)) await transport.stop();
+  for (const server of servers.splice(0))
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   for (const root of roots.splice(0))
     fs.rmSync(root, { recursive: true, force: true });
   lstatMock.mockReset();
-  chmodMock.mockReset();
   requestTimers.reset();
 });
 
@@ -150,42 +144,6 @@ describe('prepareSocketDirectory creation checks', () => {
   );
 });
 
-describe('start failure after listen', () => {
-  it.skipIf(process.platform === 'win32')(
-    'tears down a validated peer when start fails after listen',
-    async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
-      roots.push(root);
-      const socketPath = path.join(root, 'bridge.sock');
-      const transport = new ChromeExtensionTransport({ socketPath });
-      transports.push(transport);
-      let peer: Socket | undefined;
-      chmodMock.mockImplementationOnce(async () => {
-        peer = connect(socketPath);
-        peer.on('error', () => undefined);
-        await new Promise<void>((resolve) => peer!.once('connect', resolve));
-        peer.write(
-          encodeFrame({
-            type: 'hello',
-            protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
-            extensionId: CHROME_EXTENSION_ID,
-            extensionInstanceId: 'deadline-test',
-          }),
-        );
-        await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
-        throw Object.assign(new Error('read-only socket'), { code: 'EPERM' });
-      });
-
-      await expect(transport.start()).rejects.toMatchObject({
-        code: 'TRANSPORT_UNAVAILABLE',
-      });
-      expect(fs.existsSync(socketPath)).toBe(false);
-      expect(transport.isConnected()).toBe(false);
-      await vi.waitFor(() => expect(peer?.destroyed).toBe(true));
-    },
-  );
-});
-
 describe('request deadlines', () => {
   it.skipIf(process.platform === 'win32')(
     'lets a CDP command outlive the 120s operation ceiling',
@@ -197,23 +155,30 @@ describe('request deadlines', () => {
         socketPath: path.join(root, 'bridge.sock'),
       });
       transports.push(transport);
-      await transport.start();
-      const socket = connect(transport.socketPath);
-      await new Promise<void>((resolve) => socket.once('connect', resolve));
-      const requests: BridgeRequest[] = [];
-      const decoder = new FrameDecoder();
-      socket.on('data', (chunk: Buffer) => {
-        requests.push(...(decoder.push(chunk) as BridgeRequest[]));
+      let socket: Socket | undefined;
+      const server = createServer((peer) => {
+        socket = peer;
+        const decoder = new FrameDecoder();
+        peer.on('data', (chunk) => {
+          for (const value of decoder.push(chunk))
+            if ((value as { type: string }).type === 'client.hello')
+              peer.write(
+                encodeFrame({
+                  type: 'hello',
+                  protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+                  extensionId: CHROME_EXTENSION_ID,
+                  extensionInstanceId: 'deadline-test',
+                  hostInstanceId: 'host',
+                  browserSessionId: 'session',
+                }),
+              );
+        });
       });
-      socket.write(
-        encodeFrame({
-          type: 'hello',
-          protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
-          extensionId: CHROME_EXTENSION_ID,
-          extensionInstanceId: 'deadline-test',
-        }),
+      servers.push(server);
+      await new Promise<void>((resolve) =>
+        server.listen(transport.socketPath, resolve),
       );
-      await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
+      await transport.start();
 
       let cdpSettled = false;
       let cdpResult: unknown;
@@ -254,7 +219,8 @@ describe('request deadlines', () => {
         code: 'OPERATION_TIMEOUT',
         message: expect.stringContaining('cdp.send'),
       });
-      socket.destroy();
+      socket!.destroy();
+      await vi.waitFor(() => expect(transport.isConnected()).toBe(false));
     },
   );
 });

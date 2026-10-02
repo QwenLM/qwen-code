@@ -11,12 +11,28 @@ import { Box } from 'ink';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
-const { launchEditorMock } = vi.hoisted(() => ({
+const { launchEditorMock, isEditorAvailableMock } = vi.hoisted(() => ({
   launchEditorMock: vi.fn((_filePath: string) => Promise.resolve()),
+  // Editor availability probes PATH for a real binary (`command -v code`),
+  // so leaving it unstubbed would make these tests depend on whether the
+  // host happens to have the configured editor installed. Default to
+  // "configured means available" and opt out per test. The detection itself
+  // is covered by packages/core/src/utils/editor.test.ts.
+  isEditorAvailableMock: vi.fn((editor: string | undefined) => Boolean(editor)),
 }));
 vi.mock('../../hooks/useLaunchEditor.js', () => ({
   useLaunchEditor: () => launchEditorMock,
 }));
+vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >();
+  return {
+    ...actual,
+    isEditorAvailable: isEditorAvailableMock,
+  };
+});
 
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
@@ -24,10 +40,32 @@ import type {
   Config,
 } from '@qwen-code/qwen-code-core';
 import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { render } from 'ink-testing-library';
+import { act, useEffect } from 'react';
+import { useKeypressContext } from '../../contexts/KeypressContext.js';
+import { useKeypress } from '../../hooks/useKeypress.js';
+import { ContextMenuOverlay } from '../../context-menu/ContextMenuOverlay.js';
+import {
+  ContextMenuProvider,
+  useContextMenu,
+  type ContextMenuContextValue,
+} from '../../context-menu/ContextMenuContext.js';
 
 describe('ToolConfirmationMessage', () => {
+  // The tree is wrapped in the real ContextMenuProvider (as DefaultAppLayout
+  // does) and `MenuProbe` captures its API so a case can open the menu the way
+  // ContentMouseController does on a right-click.
+  let menuApi: ContextMenuContextValue | null = null;
+  const MenuProbe = () => {
+    menuApi = useContextMenu();
+    return null;
+  };
+
   const mockConfig = {
     isTrustedFolder: () => true,
     getIdeMode: () => false,
@@ -636,6 +674,84 @@ describe('ToolConfirmationMessage', () => {
         expect(lastFrame()).not.toContain(alwaysAllowText);
       });
     });
+
+    describe('unguarded entrances', () => {
+      const infoDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm,
+      });
+
+      const planDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Plan\n- Step 1',
+        onConfirm,
+      });
+
+      const renderWith = (
+        trusted: boolean,
+        details: ToolCallConfirmationDetails,
+        compactMode = false,
+      ) => {
+        const config = {
+          isTrustedFolder: () => trusted,
+          getIdeMode: () => false,
+        } as unknown as Config;
+        return renderWithProviders(
+          <ToolConfirmationMessage
+            confirmationDetails={details}
+            config={config}
+            availableTerminalHeight={30}
+            contentWidth={80}
+            compactMode={compactMode}
+          />,
+        );
+      };
+
+      it('compactMode offers "Allow always" only in a trusted folder', () => {
+        expect(renderWith(true, infoDetails(), true).lastFrame()).toContain(
+          'Allow always',
+        );
+        const untrusted = renderWith(false, infoDetails(), true).lastFrame();
+        expect(untrusted).toContain('Yes, allow once');
+        expect(untrusted).not.toContain('Allow always');
+      });
+
+      it('plan exit offers auto-accept only in a trusted folder', () => {
+        expect(renderWith(true, planDetails()).lastFrame()).toContain(
+          'Yes, and auto-accept edits',
+        );
+        const untrusted = renderWith(false, planDetails()).lastFrame();
+        // Both remaining exits must survive: the gate admits DEFAULT and PLAN.
+        expect(untrusted).toContain('Yes, and manually approve edits');
+        expect(untrusted).toContain('restore previous mode');
+        expect(untrusted).not.toContain('Yes, and auto-accept edits');
+      });
+
+      it('subscribes to the promise onConfirm returns instead of letting it float', async () => {
+        // A floating rejection reaches the process-level handler (llm.tsx) and
+        // shows a "file a bug report" banner over a correctly-refused action,
+        // so the call site must consume what onConfirm returns. Asserted via a
+        // thenable: `Promise.resolve(x).catch(...)` subscribes through `then`,
+        // a bare `onConfirm(outcome)` statement never does.
+        const then = vi.fn();
+        const thenable = { then } as unknown as Promise<void>;
+        const onConfirm = vi.fn(() => thenable);
+        const { stdin } = renderWith(true, infoDetails(onConfirm));
+
+        stdin.write('\r');
+
+        await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+        expect(then).toHaveBeenCalled();
+      });
+    });
   });
 
   describe('external editor option', () => {
@@ -649,12 +765,23 @@ describe('ToolConfirmationMessage', () => {
       newContent: 'b',
       onConfirm: vi.fn(),
     };
+    const execConfirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+    const preferredEditorSettings = {
+      merged: { general: { preferredEditor: 'vscode' } },
+    } as unknown as LoadedSettings;
 
     it('should show "Modify with external editor" when preferredEditor is set', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -663,14 +790,64 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
       expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
+    });
+
+    it('probes editor availability once for the dialog lifetime', () => {
+      isEditorAvailableMock.mockClear();
+
+      const component = (height: number) => (
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={height}
+          contentWidth={80}
+        />
+      );
+      const { lastFrame, rerender } = renderWithProviders(component(30), {
+        settings: preferredEditorSettings,
+      });
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+
+      // A terminal resize re-renders the dialog; the availability probe shells
+      // out, so it must not run again.
+      rerender(
+        withProviders(component(31), { settings: preferredEditorSettings }),
+      );
+
+      expect(lastFrame()).toContain('Modify with external editor');
+      expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
+    });
+
+    // #10745: the option was offered whenever `preferredEditor` was merely
+    // set, so picking it tried to launch a binary that is not installed and
+    // the modify flow failed. Offer it only when the editor is available.
+    it('should NOT show "Modify with external editor" when the configured editor is unavailable', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+      isEditorAvailableMock.mockClear();
+      isEditorAvailableMock.mockReturnValueOnce(false);
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
     it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
@@ -678,6 +855,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -693,6 +871,7 @@ describe('ToolConfirmationMessage', () => {
         },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
 
@@ -701,6 +880,7 @@ describe('ToolConfirmationMessage', () => {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
       } as unknown as Config;
+      isEditorAvailableMock.mockClear();
 
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage
@@ -709,14 +889,47 @@ describe('ToolConfirmationMessage', () => {
           availableTerminalHeight={30}
           contentWidth={80}
         />,
-        {
-          settings: {
-            merged: { general: { preferredEditor: 'vscode' } },
-          } as unknown as LoadedSettings,
-        },
+        { settings: preferredEditorSettings },
       );
 
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
       expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability in compactMode', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+          compactMode={true}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
+      expect(lastFrame()).not.toContain('Modify with external editor');
+    });
+
+    it('should NOT probe editor availability for a non-edit confirmation', () => {
+      isEditorAvailableMock.mockClear();
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={execConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+        { settings: preferredEditorSettings },
+      );
+
+      expect(lastFrame()).toContain('Yes, allow once');
+      expect(isEditorAvailableMock).not.toHaveBeenCalled();
     });
 
     it('renders edit warnings and honors hideAlwaysAllow on small terminals', () => {
@@ -1185,5 +1398,226 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Line 12');
       expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
     });
+  });
+
+  it.each([true, false])(
+    'handles a right-click and keys in one stdin chunk (menu items: %s)',
+    async (hasItems) => {
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const onMenuSelect = vi.fn();
+      const onUnderlyingKey = vi.fn();
+      const onMenuChange = vi.fn();
+      const OpenOnRightPress = () => {
+        const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
+        const { menu, openMenu } = useContextMenu();
+        useKeypress(onUnderlyingKey, { isActive: menu === null });
+        useEffect(() => {
+          const handler = () => {
+            openMenu(
+              hasItems
+                ? [
+                    {
+                      id: 'open-link',
+                      label: 'Open Link',
+                      onSelect: onMenuSelect,
+                    },
+                  ]
+                : [],
+              { x: 0, y: 0 },
+            );
+            // AppContainer is outside the provider and relies on this callback.
+            expect(onMenuChange).toHaveBeenLastCalledWith(hasItems);
+          };
+          subscribeMouse(handler);
+          return () => unsubscribeMouse(handler);
+        }, [subscribeMouse, unsubscribeMouse, openMenu]);
+        return null;
+      };
+      const { stdin } = render(
+        withProviders(
+          <ContextMenuProvider onMenuChange={onMenuChange}>
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Execution',
+                command: 'echo test',
+                rootCommand: 'echo',
+                onConfirm,
+              }}
+              config={mockConfig}
+              availableTerminalHeight={30}
+              contentWidth={80}
+            />
+            <OpenOnRightPress />
+            <ContextMenuOverlay />
+          </ContextMenuProvider>,
+        ),
+      );
+      await act(async () => {});
+      await act(async () => {
+        stdin.write('\x1b[<2;10;5M\x1b[Z\x1b[C\r');
+      });
+      if (hasItems) {
+        expect(onUnderlyingKey).not.toHaveBeenCalled();
+        expect(onConfirm).not.toHaveBeenCalled();
+        expect(onMenuSelect).not.toHaveBeenCalled();
+        // Once rendered, Enter belongs to the menu, then to the dialog again.
+        await act(async () => {
+          stdin.write('\r');
+        });
+        expect(onMenuSelect).toHaveBeenCalledTimes(1);
+        expect(onConfirm).not.toHaveBeenCalled();
+        await act(async () => {
+          stdin.write('\r');
+        });
+      } else {
+        expect(onUnderlyingKey).toHaveBeenCalled();
+      }
+      await vi.waitFor(() =>
+        expect(onConfirm).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+        ),
+      );
+    },
+  );
+
+  it('does not act on a key aimed at an open context menu', async () => {
+    // The teammate tab mounts this dialog while AgentChatContent's
+    // ContentMouseController makes the right-click menu openable there.
+    // KeypressContext broadcasts to every subscriber and discards return
+    // values (the overlay cannot consume a key for us), so the dialog has to
+    // go quiet itself — RadioButtonSelect's initialIndex is 0 with
+    // "allow once" first, so one Enter aimed at "Open Link" would otherwise
+    // approve the pending call and Esc would silently deny it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    // Control: with no menu open, Enter still approves the pending call.
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // would approve (ProceedOnce is index 0)
+      stdin.write('\x1b'); // would deny (handleConfirm(Cancel))
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('does not submit a nested custom answer aimed at an open context menu', async () => {
+    // The `ask_user_question` flavour nests a free-text TextInput one level
+    // below the dialog's own subscriber. Quieting only the dialog left that
+    // input hot, so one Enter aimed at "Open Link" submitted the half-typed
+    // draft as the answer and the teammate round proceeded on it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'ask_user_question',
+      title: 'Question',
+      questions: [
+        {
+          question: 'What is your favorite color?',
+          header: 'Color',
+          options: [
+            { label: 'Red', description: 'A warm color' },
+            { label: 'Blue', description: 'A cool color' },
+            { label: 'Green', description: '' },
+          ],
+          multiSelect: false,
+        },
+      ],
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      });
+
+    // Row 4 is the custom answer; typing into it mounts the nested input.
+    await settle();
+    await act(async () => {
+      stdin.write('4');
+    });
+    await settle();
+    await act(async () => {
+      stdin.write('draft');
+    });
+    await settle();
+
+    // Control: with no menu open, Enter submits exactly that draft — which is
+    // also the proof the nested input is mounted and live.
+    await act(async () => {
+      stdin.write('\r');
+    });
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'draft' } },
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // aimed at "Open Link", not at the draft
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

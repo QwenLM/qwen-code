@@ -211,7 +211,7 @@ describe('session-rewind state machine', () => {
       type: 'enter-pick',
       fileCheckpointingEnabled: true,
     });
-    state = rewindReducer(state, { type: 'option-up' });
+    state = rewindReducer(state, { type: 'option-up', optionCount: 4 });
     expect(state.restoreOptionIndex).toBe(0);
     state = rewindReducer(state, { type: 'option-down', optionCount: 4 });
     state = rewindReducer(state, { type: 'option-down', optionCount: 4 });

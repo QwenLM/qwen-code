@@ -23,6 +23,8 @@ export default {
   'Project level': 'Project level',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -192,7 +194,10 @@ export default {
   'toolDisplayName.UpdateGoal': 'toolDisplayName.UpdateGoal',
   'toolDisplayName.ProposeGoal': 'toolDisplayName.ProposeGoal',
   'toolDisplayName.SaveMemory': 'toolDisplayName.SaveMemory',
+  'toolDisplayName.ManageMemory': 'toolDisplayName.ManageMemory',
+  'toolDisplayName.SearchMemory': 'toolDisplayName.SearchMemory',
   'toolDisplayName.Agent': 'toolDisplayName.Agent',
+  'toolDisplayName.Advisor': 'toolDisplayName.Advisor',
   'toolDisplayName.Artifact': 'toolDisplayName.Artifact',
   'toolDisplayName.RecordArtifact': 'toolDisplayName.RecordArtifact',
   'toolDisplayName.RecordSource': 'toolDisplayName.RecordSource',
@@ -225,11 +230,18 @@ export default {
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
   'toolDisplayName.NotebookEdit': 'toolDisplayName.NotebookEdit',
   'toolDisplayName.ToolSearch': 'toolDisplayName.ToolSearch',
+  'toolDisplayName.ToolCall': 'toolDisplayName.ToolCall',
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.ThreadPost': 'toolDisplayName.ThreadPost',
+  'toolDisplayName.ThreadWait': 'toolDisplayName.ThreadWait',
+  'toolDisplayName.ThreadBlock': 'toolDisplayName.ThreadBlock',
+  'toolDisplayName.ThreadReview': 'toolDisplayName.ThreadReview',
+  'toolDisplayName.ThreadCreate': 'toolDisplayName.ThreadCreate',
+  'toolDisplayName.ThreadRead': 'toolDisplayName.ThreadRead',
   'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
   'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
   'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
@@ -435,6 +447,8 @@ export default {
     'Rewinding does not affect files edited manually or via shell commands.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -2422,6 +2436,10 @@ export default {
     'Context exceeds limit! Use /compress or /clear to reduce.',
   'No API response yet. Send a message to see actual usage.':
     'No API response yet. Send a message to see actual usage.',
+  'Estimated usage, including the conversation':
+    'Estimated usage, including the conversation',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'No provider usage yet. These are local estimates, including the conversation.',
   'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',
   'Context window': 'Context window',
   tokens: 'tokens',
@@ -2435,6 +2453,9 @@ export default {
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
+  'Startup context': 'Startup context',
+  Unattributed: 'Unattributed',
+  'Cached prefix': 'Cached prefix',
   'Run /context detail for per-item breakdown.':
     'Run /context detail for per-item breakdown.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -2597,6 +2618,15 @@ export default {
     'Ask a quick side question without affecting the main conversation',
   'Get a second opinion on the current conversation from a reviewer model':
     'Get a second opinion on the current conversation from a reviewer model',
+  'Configure the Advisor model': 'Configure the Advisor model',
+  'Disable Advisor': 'Disable Advisor',
+  'Select Advisor Model': 'Select Advisor Model',
+  'Advisor disabled': 'Advisor disabled',
+  'Advisor set to {{model}}': 'Advisor set to {{model}}',
+  'Selected Advisor model is unavailable.':
+    'Selected Advisor model is unavailable.',
+  'Advisor configuration is unavailable.':
+    'Advisor configuration is unavailable.',
   'Consulting advisor...': 'Consulting advisor...',
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
@@ -2914,4 +2944,6 @@ export default {
   'Kept model as {{model}}': 'Kept model as {{model}}',
   'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
     'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
+  'Create a git commit with an AI-drafted message':
+    'Create a git commit with an AI-drafted message',
 };

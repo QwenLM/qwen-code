@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookExecutionOwner } from '../hooks/hook-execution-context.js';
+
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type {
@@ -119,6 +121,7 @@ export async function firePreToolUseHook(
   permissionMode: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  owner?: HookExecutionOwner,
 ): Promise<PreToolUseHookResult> {
   if (!messageBus) {
     return { shouldProceed: true };
@@ -131,6 +134,7 @@ export async function firePreToolUseHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PreToolUse',
         input: {
           permission_mode: permissionMode,
@@ -172,6 +176,8 @@ export async function firePreToolUseHook(
       'PreToolUse',
       response.output,
     ) as PreToolUseHookOutput;
+    // Read once so every decision branch carries the same sanitized value.
+    const additionalContext = preToolOutput.getAdditionalContext();
 
     // Check if execution was denied
     if (preToolOutput.isDenied()) {
@@ -181,6 +187,7 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           preToolOutput.getEffectiveReason(),
         blockType: 'denied',
+        additionalContext,
       };
     }
 
@@ -192,6 +199,7 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           'User confirmation required',
         blockType: 'ask',
+        additionalContext,
       };
     }
 
@@ -201,11 +209,9 @@ export async function firePreToolUseHook(
         shouldProceed: false,
         blockReason: preToolOutput.getEffectiveReason(),
         blockType: 'stop',
+        additionalContext,
       };
     }
-
-    // Get additional context
-    const additionalContext = preToolOutput.getAdditionalContext();
 
     return {
       shouldProceed: true,
@@ -241,6 +247,7 @@ export async function firePostToolUseHook(
   signal?: AbortSignal,
   tool_call_id?: string,
   durationMs?: number,
+  owner?: HookExecutionOwner,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -253,6 +260,7 @@ export async function firePostToolUseHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PostToolUse',
         input: {
           permission_mode: permissionMode,
@@ -338,6 +346,7 @@ export async function firePostToolUseFailureHook(
   signal?: AbortSignal,
   tool_call_id?: string,
   durationMs?: number,
+  owner?: HookExecutionOwner,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -350,6 +359,7 @@ export async function firePostToolUseFailureHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PostToolUseFailure',
         input: {
           permission_mode: permissionMode,
@@ -414,6 +424,7 @@ export async function firePostToolBatchHook(
   toolCalls: PostToolBatchToolCall[],
   permissionMode = 'default',
   signal?: AbortSignal,
+  owner?: HookExecutionOwner,
 ): Promise<PostToolBatchHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -426,6 +437,7 @@ export async function firePostToolBatchHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PostToolBatch',
         input: {
           permission_mode: permissionMode,
@@ -483,6 +495,7 @@ export async function fireNotificationHook(
   notificationType: NotificationType,
   title?: string,
   signal?: AbortSignal,
+  owner?: HookExecutionOwner,
 ): Promise<NotificationHookResult> {
   if (!messageBus) {
     return {};
@@ -495,6 +508,7 @@ export async function fireNotificationHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'Notification',
         input: {
           message,
@@ -561,6 +575,7 @@ export async function firePermissionRequestHook(
   permissionMode: string,
   permissionSuggestions?: PermissionSuggestion[],
   signal?: AbortSignal,
+  owner?: HookExecutionOwner,
 ): Promise<PermissionRequestHookResult> {
   if (!messageBus) {
     return { hasDecision: false };
@@ -573,6 +588,7 @@ export async function firePermissionRequestHook(
     >(
       {
         type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        owner,
         eventName: 'PermissionRequest',
         input: {
           tool_name: toolName,

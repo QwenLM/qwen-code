@@ -31,6 +31,14 @@ const realReaddirSync = fs.readdirSync;
 const realStatSync = fs.statSync;
 const realRmSync = fs.rmSync;
 
+function reportsMissingArtifact(message, missingArtifact, pathFlavor = path) {
+  const normalized = String(message).split(pathFlavor.sep).join('/');
+  return (
+    normalized.includes('Required package artifact not found') &&
+    normalized.includes(missingArtifact)
+  );
+}
+
 describe('package asset scripts', () => {
   const tempDirs = [];
 
@@ -666,6 +674,7 @@ describe('package asset scripts', () => {
     expect(distPackageJson.files).toContain('export-transcript-document.js');
     expect(distPackageJson.files).toContain('export-transcript-document.css');
     expect(distPackageJson.files).toContain('execution-worker.js');
+    expect(distPackageJson.files).toContain('mem0');
   });
 
   it('names the missing stylesheet when only the renderer JS was built', () => {
@@ -704,33 +713,51 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it.each(['execution-worker.js', 'export-transcript-document.css'])(
-    'fails packaging when the published %s is missing',
-    (missingArtifact) => {
-      const rootDir = createFixtureRoot();
-      createBundleArtifacts(rootDir);
-      rmSync(path.join(rootDir, 'dist', missingArtifact));
-      stubConsole();
-      vi.spyOn(console, 'error').mockImplementation(() => {});
-      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
-      // throw, so the exit has to become one to keep the rest of the suite alive.
-      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit(1)');
-      });
+  it.each([
+    'execution-worker.js',
+    'mem0/main.js',
+    'mem0/write-confirmation.js',
+    'sandboxBwrapRelay.js',
+    'sandboxLandlockRelay.js',
+    'sandboxFileWorker.js',
+    'export-transcript-document.css',
+  ])('fails packaging when the published %s is missing', (missingArtifact) => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    rmSync(path.join(rootDir, 'dist', missingArtifact));
+    stubConsole();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+    // throw, so the exit has to become one to keep the rest of the suite alive.
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit(1)');
+    });
 
-      expect(() =>
-        preparePackage({ rootDir, requireNativeAudioCapture: false }),
-      ).toThrow('process.exit(1)');
-      expect(exit).toHaveBeenCalledWith(1);
-      expect(
-        console.error.mock.calls
-          .map(([message]) => String(message))
-          .some(
-            (message) =>
-              message.includes('Required package artifact not found') &&
-              message.includes(missingArtifact),
-          ),
-      ).toBe(true);
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow('process.exit(1)');
+    expect(exit).toHaveBeenCalledWith(1);
+    // verifyBundleArtifacts builds `requiredPath` with path.join, so on Windows
+    // the reported message carries `\`. The two multi-segment entries above
+    // (`mem0/main.js`, `mem0/write-confirmation.js`) are spelled with `/`, so
+    // normalise the separator before matching; otherwise they pass on POSIX and
+    // go red in the test_windows lane (which runs test:scripts).
+    expect(
+      console.error.mock.calls.some(([message]) =>
+        reportsMissingArtifact(message, missingArtifact),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(['mem0/main.js', 'mem0/write-confirmation.js'])(
+    'recognizes a Windows missing-artifact error for %s',
+    (missingArtifact) => {
+      const message =
+        'Error: Required package artifact not found: ' +
+        path.win32.join('D:\\publish\\dist', ...missingArtifact.split('/'));
+      expect(reportsMissingArtifact(message, missingArtifact, path.win32)).toBe(
+        true,
+      );
     },
   );
 
@@ -1006,6 +1033,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
+    expect(distPackageJson.private).not.toBe(true);
     expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
@@ -1030,19 +1058,12 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+  it('falls back to the hoisted sharp when core has no nested copy', () => {
     const rootDir = createFixtureRoot();
-    writeFile(
-      rootDir,
-      'package-lock.json',
-      JSON.stringify({
-        packages: {
-          'node_modules/sharp': {
-            version: '0.35.3',
-          },
-        },
-      }),
-    );
+    rmSync(path.join(rootDir, 'packages/core/node_modules'), {
+      recursive: true,
+      force: true,
+    });
     writeFile(
       rootDir,
       'packages/core/package.json',
@@ -1120,7 +1141,7 @@ describe('package asset scripts', () => {
 
     expect(() =>
       preparePackage({ rootDir, requireNativeAudioCapture: false }),
-    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
+    ).toThrow(/installed 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1442,6 +1463,7 @@ describe('package asset scripts', () => {
           name: '@qwen-code/qwen-code',
           version: '0.17.0',
           description: 'Qwen Code',
+          private: true,
           repository: {
             type: 'git',
             url: 'https://github.com/QwenLM/qwen-code.git',
@@ -1461,21 +1483,13 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
-      'package-lock.json',
-      JSON.stringify(
-        {
-          packages: {
-            'node_modules/sharp': {
-              version: '0.35.3',
-            },
-            'packages/core/node_modules/sharp': {
-              version: '0.35.4',
-            },
-          },
-        },
-        null,
-        2,
-      ),
+      'node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.3' }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/node_modules/sharp/package.json',
+      JSON.stringify({ name: 'sharp', version: '0.35.4' }),
     );
 
     writeFile(
@@ -1571,8 +1585,13 @@ describe('package asset scripts', () => {
   }
 
   function createBundleArtifacts(rootDir) {
+    writeFile(rootDir, 'dist/mem0/main.js', '');
+    writeFile(rootDir, 'dist/mem0/write-confirmation.js', '');
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
+    writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxLandlockRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxFileWorker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,

@@ -563,6 +563,223 @@ describe('applyModelSelection', () => {
       }
     });
 
+    it('fast mode keeps the endpoint disambiguator in the persisted selector (#12760)', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({ id: 'shared-fast', baseUrl: 'https://a.example/v1' }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[1].key,
+      });
+
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://b.example/v1',
+      );
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://b.example/v1',
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toContain('Fast Model: openai:shared-fast');
+        expect(outcome.message).not.toContain('\0');
+      }
+    });
+
+    it('fast mode keeps a credential endpoint out of workspace-scope settings', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+        }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      // The shareable .qwen/settings.json only gets the bare selector.
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast',
+      });
+      expect(
+        written.find((write) => write.key === 'fastModel')?.value,
+      ).not.toContain('\0');
+      // This session's in-memory pin still binds the row the user picked.
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe(
+          'Fast Model: openai:shared-fast (this project) (endpoint not saved: project settings are shared)',
+        );
+      }
+    });
+
+    it('fast mode keeps a public endpoint disambiguator in workspace-scope settings', async () => {
+      const config = resolvedConfig({
+        setFastModel: vi.fn() as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({ id: 'shared-fast', baseUrl: 'https://a.example/v1' }),
+        modelRow({ id: 'shared-fast', baseUrl: 'https://b.example/v1' }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[1].key,
+        persistScope: 'workspace',
+      });
+
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://b.example/v1',
+      });
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe(
+          'Fast Model: openai:shared-fast (this project)',
+        );
+      }
+    });
+
+    it('fast mode keeps a query-secret endpoint out of workspace-scope settings', async () => {
+      const config = resolvedConfig({
+        setFastModel: vi.fn() as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://gw.example/v1?key=sk-1',
+        }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      // Fail closed: the userinfo-stripping predicate alone would call this URL
+      // clean and copy the query secret into the shared file.
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'fastModel',
+        value: 'openai:shared-fast',
+      });
+      expect(outcome.ok).toBe(true);
+    });
+
+    it('fast mode keeps a credential endpoint byte-identical at user scope', async () => {
+      const setFastModel = vi.fn();
+      const config = resolvedConfig({
+        setFastModel: setFastModel as Config['setFastModel'],
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+        }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'fast',
+        selectionKey: entries[0].key,
+        persistScope: 'user',
+      });
+
+      // Config.pinnedAuxEndpoint resolves the pin by exact compare, so the
+      // private user file keeps the suffix untouched.
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'fastModel',
+        value: 'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      });
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe('Fast Model: openai:shared-fast (global)');
+      }
+    });
+
+    it('compaction mode keeps a credential endpoint out of workspace-scope settings', async () => {
+      const setCompactionModel = vi.fn();
+      const config = resolvedConfig({
+        setCompactionModel: setCompactionModel as Config['setCompactionModel'],
+      });
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'shared-fast',
+          baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+        }),
+      ];
+
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'compaction',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'compactionModel',
+        value: 'openai:shared-fast',
+      });
+      expect(setCompactionModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.message).toBe(
+          'Compaction Model: openai:shared-fast (this project) (endpoint not saved: project settings are shared)',
+        );
+      }
+    });
+
     it('vision mode writes visionModel and syncs Config.setVisionModel', async () => {
       const setVisionModel = vi.fn();
       const switchModel = vi.fn(async () => {});
@@ -1697,5 +1914,98 @@ describe('extension management actions (audit 01 G-4)', () => {
       changed: false,
       level: 'error',
     });
+  });
+});
+
+describe('Advisor model selection', () => {
+  it('keeps Off available without models and disables without switching the executor', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(true);
+    const switchModel = vi.fn();
+    const config = stubConfig({
+      getAllConfiguredModels: () => [],
+      setAdvisorModel,
+      switchModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    expect(entries.map((entry) => entry.key)).toEqual(['$advisor-off']);
+    expect(
+      await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+        selectionKey: '$advisor-off',
+      }),
+    ).toMatchObject({ ok: true });
+    expect(setAdvisorModel).toHaveBeenCalledWith(undefined);
+    expect(written).toEqual([
+      { scope: SettingScope.User, key: 'advisorModel', value: '' },
+    ]);
+    expect(switchModel).not.toHaveBeenCalled();
+  });
+
+  it('pins and highlights the selected registry endpoint, persisting only after acceptance', async () => {
+    const models: AvailableModel[] = [
+      {
+        id: 'shared',
+        label: 'Default',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+      },
+      {
+        id: 'shared',
+        label: 'Explicit',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        registryBaseUrl: 'https://api.openai.com/v1',
+      },
+      {
+        id: 'vision',
+        label: 'Vision',
+        authType: AuthType.USE_OPENAI,
+        visionOnly: true,
+      },
+    ];
+    const selector = `${AuthType.USE_OPENAI}:shared\0https://api.openai.com/v1`;
+    const setAdvisorModel = vi.fn().mockResolvedValue(false);
+    const switchModel = vi.fn();
+    const config = stubConfig({
+      getAllConfiguredModels: () => models,
+      getAdvisorModel: () => selector,
+      setAdvisorModel,
+      switchModel,
+    });
+    const { settings, written } = createFakeSettings();
+    const entries = buildModelEntries(config, 'advisor');
+    expect(entries.map((entry) => entry.key)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}:shared\0`,
+      selector,
+    ]);
+    expect(
+      computeModelDialogInitialKey({
+        config,
+        settings,
+        entries,
+        mode: 'advisor',
+      }),
+    ).toBe(selector);
+    const params = {
+      config,
+      settings,
+      entries,
+      mode: 'advisor' as const,
+      selectionKey: selector,
+    };
+    expect(await applyModelSelection(params)).toMatchObject({ ok: false });
+    expect(written).toEqual([]);
+    setAdvisorModel.mockResolvedValue(true);
+    expect(await applyModelSelection(params)).toMatchObject({ ok: true });
+    expect(setAdvisorModel).toHaveBeenLastCalledWith(selector);
+    expect(written).toEqual([
+      { scope: SettingScope.User, key: 'advisorModel', value: selector },
+    ]);
+    expect(switchModel).not.toHaveBeenCalled();
   });
 });

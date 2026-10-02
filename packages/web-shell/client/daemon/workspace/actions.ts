@@ -594,18 +594,18 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async loadMemoryStatus() {
+    async loadMemoryStatus(options) {
       const client = requireClient(getClient, 'Load memory failed');
       return withActionTimeout(
-        client.workspaceMemory(),
+        client.workspaceMemory(options),
         'Load memory timed out',
       );
     },
 
-    async readWorkspaceFile(filePath) {
+    async readWorkspaceFile(filePath, opts) {
       const client = requireClient(getClient, 'Read workspace file failed');
       return withActionTimeout(
-        client.readWorkspaceFile(filePath),
+        client.readWorkspaceFile(filePath, opts),
         'Read workspace file timed out',
       );
     },

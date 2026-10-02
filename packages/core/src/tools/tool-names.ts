@@ -28,6 +28,8 @@ export const ToolNames = {
   SHELL: 'run_shell_command',
   TODO_WRITE: 'todo_write',
   MEMORY: 'save_memory',
+  MANAGE_MEMORY: 'manage_memory',
+  SEARCH_MEMORY: 'search_memory',
   AGENT: 'agent',
   SKILL: 'skill',
   EXIT_PLAN_MODE: 'exit_plan_mode',
@@ -56,8 +58,10 @@ export const ToolNames = {
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
+  TOOL_CALL: 'tool_call',
   TOOL_SEARCH: 'tool_search',
   READ_MCP_RESOURCE: 'read_mcp_resource',
+  ADVISOR: 'advisor',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
   WORKFLOW: 'workflow',
@@ -88,7 +92,24 @@ export const ToolNames = {
   OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
   PROPOSE_GOAL: 'propose_goal',
   DISPLAY_IMAGE: 'display_image',
+  THREAD_POST: 'thread_post',
+  THREAD_WAIT: 'thread_wait',
+  THREAD_BLOCK: 'thread_block',
+  THREAD_REVIEW: 'thread_review',
+  THREAD_CREATE: 'thread_create',
+  THREAD_READ: 'thread_read',
 } as const;
+
+/**
+ * The only tools an agent-host session declares and runs. The Host is
+ * read-only and auto-rejects permission prompts, so anything outside this
+ * set would be advertised to the model yet fail every invocation.
+ */
+export const AGENT_HOST_TOOL_NAMES: readonly string[] = [
+  ToolNames.READ_FILE,
+  ToolNames.GREP,
+  ToolNames.LS,
+];
 
 /**
  * Tool display name constants to avoid circular dependencies.
@@ -106,6 +127,8 @@ export const ToolDisplayNames = {
   SHELL: 'Shell',
   TODO_WRITE: 'TodoList',
   MEMORY: 'SaveMemory',
+  MANAGE_MEMORY: 'ManageMemory',
+  SEARCH_MEMORY: 'SearchMemory',
   AGENT: 'Agent',
   SKILL: 'Skill',
   EXIT_PLAN_MODE: 'ExitPlanMode',
@@ -134,8 +157,10 @@ export const ToolDisplayNames = {
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
+  TOOL_CALL: 'ToolCall',
   TOOL_SEARCH: 'ToolSearch',
   READ_MCP_RESOURCE: 'ReadMcpResource',
+  ADVISOR: 'Advisor',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
   WORKFLOW: 'Workflow',
@@ -162,6 +187,12 @@ export const ToolDisplayNames = {
   OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
   PROPOSE_GOAL: 'ProposeGoal',
   DISPLAY_IMAGE: 'DisplayImage',
+  THREAD_POST: 'ThreadPost',
+  THREAD_WAIT: 'ThreadWait',
+  THREAD_BLOCK: 'ThreadBlock',
+  THREAD_REVIEW: 'ThreadReview',
+  THREAD_CREATE: 'ThreadCreate',
+  THREAD_READ: 'ThreadRead',
 } as const;
 
 // Migration from old tool names to new tool names
@@ -182,7 +213,34 @@ export const ToolNamesMigration = {
  * use this so an aliased call is treated identically everywhere.
  */
 export function canonicalToolName(toolName: string): string {
+  if (!Object.prototype.hasOwnProperty.call(ToolNamesMigration, toolName)) {
+    return toolName;
+  }
   return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
+/**
+ * Resolve a model-supplied tool name against the registered names the way
+ * both halves of the deferred-tool bridge must agree on: an exact match wins,
+ * otherwise a single case-insensitive match. Returns the registered name,
+ * the candidate list when several registered names differ from the request
+ * only by case, or `undefined` when nothing matches.
+ *
+ * Returning the candidates instead of picking one keeps the answer
+ * independent of registration order, which `ensureTool` changes when it
+ * moves a lazily-built tool from the factory map into the tool map (#11321).
+ */
+export function resolveRegisteredToolName(
+  requested: string,
+  registered: readonly string[],
+): string | string[] | undefined {
+  if (registered.includes(requested)) return requested;
+  const lower = requested.toLowerCase();
+  const candidates = [
+    ...new Set(registered.filter((name) => name.toLowerCase() === lower)),
+  ].sort();
+  if (candidates.length === 1) return candidates[0];
+  return candidates.length > 1 ? candidates : undefined;
 }
 
 // Migration from old tool display names to new tool display names

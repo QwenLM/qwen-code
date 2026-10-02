@@ -1,6 +1,7 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.24.0",
+  "private": true,
+  "version": "0.24.7",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -45,6 +46,10 @@
       "types": "./dist/src/tools/sub-session-constants.d.ts",
       "import": "./dist/src/tools/sub-session-constants.js"
     },
+    "./telemetryConstants": {
+      "types": "./dist/src/telemetry/constants.d.ts",
+      "import": "./dist/src/telemetry/constants.js"
+    },
     "./toolWriteOrigin": {
       "types": "./dist/src/services/tool-write-origin.d.ts",
       "import": "./dist/src/services/tool-write-origin.js"
@@ -80,9 +85,14 @@
     "./package.json": "./package.json",
     "./*": "./dist/src/*",
     "./dist/*": "./dist/*",
-    "./src/*": "./src/*"
+    "./src/*": "./src/*",
+    "./shellResult": {
+      "types": "./dist/src/utils/shell-result.d.ts",
+      "import": "./dist/src/utils/shell-result.js"
+    }
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').accessSync('../browser-use/dist/index.js')\" || npm --prefix ../browser-use run build",
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
@@ -123,6 +133,8 @@
     "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.36.0",
     "@xterm/headless": "5.5.0",
+    "acorn": "^8.18.0",
+    "acorn-walk": "^8.3.5",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
     "async-mutex": "^0.5.0",
@@ -166,6 +178,7 @@
     "@lydell/node-pty": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"

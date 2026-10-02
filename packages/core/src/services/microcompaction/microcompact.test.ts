@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
 
 import {
+  collectResidentMemoryBodies,
   evaluateTimeBasedTrigger,
   isClearedMediaPlaceholder,
   microcompactHistory,
@@ -38,6 +39,76 @@ function makeToolResult(name: string, output: string): Content {
   return {
     role: 'user',
     parts: [{ functionResponse: { name, response: { output } } }],
+  };
+}
+
+function makeMemoryResult(
+  ref: string,
+  content: string,
+  mtimeMs = 1,
+  range = { start: 0, end: content.length, total: content.length },
+): Content {
+  return makeToolResult(
+    'search_memory',
+    JSON.stringify({
+      mode: 'fetch',
+      results: [{ ref, version: mtimeMs, content, range }],
+    }),
+  );
+}
+
+function makeMemorySearchResult(
+  ref: string,
+  content: string,
+  range = { start: 0, end: content.length, total: content.length + 1 },
+): Content {
+  return makeToolResult(
+    'search_memory',
+    JSON.stringify({
+      mode: 'search',
+      results: [
+        {
+          ref,
+          version: 1,
+          content,
+          range,
+        },
+      ],
+    }),
+  );
+}
+
+function makeBridgedToolCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown> = {},
+): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: {
+          id,
+          name: 'tool_call',
+          args: { name, arguments: args },
+        },
+      },
+    ],
+  };
+}
+
+function makeBridgedToolResult(id: string, output: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id,
+          name: 'tool_call',
+          response: { output },
+        },
+      },
+    ],
   };
 }
 
@@ -214,6 +285,26 @@ describe('microcompactHistory', () => {
       makeModelMessage('hi'),
     ];
     const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+    expect(result.history).toBe(history);
+    expect(result.meta).toBeUndefined();
+  });
+
+  it.each([
+    'toString',
+    'constructor',
+    'valueOf',
+    'hasOwnProperty',
+    '__proto__',
+  ])('handles Object.prototype tool name %s', (name) => {
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'prototype-name', name, args: {} } }],
+      },
+    ];
+
+    const result = microcompactHistory(history, Date.now(), DEFAULT_SETTINGS);
+
     expect(result.history).toBe(history);
     expect(result.meta).toBeUndefined();
   });
@@ -839,6 +930,111 @@ describe('microcompactHistory', () => {
     expect(
       result.history.at(-1)!.parts![0]!.functionResponse!.response!['output'],
     ).toBe('Y'.repeat(25_500));
+  });
+
+  it('size-compacts bridged tool results using the target tool identity', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c1', 'WEB_FETCH'),
+      makeBridgedToolResult('c1', 'x'.repeat(1_000)),
+      makeBridgedToolCall('c2', 'web_fetch'),
+      makeBridgedToolResult('c2', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({
+      triggerReason: 'size',
+      toolsCleared: 1,
+      toolResultCharsBefore: 1_006,
+    });
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it('does not guess when a bridged call id maps to mixed tool names', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'web_fetch'),
+      makeBridgedToolCall('reused', 'grep_search'),
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not throw on non-string tool names in unvalidated history', () => {
+    // Resumed or hand-edited session files can carry truthy non-string
+    // names; the identity resolution must not throw on them.
+    const history = [
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'n', name: 42, args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'n',
+              name: {},
+              response: { output: 'x'.repeat(5000) },
+            },
+          },
+        ],
+      },
+    ] as unknown as Content[];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
+  });
+
+  it('does not guess when a bridged call id has an unparseable sibling call', () => {
+    // The reused id pairs one well-formed bridged read_file with a call
+    // whose envelope target cannot be parsed; the safe outcome is refusal,
+    // not compaction on the one identity that did parse.
+    const malformedCall = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'reused',
+            name: 'tool_call',
+            args: { name: 42 },
+          },
+        },
+      ],
+    } as unknown as Content;
+    const history: Content[] = [
+      makeBridgedToolCall('reused', 'read_file', { file_path: '/proj/a.ts' }),
+      malformedCall,
+      makeBridgedToolResult('reused', 'ambiguous output'.repeat(100)),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toBeUndefined();
+    expect(result.history).toBe(history);
   });
 
   it('size-compacts old skill results and keeps the most recent result', () => {
@@ -1810,6 +2006,28 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
+  it('reports the inner file path of a blanked bridged read_file result', () => {
+    const history: Content[] = [
+      makeBridgedToolCall('c0', 'read_file', {
+        file_path: '/proj/old.ts',
+      }),
+      makeBridgedToolResult('c0', 'old long content '.repeat(50)),
+      makeBridgedToolCall('c1', 'web_fetch'),
+      makeBridgedToolResult('c1', 'recent content'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta).toMatchObject({
+      toolsCleared: 1,
+      evictedReadPaths: ['/proj/old.ts'],
+      unresolvedEvictedReads: 0,
+    });
+  });
+
   it('does not let a kept read_file result vouch for residency (issue #4239)', () => {
     // A kept read_file result may be a cache-hit placeholder or partial
     // slice, so it cannot prove the file's bytes stay resident. The path
@@ -2103,6 +2321,184 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
 
     // No trigger → no meta at all (and therefore no eviction data).
     expect(result.meta).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory memory body eviction', () => {
+  const settings: ClearContextOnIdleSettings = {
+    toolResultsThresholdMinutes: 60,
+    toolResultsNumToKeep: 1,
+  };
+
+  it.each([false, true])(
+    'reports a cleared memory ref through the tool bridge: %s',
+    (bridged) => {
+      const history = [
+        makeMemoryResult('project:old.md', 'old body'),
+        makeMemoryResult('project:new.md', 'new body'),
+      ];
+      if (bridged) {
+        const output = history[0]!.parts![0]!.functionResponse!.response![
+          'output'
+        ] as string;
+        history.splice(
+          0,
+          1,
+          makeBridgedToolCall('memory-call', 'search_memory'),
+          makeBridgedToolResult('memory-call', output),
+        );
+      }
+      expect(collectResidentMemoryBodies(history)).toContainEqual({
+        memoryRef: 'project:old.md',
+        mtimeMs: 1,
+      });
+
+      const result = microcompactHistory(history, Date.now(), settings, {
+        force: true,
+      });
+
+      expect(result.meta?.evictedMemoryBodies).toEqual([
+        { memoryRef: 'project:old.md', mtimeMs: 1 },
+      ]);
+    },
+  );
+
+  it('reports an unresolved memory body when result JSON is not intact', () => {
+    const corrupted = makeMemoryResult('project:old.md', 'old body');
+    const response = corrupted.parts?.[0]?.functionResponse?.response;
+    if (response) {
+      response['output'] =
+        `${response['output']}\n\n<system-reminder>hook</system-reminder>`;
+    }
+
+    const result = microcompactHistory(
+      [corrupted, makeMemoryResult('project:new.md', 'new body')],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.unresolvedEvictedMemoryBodies).toBe(1);
+  });
+
+  it('keeps a ref resident when another body result remains in history', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'old window'),
+      makeMemoryResult('project:same.md', 'new window'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([]);
+  });
+
+  it('distinguishes old and current versions of the same ref', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'old version', 1),
+      makeMemoryResult('project:same.md', 'current version', 2),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not count an uncommitted pending body result as resident', () => {
+    const old = makeMemoryResult('project:same.md', 'x'.repeat(100), 1);
+    const pending = makeMemoryResult('project:same.md', 'current body', 1);
+
+    const result = microcompactHistory(
+      [old, makeMemoryResult('project:other.md', 'recent body', 1)],
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 10,
+      },
+      { sizeOnly: true, pendingContent: pending },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not treat a search window as a resident full body', () => {
+    const result = microcompactHistory(
+      [
+        makeMemoryResult('project:same.md', 'full body'),
+        makeMemorySearchResult('project:same.md', 'search window'),
+      ],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('requires resident fetch windows to cover the complete body', () => {
+    const result = microcompactHistory(
+      [
+        makeMemoryResult('project:same.md', 'first', 1, {
+          start: 0,
+          end: 5,
+          total: 10,
+        }),
+        makeMemoryResult('project:other.md', 'recent'),
+      ],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('combines contiguous fetch windows into a resident body', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'first', 1, {
+        start: 0,
+        end: 5,
+        total: 10,
+      }),
+      makeMemoryResult('project:same.md', 'second', 1, {
+        start: 5,
+        end: 10,
+        total: 10,
+      }),
+    ];
+
+    expect(collectResidentMemoryBodies(history)).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not combine fetch windows with a gap', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'first', 1, {
+        start: 0,
+        end: 4,
+        total: 10,
+      }),
+      makeMemoryResult('project:same.md', 'second', 1, {
+        start: 5,
+        end: 10,
+        total: 10,
+      }),
+    ];
+
+    expect(collectResidentMemoryBodies(history)).toEqual([]);
   });
 });
 

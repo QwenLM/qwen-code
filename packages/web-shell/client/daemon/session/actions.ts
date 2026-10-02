@@ -22,11 +22,13 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  DaemonBranchSessionRequest,
   GoalControlRequest,
   GoalSnapshotV2,
-  DaemonBranchSessionResult,
   DaemonBranchedSession,
   DaemonSessionAttachmentReference,
   PermissionResponse,
@@ -263,7 +265,15 @@ export interface CreateDaemonSessionActionsArgs {
     owner: DaemonSessionClient,
     promptId: string,
   ) => void;
-  onPromptRemoved?: (owner: DaemonSessionClient, promptId: string) => void;
+  onPromptRemoved?: (
+    owner: DaemonSessionClient,
+    promptId: string,
+    // Present only when the removal bypassed the session object (the
+    // stale-session branch routes to `session.client.removePendingPrompt` and
+    // hands over the foreign owner session id, since `session` there is the
+    // *current* session, not the prompt's owner).
+    sessionId?: string,
+  ) => void;
 }
 
 export function getWorkspaceModelsAfterSessionClear(
@@ -328,6 +338,7 @@ export function getConnectionAfterSessionClear(
   clearedSessionId: string | undefined,
   preserveWorkspaceMetadata = current.sessionContext === undefined ||
     current.sessionContext.kind === 'workspace',
+  dropSessionContext = false,
 ): DaemonConnectionState {
   const next = { ...current };
   if (!clearedSessionId || current.sessionId === clearedSessionId) {
@@ -351,6 +362,14 @@ export function getConnectionAfterSessionClear(
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    if (dropSessionContext) {
+      // Leaving a context (Live, in practice) has to be a real state change.
+      // An undefined pending session context means "inherit from the
+      // connection" downstream, so a cleared connection that still advertises
+      // the old context sends the next prompt straight back into it —
+      // `createSession` then rejects a live context (#12620).
+      delete next.sessionContext;
+    }
     if (preserveWorkspaceMetadata) {
       // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
       // MCP-prompt and workflow slash commands all live at the workspace/config
@@ -2354,7 +2373,7 @@ export function createDaemonSessionActions({
       return loadPromise;
     },
 
-    async clearSession() {
+    async clearSession(options?: { dropSessionContext?: boolean }) {
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
       if (pendingPersistedReasoningAction) {
@@ -2366,7 +2385,12 @@ export function createDaemonSessionActions({
         clearActiveSessionState();
         sessionRef.current = undefined;
         setConnection((current) =>
-          getConnectionAfterSessionClear(current, session?.sessionId),
+          getConnectionAfterSessionClear(
+            current,
+            session?.sessionId,
+            undefined,
+            options?.dropSessionContext === true,
+          ),
         );
         if (refreshStandaloneOptions) {
           setRestoreSessionNonce((nonce) => nonce + 1);
@@ -2911,10 +2935,14 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
-        return await session.client.removePendingPrompt(
+        const result = await session.client.removePendingPrompt(
           opts.sessionId,
           promptId,
         );
+        if (result.removed) {
+          onPromptRemoved?.(session, promptId, opts.sessionId);
+        }
+        return result;
       }
       const result = await session.removePendingPrompt(promptId);
       if (result.removed) onPromptRemoved?.(session, promptId);
@@ -3273,6 +3301,17 @@ export function createDaemonSessionActions({
       return withActionTimeout(session.artifacts(), 'Load artifacts timed out');
     },
 
+    async addArtifact(
+      artifact: DaemonSessionArtifactInput,
+    ): Promise<DaemonSessionArtifactMutationResult> {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.addArtifact(artifact),
+        'Add artifact timed out',
+      );
+    },
+
     async respondToGlobalPermission(
       requestId: string,
       response: PermissionResponse,
@@ -3298,7 +3337,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async branchSession(name?: string, atRecordId?: string) {
+    async branchSession(options: DaemonBranchSessionRequest = {}) {
       if (branchInFlight) {
         throw new DOMException(
           'A branch request is already in progress',
@@ -3315,24 +3354,19 @@ export function createDaemonSessionActions({
       const loadGeneration = pendingSessionLoadIdRef.current;
       branchInFlight = true;
       try {
-        const branchRequest: Promise<DaemonBranchSessionResult> =
-          atRecordId === undefined
-            ? session.client.branchSession(
-                sourceSessionId,
-                { name },
-                session.clientId,
-              )
-            : session.client.branchSession(
-                sourceSessionId,
-                { name, atRecordId },
-                session.clientId,
-              );
+        const branchRequest = session.client.branchSession(
+          sourceSessionId,
+          options,
+          session.clientId,
+        );
         const result = await branchRequest;
         const switchStarted =
           sessionRef.current === session &&
           pendingSessionLoadIdRef.current === loadGeneration;
         const restored =
-          atRecordId === undefined
+          !('atRecordId' in options) ||
+          options.atRecordId === undefined ||
+          ('worktree' in options && options.worktree !== undefined)
             ? (result as DaemonBranchedSession)
             : undefined;
         if (switchStarted) {
@@ -3369,7 +3403,12 @@ export function createDaemonSessionActions({
             : {}),
         };
       } catch (error) {
-        if (isStaleBranchPointError(error)) {
+        if (
+          isStaleBranchPointError(error) ||
+          (error instanceof DaemonHttpError &&
+            (error.body as { code?: unknown } | null)?.code ===
+              'branch_worktree_activation_failed')
+        ) {
           throw markNoticeDispatched(error);
         }
         throw dispatchActionError(

@@ -62,3 +62,10 @@ it('advertises runtime stop only with its complete management predicate', () => 
     }),
   ).toContain('workspace_runtime_stop');
 });
+
+it('advertises batched session catalogs for single and multiple workspaces', () => {
+  expect(getAdvertisedServeFeatures()).toContain('session_catalog_batch');
+  expect(
+    getAdvertisedServeFeatures(undefined, { workspaceRuntimeAvailable: true }),
+  ).toContain('session_catalog_batch');
+});

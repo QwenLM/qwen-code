@@ -38,6 +38,7 @@ import {
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import type { Mem0Settings } from './mem0-settings.js';
 
 export const DEFAULT_OPENAI_LOG_RETENTION_DAYS = 7;
 
@@ -87,6 +88,10 @@ export interface SettingDefinition {
   label: string;
   category: string;
   requiresRestart: boolean;
+  // Required even when there is no fixed default (use
+  // `default: undefined as <type> | undefined`): it is load-bearing for the
+  // `satisfies SettingsSchema` constraint and `InferSettings` below, and at
+  // runtime it feeds only display and reset paths, never the load path.
   default: SettingsValue;
   description?: string;
   parentKey?: string;
@@ -347,6 +352,16 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         items: { type: 'string' },
       },
+      tokenQr: {
+        type: 'boolean',
+        label: 'Token QR',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: false,
+        description:
+          "Print the token-bearing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-token-qr suppresses the QR for that run. Same effect as qwen serve --token-qr.",
+        showInDialog: false,
+      },
       maxConcurrentSubSessionsPerCaller: {
         type: 'integer',
         label: 'Max Concurrent Sub-Sessions Per Caller',
@@ -549,6 +564,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      batchAutoCollect: {
+        type: 'boolean',
+        label: 'Batch Auto Collect',
+        category: 'General',
+        requiresRestart: true,
+        default: true,
+        description:
+          "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",
+        showInDialog: false,
+      },
       showSessionRecap: {
         type: 'boolean',
         label: 'Show Session Recap',
@@ -585,7 +610,7 @@ const SETTINGS_SCHEMA = {
         default: 30,
         minimum: 0,
         description:
-          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.',
+          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind, background subagent transcripts under <projectDir>/subagents/, and session debug logs under the runtime debug/ directory. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.',
         showInDialog: true,
       },
       gitCoAuthor: {
@@ -1540,15 +1565,70 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  batch: {
+    type: 'object',
+    label: 'Batch',
+    category: 'Model',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Independent model selection for /batch-api and qwen batch. Unset to reuse the main model configuration.',
+    showInDialog: false,
+    properties: {
+      model: {
+        type: 'string',
+        label: 'Batch Model',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Model ID in modelProviders. The selected entry supplies the endpoint, envKey and generationConfig.',
+        showInDialog: false,
+      },
+      authType: {
+        type: 'string',
+        label: 'Batch Auth Type',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Batch protocol. Defaults to openai; only OpenAI-compatible chat-completions is supported.',
+        showInDialog: false,
+      },
+      baseUrl: {
+        type: 'string',
+        label: 'Batch Model Base URL',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Optional exact modelProviders baseUrl to distinguish entries with the same model ID.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  advisorMaxUses: {
+    type: 'integer',
+    label: 'Advisor Session Call Limit',
+    category: 'Model',
+    requiresRestart: true,
+    default: 0,
+    minimum: 0,
+    description:
+      'Maximum native Advisor requests per session, shared by the executor and its subagents. Failed requests count. 0 means unlimited. Each request sends the conversation to the selected provider and consumes additional tokens. Only user and system settings apply.',
+    showInDialog: true,
+  },
+
   advisorModel: {
     type: 'string',
     label: 'Advisor Model',
     category: 'Model',
-    requiresRestart: false,
+    requiresRestart: true,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
-    showInDialog: true,
+      'Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.',
+    showInDialog: false,
   },
 
   visionModel: {
@@ -2251,6 +2331,67 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for managed auto-memory.',
     showInDialog: false,
     properties: {
+      mem0: {
+        type: 'object',
+        label: 'Mem0',
+        category: 'Memory',
+        requiresRestart: true,
+        default: undefined as Mem0Settings | undefined,
+        description:
+          'Bundled Mem0 connection. Configure in user or system settings.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['baseUrl'],
+          properties: {
+            baseUrl: { type: 'string', format: 'uri' },
+            envKey: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              default: 'MEM0_API_KEY',
+              description:
+                'Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field.',
+            },
+            credentialEnv: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              deprecated: true,
+              description:
+                'Legacy alias for envKey. If both are set, their values must match.',
+            },
+            protocol: {
+              type: 'string',
+              enum: [
+                'mem0-v2',
+                'mem0-v3',
+                'mem0-oss-2026-08',
+                'aliyun-polardb-mysql-2026-08',
+                'mem0-platform-v3',
+                'mem0-oss-rest-2026-08',
+              ],
+              default: 'mem0-v2',
+            },
+            scope: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                userId: { type: 'string', minLength: 1, maxLength: 256 },
+                agentId: { type: 'string', minLength: 1, maxLength: 256 },
+                appId: { type: 'string', minLength: 1, maxLength: 256 },
+              },
+            },
+            enableWrites: { type: 'boolean', default: false },
+            allowInsecureHttp: { type: 'boolean', default: false },
+            timeoutMs: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 30000,
+              default: 5000,
+            },
+          },
+        },
+      },
       enableManagedAutoMemory: {
         type: 'boolean',
         label: 'Enable Managed Auto-Memory',
@@ -2331,6 +2472,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.',
+        showInDialog: false,
+      },
+      enableStructuredRecall: {
+        type: 'boolean',
+        label: 'Enable Structured Memory Recall',
+        category: 'Memory',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Switch memory recall from the flat MEMORY.md listing to the structured protocol: hierarchical memory tree, focused subtree, and the search_memory tool. Off by default — while off, the metadata migration that would make the corpus structured-ready is never scheduled, so the protocol costs no background model calls. Override with QWEN_CODE_MEMORY_STRUCTURED_RECALL=0|1.',
         showInDialog: false,
       },
     },
@@ -2724,6 +2875,34 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
+      executionSandbox: {
+        type: 'object',
+        label: 'Tool Execution Sandbox',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as
+          | import('./execution-sandbox-settings.js').ExecutionSandboxSettings
+          | undefined,
+        description:
+          'Linux tool execution confinement. Operator scopes only; workspace settings cannot override it. Model/auth/session traffic stays on the host.',
+        showInDialog: false,
+        jsonSchemaOverride: {
+          type: 'object',
+          required: ['filesystem', 'network'],
+          additionalProperties: false,
+          properties: {
+            backend: {
+              type: 'string',
+              enum: ['auto', 'bwrap', 'landlock'],
+            },
+            filesystem: {
+              type: 'string',
+              enum: ['read-only', 'workspace-write'],
+            },
+            network: { type: 'string', enum: ['open', 'closed'] },
+          },
+        },
+      },
       codeModeOnly: {
         type: 'boolean',
         label: 'Code Mode Only (Experimental)',
@@ -2731,8 +2910,18 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+          'Expose ordinary tools through the isolated exec JavaScript tool. Load deferred descriptions and schemas on demand with tool_search; if search is unavailable, include all allowed signatures in exec. Direct control tools remain available. Ignored in safe and bare modes.',
         showInDialog: true,
+      },
+      freeform: {
+        type: 'boolean',
+        label: 'Freeform Tool Input (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.codeModeOnly is true and the selected model uses wireApi "responses". Enable only for endpoints that support Responses Custom Tools.',
+        showInDialog: false,
       },
       sandbox: {
         type: 'object',
@@ -2827,7 +3016,7 @@ const SETTINGS_SCHEMA = {
         category: 'Tools',
         requiresRestart: true,
         default: {},
-        description: 'Settings for the ToolSearch discovery mechanism.',
+        description: 'Settings for deferred-tool discovery and invocation.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -2837,7 +3026,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
+              "When enabled, deferred tools are reviewed via ToolSearch and invoked through the stable ToolCall bridge. Bridge review and invocation keep the tool list stable — the bridge never re-declares what it reveals — reducing prompt size without touching the prompt-cache prefix. The declaration list is not immutable, though: a session still re-declares on resume, whenever a tool-set refresh (MCP discovery, the first plan-mode entry in a session, a subagent definition change) finds a direct call to a still-hidden deferred tool in the live history, when a subagent definition change rewrites the agent tool's own description, and when an MCP server registers mid-session with alwaysLoadTools: true.",
             showInDialog: true,
           },
           threshold: {
@@ -2845,9 +3034,9 @@ const SETTINGS_SCHEMA = {
             label: 'Deferred Tool Preload Threshold (%)',
             category: 'Tools',
             requiresRestart: true,
-            default: 10,
+            default: 0,
             description:
-              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). Defaults to 0, which performs no threshold-based preload; ordinary deferred tools normally stay behind the stable ToolSearch + ToolCall bridge, at the cost of one tool_search round trip before first use. Raise it to N so that, when every eligible deferred schema fits within N% of the context window, all are declared upfront for direct calls with no bridge round trip; otherwise they stay behind the bridge while both bridge tools are registered. Tools demoted by tools.eager are excluded from this preload and stay reachable on demand through that bridge while it is registered; when either bridge tool is unregistered (tools.toolSearch.enabled false denies both; a tool_search or tool_call deny rule removes one) the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct tool mode. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager also reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed tool signatures. In direct mode they stay registered, so a direct call by their own name is still evaluated and approved normally. Separate paths can still declare deferred tools at 0: tools.visible; the live-history compatibility scan on every tool-set refresh (including resume, MCP discovery, first plan-mode entry, and subagent definition changes); the incomplete-bridge eager fallback; and daemon ACP late registration, which explicitly reveals and pins create_sub_session.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -2857,7 +3046,7 @@ const SETTINGS_SCHEMA = {
               type: 'number',
               minimum: 0,
               maximum: 100,
-              default: 10,
+              default: 0,
             },
           },
         },
@@ -2920,9 +3109,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: true,
+            default: undefined as boolean | undefined,
             description:
-              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
+              'Use node-pty for an interactive shell experience. Explicit one-shot prompts default to child_process when this setting is unset; interactive and input-driven modes default to PTY.',
             showInDialog: true,
           },
           pager: {
@@ -3018,7 +3207,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
+          'Deferred tool names made visible at startup without requiring the ToolSearch + ToolCall bridge. Listed tools appear alongside core tools in the initial session.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -3029,7 +3218,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, and reachable through the tool_search + tool_call bridge. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, tool_call, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with the ToolSearch + ToolCall bridge: when either half is not registered — tools.toolSearch.enabled false (which denies both), a tool_search or tool_call deny rule, or a tools.disabled entry — the allowlist still withholds the schemas, but nothing can load them back, so the demoted tools that remain hidden are not offered to the model and cannot be reached through the bridge for that session, and a warning is logged; these bridge and warning rules apply to direct tool mode. CodeModeOnly discovers deferred schemas through top-level tool_search and invokes them through exec. It skips deferred preload and startup catalogs; tools.eager also reduces the initial exec description. When search is unavailable in the current scope, exec includes all allowed tool signatures. In direct mode they stay registered, so a direct call by their own name is still evaluated and approved normally — except tools also listed in tools.visible, which are declared upfront, and sessions whose live history contains a direct call to a still-hidden demoted tool, which any tool-set refresh (resume, MCP discovery, the first plan-mode entry in a session, a subagent definition change) re-declares. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {
@@ -4103,7 +4292,7 @@ const SETTINGS_SCHEMA = {
             default:
               'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
             description:
-              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+              'Base URL of the DashScope Realtime service, such as https://dashscope.aliyuncs.com/compatible-mode/v1; a Realtime WebSocket URL is also accepted.',
             showInDialog: false,
           },
           voice: {
@@ -4192,6 +4381,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+        showInDialog: true,
+      },
+      agentCollaboration: {
+        type: 'boolean',
+        label: 'Enable Agent Collaboration',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
       },
       artifact: {

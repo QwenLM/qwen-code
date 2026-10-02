@@ -12,6 +12,7 @@ import type {
   GoalStateCause,
   Logger,
   SessionListItem,
+  ToolArtifact,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
@@ -157,6 +158,8 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+  /** Files already written by the command; advisory metadata for ACP clients. */
+  artifacts?: ToolArtifact[];
 }
 
 export type GoalCommandOperation =
@@ -235,6 +238,7 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'advisor-model'
     | 'voice-model'
     | 'vision-model'
     | 'compaction-model'
