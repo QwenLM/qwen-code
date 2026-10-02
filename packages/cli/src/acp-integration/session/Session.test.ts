@@ -8724,14 +8724,14 @@ describe('Session', () => {
         recorder as never,
       );
       useHistory([
-        { role: 'user', parts: [{ text: 'p1' }] },
+        markedUser('p1', 'p1'),
         { role: 'model', parts: [{ text: 'r1' }] },
         {
           role: 'user',
           parts: [{ text: 'Continue working on the active Goal.' }],
         },
         { role: 'model', parts: [{ text: 'rg' }] },
-        { role: 'user', parts: [{ text: 'p3' }] },
+        markedUser('p3', 'p3'),
         { role: 'model', parts: [{ text: 'r3' }] },
       ]);
       vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
@@ -8752,6 +8752,107 @@ describe('Session', () => {
         apiTruncateIndex: 4,
       });
       const rewind = branch().find((record) => record.subtype === 'rewind');
+      expect(rewind?.parentUuid).toBe(p3Parent);
+
+      fsSync.rmSync(dir, { recursive: true, force: true });
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        mockChatRecordingService as never,
+      );
+    });
+
+    it('cuts the API history and the transcript at the same prompt after a file-inclusive rewind', () => {
+      const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'rewind-kept3-'));
+      const recorder = new core.ChatRecordingService(
+        {
+          getSessionId: () => 'test-session-id',
+          getCliVersion: () => 'test',
+          getProjectRoot: () => dir,
+          getResumedSessionData: () => undefined,
+          isInteractive: () => false,
+          getExperimentalZedIntegration: () => false,
+          isSessionWriterLeaseEnabled: () => false,
+          storage: { getProjectDir: () => dir },
+        } as unknown as core.Config,
+        undefined,
+        false,
+      );
+      const recordTurn = (text: string, id: string) => {
+        recorder.recordUserMessage([{ text }], undefined, undefined, id);
+        recorder.recordAssistantTurn({
+          model: 'test',
+          message: [{ text: `${text} reply` }],
+        });
+      };
+      recordTurn('t0', 'p0');
+      recordTurn('t1', 'p1');
+      recordTurn('t2', 'p2');
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as never,
+      );
+      const snapshots = snapshotList(['p0', 'p1', 'p2']);
+      let history: Content[] = [
+        markedUser('t0', 'p0'),
+        { role: 'model', parts: [{ text: 't0 reply' }] },
+        markedUser('t1', 'p1'),
+        { role: 'model', parts: [{ text: 't1 reply' }] },
+        markedUser('t2', 'p2'),
+        { role: 'model', parts: [{ text: 't2 reply' }] },
+      ];
+      const userTexts = () =>
+        history.flatMap((entry) =>
+          entry.role === 'user'
+            ? (entry.parts?.flatMap((part) =>
+                typeof part.text === 'string' ? [part.text] : [],
+              ) ?? [])
+            : [],
+        );
+      useHistory(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockImplementation(
+        () => snapshots,
+      );
+      vi.mocked(mockFileHistoryService.restoreFromSnapshots).mockImplementation(
+        (next: typeof snapshots) => {
+          snapshots.splice(0, snapshots.length, ...next);
+        },
+      );
+      vi.mocked(mockChat.truncateHistory).mockImplementation(
+        (index: number) => {
+          history = history.slice(0, index);
+          useHistory(history);
+        },
+      );
+
+      session.rewindToTurn(1, { rewindFiles: true });
+      recordTurn('p3', 'p3');
+      recordTurn('p4', 'p4');
+      history = [
+        ...history,
+        markedUser('p3', 'p3'),
+        { role: 'model', parts: [{ text: 'p3 reply' }] },
+        markedUser('p4', 'p4'),
+        { role: 'model', parts: [{ text: 'p4 reply' }] },
+      ];
+      useHistory(history);
+      snapshots.push(...snapshotList(['p3', 'p4']));
+      const branch = () =>
+        (recorder as unknown as { activeBranchRecords: core.ChatRecord[] })
+          .activeBranchRecords;
+      const p3Parent = branch().find(
+        (record) => record.promptId === 'p3',
+      )?.parentUuid;
+
+      expect(session.getRewindableTurnRange()).toEqual({ start: 0, end: 3 });
+      expect(snapshots.map((snapshot) => snapshot.promptId)).toEqual([
+        'p0',
+        'p1',
+        'p3',
+        'p4',
+      ]);
+      const result = session.rewindToTurn(2);
+      const rewind = branch().findLast((record) => record.subtype === 'rewind');
+      expect(result.apiTruncateIndex).toBe(2);
+      expect(userTexts()).toEqual(['t0']);
+      expect(p3Parent).toEqual(expect.any(String));
       expect(rewind?.parentUuid).toBe(p3Parent);
 
       fsSync.rmSync(dir, { recursive: true, force: true });

@@ -82,6 +82,7 @@ import {
   SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
+  buildManagedSessionRestoreProjection,
   type SelectiveSessionRestoreOptions,
   type SessionTranscriptCursorState,
   type SessionTranscriptReadPageOptions,
@@ -1113,6 +1114,50 @@ describe('SessionTranscriptReader', () => {
     ]);
     const page = await readPage();
     expect(uuids(page.records)).toEqual(['source', 'parent-u1', 'u1']);
+  });
+
+  it('carries rewind prompt ids on a managed restore projection', () => {
+    const promptId = `${sessionId}########1`;
+    const user = { ...record('u1', null, 'first prompt'), promptId };
+    const answer = record('a1', 'u1', 'first answer');
+    const projection = buildManagedSessionRestoreProjection({
+      sessionId,
+      records: [user, answer],
+      replay: { kind: 'none' },
+      filePath: '/tmp/managed.jsonl',
+      startTime: T0,
+      lastUpdated: T1,
+      executionEngine: {
+        sessionId,
+        snapshot: {
+          filePath: '/tmp/managed.jsonl',
+          dev: 1,
+          ino: 1,
+          size: 1,
+          lastUpdated: T1,
+        },
+        status: 'verified',
+        engine: 'managed',
+        recorded: true,
+      },
+      fallbackLastCompletedUuid: 'a1',
+    });
+
+    expect(projection.runtime.recording.rewindTurnPromptIds).toEqual([
+      promptId,
+    ]);
+    const service = new ChatRecordingService(
+      {
+        getSessionId: () => sessionId,
+        getResumedSessionData: () => undefined,
+        isSessionWriterLeaseEnabled: () => false,
+        getExperimentalZedIntegration: () => false,
+      } as Config,
+      undefined,
+      false,
+      projection.runtime.recording,
+    );
+    expect(service.recordedTurnIndexForPrompt(promptId)).toBe(0);
   });
 
   it('builds a cold runtime projection with full-loader parity', async () => {

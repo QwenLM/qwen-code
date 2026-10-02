@@ -4755,11 +4755,12 @@ export class Session implements SessionContext {
     const lookup = recorder?.recordedTurnIndexForPrompt;
     let recorderIndex = targetTurnIndex;
     let recorderRefused = false;
+    let mappedTurn: number | undefined;
     if (lookup) {
-      const found = targetPromptId
+      mappedTurn = targetPromptId
         ? lookup.call(recorder, targetPromptId)
         : undefined;
-      if (found !== undefined) recorderIndex = found;
+      if (mappedTurn !== undefined) recorderIndex = mappedTurn;
       else if (compressed) recorderRefused = true;
     }
     if (
@@ -4775,14 +4776,16 @@ export class Session implements SessionContext {
       targetTurnIndex < rewindWindow.end;
     let apiTruncateIndex = -1;
     if (inWindow && !recorderRefused) {
-      apiTruncateIndex = compressed
-        ? targetPromptId
+      const cutByPromptId = compressed || mappedTurn !== undefined;
+      apiTruncateIndex =
+        cutByPromptId && targetPromptId
           ? findApiHistoryPromptIndex(apiHistory, targetPromptId)
-          : -1
-        : this.#computeApiTruncationIndexForUserTurn(
-            apiHistory,
-            targetTurnIndex,
-          );
+          : cutByPromptId
+            ? -1
+            : this.#computeApiTruncationIndexForUserTurn(
+                apiHistory,
+                targetTurnIndex,
+              );
     }
 
     if (apiTruncateIndex < 0) {
