@@ -251,7 +251,9 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: |-
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+          # These steps only stage jars; the SpotBugs gate lives on the
+          # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
 
       - name: 'Run Managed Agent tests, Checkstyle, and MySQL integration'
         working-directory: 'packages/sdk-java/managed-agent-server'
@@ -312,7 +314,9 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: |-
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+          # These steps only stage jars; the SpotBugs gate lives on the
+          # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
       - name: 'Verify Hosted Java, Spring and MySQL processes'
         timeout-minutes: 12
         env:

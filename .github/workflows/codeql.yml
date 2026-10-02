@@ -27,16 +27,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language:
-          - 'javascript'
-          - 'java'
-    # One job per language: in a shared job an overrun or failure in one leg
-    # kills the other's coverage with it. Size the cap generously: the
-    # JavaScript-only scan hit the previous 30-minute cap on ten consecutive
-    # nightlies (2026-09-23 through 2026-10-02, all cancelled at ~30m). The
-    # cap still exists so a runner that drops its heartbeat mid-analysis
-    # can't hold a slot for the default 6h.
-    timeout-minutes: 60
+        include:
+          - language: 'javascript'
+            timeout: 90
+          - language: 'java'
+            timeout: 15
+            sourceroot: 'packages/sdk-java'
+    # One job per language, each with its own measured cap: a shared job let
+    # the JavaScript leg's overrun kill the Java analysis with it. The
+    # JavaScript leg took 44m12s on the 2026-10-02 dispatch (run 37019120152)
+    # after the old shared 30-minute cap had cancelled the nightly on
+    # thirteen consecutive runs (2026-09-20 through 2026-10-02); the
+    # buildless Java leg took 4m40s. The caps stay finite so a runner that
+    # drops its heartbeat mid-analysis can't hold a slot for the default 6h.
+    timeout-minutes: '${{ matrix.timeout }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -48,8 +52,13 @@ jobs:
           # The Maven modules depend on each other through locally installed
           # snapshots, so a real build here would duplicate sdk-java.yml's
           # install dance. build-mode none extracts from source instead
-          # (javascript is interpreted and never builds either way).
+          # (javascript is interpreted and never builds either way). The java
+          # leg scans only the Maven modules: the Gradle tree under
+          # packages/mobile-shell needs a real build, its Kotlin sources are
+          # out of scope, and its Gradle JDK recommendation must not set the
+          # API model for the Java 21 Maven modules.
           build-mode: 'none'
+          source-root: "${{ matrix.sourceroot || '' }}"
 
       - name: 'Perform CodeQL Analysis'
         uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3

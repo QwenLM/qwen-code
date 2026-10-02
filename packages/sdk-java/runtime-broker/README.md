@@ -28,8 +28,9 @@ provisioners, and any container or remote provider. The module
 intentionally does not expose an HTTP API, wire Spring, call the Hosted
 Harness, or define public Agent resources. Those adapters belong to later PRs.
 
-Building and running this module requires JDK 21 or later. Its Maven release
-target is 21; services embedding the resulting JAR must also use JDK 21 or later.
+Building and running this module requires JDK 21 or later and Maven 3.8.9+
+(the SpotBugs gate's plugin declares that floor). Its Maven release target is
+21; services embedding the resulting JAR must also use JDK 21 or later.
 
 Build and test with:
 
