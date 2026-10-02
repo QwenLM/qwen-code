@@ -5192,6 +5192,12 @@ function ensureMinimalDist({
   }
 
   mkdirSync(path.join(distPath, 'chunks'), { recursive: true });
+  mkdirSync(path.join(distPath, 'mem0'), { recursive: true });
+  writeFileSync(path.join(distPath, 'mem0/main.js'), 'export {};\n');
+  writeFileSync(
+    path.join(distPath, 'mem0/write-confirmation.js'),
+    'export {};\n',
+  );
   mkdirSync(path.join(distPath, 'vendor'), { recursive: true });
   mkdirSync(path.join(distPath, 'bundled/qc-helper/docs'), {
     recursive: true,

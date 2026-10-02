@@ -48,6 +48,8 @@ import { Storage } from '../../config/storage.js';
 import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 import {
   allocateRunSequence,
+  claimAgentHostSession,
+  releaseAgentHostSession,
   getAgentsFilePath,
   getThreadPath,
   getWorkspaceFilePath,
@@ -65,6 +67,7 @@ import {
   writeThread,
 } from './store.js';
 import { postMessage, postMessageInTransaction } from './thread-actions.js';
+import { issueA2AGrant } from './a2a-grants.js';
 import { resolveThreadStatus } from './thread-status.js';
 import {
   HUMAN_AUTHOR_ID,
@@ -336,6 +339,34 @@ describe('agent versioned store', () => {
       schemaVersion: AGENTS_SCHEMA_VERSION,
       tokensUsed: 0,
       runs: [{ usageByRound: [{ attempt: 1, round: 1, tokens: 3 }] }],
+    });
+  });
+
+  it('reads the thread directory once per transaction and keeps it current', async () => {
+    await writeThread(PROJECT_ROOT, thread());
+    await withAgentStoreTransaction(PROJECT_ROOT, async (transaction) => {
+      const first = await transaction.listThreads();
+      expect(first.threads.map((entry) => entry.title)).toEqual(['Root']);
+
+      // A change on disk mid-transaction is not re-read: nothing else may
+      // write while the lock is held, so the listing is taken once.
+      await writeRaw(getThreadPath(PROJECT_ROOT, 'th_root'), {
+        ...thread(),
+        title: 'Changed outside',
+      });
+      // An in-place edit that is never written does not leak into the cache.
+      first.threads[0]!.title = 'Edited, not written';
+      const second = await transaction.listThreads();
+      expect(second.threads.map((entry) => entry.title)).toEqual(['Root']);
+
+      // The transaction's own write is what the next read sees.
+      const [root] = second.threads;
+      await transaction.writeThread({ ...root!, title: 'Written' });
+      const third = await transaction.listThreads();
+      expect(third.threads.map((entry) => entry.title)).toEqual(['Written']);
+      await expect(transaction.readThread('th_root')).resolves.toMatchObject({
+        title: 'Written',
+      });
     });
   });
 
@@ -842,5 +873,39 @@ describe('retiring an agent', () => {
       'not_found',
     );
     expect(await readWorkspaceAgents(PROJECT_ROOT)).toHaveLength(1);
+  });
+});
+
+describe('releasing the agent host session', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'agent-release-test-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  it('drops only the claim and keeps the A2A grants', async () => {
+    await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: ALICE.id,
+    });
+    await claimAgentHostSession(PROJECT_ROOT, 'session-1');
+
+    await expect(
+      releaseAgentHostSession(PROJECT_ROOT, 'session-1'),
+    ).resolves.toBe(true);
+
+    const workspace = await readAgentWorkspace(PROJECT_ROOT);
+    expect(workspace.hostSessionId).toBeUndefined();
+    expect(workspace.callerGrants?.map((grant) => grant.callerId)).toEqual([
+      'share_1',
+    ]);
   });
 });

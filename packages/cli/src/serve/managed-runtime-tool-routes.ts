@@ -19,8 +19,10 @@ import {
   ManagedToolInvalidError,
   ManagedToolUnavailableError,
   type ManagedToolExecutor,
+  ManagedMcpToolUnknownError,
   type ManagedToolReference,
 } from './managed-runtime-tool-executor.js';
+import { ManagedMcpError } from './managed-mcp-runtime.js';
 
 const REFERENCE_KEYS = Object.freeze([
   'argsDigest',
@@ -140,6 +142,14 @@ export function registerManagedRuntimeToolRoutes(
         );
         res.status(200).json({ protocolVersion: 2, state: 'settled', result });
       } catch (error) {
+        if (error instanceof ManagedMcpError) {
+          res.status(400).json({ code: error.code });
+          return;
+        }
+        if (error instanceof ManagedMcpToolUnknownError) {
+          res.status(200).json({ protocolVersion: 2, state: 'unknown' });
+          return;
+        }
         if (error instanceof ManagedToolInvalidError) {
           invalid(res);
           return;

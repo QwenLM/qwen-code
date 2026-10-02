@@ -1,3 +1,5 @@
+import type { ManagedToolResultReader } from './managed-tool-result-types';
+
 export type ManagedAgentSessionPhase =
   | 'created'
   | 'admitted'
@@ -28,7 +30,12 @@ export interface ManagedAgentSessionSummary {
   phase: ManagedAgentSessionPhase;
   runtimeReady: boolean;
   runtimeState: ManagedAgentRuntimeState;
-  capabilities: { canSend: boolean; canCancel: boolean };
+  capabilities: {
+    canSend: boolean;
+    canCancel: boolean;
+    actions?: boolean;
+    artifacts?: boolean;
+  };
   failure?: { code: string; message: string };
 }
 
@@ -44,10 +51,12 @@ export type ManagedAgentSessionEventType =
   | 'tool_requested'
   | 'tool_started'
   | 'tool_completed'
+  | 'tool_result_updated'
   | 'completed'
   | 'failed'
   | 'cancelling'
   | 'cancelled'
+  | 'action_updated'
   | 'stream_gap';
 
 export interface ManagedAgentSessionEvent {
@@ -79,11 +88,38 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
+/** A Hosted tool approval waiting for the Session owner's answer. */
+export interface ManagedAgentPendingAction {
+  actionId: string;
+  sessionId: string;
+  /** Public Turn ID; absent when the Turn could not be resolved. */
+  turnId?: string;
+  functionCallId: string;
+  toolName: string;
+  inputRevision: number;
+  policyRevision: string;
+  expiresAt: number;
+  options: Array<{ id: string; label: string }>;
+}
+
 export interface ManagedAgentProvider {
   readonly kind: 'daemon' | 'java';
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  /** Present when the provider can serve Hosted permission Actions. */
+  readonly actions?: {
+    listPending(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedAgentPendingAction[]>;
+    respond(
+      action: ManagedAgentPendingAction,
+      optionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<void>;
+  };
+  readonly toolResults?: ManagedToolResultReader;
   readonly workspaceBinding?: {
     readonly agentId: string;
     list(

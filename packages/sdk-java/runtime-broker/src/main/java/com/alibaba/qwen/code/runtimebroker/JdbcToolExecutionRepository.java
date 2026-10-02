@@ -308,6 +308,18 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
+        return resolve(expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        return resolve(expected, resolutionResult, resolutionTime, false);
+    }
+
+    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime,
+            boolean unknownOnly) {
         if (expected == null) {
             throw new IllegalArgumentException("expected is required");
         }
@@ -316,15 +328,51 @@ public final class JdbcToolExecutionRepository
                     expected.getExecutionCallId(), true);
             if (current == null || !current.sameIdentity(expected)
                     || current.getVersion() != expected.getVersion()
-                    || current.getState()
-                            != ToolExecutionRecord.State.UNKNOWN) {
+                    || !current.needsReconciliation()
+                    || unknownOnly && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
                 return null;
             }
-            ToolExecutionRecord resolved = current.resolveUnknown(
+            ToolExecutionRecord resolved = current.resolveUnsettled(
                     resolutionResult, resolutionTime)
                     .withVersion(current.getVersion() + 1);
             updateExecution(connection, resolved);
             return resolved;
+        });
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            String sql = "SELECT " + EXECUTION_COLUMNS + " FROM qwen_tool_execution "
+                    + "WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_key = ? "
+                    + "AND harness_session_id = ? AND execution_call_id_hash > ? "
+                    + "AND execution_state IN ('EXECUTING', 'CANCEL_REQUESTED', 'UNKNOWN') "
+                    + "ORDER BY execution_call_id_hash LIMIT ?";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, session.getBindingId());
+                statement.setLong(2, session.getRuntimeGeneration());
+                statement.setString(3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                statement.setString(4, session.getSession().getHarnessSessionId());
+                statement.setString(5, after);
+                statement.setInt(6, limit);
+                List<ToolExecutionRecord> records = new ArrayList<>();
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        ToolExecutionRecord record = mapExecution(result);
+                        if (!record.belongsTo(session)) {
+                            throw new IllegalStateException("Execution scan ownership differs");
+                        }
+                        records.add(record);
+                    }
+                }
+                return List.copyOf(records);
+            }
         });
     }
 
