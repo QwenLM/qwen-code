@@ -791,6 +791,24 @@ export class ManagedToolExecutor {
           directory,
           params['file_path'].trim(),
         );
+        // The glob admission makes an in-context symlink enumerable, so the
+        // lexical resolve is no longer sufficient: realpath the result and
+        // refuse anything that lands outside the Session directory. The
+        // ENOENT fallback keeps a nonexistent file reported by the tool
+        // itself rather than accused as traversal.
+        const relative = path.relative(
+          await realpathIfPresent(directory),
+          await realpathIfPresent(params['file_path'] as string),
+        );
+        if (
+          relative === '..' ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          throw new Error(
+            `Path '${params['file_path'] as string}' is not within the Session working directory.`,
+          );
+        }
       }
       if (entry.toolName === GlobTool.Name) {
         // Glob's own validation admits external paths, so the executor pins
@@ -1174,8 +1192,13 @@ function sameInvocation(
  * Runtime host's physical layout: every path under the Session's installed
  * context becomes Workspace-relative, and the root itself becomes ".".
  */
-function relativizeGlobText(text: string, directory: string): string {
+export function relativizeGlobText(text: string, directory: string): string {
   const root = path.resolve(directory);
+  // A Session installed at the filesystem root is its own boundary: every
+  // absolute path legitimately starts with it, so there is nothing to strip
+  // and a one-character prefix would only eat separators (the echoed pattern
+  // included).
+  if (root === path.sep) return text;
   const prefix = root.endsWith(path.sep) ? root : root + path.sep;
   const escape = (value: string) =>
     value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1183,7 +1206,12 @@ function relativizeGlobText(text: string, directory: string): string {
   // split/join also ate the separators of a nested directory whose name
   // repeats the root, fusing two real paths into one that does not exist.
   const tokenPrefix = new RegExp(`(?<![\\w./\\\\-])${escape(prefix)}`, 'g');
-  const bareRoot = new RegExp(escape(root) + '(?![/\\w.-])', 'g');
+  // The bare-root rewrite needs the same leading boundary: without it a hit
+  // whose text merely ends with the root string is truncated mid-token.
+  const bareRoot = new RegExp(
+    `(?<![\\w./\\-])${escape(root)}(?![/\\w.-])`,
+    'g',
+  );
   return text.replace(tokenPrefix, '').replace(bareRoot, '.');
 }
 

@@ -1164,6 +1164,67 @@ describe('Managed context tool gate', () => {
     }
   });
 
+  it('refuses read_file through an in-context symlink that leaves the Session', async () => {
+    // The glob admission makes the link enumerable; reading through it must
+    // not hand a sibling Session's content to a files-only Session.
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    const read = async (callId: string, filePath: string) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'read_file',
+          input: { file_path: filePath },
+        })
+      ).json();
+
+    const through = await read('call-1', 'peek/secret.txt');
+    expect(through.result.executionStatus).toBe('error');
+    expect(JSON.stringify(through)).not.toContain('sibling');
+    // A nonexistent path keeps the tool's own not-found answer, not a
+    // traversal accusation (realpathIfPresent's ENOENT fallback).
+    const missing = await read('call-2', 'src/nope.txt');
+    expect(JSON.stringify(missing)).not.toContain(
+      'not within the Session working directory',
+    );
+    // Control: an ordinary in-Session read still works.
+    const own = await read('call-3', 'src/index.ts');
+    expect(own.result.executionStatus).toBe('success');
+    expect(JSON.stringify(own)).toContain('mine');
+  });
+
+  it('keeps the echoed pattern verbatim for a Session at the filesystem root', async () => {
+    // Degenerate root: '/' is both the boundary and every path's prefix, so
+    // the rewrite must stand down rather than eat the pattern's separators.
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: path.parse(process.cwd()).root,
+    });
+    await post(origin, CONTEXT, installation('session-root', '.'));
+    const answer = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-root', 'call-1', ''),
+        toolName: 'glob',
+        input: { pattern: 'etc*/host*' },
+      })
+    ).json();
+    expect(answer.result.executionStatus).toBe('success');
+    expect(JSON.stringify(answer)).toContain('etc*/host*');
+  });
+
   it('refuses new calls once the directory is gone, and still answers settled ones', async () => {
     const root = workspace();
     const origin = await startWorker({ ...BOOT, mountRoot: root });
