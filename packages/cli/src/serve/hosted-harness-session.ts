@@ -121,7 +121,16 @@ interface HostedSession {
   cwd: string;
   streams: Set<() => void>;
   active?: { promptId: string; digest: string; abort: AbortController };
-  admissions: Map<string, { digest: string; lastEventId: number }>;
+  admissions: Map<
+    string,
+    {
+      digest: string;
+      lastEventId: number;
+      /** A lost-reply replay was answered 200 while the drive still ran, so
+       * the coordinator believes this admission and will not retry it. */
+      replayedInFlight?: boolean;
+    }
+  >;
   blocked: boolean;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   publication?: { owner: HttpToolPublicationOwner; captureBytes: number };
@@ -2620,17 +2629,14 @@ export function registerHostedHarnessSessionRoutes(
           // Reconcile the pending file-history obligation the recovered turn
           // left behind before inference — a text-only continuation never
           // re-acquires, so without this the marker outlives the turn and
-          // wedges every later cold load.
-          try {
-            await toolTurn.resumeCommittedResults();
-          } catch (cause) {
-            // The route already answered, so a retryable workspace refusal
-            // cannot reach the caller as a 409: every reconciliation failure
-            // blocks for recovery instead of settling a terminal turn_result,
-            // and the coordinator's next takeover load re-drives the Turn.
-            if (cause instanceof HostedToolRecoveryRequiredError) throw cause;
-            throw new HostedToolRecoveryRequiredError(cause);
-          }
+          // wedges every later cold load. A raw escape (a transient warmup
+          // failure, or a retryable re-acquire refusal acquire() rethrows
+          // as-is) settles terminally below: the 200 is already sent and no
+          // blocked-on-recovery re-drive exists on this route, because the
+          // Session stays registered and the coordinator drops its recovery
+          // tracking on this admission. Only an already-wrapped recovery
+          // error keeps its outer recovery-blocked handling.
+          await toolTurn.resumeCommittedResults();
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,
@@ -2707,6 +2713,11 @@ export function registerHostedHarnessSessionRoutes(
     const recoveryDigest = `recovery:${checkpointId}:${activationId}`;
     const admittedCancel = session.admissions.get(promptId);
     if (admittedCancel?.digest === recoveryDigest) {
+      // A replay served while the drive still runs certifies acceptance to
+      // the coordinator: it will never retry, so the failure path below must
+      // stop waiting for a re-drive that cannot arrive.
+      if (session.active?.promptId === promptId)
+        admittedCancel.replayedInFlight = true;
       if (!session.active) releaseRecoveredRuntime(session);
       res.status(200).json({
         accepted: true,
@@ -2777,15 +2788,26 @@ export function registerHostedHarnessSessionRoutes(
         }
         // The original owner's Runtime Session keeps the Workspace lease
         // pinned; a passive takeover never re-acquired it, so release it
-        // here once the executions are confirmed stopped.
-        await broker.release().catch((cause: unknown) => {
-          if (
-            cause instanceof HostedWorkspaceBrokerRejection &&
-            cause.status === 404
-          )
-            return;
-          throw cause;
-        });
+        // here once the executions are confirmed stopped — including the
+        // abandoned kind, whose binding is fenced too. A refused or lost
+        // release must not redo a cancellation that is already settled:
+        // record the lease as owed so the next terminal route retries the
+        // handback, and answer the Turn's outcome rather than the lease's.
+        const released = await broker.release().then(
+          () => true,
+          (cause: unknown) => {
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 404
+            )
+              return true;
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness release of recovered Runtime ${promptId} failed after the cancellation settled: ${String(cause)}`,
+            );
+            return false;
+          },
+        );
+        if (!released) session.runtimeLeaseHeld = promptId;
         await session.managed.sink.write(
           record(session, sessionId, 'system', null, {
             subtype: 'turn_result',
@@ -2813,9 +2835,19 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted Harness turn ${promptId} could not settle the cancellation: ${String(cause)}`,
         );
-        // The cancellation never confirmed: drop the admission so the
-        // coordinator's retry re-drives instead of replaying the watermark.
-        session.admissions.delete(promptId);
+        if (session.admissions.get(promptId)?.replayedInFlight) {
+          // A replay already certified this cancellation as accepted to the
+          // coordinator, so no retry or re-drive will ever come — admit the
+          // failure loudly instead of leaving the Session armed-and-idle,
+          // and keep the admission it certified on record.
+          session.blocked = true;
+          session.recoveredTurn = undefined;
+        } else {
+          // The cancellation never confirmed and no replay certified it:
+          // drop the admission so the coordinator's retry re-drives instead
+          // of replaying the watermark.
+          session.admissions.delete(promptId);
+        }
         if (!res.headersSent) error(res, 503, 'managed_runtime_cancel_failed');
       } finally {
         releaseRecoveredRuntime(session);

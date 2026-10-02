@@ -434,7 +434,7 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it.each([undefined, { state: 'unknown' }])(
+  it.each([undefined, { state: 'unknown' }, { state: 'abandoned' }])(
     'reports an execution the Broker cannot account for as unknown (%s)',
     async (status) => {
       await parkAtAwaitRuntime();
@@ -719,6 +719,32 @@ describe('recoverHostedRuntimeTurn', () => {
         expect(authorization.checkpoint.continuation.phase).toBe(
           'await_runtime',
         );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('breaks the terminal poll when an execution is fenced abandoned after the cancel', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValue({ state: 'abandoned' });
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      // Loss evidence arriving late must still end the stop: a poll that
+      // does not break here spins the full 30 s deadline and throws.
+      await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).toHaveBeenCalledTimes(1);
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
     } finally {
       await replacement.close();
     }

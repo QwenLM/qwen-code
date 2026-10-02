@@ -258,30 +258,27 @@ export async function stopParkedRuntimeExecutions(input: {
     authorization.checkpoint.tools?.items ?? [],
     input.brokerOptions,
   );
+  // Terminal for the stop's purposes — the Broker never knew it, the result
+  // is durable, or the record is fenced permanently. The pre-cancel skip
+  // and the post-cancel poll must agree on this or one side lies.
+  const stopComplete = (state: { state: string } | undefined): boolean =>
+    state === undefined ||
+    state.state === 'settled' ||
+    state.state === 'abandoned';
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
     const before = await broker.status(item.executionCallId);
     if (before?.state === 'unknown')
       throw new Error('Runtime execution outcome is unknown.');
-    if (
-      before === undefined ||
-      before.state === 'settled' ||
-      before.state === 'abandoned'
-    )
-      continue;
+    if (stopComplete(before)) continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = await broker.status(item.executionCallId);
       if (status?.state === 'unknown')
         throw new Error('Runtime execution outcome is unknown.');
-      if (
-        status === undefined ||
-        status.state === 'settled' ||
-        status.state === 'abandoned'
-      )
-        break;
+      if (stopComplete(status)) break;
       if (Date.now() >= deadline) {
         throw new Error(
           'Runtime execution did not reach a terminal state after cancellation.',
