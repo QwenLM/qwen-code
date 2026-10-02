@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.LinkedHashMap;
@@ -67,6 +68,30 @@ final class WorkspaceRuntimeResolver {
         if (mount == null) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        verifyMountIntact(mount);
+        return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
+                Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"));
+    }
+
+    /**
+     * The W2 settlement probe: proves for the target directory of a cwd
+     * change what a later acquisition proves for the current one — the
+     * administrator mount mapping and continuity, the storage guard when
+     * enabled, and the directory rule {@code acquire()} enforces — without
+     * claiming storage or contacting a worker. Read-only and idempotent.
+     */
+    void verifyInstallable(ContextBinding binding, String targetCwdRelative) {
+        Mount mount = mounts.get(new Storage(binding.getTenantId(), binding.getStorageId()));
+        if (mount == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        verifyMountIntact(mount);
+        authority.verifyMount(binding);
+        requireDirectory(mount.root().toString(), targetCwdRelative);
+    }
+
+    private static void verifyMountIntact(Mount mount) {
         try {
             if (!mount.root().equals(mount.root().toRealPath())
                     || !Objects.equals(mount.fileKey(), Files.readAttributes(
@@ -76,9 +101,19 @@ final class WorkspaceRuntimeResolver {
         } catch (IOException error) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
-                Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"));
+    }
+
+    static void requireDirectory(String root, String cwdRelative) {
+        try {
+            Path base = Path.of(root);
+            Path directory = base.resolve(cwdRelative).normalize();
+            if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
+                    || !directory.toRealPath().equals(directory)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     ContextBinding savedBinding(String sessionId) {

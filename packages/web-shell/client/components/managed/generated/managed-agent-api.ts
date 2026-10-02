@@ -133,6 +133,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/sessions/cwd/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the same admission order and refusal vocabulary; the idempotency key travels in the request body (a key over 128 characters is refused during request validation with 400 invalid_request before the service's invalid_idempotency_key check, so the surfaces classify over-length keys differently). Poll the operation or await session.context.changed; do not treat 202 as activation. */
+        post: operations["webShellChangeCwd"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/operations/query": {
         parameters: {
             query?: never;
@@ -616,6 +633,8 @@ export interface components {
          * @example services/api
          */
         WorkspaceRelativePath: string;
+        /** @enum {string} */
+        CwdOperationStatus: "pending" | "installing" | "completed" | "failed";
         WebShellWorkspaceSelection: {
             workspaceId: string;
             /** @default . */
@@ -658,11 +677,36 @@ export interface components {
                 canCreateSession?: true;
             }) | null;
         };
+        WebShellChangeCwdRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            requestId?: string | null;
+        };
         WebShellOperationRequest: {
             /** Format: uuid */
             sessionId: string;
             operationId: string;
         };
+        /** @description A completed operation returns the committed target revision. A replay returns the same operation identity and latest durable status, with replayed=true; polling itself is not replay. */
+        WebShellCwdOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            type: "cwd_change";
+            status: components["schemas"]["CwdOperationStatus"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            targetCwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            resultContextRevision?: number | null;
+            failureCode?: string | null;
+            replayed: boolean;
+        } & (unknown & unknown);
         WebShellAction: components["schemas"]["WebShellPermissionAction"] | components["schemas"]["WebShellQuestionAction"];
         WebShellActionResolution: {
             actionId: string;
@@ -781,7 +825,7 @@ export interface components {
             policyRevision: string;
             answers: components["schemas"]["WebShellQuestionAnswer"][];
         };
-        WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellOperation: components["schemas"]["WebShellCwdOperation"] | components["schemas"]["WebShellCommandOperation"];
         WebShellActionQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -1235,6 +1279,35 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    webShellChangeCwd: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeCwdRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable cwd operation; acceptance does not mean the new cwd is active. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCwdOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     webShellQueryCwdOperation: {

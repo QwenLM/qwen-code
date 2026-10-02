@@ -3,10 +3,13 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Set;
@@ -19,12 +22,15 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * Delivers admitted close and delete operations. An operation admitted on an
- * active Session closes it in the Hosted Harness and waits until no Harness
- * holds the Session's journal writer; every operation then drains the
- * Session's Runtime binding and completes. A failed attempt is retried with
- * the dispatch backoff until it succeeds, so an operation never completes
- * before these steps.
+ * Delivers admitted close, delete and cwd-change operations. An operation
+ * admitted on an active Session closes it in the Hosted Harness and waits
+ * until no Harness holds the Session's journal writer; a close or delete
+ * then drains the Session's Runtime binding and completes, and a failed
+ * attempt is retried with the dispatch backoff until it succeeds, so one of
+ * those operations never completes before these steps. A cwd change is
+ * settled without Harness or worker involvement — a read-only mount probe
+ * and one revision-CAS commit — and a probe refusal or a moved fact is a
+ * terminal failure that is never retried.
  */
 @Component
 public class SessionLifecycleCoordinator {
@@ -116,6 +122,10 @@ public class SessionLifecycleCoordinator {
             }
         }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         try {
+            if (claimed.kind() == OperationKind.CWD_CHANGE) {
+                settleCwdChange(claimed);
+                return;
+            }
             boolean harnessConfirmed = settle(claimed);
             if (!valid.get()) {
                 return;
@@ -157,6 +167,43 @@ public class SessionLifecycleCoordinator {
                     error.getClass().getSimpleName(), error.getMessage());
         } finally {
             renewal.cancel(false);
+        }
+    }
+
+    // A cwd change settles without Harness or worker involvement: the probe
+    // is read-only, and the commit transaction re-checks every fact it
+    // depends on, so a reclaim can rerun this branch idempotently.
+    private void settleCwdChange(OperationRecord operation) {
+        String tenantId = operation.tenantId();
+        String sessionId = operation.sessionId();
+        String operationId = operation.operationId();
+        var session = store.requireSession(tenantId, sessionId);
+        try {
+            if (session.workspace() == null) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            runtimeWarmer.verifyWorkspaceCwdTarget(session.workspace(),
+                    operation.targetCwdRelative());
+        } catch (RuntimeBrokerException error) {
+            store.failCwdChangeOperation(tenantId, sessionId, operationId,
+                    owner, operation.claimGeneration(), "workspace_unavailable");
+            LOG.info("Managed Session cwd change refused tenant={}"
+                            + " session={} operation={} failure={}",
+                    tenantId, sessionId, operationId,
+                    "workspace_unavailable");
+            return;
+        }
+        CwdChangeOutcome outcome = store.completeCwdChangeOperation(
+                tenantId, sessionId, operationId, owner,
+                operation.claimGeneration());
+        if (outcome == null) {
+            LOG.warn("Managed Session operation was claimed by another"
+                            + " worker tenant={} session={} operation={}",
+                    tenantId, sessionId, operationId);
+        } else if (!outcome.completed()) {
+            LOG.info("Managed Session cwd change failed tenant={}"
+                            + " session={} operation={} failure={}",
+                    tenantId, sessionId, operationId, outcome.failureCode());
         }
     }
 
