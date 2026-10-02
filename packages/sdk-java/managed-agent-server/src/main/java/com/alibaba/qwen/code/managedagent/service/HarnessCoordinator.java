@@ -227,11 +227,16 @@ public class HarnessCoordinator {
             warmRuntime(session, claimed);
         }
         requireLease(leaseLost);
-        Attachment attachment = recoveringCancellation
-                ? harness.createOrLoad(session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null, true)
-                : harness.createOrLoad(session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null);
+        Attachment attachment;
+        if (session.harnessBootId() != null) {
+            // A previously attached Session may hold a parked Turn; the
+            // takeover load settles or reports it. Plain loads stay inert.
+            attachment = harness.recoverManagedRuntime(session.tenantId(),
+                    session.sessionId(), recoveringCancellation);
+        } else {
+            attachment = harness.createOrLoad(session.tenantId(),
+                    session.sessionId(), false);
+        }
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()) {
