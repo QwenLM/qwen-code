@@ -12,6 +12,7 @@ import {
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -249,7 +250,10 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
-import { createAgentToolInvocationGuard } from '../agents/workspace-agents/capability.js';
+import {
+  createAgentHostToolInvocationGuard,
+  createAgentToolInvocationGuard,
+} from '../agents/workspace-agents/capability.js';
 import type {
   ExecutionSandboxPolicy,
   ResolvedExecutionSandboxPolicy,
@@ -4069,6 +4073,7 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+    void refreshModelCatalog();
     options?.signal?.throwIfAborted();
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
@@ -4710,6 +4715,7 @@ export class Config {
     if (
       !this.shellExecutionSandbox &&
       !this.getBareMode() &&
+      this.sessionSourceType !== 'agent-host' &&
       !this.provisionalWorkspace
     ) {
       void (async () => {
@@ -12045,9 +12051,8 @@ export class Config {
   }
 
   /**
-   * Whether this session runs as a workspace agent, inside the read-only
-   * capability boundary. The one source of truth for the tool registry, the
-   * invocation guard and skill side effects.
+   * Whether this session carries a workspace-agent persona. This is the source
+   * of truth for collaboration tools and skill side effects.
    */
   isWorkspaceAgentSession(): boolean {
     return (
@@ -12056,6 +12061,15 @@ export class Config {
   }
 
   getToolInvocationGuard(): ToolInvocationGuard | undefined {
+    // A persisted Host session stays read-only even after collaboration is off.
+    if (this.sessionSourceType === 'agent-host') {
+      return createAgentHostToolInvocationGuard(
+        this.toolInvocationGuard,
+        this.getTargetDir(),
+        (candidate) =>
+          this.getWorkspaceContext().isPathWithinWorkspace(candidate),
+      );
+    }
     return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
