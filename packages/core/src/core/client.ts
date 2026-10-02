@@ -1502,7 +1502,15 @@ export class LlmClient {
    * next send (which can add a large input). Unknown counts as not below.
    */
   private isBelowCompactionWarn(): boolean {
-    const promptTokens = this.chat?.getLastPromptTokenCount() ?? 0;
+    // Match the gate that decides the next send: estimatePromptTokens adds
+    // the previous response's output tokens on top of the prompt count, so
+    // this guard must too — with a thinking-heavy turn the output alone can
+    // consume the whole warn→auto buffer and the cooldown would skip turns
+    // straight across a compaction. Optional-chained: installChat mocks
+    // supply only getLastPromptTokenCount.
+    const promptTokens =
+      (this.chat?.getLastPromptTokenCount() ?? 0) +
+      (this.chat?.getLastOutputTokenCount?.() ?? 0);
     if (promptTokens <= 0) return false;
     const window =
       this.config.getContentGeneratorConfig()?.contextWindowSize ??
@@ -1573,8 +1581,12 @@ export class LlmClient {
     // scorer matches anything, the fast result wins — the selector's speed is
     // irrelevant. `onFastResult` is published before recall even issues the
     // selector request, so `settledAt` is necessarily null when the wait ends
-    // on it. The settled-recall branch is reached at this point only when no
-    // fast result exists at all: no `Config`, or nothing matched
+    // on it — unless the #13003 skip-selector knob is on: a skipped selector
+    // settles the recall promise within microtasks, so the wait can meet a
+    // settled handle still carrying an undelivered fast result (the
+    // `selectorSkippedFast` term below exists for exactly that state). With
+    // the knob off, the settled-recall branch is reached at this point only
+    // when no fast result exists at all: no `Config`, or nothing matched
     // lexically. That is deliberate, not incidental — a model side query does
     // not complete inside this ceiling, so arbitrating between them would
     // cost every turn the remainder of the budget to win a race that does not

@@ -1633,10 +1633,14 @@ export function logMemoryRecall(
     docs_selected: event.docs_selected,
     // The selector_skipped metric dimension belongs to the #13003
     // skip-selector experiment: attach it only while the experiment is
-    // enabled so deployments without the flag keep the pre-existing
-    // attribute space on these series. The log attribute above stays
+    // enabled AND the recall mode had a skip decision to make (structured;
+    // legacy recalls leave the event field undefined), so deployments
+    // without the flag keep the pre-existing attribute space on these
+    // series and legacy-mode recalls do not mix a constant `false` into the
+    // experiment's control series. The log attribute above stays
     // unconditional on purpose.
-    ...(isSkipSelectorOnUniqueStrongHitEnabled()
+    ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
+    typeof event.selector_skipped === 'boolean'
       ? { selector_skipped: event.selector_skipped }
       : {}),
   });

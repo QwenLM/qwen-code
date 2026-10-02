@@ -564,6 +564,11 @@ function logRecallResult(
   },
 ): void {
   if (!config || abortSignal?.aborted) return;
+  // The skip guard only exists in structured mode, so legacy recalls never
+  // have a selector-skip decision to report: stamping `false` there would
+  // mix a constant into the experiment's control series. Leave the field
+  // unset and let the logger drop the dimension.
+  const legacy = (config.getMemoryRecallMode?.() ?? 'legacy') === 'legacy';
   logMemoryRecall(
     config,
     new MemoryRecallEvent({
@@ -575,7 +580,7 @@ function logRecallResult(
       scan_duration_ms: timings.scanDurationMs,
       fast_duration_ms: timings.fastDurationMs,
       selector_duration_ms: timings.selectorDurationMs,
-      selector_skipped: result.selectorSkipped === true,
+      ...(legacy ? {} : { selector_skipped: result.selectorSkipped === true }),
     }),
   );
 }

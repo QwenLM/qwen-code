@@ -191,6 +191,12 @@ The fast scorer and selector read the same snapshot but have different roles:
 4. A refined selector result is delivered at a later safe injection point and
    merged with fast results by ref. It never narrows the Complete Tree snapshot.
 
+Steps 2 and 4 are conditional while the experimental skip-selector knob
+(`QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT`, off by default)
+is set: a single fast hit that is strong and current suppresses the selector
+for that recall, so no selector pass runs and no refined result arrives. The
+knob is an ablation experiment; the default contract above is unchanged.
+
 Short Latin keywords require token boundaries, so `ai` does not match
 `explain`. Han, Hiragana, Katakana, and Hangul use a shared CJK tokenizer. Body
 text is a low-weight fallback and cannot override clear metadata matches.

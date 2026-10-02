@@ -94,6 +94,23 @@ export class AutoMemoryExtractionError extends Error {
 }
 
 /**
+ * The cached-tail arm's history source. The slot is process-global (another
+ * session's params can sit in it — see forkedAgent.ts), so the lookup is
+ * keyed by session and throws when absent: extraction must run after a
+ * completed main turn. Only called when no complete window was handed in.
+ */
+function getCacheSafeHistoryOrThrow(sessionId: string): Content[] {
+  const cacheSafe = getCacheSafeParams(sessionId);
+  if (!cacheSafe) {
+    throw new Error(
+      'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +
+        'extraction must run after a completed main turn.',
+    );
+  }
+  return cacheSafe.history;
+}
+
+/**
  * Drop runtime reminders and hidden reasoning while preserving tool traffic,
  * which tells the extractor when the turn only read existing memory.
  * The resulting history must end with a model text message.
@@ -221,7 +238,7 @@ function buildTaskPrompt(
     // time — only a proxy, so the instruction drops the conversion claim
     // rather than re-anchoring to it.
     windowAsOf
-      ? `This segment is from an earlier part of the session (last processed around ${windowAsOf}) — do not convert its relative dates against today; keep them relative or omit them.`
+      ? `This segment is from an earlier part of the session (last processed around ${windowAsOf}) — do not convert its relative dates against today; keep them relative or omit them. The standing type guidance that says to always convert relative dates to absolute ones does not apply to this segment: it has no reliable date to convert against.`
       : `Today's date is ${formatDateForContext()} — use it to turn any relative date in the history into an absolute one before saving.`,
     '',
     'Available tools in this run: `read_file`, `grep_search`, `glob`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
@@ -330,22 +347,17 @@ export async function runAutoMemoryExtractionByAgent(
     windowAsOf?: string;
   },
 ): Promise<AutoMemoryExtractionExecutionResult> {
-  const cacheSafe = getCacheSafeParams(config.getSessionId());
-  if (!cacheSafe) {
-    throw new Error(
-      'runAutoMemoryExtractionByAgent: no cache-safe params available; ' +
-        'extraction must run after a completed main turn.',
-    );
-  }
   // The pending window comes from raw history: curate it the way the cached
   // tail is curated, or degraded placeholder turns (e.g. "(request
-  // timeout)") reach the extractor as something the assistant said.
+  // timeout)") reach the extractor as something the assistant said. Only the
+  // cached-tail arm reads the process-global slot — a caller that handed a
+  // complete window in must neither pay the clone nor be gated on the slot.
   const inputHistory = history
     ? slimCompactionInput(
         extractCuratedHistory(history),
         config.getEffectiveInputModalities(),
       ).slimmedHistory
-    : cacheSafe.history;
+    : getCacheSafeHistoryOrThrow(config.getSessionId());
   const extraHistory = buildAgentHistory(inputHistory);
 
   const { topicSummaries, keywordVocabularySnapshot } =

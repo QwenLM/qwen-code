@@ -1161,6 +1161,8 @@ export class MemoryManager {
    * Returns immediately with a skipped result if:
    *   - The last history turn wrote to a memory file (memory_tool)
    *   - Extraction is already running for this project (queues trailing request)
+   *   - A no-op cooldown is armed and too little history has grown since
+   *     (cooldown; #13004, opt-in)
    *
    * The trailing request starts automatically when the active extraction
    * completes.
@@ -1377,6 +1379,10 @@ export class MemoryManager {
    * wrote nothing and advanced its cursor. A write, an early return with no
    * extractor run, or a cursor held back by the zero-tool-call guard all
    * clear it, so the next turn runs as today. Skipped results leave it as is.
+   * The windowed arm stops short of `history.length` by construction, so the
+   * trigger is an advanced cursor, not reaching the live end — otherwise a
+   * tool-heavy session (every turn outgrows the window cap) never arms the
+   * cooldown at all (#13004's measured waste case).
    */
   private updateExtractCooldown(
     params: ScheduleExtractParams,
@@ -1386,7 +1392,7 @@ export class MemoryManager {
     const completedNoop =
       result.extractorRan === true &&
       result.touchedTopics.length === 0 &&
-      result.cursor.processedOffset === params.history.length;
+      result.cursorAdvanced === true;
     const turns = completedNoop ? resolveExtractNoopCooldownTurns() : 0;
     if (turns > 0) {
       this.extractCooldownRemaining.set(params.projectRoot, {
@@ -1563,10 +1569,17 @@ export class MemoryManager {
     const queued = this.extractQueued.get(projectRoot);
     if (!queued) return;
     this.extractQueued.delete(projectRoot);
+    // runExtract rethrows; `track`'s removal handler swallows the rejection
+    // without surfacing it, so observe it here — the trailing path has no
+    // caller left to catch.
     void this.track(
       queued.taskId,
       this.runExtract(queued.taskId, queued.params),
-    );
+    ).catch((error: unknown) => {
+      debugLogger.warn(
+        `Queued managed auto-memory extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 
   // ─── Skill review ─────────────────────────────────────────────────────────────
@@ -2762,6 +2775,7 @@ export class MemoryManager {
     this.extractCurrentTaskId.clear();
     this.extractQueued.clear();
     this.extractFailures.clear();
+    this.extractCooldownRemaining.clear();
   }
 
   /** Reset all dream scheduling state. */

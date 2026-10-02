@@ -203,6 +203,27 @@ describe('Telemetry Metrics', () => {
         [7, { strategy: 'heuristic', selector_skipped: true }],
       ]);
     });
+
+    it('keeps an explicit selector_skipped: false as the control series', () => {
+      // The ablation's control arm: with the experiment on, a recall whose
+      // selector ran must carry the dimension set to false — a truthiness
+      // check would drop it and mix the control series into the
+      // no-dimension (experiment-off) one.
+      init();
+
+      m.recordMemoryRecallMetrics(mockConfig, 9, {
+        strategy: 'heuristic',
+        docs_selected: 1,
+        selector_skipped: false,
+      });
+
+      expectCalls(mockCounterAddFn, [
+        [1, { strategy: 'heuristic', selector_skipped: false }],
+      ]);
+      expectCalls(mockHistogramRecordFn, [
+        [9, { strategy: 'heuristic', selector_skipped: false }],
+      ]);
+    });
   });
 
   describe('recordGoalStateMetrics', () => {

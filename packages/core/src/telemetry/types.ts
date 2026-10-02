@@ -1659,7 +1659,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'memory_pressure'
     | 'session_mismatch'
     | 'cooldown'
-    | 'failure_limit';
+    | 'failure_limit'
+    | 'no_user_text';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1674,7 +1675,8 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'memory_pressure'
       | 'session_mismatch'
       | 'cooldown'
-      | 'failure_limit';
+      | 'failure_limit'
+      | 'no_user_text';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;
@@ -1760,9 +1762,11 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
    * True only when the model selector was skipped because the deterministic
    * fast result was a unique, strong, current match (#13003). Keeps a
    * deliberate skip apart from a selector failure, which also reports
-   * `strategy: 'heuristic'`.
+   * `strategy: 'heuristic'`. Undefined when the recall mode had no skip
+   * decision to make (legacy mode), so the metric dimension stays off a
+   * series the experiment cannot move.
    */
-  selector_skipped: boolean;
+  selector_skipped: boolean | undefined;
 
   constructor(params: {
     query_length: number;
@@ -1785,7 +1789,7 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.scan_duration_ms = params.scan_duration_ms ?? 0;
     this.fast_duration_ms = params.fast_duration_ms ?? 0;
     this.selector_duration_ms = params.selector_duration_ms ?? 0;
-    this.selector_skipped = params.selector_skipped ?? false;
+    this.selector_skipped = params.selector_skipped;
   }
 }
 

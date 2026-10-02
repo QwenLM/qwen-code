@@ -28,6 +28,7 @@ import type {
 } from '../core/turn.js';
 import { EditTool } from '../tools/edit.js';
 import { OutputFormat } from '../output/types.js';
+import { RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV } from '../memory/recall-experiment.js';
 import {
   EVENT_API_REQUEST,
   EVENT_API_RESPONSE,
@@ -326,7 +327,7 @@ describe('loggers', () => {
 
   describe('logMemoryRecall', () => {
     const SKIP_SELECTOR_EXPERIMENT_ENV =
-      'QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT';
+      RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV;
 
     const makeRecallEvent = (selectorSkipped: boolean) =>
       new MemoryRecallEvent({
@@ -381,6 +382,28 @@ describe('loggers', () => {
           strategy: 'heuristic',
           docs_selected: 1,
           selector_skipped: true,
+        },
+      );
+    });
+
+    it('drops the selector_skipped metric dimension when the recall had no skip decision', () => {
+      // Legacy-mode recalls never reach the skip guard; stamping a constant
+      // `false` there would mix a no-decision series into the experiment's
+      // control arm.
+      process.env[SKIP_SELECTOR_EXPERIMENT_ENV] = '1';
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = makeRecallEvent(false);
+      // The producer leaves the field unset for a legacy recall.
+      event.selector_skipped = undefined;
+
+      logMemoryRecall(config, event);
+
+      expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
+        config,
+        42,
+        {
+          strategy: 'heuristic',
+          docs_selected: 1,
         },
       );
     });

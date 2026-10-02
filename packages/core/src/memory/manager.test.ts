@@ -1838,6 +1838,7 @@ describe('MemoryManager', () => {
       const completedNoop = (sessionId = 'sess-1') => ({
         touchedTopics: [],
         extractorRan: true as const,
+        cursorAdvanced: true as const,
         cursor: {
           sessionId,
           processedOffset: history.length,
@@ -1894,6 +1895,50 @@ describe('MemoryManager', () => {
         expect(runAutoMemoryExtract).toHaveBeenCalledWith(
           expect.objectContaining({ preserveUnprocessedHistory: true }),
         );
+      });
+
+      it('arms the cooldown on a windowed no-op that stops short of the live end', async () => {
+        // The windowed arm caps the cursor below history.length by
+        // construction, so keying the arm on `processedOffset ===
+        // history.length` never arms in a tool-heavy session — the #13004
+        // waste case. The trigger is an advanced cursor, not the live end.
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+          ...completedNoop(),
+          cursor: {
+            sessionId: 'sess-1',
+            processedOffset: CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+            updatedAt: new Date().toISOString(),
+          },
+        });
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const next = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES),
+        });
+
+        expect(next.skippedReason).toBe('cooldown');
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not arm the cooldown on a completed no-op whose cursor was held', async () => {
+        // The zero-tool-call guard holds the cursor at its opening offset;
+        // that turn must not arm the cooldown even at the live end.
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        const { cursorAdvanced: _dropped, ...heldNoop } = completedNoop();
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(heldNoop);
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const next = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(1),
+        });
+
+        expect(next.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       });
 
       it.each([
@@ -1967,6 +2012,39 @@ describe('MemoryManager', () => {
         ).toHaveLength(2);
       });
 
+      it('accumulates pending entries from the arm point across consecutive skips', async () => {
+        // The arm-point length is written once and never refreshed on a skip:
+        // two skips over a growing history must see 10 then 20 pending — a
+        // one-line rebase to the current length would release the second skip.
+        // The budget is three so the release turn still has cooldown left —
+        // otherwise the release is exhausted-budget, not past-gate.
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '3';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValue(completedNoop());
+        const mgr = new MemoryManager();
+
+        await turn(mgr);
+        const half = MAX_COOLDOWN_PENDING_HISTORY_ENTRIES / 2;
+        const first = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(half),
+        });
+        const second = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(half * 2),
+        });
+        // Past the arm point by more than the gate: runs again even with a
+        // turn of cooldown remaining.
+        const third = await turn(mgr, {
+          isBelowCompactionWarn: () => true,
+          history: grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES + 1),
+        });
+
+        expect(first.skippedReason).toBe('cooldown');
+        expect(second.skippedReason).toBe('cooldown');
+        expect(third.skippedReason).toBeUndefined();
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      });
+
       it.each([false, true])(
         "does not inherit another session's cooldown (completion after switch: %s)",
         async (completeAfterSwitch) => {
@@ -2013,10 +2091,15 @@ describe('MemoryManager', () => {
         ],
         [
           'a cursor held back by the zero-tool-call guard',
-          () => ({
-            ...completedNoop(),
-            cursor: { ...completedNoop().cursor, processedOffset: 0 },
-          }),
+          () => {
+            // Held means "not advanced": the flag stays absent, and the
+            // offset alone must not arm.
+            const { cursorAdvanced: _dropped, ...held } = completedNoop();
+            return {
+              ...held,
+              cursor: { ...held.cursor, processedOffset: 0 },
+            };
+          },
         ],
         [
           'an early return with no extractor run',

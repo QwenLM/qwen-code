@@ -1011,6 +1011,24 @@ describe('auto-memory relevant recall', () => {
       );
     });
 
+    it('leaves selector_skipped unset for a legacy-mode recall even with the knob on', async () => {
+      // The skip guard does not exist in legacy mode, so the recall has no
+      // skip decision to report; a constant `false` would mix into the
+      // experiment's control series.
+      process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = '1';
+      vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult: vi.fn(),
+      });
+
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
     it('keeps the selector when the unique strong fast document has a stale body', async () => {
       const stale = {
         ...exact,

@@ -52,7 +52,8 @@ export interface AutoMemoryExtractResult {
     | 'memory_pressure'
     | 'session_mismatch'
     | 'cooldown'
-    | 'failure_limit';
+    | 'failure_limit'
+    | 'no_user_text';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
   /**
@@ -62,6 +63,15 @@ export interface AutoMemoryExtractResult {
    * those as a completed no-op (#13004).
    */
   extractorRan?: true;
+  /**
+   * True when this run's cursor advanced past the offset it started from.
+   * The cooldown arms on a completed no-op that consumed its window; a cursor
+   * merely held at the live end by the zero-tool-call guard must not arm it,
+   * and a windowed no-op that stops short of `history.length` must be able
+   * to (#13004's tool-heavy-session case, where the window caps below the
+   * live end every turn).
+   */
+  cursorAdvanced?: true;
 }
 
 function getSessionMismatchResult(
@@ -122,8 +132,13 @@ function hasUserText(content: Content): boolean {
     (content.parts ?? []).some(
       (part) =>
         !part.thought &&
-        typeof part.text === 'string' &&
-        stripSystemReminderBlocks(part.text).trim().length > 0,
+        (typeof part.text === 'string'
+          ? stripSystemReminderBlocks(part.text).trim().length > 0
+          : // A media-only user turn (image/file) has no text but is still
+            // user content — counting it as empty would advance the cursor
+            // past a turn no extractor ever sees, and the cursor only moves
+            // forward.
+            part.inlineData !== undefined || part.fileData !== undefined),
     )
   );
 }
@@ -339,7 +354,10 @@ export async function runAutoMemoryExtract(params: {
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
-    return { touchedTopics: [], cursor };
+    // No fork ever ran: name the skip so the task list and telemetry do not
+    // report this turn as a completed no-op extraction (extractorRan stays
+    // absent either way, which is what the cooldown gate keys on).
+    return { touchedTopics: [], skippedReason: 'no_user_text', cursor };
   }
 
   const lateMismatch = getSessionMismatchResult(
@@ -373,7 +391,14 @@ export async function runAutoMemoryExtract(params: {
     // anchor-to-today date claim, which would otherwise convert the
     // segment's relative dates against the drain day. The previous cursor's
     // write time is the nearest proxy for the segment's own date.
-    endOffset < params.history.length
+    endOffset < params.history.length &&
+      // The stamp proxies the window's own date with the previous cursor's
+      // write time — only meaningful for the session that wrote it. A cursor
+      // from another session (or an unattested one) must not relabel today's
+      // opening turns as historical. A session-less cursor (the scaffold's
+      // bootstrap write) is unknown, not a mismatch.
+      (currentCursor.sessionId === undefined ||
+        currentCursor.sessionId === params.sessionId)
       ? { windowAsOf: currentCursor.updatedAt }
       : undefined,
   ).catch((error: unknown) => {
@@ -467,6 +492,10 @@ export async function runAutoMemoryExtract(params: {
       cursor,
       systemMessage: agentResult.systemMessage,
       extractorRan: true,
+      ...(cursor.processedOffset !== undefined &&
+      cursor.processedOffset > startOffset
+        ? { cursorAdvanced: true as const }
+        : {}),
     };
   } catch (error) {
     if (extractionFailure && error === extractionFailure) throw error;

@@ -433,6 +433,9 @@ describe('auto-memory extraction', () => {
       { windowAsOf: expect.any(String) },
     );
     expect(first.cursor.processedOffset).toBe(aligned);
+    // A windowed no-op that advances must be visible to the cooldown gate:
+    // keying on the live end would never fire for this shape (#13004).
+    expect(first.cursorAdvanced).toBe(true);
     const persisted = JSON.parse(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
     );
@@ -446,6 +449,31 @@ describe('auto-memory extraction', () => {
       undefined,
     );
     expect(second.cursor.processedOffset).toBe(history.length);
+  });
+
+  it('does not mark the cursor advanced when a no-op held it at the live end', async () => {
+    // The zero-tool-call guard holds the cursor at its opening offset; the
+    // cooldown must not read that as a consumed window.
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+    });
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Remember: use pnpm.' }] },
+    ];
+
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      preserveUnprocessedHistory: true,
+      history,
+    });
+
+    expect(result.cursor.processedOffset).toBe(0);
+    expect(result.cursorAdvanced).toBeUndefined();
   });
 
   it('backs the pending-window cut off a model functionCall so the response is never orphaned', async () => {
@@ -1428,6 +1456,42 @@ describe('auto-memory extraction', () => {
       );
       expect(result.touchedTopics).toEqual([]);
       expect(result.cursor.processedOffset).toBe(2);
+    });
+
+    it('treats a media-only user turn as user content instead of silently advancing past it', async () => {
+      // partToString renders an inlineData/fileData-only user entry as empty;
+      // counting it as "no user text" would advance the cursor past a turn
+      // the extractor never sees, and the cursor only moves forward.
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'aGVsbG8=',
+              },
+            },
+          ],
+        },
+      ];
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history,
+      });
+
+      expect(vi.mocked(runAutoMemoryExtractionByAgent)).toHaveBeenCalledOnce();
+      expect(result.skippedReason).toBeUndefined();
     });
 
     /**
