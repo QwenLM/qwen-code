@@ -7,6 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HookEventName,
@@ -875,7 +876,9 @@ describe('ManagedHookRuntime', () => {
         expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
           'started\n',
         );
-        const module = (await import(modulePath)) as { release: () => void };
+        const module = (await import(pathToFileURL(modulePath).href)) as {
+          release: () => void;
+        };
         module.release();
         await vi.waitFor(async () => {
           expect(await readFile(path.join(directory, 'counter'), 'utf8')).toBe(
@@ -901,6 +904,81 @@ describe('ManagedHookRuntime', () => {
       }
     },
   );
+
+  it('fails a function handler whose module never settles within its timeout', async () => {
+    const modulePath = path.join(directory, 'stuck-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 50 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      error: { code: 'managed_hook_handler_unavailable' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+  });
+  it('settles a stuck module evaluation as cancelled without wedging close', async () => {
+    const modulePath = path.join(directory, 'stuck-cancel-handler.mjs');
+    await writeFile(
+      modulePath,
+      `await new Promise(() => {});
+       export const registered = { handlerRevision: 1, callback: async () => ({ continue: true }) };`,
+    );
+    const instance = runtime([
+      {
+        ...definition(),
+        config: { type: 'function', timeout: 60_000 },
+        handler: {
+          handlerId: 'stuck',
+          handlerRevision: 1,
+          modulePath,
+          exportName: 'registered',
+        },
+      },
+    ]);
+    const call = request();
+    await instance.control('runtime-session', call);
+    await vi.waitFor(async () => {
+      const view = await instance.control('runtime-session', {
+        kind: 'hook-status',
+        sessionKey: key,
+        operationId: 'probe',
+        targetOperationId: call.operationId,
+      });
+      expect(view.state).toBe('running');
+    });
+    await instance.control('runtime-session', {
+      kind: 'hook-cancel',
+      sessionKey: key,
+      operationId: 'cancel',
+      targetOperationId: call.operationId,
+    });
+    const receipt = await settled(instance);
+    expect(receipt).toMatchObject({
+      state: 'settled',
+      result: { outcome: 'cancelled' },
+    });
+    expect(instance.hasHolds('runtime-session')).toBe(false);
+    expect(await instance.control('runtime-session', call)).toEqual(receipt);
+    await instance.close();
+  });
 
   it('keeps oversized output as a bounded failure receipt without replay', async () => {
     const modulePath = path.join(directory, 'large-handler.mjs');

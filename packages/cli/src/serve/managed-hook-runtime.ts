@@ -75,6 +75,44 @@ export class ManagedHookError extends Error {
   }
 }
 
+class ManagedHookImportAbortedError extends Error {}
+
+// Module evaluation runs before HookRunner enforces the manifest timeout and
+// abort signal, so bound it here with both; a stuck top-level await must not
+// pin an admission slot or hold close() open forever.
+function importHookModule(
+  modulePath: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const timer = setTimeout(
+      () => finish(new ManagedHookError('managed_hook_handler_unavailable')),
+      timeoutMs,
+    );
+    const onAbort = () => finish(new ManagedHookImportAbortedError());
+    function finish(error?: Error, module?: Record<string, unknown>) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve(module as Record<string, unknown>);
+    }
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    import(pathToFileURL(modulePath).href).then(
+      (module) => finish(undefined, module as Record<string, unknown>),
+      (error: unknown) =>
+        finish(error instanceof Error ? error : new Error(String(error))),
+    );
+  });
+}
+
 const identifier = /^[a-zA-Z0-9:_.-]{1,512}$/u;
 const MAX_OPERATIONS = 4096;
 const MAX_BYTES = 60 * 1024;
@@ -702,8 +740,10 @@ export class ManagedHookRuntime {
         const handler = definition.handler!;
         let registered: Record<string, unknown>;
         try {
-          const module: Record<string, unknown> = await import(
-            pathToFileURL(handler.modulePath).href
+          const module = await importHookModule(
+            handler.modulePath,
+            definition.config.timeout,
+            entry.controller.signal,
           );
           registered = object(module[handler.exportName]);
           if (
@@ -713,7 +753,15 @@ export class ManagedHookRuntime {
               typeof registered['onHookSuccess'] !== 'function')
           )
             throw new Error('handler revision unavailable');
-        } catch {
+        } catch (error) {
+          if (error instanceof ManagedHookImportAbortedError) {
+            entry.view = {
+              operationId: control.operationId,
+              state: 'settled',
+              result: { success: false, outcome: 'cancelled', duration: 0 },
+            };
+            return;
+          }
           throw new ManagedHookError('managed_hook_handler_unavailable');
         }
         const callback = registered['callback'] as FunctionHookCallback;
