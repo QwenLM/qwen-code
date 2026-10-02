@@ -195,8 +195,9 @@ vi.mock('./lib/paths.js', async (importOriginal) => {
     LEASE_PREFIX: 'qwen-review-lease-',
     REVIEW_TMP_DIR: '/repo/.qwen/tmp',
     tmpFile: (target: string, suffix: string) =>
-      `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
-    tmpPrefix: (target: string) => `qwen-review-${target}-`,
+      `/repo/.qwen/tmp/qwen-review-${target}~${suffix}`,
+    // Real tmpPrefix: the dash-twin sweep below is the prefix-free property,
+    // and a restated mock would stay green while the helper drifted.
   };
 });
 
@@ -624,7 +625,7 @@ describe('runCleanup', () => {
     // every later cleanup, and nothing sweeps it automatically.
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockReturnValue(true);
-    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-diff.txt']);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123~diff.txt']);
     mocks.rmSync.mockImplementation(() => {
       throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
     });
@@ -661,7 +662,7 @@ describe('runCleanup', () => {
     // gate would reach for the holder's side files and trip the
     // rmSync-not-called assertion below.
     mocks.existsSync.mockReturnValue(true);
-    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-diff.txt']);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123~diff.txt']);
 
     runCleanup('pr-123');
 
@@ -803,7 +804,7 @@ describe('runCleanup', () => {
       // Neither of these belongs to this review: one is another PR's scratch
       // tree, the other an ordinary side file.
       'review-pr-999-scratch-verify--round-1--ccc',
-      'qwen-review-pr-123-diff.txt',
+      'qwen-review-pr-123~diff.txt',
     ] as unknown as []);
 
     runCleanup('pr-123');
@@ -1016,13 +1017,13 @@ describe('runCleanup', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockReturnValue(true);
     mocks.readdirSync.mockReturnValue([
-      'qwen-review-lease-diff.txt',
+      'qwen-review-lease~diff.txt',
       'qwen-review-lease-pr-999.json',
     ]);
 
     runCleanup('lease');
 
-    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-lease-diff.txt');
+    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-lease~diff.txt');
     expect(mocks.rmSync).toHaveBeenCalledWith(sideFile, {
       recursive: true,
       force: true,
@@ -1039,11 +1040,11 @@ describe('runCleanup', () => {
     // prefix, not on the sweep itself.
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockReturnValue(true);
-    mocks.readdirSync.mockReturnValue(['qwen-review-local-diff.txt']);
+    mocks.readdirSync.mockReturnValue(['qwen-review-local~diff.txt']);
 
     runCleanup('local');
 
-    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-local-diff.txt');
+    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-local~diff.txt');
     expect(mocks.rmSync).toHaveBeenCalledWith(sideFile, {
       recursive: true,
       force: true,
@@ -1051,6 +1052,33 @@ describe('runCleanup', () => {
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       `Removed temp file: ${sideFile}`,
     );
+  });
+
+  it("does not delete a dash-extended twin target's artifacts (#10057)", () => {
+    // safeTarget keeps dashes, and tmpPrefix used to join with another dash,
+    // so `src/foo` (token `src_foo`) was a strict prefix of `src/foo-bar`
+    // (token `src_foo-bar`). Cleanup's startsWith sweep then deleted the
+    // twin's live family — file/local reviews take no lease, so nothing
+    // blocked the interleaving.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    const own = 'qwen-review-src_foo~diff.txt';
+    const twinArtifacts = [
+      'qwen-review-src_foo-bar-diff.txt',
+      'qwen-review-src_foo-bar-findings.json',
+      'qwen-review-src_foo-bar-composed.json',
+      'qwen-review-src_foo-bar-stop.json',
+      'qwen-review-src_foo-bar~diff.txt',
+    ];
+    mocks.readdirSync.mockReturnValue([own, ...twinArtifacts]);
+
+    runCleanup('src/foo');
+
+    const removed = mocks.rmSync.mock.calls.map((c) => String(c[0]));
+    expect(removed).toContain(join('/repo/.qwen/tmp', own));
+    for (const file of twinArtifacts) {
+      expect(removed).not.toContain(join('/repo/.qwen/tmp', file));
+    }
   });
 
   it('keeps the record directory of a NON-CONVERGED reverse audit (#9206)', () => {
@@ -1061,9 +1089,9 @@ describe('runCleanup', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockReturnValue(true);
     mocks.readdirSync.mockReturnValue([
-      'qwen-review-pr-123-fetch.json',
-      'qwen-review-pr-123-fetch-prompts',
-      'qwen-review-pr-123-diff.txt',
+      'qwen-review-pr-123~fetch.json',
+      'qwen-review-pr-123~fetch-prompts',
+      'qwen-review-pr-123~diff.txt',
     ]);
     mocks.readFileSync.mockImplementation((path: string): string => {
       if (path.endsWith('budget-stop.json')) {
@@ -1085,14 +1113,14 @@ describe('runCleanup', () => {
     runCleanup('pr-123');
 
     const removed = mocks.rmSync.mock.calls.map((c) => c[0]);
-    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-fetch.json');
-    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123-diff.txt');
+    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123~fetch.json');
+    expect(removed).toContain('/repo/.qwen/tmp/qwen-review-pr-123~diff.txt');
     expect(removed).not.toContain(
-      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      '/repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
     );
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       ),
     );
   });
@@ -1106,7 +1134,7 @@ describe('runCleanup', () => {
     mocks.existsSync.mockReturnValue(true);
     mocks.readdirSync.mockImplementation((p: string): string[] =>
       p === '/repo/.qwen/tmp'
-        ? ['qwen-review-pr-123-fetch.json', 'qwen-review-pr-123-fetch-prompts']
+        ? ['qwen-review-pr-123~fetch.json', 'qwen-review-pr-123~fetch-prompts']
         : ['reverse-audit--chunk-13--round-1--abc.txt'],
     );
     // No marker — the readFileSync default throws for budget-stop.json.
@@ -1118,12 +1146,12 @@ describe('runCleanup', () => {
     runCleanup('pr-123');
 
     expect(mocks.rmSync).not.toHaveBeenCalledWith(
-      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      '/repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       expect.anything(),
     );
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       ),
     );
   });
@@ -1135,17 +1163,17 @@ describe('runCleanup', () => {
     // and "Nothing to clean" must NOT print while something was kept.
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockImplementation((p: string) => p === '/repo/.qwen/tmp');
-    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123-fetch-prompts']);
+    mocks.readdirSync.mockReturnValue(['qwen-review-pr-123~fetch-prompts']);
 
     runCleanup('pr-123');
 
     expect(mocks.rmSync).not.toHaveBeenCalledWith(
-      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      '/repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       expect.anything(),
     );
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       ),
     );
     expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
@@ -1162,7 +1190,7 @@ describe('runCleanup', () => {
     mocks.existsSync.mockReturnValue(true);
     mocks.readdirSync.mockImplementation((p: string): string[] =>
       p === '/repo/.qwen/tmp'
-        ? ['qwen-review-pr-123-fetch.json', 'qwen-review-pr-123-fetch-prompts']
+        ? ['qwen-review-pr-123~fetch.json', 'qwen-review-pr-123~fetch-prompts']
         : [],
     );
     const planNow = Date.now();
@@ -1191,12 +1219,12 @@ describe('runCleanup', () => {
     runCleanup('pr-123');
 
     expect(mocks.rmSync).not.toHaveBeenCalledWith(
-      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      '/repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       expect.anything(),
     );
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Kept /repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+        'Kept /repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       ),
     );
   });
@@ -1208,15 +1236,15 @@ describe('runCleanup', () => {
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.existsSync.mockReturnValue(true);
     mocks.readdirSync.mockReturnValue([
-      'qwen-review-pr-123-fetch.json',
-      'qwen-review-pr-123-fetch-prompts',
+      'qwen-review-pr-123~fetch.json',
+      'qwen-review-pr-123~fetch-prompts',
     ]);
     mocks.readFileSync.mockReturnValue(JSON.stringify({}));
 
     runCleanup('pr-123');
 
     expect(mocks.rmSync).toHaveBeenCalledWith(
-      '/repo/.qwen/tmp/qwen-review-pr-123-fetch-prompts',
+      '/repo/.qwen/tmp/qwen-review-pr-123~fetch-prompts',
       { recursive: true, force: true },
     );
   });
@@ -1398,7 +1426,7 @@ describe('runCleanup — bypass-write audit', () => {
     runCleanup('pr-123');
 
     expect(mocks.readFileSync).toHaveBeenCalledWith(
-      '/repo/.qwen/tmp/qwen-review-pr-123-fetch.json',
+      '/repo/.qwen/tmp/qwen-review-pr-123~fetch.json',
       'utf8',
     );
     expect(mocks.setGhHost).toHaveBeenCalledWith('ghe.example.com');
