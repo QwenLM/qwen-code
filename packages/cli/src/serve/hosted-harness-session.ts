@@ -147,8 +147,11 @@ interface HostedSession {
   mcpRecovering?: boolean;
   approval?: HostedApprovalSettings;
   waiters: HostedApprovalWaiters;
-  /** A recovery load acquired the Runtime Session for this promptId;
-   * whichever terminal route runs must release it. */
+  /** A recovery load acquired the Runtime Session for this promptId. Only
+   * the terminal success route and session teardown hand it back;
+   * retry-inviting refusals deliberately leave it owed, because a release
+   * persists RELEASED forever while a stranded READY lease is re-admitted
+   * against the current checkpoint or re-acquired idempotently. */
   runtimeLeaseHeld?: string;
 }
 
@@ -2433,10 +2436,11 @@ export function registerHostedHarnessSessionRoutes(
     session.managed.activation.activationId === activationId &&
     unsettledPromptId(session) === promptId;
 
-  // A recovery load may hold the Runtime Session; whichever terminal route
-  // runs must release it, or the workspace lease stays pinned forever. The
-  // flag clears only once the release is confirmed, so a failed handback
-  // stays owed and the next terminal route retries it.
+  // A recovery load may hold the Runtime Session. Terminal routes hand it
+  // back — or the workspace lease stays pinned forever — but retry-inviting
+  // refusals must not (see the field doc): a release persists RELEASED.
+  // The flag clears only once the release is confirmed, so a failed
+  // handback stays owed and the next terminal route retries it.
   const releaseRecoveredRuntime = (session: HostedSession): void => {
     const promptId = session.runtimeLeaseHeld;
     if (promptId === undefined || !brokerOptions) return;
@@ -2762,15 +2766,24 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (!matchesRecovery(session, promptId, checkpointId, activationId)) {
+    // A redriven cancellation carries its load-time identity, but the
+    // checkpoint may legitimately have advanced underneath: an earlier
+    // attempt settled the executions and then failed before the terminal
+    // record. The coordinator never re-loads an attached Session, so the
+    // fence is the activation plus the unsettled Turn — admit those against
+    // the current checkpoint instead of refusing the only retry there is.
+    const attachedToUnsettled =
+      session.managed.activation.activationId === activationId &&
+      unsettledPromptId(session) === promptId;
+    if (!attachedToUnsettled) {
       if (settledReplay(session, promptId, res)) {
         releaseRecoveredRuntime(session);
         return;
       }
-      // A mismatched cancel against a still-unsettled Turn is not a
-      // teardown: the live flow may itself have advanced the checkpoint, so
-      // keep the lease owed and re-acquirable — the same owed discipline as
-      // the refusals above. Only a genuinely settled replay hands it back.
+      // A foreign-epoch cancel against a stranger's or settled Turn is not a
+      // teardown: keep the lease owed and re-acquirable — the same owed
+      // discipline as the refusals above. Only a genuinely settled replay
+      // hands it back.
       return error(res, 409, 'hosted_recovery_identity_mismatch');
     }
     const sessionId = req.params['id'];
@@ -2848,17 +2861,27 @@ export function registerHostedHarnessSessionRoutes(
         // retry, while a stranded READY lease is re-acquired idempotently.
         // It must also stay after the stop loop: the Broker refuses with
         // runtime_session_busy while an execution is active.
-        await broker.release().catch((cause: unknown) => {
-          if (
-            cause instanceof HostedWorkspaceBrokerRejection &&
-            cause.status === 404
-          )
-            return;
-          throw cause;
-        });
-        // The release above discharged the lease the load adopted, or it
-        // never existed; do not let the teardown retry a doomed handback.
-        session.runtimeLeaseHeld = undefined;
+        const handedBack = await broker.release().then(
+          () => true,
+          (cause: unknown) => {
+            if (
+              cause instanceof HostedWorkspaceBrokerRejection &&
+              cause.status === 404
+            )
+              return true;
+            // The Turn is already durable, so a handback failure must not
+            // refuse an answered cancellation. Leave the lease owed; later
+            // replays and the session close retry it.
+            writeStderrLineSafe(
+              `qwen serve: Hosted Harness could not hand back the recovered Runtime Session: ${String(cause)}`,
+            );
+            return false;
+          },
+        );
+        if (handedBack)
+          // The release discharged the lease the load adopted, or it never
+          // existed; the teardown skips what is now a redundant handback.
+          session.runtimeLeaseHeld = undefined;
         // Answer at the admission watermark: the cancelled turn_result
         // streams in from there, and a replayed cancel replays it exactly.
         res.status(200).json({

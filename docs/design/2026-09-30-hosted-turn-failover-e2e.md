@@ -71,8 +71,13 @@ takeover is implemented for contract completeness but has no E2E mode.
   before answering. A passive load (the coordinator's cancellation path)
   first adopts the dead owner's Runtime Session — acquiring dispatches
   nothing — then reads execution status and reports `known`/`unknown`. The
-  load holds the adoption: owed to the retried takeover on failure, handed
-  to the terminal cancel route on success — it never releases it itself.
+  load holds the adoption and never releases it itself: on success the
+  terminal cancel route hands the lease back; on failure it stays owed,
+  because a release persists RELEASED while a stranded READY identity is
+  still usable — a redriven cancel is re-admitted against the current
+  checkpoint (the daemon never re-loads an attached Session), and a
+  takeover after an owner change re-acquires idempotently. Only session
+  retirement discharges an abandonment.
   Executions the Broker cannot account for report `unknown`, the coordinator
   blocks the Turn as `managed_runtime_recovery_blocked`, and nothing replays.
 - **Continue runs the model from `results_ready`; cancel settles without new

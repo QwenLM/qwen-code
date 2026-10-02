@@ -53,8 +53,11 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   每个挂起执行 —— Broker 的持久记录保证恰好一次 —— 提交工具结果并在应答前把 checkpoint
   推进到 `results_ready`。passive load（协调器的取消路径）先接管已 dead 的 owner
   留下的 Runtime Session —— acquire 不派发任何东西 —— 然后读取执行状态并上报
-  `known`/`unknown`。load 持有该接管：失败时欠给重试的接管，成功时交给终结的
-  cancel 路由，自身从不释放。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
+  `known`/`unknown`。load 持有该接管、自身从不释放：成功时由终结的 cancel
+  路由交还租约；失败时留作欠账——因为一次 release 会持久化为 RELEASED，而搁浅的
+  READY 身份仍然可用：重驱动的 cancel 会按当前 checkpoint 被重新接纳（daemon
+  不会对已 attach 的会话重新 load），owner 变更后的接管则幂等重 acquire。
+  只有会话退休才会清偿一次遗弃。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
   `managed_runtime_recovery_blocked`，什么都不重放。
 - **continue 从 `results_ready` 起跑模型；cancel 不做新工作直接结算。**
   `managed-runtime/continue` 校验 prompt、checkpoint 与 activation 身份，以 200 回执准入
