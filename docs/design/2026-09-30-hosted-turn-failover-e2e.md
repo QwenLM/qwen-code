@@ -68,8 +68,11 @@ takeover is implemented for contract completeness but has no E2E mode.
   `executionCallId`. A continuation load re-dispatches each parked execution
   through `execute` — the Broker's durable record makes that exactly-once —
   commits the tool result, and advances the checkpoint to `results_ready`
-  before answering. A passive load (the coordinator's cancellation path) only
-  reads execution status and reports `known`/`unknown` without dispatching.
+  before answering. A passive load (the coordinator's cancellation path)
+  first adopts the dead owner's Runtime Session — acquiring dispatches
+  nothing — then reads execution status and reports `known`/`unknown`. The
+  load holds the adoption: owed to the retried takeover on failure, handed
+  to the terminal cancel route on success — it never releases it itself.
   Executions the Broker cannot account for report `unknown`, the coordinator
   blocks the Turn as `managed_runtime_recovery_blocked`, and nothing replays.
 - **Continue runs the model from `results_ready`; cancel settles without new
@@ -110,7 +113,7 @@ takeover is implemented for contract completeness but has no E2E mode.
 | ------------ | ------------------------------------------------------------------------------- | ------------------------- |
 | Core journal | `message.delta` event kind (schema, harness actor, activation subject)          | Managed Session log       |
 | CLI Harness  | Recovery snapshot + settlement on load; continue/cancel routes; delta streaming | Hosted Harness sessions   |
-| CLI Broker   | `status` read for passive reports                                               | Workspace Broker          |
+| CLI Broker   | acquire + `status` read + release for passive reports                           | Workspace Broker          |
 | Java API     | `TrustedActorHeaderFilter` + property, default off                              | Deployment opt-in         |
 | E2E runner   | Ungate; Workspace seeding, mounts and actor wiring; `write_file` side effect    | Local and CI verification |
 | CI workflow  | MySQL binaries + both failover modes in `hosted-harness-mysql`                  | Hosted MySQL job          |

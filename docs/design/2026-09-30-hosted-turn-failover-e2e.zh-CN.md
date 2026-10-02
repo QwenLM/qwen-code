@@ -51,8 +51,10 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
   可运行（`await_runtime` 或 `results_ready`）且带 Workspace 工具 profile 的会话，Harness
   按原 `executionCallId` 逐个向 Broker 解决在途执行。continuation load 经 `execute` 重派发
   每个挂起执行 —— Broker 的持久记录保证恰好一次 —— 提交工具结果并在应答前把 checkpoint
-  推进到 `results_ready`。passive load（协调器的取消路径）只读执行状态并上报
-  `known`/`unknown`，不派发。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
+  推进到 `results_ready`。passive load（协调器的取消路径）先接管已 dead 的 owner
+  留下的 Runtime Session —— acquire 不派发任何东西 —— 然后读取执行状态并上报
+  `known`/`unknown`。load 持有该接管：失败时欠给重试的接管，成功时交给终结的
+  cancel 路由，自身从不释放。Broker 无法交代的执行上报 `unknown`，协调器把该轮次阻塞为
   `managed_runtime_recovery_blocked`，什么都不重放。
 - **continue 从 `results_ready` 起跑模型；cancel 不做新工作直接结算。**
   `managed-runtime/continue` 校验 prompt、checkpoint 与 activation 身份，以 200 回执准入
@@ -82,7 +84,7 @@ Workspace 绑定文件工具会话的公开准入，但在打包栈上实际运�
 | ------------ | --------------------------------------------------------------------- | ------------------------- |
 | core journal | `message.delta` 事件类型（schema、harness actor、activation subject） | Managed Session 日志      |
 | CLI Harness  | load 恢复快照与结算；continue/cancel 路由；delta 流式提交             | Hosted Harness 会话       |
-| CLI Broker   | 供 passive 上报的 `status` 读取                                       | Workspace Broker          |
+| CLI Broker   | 供 passive 上报的 acquire + `status` 读取 + release                   | Workspace Broker          |
 | Java API     | `TrustedActorHeaderFilter` 与属性，默认关闭                           | 部署 opt-in               |
 | E2E runner   | 解禁；Workspace 种子、mount 与 actor 接线；`write_file` 副作用        | 本地与 CI 验证            |
 | CI workflow  | MySQL 二进制 + 两个 failover 模式进 `hosted-harness-mysql`            | Hosted MySQL 任务         |

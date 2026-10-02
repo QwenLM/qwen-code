@@ -957,7 +957,7 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('releases the adopted session when the final authorization fails on a passive load', async () => {
+  it('leaves the adoption owed when the final authorization fails on a passive load', async () => {
     await parkAtAwaitRuntime();
     const acquire = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
@@ -968,9 +968,9 @@ describe('recoverHostedRuntimeTurn', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'prepared',
     });
-    const replacement = await open('boot-2', false);
+    const first = await open('boot-2', false);
     try {
-      const authority = replacement.authority;
+      const authority = first.authority;
       const original = authority.harnessRunAuthorization.bind(authority);
       let authorizationCalls = 0;
       vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
@@ -981,7 +981,7 @@ describe('recoverHostedRuntimeTurn', () => {
       });
       await expect(
         recoverHostedRuntimeTurn({
-          session: replacement,
+          session: first,
           sessionId: SESSION_ID,
           cwd: root,
           promptId: PROMPT_ID,
@@ -990,11 +990,91 @@ describe('recoverHostedRuntimeTurn', () => {
         }),
       ).rejects.toThrow('store hiccup');
       expect(acquire).toHaveBeenCalledOnce();
-      // The session authority is unreadable, so no retry comes; the adopted
-      // lease must not strand the Workspace.
-      expect(release).toHaveBeenCalledTimes(1);
+      // The load route offers the coordinator a retry, so a release here
+      // would persist RELEASED and wedge every retried acquire with
+      // runtime_session_not_acquirable.
+      expect(release).not.toHaveBeenCalled();
     } finally {
-      await replacement.close();
+      await first.close();
+    }
+    // The retried takeover re-acquires the same identity — idempotent
+    // server-side — and produces the report.
+    const second = await open('boot-3', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: second,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(recovered).toBeDefined();
+      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('leaves the adoption owed when the final authorization is not runnable on a passive load', async () => {
+    await parkAtAwaitRuntime();
+    const acquire = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'prepared',
+    });
+    const first = await open('boot-2', false);
+    try {
+      const authority = first.authority;
+      const original = authority.harnessRunAuthorization.bind(authority);
+      let authorizationCalls = 0;
+      vi.spyOn(authority, 'harnessRunAuthorization').mockImplementation(() => {
+        authorizationCalls += 1;
+        if (authorizationCalls === 2)
+          // A transiently blocked authorization is not a reason to release:
+          // the coordinator retries the load, and a release would wedge it.
+          return Promise.resolve({
+            status: 'blocked',
+            reason: 'missing_state',
+          } as never);
+        return original();
+      });
+      const recovered = await recoverHostedRuntimeTurn({
+        session: first,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(recovered).toBeUndefined();
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await first.close();
+    }
+    const second = await open('boot-3', false);
+    try {
+      const recovered = await recoverHostedRuntimeTurn({
+        session: second,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: true,
+      });
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(recovered).toBeDefined();
+      expect(recovered!.acquiredRuntime).toBe(true);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await second.close();
     }
   });
 });

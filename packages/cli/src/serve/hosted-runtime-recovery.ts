@@ -331,13 +331,18 @@ export async function recoverHostedRuntimeTurn(input: {
   if (passive && items.length > 0) {
     // A replacement Broker answers status, cancel and release only for a
     // Runtime Session it has adopted, so the cancellation path re-attaches
-    // to the dead owner's one first. Acquiring dispatches nothing. A failed
-    // takeover must not compensate-release though: releasing persists the
-    // record as RELEASED, and every retried acquire of the same identity
-    // then conflicts with 409 runtime_session_not_acquirable. The adoption
-    // stays owed to the retried takeover or the cancel route instead —
-    // re-acquiring a READY session under the same identity is idempotent
-    // server-side.
+    // to the dead owner's one first. Acquiring dispatches nothing.
+    //
+    // The passive path never compensation-releases: a release persists the
+    // record as RELEASED, every retried acquire of the same identity then
+    // conflicts with 409 runtime_session_not_acquirable, and a load that
+    // throws leaves no harness-side record a route could hand back. The
+    // adoption instead stays owed to the retried takeover, which re-acquires
+    // a READY session under the same identity idempotently server-side; a
+    // load that reports successfully hands the lease to the cancel route.
+    // The continuation takeover keeps its #13083 handback discipline for
+    // now — whether the same wedge reasoning applies there is a recorded
+    // follow-up, not settled by this change.
     await broker.acquire();
     acquiredRuntime = true;
   }
@@ -488,9 +493,10 @@ export async function recoverHostedRuntimeTurn(input: {
   try {
     finalAuthorization = await session.authority.harnessRunAuthorization();
   } catch (cause) {
-    // The caller only learns about the lease from a returned report, so a
-    // rejection here must hand it back first.
-    if (acquiredRuntime) {
+    // A failed continuation hands the lease back — but a passive load must
+    // not (see the adoption comment above): its retried takeover re-acquires
+    // the READY identity idempotently, while a release would wedge it.
+    if (acquiredRuntime && !passive) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
@@ -501,7 +507,9 @@ export async function recoverHostedRuntimeTurn(input: {
     throw cause;
   }
   if (finalAuthorization.status !== 'runnable') {
-    if (acquiredRuntime) {
+    // Same split as the catch above: only the continuation path hands its
+    // lease back here; a passive load leaves the adoption owed.
+    if (acquiredRuntime && !passive) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
