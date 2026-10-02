@@ -584,6 +584,7 @@ export class ChatCompressionService {
             .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
         }
       } catch (err) {
+        if (hookSystem.isManaged()) throw err;
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
     }
@@ -1341,6 +1342,7 @@ export class ChatCompressionService {
             signal,
           );
       } catch (err) {
+        if (config.getHookSystem()?.isManaged()) throw err;
         config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
       }
 
