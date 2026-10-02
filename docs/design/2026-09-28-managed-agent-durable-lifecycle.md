@@ -55,7 +55,8 @@ original operation, and that a different payload under the same key conflicts.
 - Erasing a deleted Session's content and purging tombstones and operations
   after the retry window. Both belong to the retention work.
 - The `failed`, `cancelled` and `recovery_blocked` outcomes. D4 operations retry
-  until they complete (4.5).
+  within the `dispatch.max-operation-retries` budget and complete unconfirmed
+  once it is spent (4.5).
 
 ## 4. Decisions
 
@@ -184,12 +185,17 @@ loses nothing.
 
 A failed attempt returns the operation to pending with the dispatch backoff,
 from `dispatch.retry-initial-delay` doubling to `dispatch.retry-max-delay`, and
-counts it. There is no last attempt: an operation completes only after its
+counts it. The retries are bounded by `dispatch.max-operation-retries`
+(default 10): while the budget lasts, an operation completes only after its
 steps succeed, so the `202` never claims that tools stopped, and an operation
-whose Harness keeps failing stays `running`. After the Hosted Harness
-restarts, the Java connector keeps the previous boot, so its calls fail with a
-generation error until Java restarts too, as Turn dispatch does; the operation
-waits meanwhile, and then until the old process's writer lease expires.
+whose Harness keeps failing stays `running`. When the budget is spent, the
+operation stops retrying, still drains the Runtime binding best-effort, and
+completes unconfirmed (`admission_stage` stays `java_durable`), so a Session
+whose settle can never succeed still reaches its terminal state instead of
+looping forever. After the Hosted Harness restarts, the Java connector keeps
+the previous boot, so its calls fail with a generation error until Java
+restarts too, as Turn dispatch does; the operation waits meanwhile — within
+the same budget — and then until the old process's writer lease expires.
 
 A Harness that stopped writing the Session's journal cannot close it either.
 After any failed journal commit, for example one made while Java or its
@@ -198,8 +204,10 @@ Session, and its close first records that its activation ended, so it answers
 every attempt with `503`. Its writer lease can stay live, because the writer's
 own renewal keeps running, so no other server can complete the close; the
 operation stays `running` until that Harness restarts, and Java with it as
-above. Only when that lease lapses too can another server's Harness complete it
-(step 2). D4 does not complete such a close without the Harness: section 10 of
+above — or until the operation's retry budget is spent, in which case it
+completes unconfirmed as described above. Only when that lease lapses too can
+another server's Harness complete it (step 2). D4 does not complete such a
+close without the Harness while the budget lasts: section 10 of
 the [contract][contract] keeps close and delete behind the existing Hooks and
 resource settlement, and only the Harness can report that its Session settled.
 

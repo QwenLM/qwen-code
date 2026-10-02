@@ -45,6 +45,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -57,6 +59,8 @@ import java.util.Locale;
 
 @Repository
 public class ManagedAgentStore implements AgentStateStore {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedAgentStore.class);
     private static final TypeReference<List<Map<String, Object>>> INPUT_TYPE =
             new TypeReference<>() {
             };
@@ -1118,11 +1122,18 @@ public class ManagedAgentStore implements AgentStateStore {
         long expected = covered + 1;
         for (EventRecord event : events) {
             if (event.sequence() != expected) {
-                throw new IllegalStateException(
-                        "Message projection event sequence has a gap");
+                // A gap is permanent: appendEvent allocates a sequence under
+                // the session row lock this method already holds, so no
+                // missing sequence can still appear. Skipping ahead once
+                // beats throwing on every scan and wedging the projection.
+                LOG.error("Message projection skips a permanent event gap"
+                                + " tenant={} session={} missingSequences={}-{}"
+                                + " nextEvent={}",
+                        tenantId, sessionId, expected, event.sequence() - 1,
+                        event.sequence());
             }
             materializeEvent(event);
-            expected++;
+            expected = event.sequence() + 1;
         }
         long nextCovered = events.get(events.size() - 1).sequence();
         long now = clock.millis();

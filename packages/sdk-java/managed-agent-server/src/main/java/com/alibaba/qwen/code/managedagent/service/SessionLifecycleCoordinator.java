@@ -22,8 +22,9 @@ import org.springframework.stereotype.Component;
  * active Session closes it in the Hosted Harness and waits until no Harness
  * holds the Session's journal writer; every operation then drains the
  * Session's Runtime binding and completes. A failed attempt is retried with
- * the dispatch backoff until it succeeds, so an operation never completes
- * before these steps.
+ * the dispatch backoff; once the retry budget is spent the operation
+ * completes unconfirmed rather than retrying forever, so a Session whose
+ * settle can never succeed still reaches a terminal state.
  */
 @Component
 public class SessionLifecycleCoordinator {
@@ -39,6 +40,7 @@ public class SessionLifecycleCoordinator {
     private final Duration leaseDuration;
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
+    private final int maxOperationRetries;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
 
@@ -56,6 +58,8 @@ public class SessionLifecycleCoordinator {
         this.retryInitialDelay = properties.getDispatch()
                 .getRetryInitialDelay();
         this.retryMaxDelay = properties.getDispatch().getRetryMaxDelay();
+        this.maxOperationRetries = properties.getDispatch()
+                .getMaxOperationRetries();
     }
 
     public void dispatch(String tenantId, String sessionId,
@@ -99,6 +103,37 @@ public class SessionLifecycleCoordinator {
                         tenantId, sessionId, operationId);
             }
         } catch (RuntimeException error) {
+            if (claimed.attemptCount() >= maxOperationRetries) {
+                LOG.error("Managed Session operation exhausted retries"
+                                + " tenant={} session={} operation={}"
+                                + " attempts={}",
+                        tenantId, sessionId, operationId,
+                        claimed.attemptCount(), error);
+                // Settle can never succeed (e.g. another live Harness keeps
+                // the journal writer), so the operation completes
+                // unconfirmed instead of retrying forever. The Runtime
+                // binding is still drained first: a session recorded as
+                // closed must not stay warmable.
+                try {
+                    runtimeWarmer.drain(sessionId).toCompletableFuture()
+                            .join();
+                } catch (RuntimeException drainError) {
+                    LOG.warn("Managed Session operation drain failed"
+                                    + " tenant={} session={} operation={}"
+                                    + " failure={}",
+                            tenantId, sessionId, operationId,
+                            drainError.getMessage());
+                }
+                if (!store.completeOperation(tenantId, sessionId,
+                        operationId, owner, claimed.claimGeneration(),
+                        false)) {
+                    LOG.warn("Managed Session operation was claimed by"
+                                    + " another worker tenant={} session={}"
+                                    + " operation={}",
+                            tenantId, sessionId, operationId);
+                }
+                return;
+            }
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
             store.retryOperation(tenantId, sessionId, operationId, owner,

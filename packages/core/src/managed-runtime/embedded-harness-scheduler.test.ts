@@ -15,6 +15,31 @@ import {
   type ManagedActivationDescriptor,
 } from './managed-activation-store.js';
 
+// Journal fault injection: a failed append whose tail repair succeeds is a
+// transient store failure; one whose repair fails is consistency damage.
+const fsFault = vi.hoisted(() => ({ failAppends: 0, failTruncates: 0 }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    appendFile: async (...args: Parameters<typeof original.appendFile>) => {
+      if (fsFault.failAppends > 0) {
+        fsFault.failAppends--;
+        throw new Error('disk busy');
+      }
+      return original.appendFile(...args);
+    },
+    truncate: async (...args: Parameters<typeof original.truncate>) => {
+      if (fsFault.failTruncates > 0) {
+        fsFault.failTruncates--;
+        throw new Error('repair failed');
+      }
+      return original.truncate(...args);
+    },
+  };
+});
+
 function activation(
   activationId: string,
   overrides: Partial<ManagedActivationDescriptor> = {},
@@ -62,6 +87,8 @@ describe('EmbeddedHarnessScheduler', () => {
   afterEach(async () => {
     for (const scheduler of schedulers) scheduler.dispose();
     schedulers.length = 0;
+    fsFault.failAppends = 0;
+    fsFault.failTruncates = 0;
     vi.useRealTimers();
     await rm(root, { recursive: true, force: true });
   });
@@ -293,6 +320,333 @@ describe('EmbeddedHarnessScheduler', () => {
       expect.objectContaining({ activationId: 'a1' }),
       expect.objectContaining({ message: 'handler failed' }),
     );
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
+  // Issue #13182 finding 4, hardened ahead of the scheduler's first
+  // production wiring: a memory-blocked pump must arm its own recovery
+  // source — a missed notifyCapacityChanged() must not starve queued
+  // activations forever.
+  it('recovers queued work when memory pressure relieves without a notification', async () => {
+    const store = await FileManagedActivationStore.open(filePath);
+    let hasMemory = false;
+    const handled = vi.fn();
+    const item = activation('a1');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => hasMemory,
+      handler: async () => {
+        handled();
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+    await waitUntil(() => scheduler.isMemoryBlocked);
+    expect(store.get(item)?.status).toBe('queued');
+
+    // Memory pressure relieves, but the capacity notification is missed:
+    // the embedder's monitor fired on pressure and not on relief, or it was
+    // never wired. The queued activation holds no lease whose expiry would
+    // arm the recovery timer, so the scheduler must re-check on its own.
+    hasMemory = true;
+
+    // Nothing may run while the block still holds.
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    expect(handled).not.toHaveBeenCalled();
+    expect(store.get(item)?.status).toBe('queued');
+
+    await waitUntil(() => handled.mock.calls.length > 0);
+    await waitUntil(() => store.get(item)?.status === 'released');
+  });
+
+  // Issue #13182 finding 5, hardened ahead of the scheduler's first
+  // production wiring: a transient renewal failure must abandon only the
+  // affected activation, not halt the whole worker.
+  it('abandons only the affected activation on a transient renewal failure', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    const signals = new Map<string, AbortSignal>();
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 2,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async (item, context) => {
+        signals.set(item.activationId, context.signal);
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.submit(activation('a2'));
+    await scheduler.start();
+    expect(scheduler.activeSlotCount).toBe(2);
+
+    // The first renewal tick hits one transient journal write failure; the
+    // store repairs the intact tail and reports the failure as transient.
+    fsFault.failAppends = 1;
+    now = 130;
+    await vi.advanceTimersByTimeAsync(30);
+    // The tail repair behind the failure is real file IO, which fake timers
+    // do not drain.
+    await waitUntil(() => signals.get('a1')?.aborted === true);
+
+    expect(signals.get('a2')?.aborted).toBe(false);
+    expect(scheduler.haltedError).toBeUndefined();
+    expect(store.haltedError).toBeUndefined();
+    await expect(scheduler.submit(activation('a3'))).resolves.toMatchObject({
+      created: true,
+    });
+    expect(store.get(activation('a1'))?.status).toBe('assigned');
+  });
+
+  // The other half of finding 5: when the store cannot repair a failed
+  // write, the journal's state is unknown — that is consistency damage, and
+  // the worker still halts.
+  it('halts the worker when the store cannot repair a failed write', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    const signals = new Map<string, AbortSignal>();
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 2,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async (item, context) => {
+        signals.set(item.activationId, context.signal);
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.submit(activation('a2'));
+    await scheduler.start();
+    expect(scheduler.activeSlotCount).toBe(2);
+
+    fsFault.failAppends = 1;
+    fsFault.failTruncates = 1;
+    now = 130;
+    await vi.advanceTimersByTimeAsync(30);
+    // The injected append/truncate failures themselves are synchronous, but
+    // persist() awaits a real mkdir first, so the failure chain crosses real
+    // event-loop turns that fake timers do not drain.
+    await waitUntil(() => scheduler.haltedError !== undefined);
+
+    expect(scheduler.haltedError?.message).toBe('disk busy');
+    expect(signals.get('a1')?.aborted).toBe(true);
+    expect(signals.get('a2')?.aborted).toBe(true);
+    await expect(scheduler.submit(activation('a3'))).rejects.toThrow(
+      'disk busy',
+    );
+  });
+
+  // A transient failure while releasing a finished activation must not halt
+  // the worker either; the activation's lease expires and it is re-run.
+  it('re-queues the activation after a transient release failure', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    let runs = 0;
+    const item = activation('a1');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {
+        runs++;
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    await scheduler.start();
+    await waitUntil(() => runs === 1);
+
+    // The release's journal write fails transiently: the outcome is lost,
+    // the activation is abandoned, and its lease (claimed at 100 for 90)
+    // expires at 190.
+    fsFault.failAppends = 1;
+    gate.resolve();
+    await waitUntil(
+      () =>
+        scheduler.activeSlotCount === 0 &&
+        store.get(item)?.status === 'assigned',
+    );
+    expect(scheduler.haltedError).toBeUndefined();
+
+    // The recovery wake at the lease's expiry re-queues and re-runs it.
+    now = 250;
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(160);
+    await waitUntil(() => runs === 2);
+    await waitUntil(() => store.get(item)?.status === 'released');
+    expect(store.get(item)?.outcome).toBe('completed');
+  });
+
+  // The other half of the claim policy: when the store cannot repair the
+  // failed write, the claim error still halts the worker.
+  it('halts the worker when a claim write cannot be repaired', async () => {
+    const store = await FileManagedActivationStore.open(filePath);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+
+    fsFault.failAppends = 1;
+    fsFault.failTruncates = 1;
+    await expect(scheduler.start()).rejects.toThrow('disk busy');
+
+    expect(scheduler.haltedError?.message).toBe('disk busy');
+    await expect(scheduler.submit(activation('a2'))).rejects.toThrow(
+      'disk busy',
+    );
+  });
+
+  // The release path keeps the other half of the policy too: an
+  // unrepairable write while releasing halts the worker.
+  it('halts the worker when a release write cannot be repaired', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const now = 100;
+    const store = await FileManagedActivationStore.open(filePath, {
+      clock: () => now,
+    });
+    const gate = deferred();
+    const signals = new Map<string, AbortSignal>();
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 2,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 90,
+      hasMemoryHeadroom: () => true,
+      handler: async (item, context) => {
+        signals.set(item.activationId, context.signal);
+        if (item.activationId === 'a1') return;
+        await gate.promise;
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.submit(activation('a2'));
+    await scheduler.start();
+    await waitUntil(() => signals.size === 2);
+
+    // a1's handler completes; the release's journal write fails and the
+    // repair fails too — consistency damage halts the whole worker.
+    fsFault.failAppends = 1;
+    fsFault.failTruncates = 1;
+    await waitUntil(() => scheduler.haltedError !== undefined);
+
+    expect(scheduler.haltedError?.message).toBe('disk busy');
+    expect(signals.get('a2')?.aborted).toBe(true);
+    await expect(scheduler.submit(activation('a3'))).rejects.toThrow(
+      'disk busy',
+    );
+    gate.resolve();
+  });
+
+  // The claim path follows the same policy: a transient journal write
+  // failure while claiming is retried by the recheck wake, not halted on.
+  it('retries a claim after a transient store write failure', async () => {
+    const store = await FileManagedActivationStore.open(filePath);
+    const handled = vi.fn();
+    const item = activation('a1');
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {
+        handled();
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+    // The first claim's journal write fails transiently.
+    fsFault.failAppends = 1;
+    await scheduler.start();
+    expect(scheduler.haltedError).toBeUndefined();
+    expect(store.get(item)?.status).toBe('queued');
+
+    await waitUntil(() => handled.mock.calls.length > 0);
+    await waitUntil(() => store.get(item)?.status === 'released');
+  });
+
+  // A disposal racing an in-flight transient claim failure must not arm the
+  // recheck wake on the dead scheduler or record a bogus 'is disposed' halt.
+  it('does not arm a wake when disposal races a transient claim failure', async () => {
+    const store = await FileManagedActivationStore.open(filePath);
+    const item = activation('a1');
+    const claimEntered = deferred();
+    const allowClaim = deferred();
+    const originalClaim = store.claim.bind(store);
+    vi.spyOn(store, 'claim').mockImplementation(async (...args) => {
+      claimEntered.resolve();
+      await allowClaim.promise;
+      // The in-flight claim now fails transiently.
+      fsFault.failAppends = 1;
+      return originalClaim(...args);
+    });
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(item);
+
+    const starting = scheduler.start();
+    await claimEntered.promise;
+    scheduler.dispose();
+    allowClaim.resolve();
+    await expect(starting).resolves.toBeUndefined();
+
+    // Past the recheck interval, nothing fired: no wake was armed.
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_100));
     expect(scheduler.haltedError).toBeUndefined();
   });
 

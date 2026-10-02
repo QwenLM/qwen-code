@@ -662,7 +662,7 @@ export interface components {
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
             receiptId?: string;
             actionResolution?: components["schemas"]["WebShellActionResolution"];
-            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, or a definitive invalid response. */
+            /** @description Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). */
             failureCode?: string;
             replayed: boolean;
         } & (unknown & unknown & unknown & unknown);

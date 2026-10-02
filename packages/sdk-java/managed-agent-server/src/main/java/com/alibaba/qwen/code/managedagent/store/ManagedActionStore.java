@@ -454,15 +454,17 @@ public class ManagedActionStore {
             String owner,
             String errorCode,
             String decisionReceiptId,
+            boolean harnessConfirmed,
             long now) {
         jdbc.update(
-                "UPDATE managed_agent_operation SET state = ?, admission_stage ="
-                    + " 'HARNESS_CONFIRMED', delivery_state = 'CONFIRMED', receipt_id = ?,"
+                "UPDATE managed_agent_operation SET state = ?, admission_stage = ?,"
+                    + " delivery_state = 'CONFIRMED', receipt_id = ?,"
                     + " error_code = ?, decision_receipt_id = ?, lease_owner = NULL, lease_until ="
                     + " NULL, updated_at = ?, completed_at = ? WHERE tenant_id = ? AND session_id ="
                     + " ? AND operation_id = ? AND delivery_state = 'LEASED' AND lease_owner = ?"
                     + " AND claim_generation = ?",
                 errorCode == null ? "COMPLETED" : "FAILED",
+                harnessConfirmed ? "HARNESS_CONFIRMED" : "JAVA_DURABLE",
                 "rcpt_" + UUID.randomUUID().toString().replace("-", ""),
                 errorCode,
                 decisionReceiptId,

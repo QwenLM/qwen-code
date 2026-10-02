@@ -13,6 +13,9 @@ import {
   type ManagedActivationLease,
   type ManagedActivationSnapshot,
 } from './managed-activation-store.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('EMBEDDED_HARNESS_SCHEDULER');
 
 export interface ManagedActivationHandlerContext {
   readonly fence: ManagedActivationFence;
@@ -77,6 +80,14 @@ function sessionKey(activation: {
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
+
+/**
+ * How often a memory-blocked pump re-checks headroom on its own. Queued
+ * activations hold no lease whose expiry could wake the scheduler, so without
+ * this poll a single missed notifyCapacityChanged() would starve them
+ * forever.
+ */
+const MEMORY_BLOCKED_RECHECK_MS = 1_000;
 
 /**
  * Bounded asynchronous Harness scheduler for one long-lived service process.
@@ -196,15 +207,33 @@ export class EmbeddedHarnessScheduler {
       }
       if (!this.options.hasMemoryHeadroom()) {
         this.memoryBlocked = true;
+        this.scheduleMemoryWake();
         return;
       }
       this.memoryBlocked = false;
       const candidate = this.selectTenantFair(candidates)!;
-      const lease = await this.store.claim(
-        candidate.descriptor,
-        this.options.workerId,
-        this.options.leaseDurationMs,
-      );
+      let lease: ManagedActivationLease | undefined;
+      try {
+        lease = await this.store.claim(
+          candidate.descriptor,
+          this.options.workerId,
+          this.options.leaseDurationMs,
+        );
+      } catch (error) {
+        // The same policy as renewal and release: a transient store failure
+        // leaves the candidate queued (with no lease, so no expiry wake), and
+        // the worker halts only when the store itself has halted.
+        if (this.store.haltedError) throw error;
+        // A dispose or halt raced the in-flight claim: arming a wake on a
+        // dead scheduler would surface a bogus 'is disposed' halt.
+        if (this.disposed || this.fatalError) return;
+        debugLogger.warn(
+          `Managed activation '${candidate.descriptor.activationId}'` +
+            ` claim failed transiently: ${toError(error).message}`,
+        );
+        this.scheduleMemoryWake();
+        return;
+      }
       if (!lease) continue;
       if (this.disposed || this.fatalError) return;
       this.launch(candidate.descriptor, lease);
@@ -275,7 +304,20 @@ export class EmbeddedHarnessScheduler {
           run.abandoned = true;
           run.controller.abort(error);
         } else {
-          this.halt(toError(error));
+          // The same policy as a failed renewal: a transient store failure
+          // abandons only this activation (its lease expires and the
+          // recovery wake re-queues it); the worker halts only when the
+          // store itself has halted on consistency damage.
+          run.abandoned = true;
+          const storeHalted = this.store.haltedError;
+          if (storeHalted) {
+            this.halt(storeHalted);
+          } else {
+            debugLogger.warn(
+              `Managed activation '${run.lease.activationId}' abandoned` +
+                ` after a release failure: ${toError(error).message}`,
+            );
+          }
         }
       }
     }
@@ -314,12 +356,33 @@ export class EmbeddedHarnessScheduler {
         this.scheduleRenewal(run);
       }
     } catch (error) {
+      // Any failure abandons only this activation; its store lease expires
+      // and the recovery wake re-queues it. The worker halts only when the
+      // store itself has halted on consistency damage — a transient IO error
+      // must not abort every other running activation.
       run.abandoned = true;
       run.controller.abort(error);
-      if (!(error instanceof ManagedActivationStaleLeaseError)) {
-        this.halt(toError(error));
+      if (error instanceof ManagedActivationStaleLeaseError) {
+        return;
+      }
+      const storeHalted = this.store.haltedError;
+      if (storeHalted) {
+        this.halt(storeHalted);
+      } else {
+        debugLogger.warn(
+          `Managed activation '${run.lease.activationId}' abandoned` +
+            ` after a renewal failure: ${toError(error).message}`,
+        );
       }
     }
+  }
+
+  private scheduleMemoryWake(): void {
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      void this.requestPump().catch(() => undefined);
+    }, MEMORY_BLOCKED_RECHECK_MS);
+    this.recoveryTimer.unref();
   }
 
   private scheduleRecoveryWake(): void {

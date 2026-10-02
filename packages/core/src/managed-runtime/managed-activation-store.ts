@@ -267,6 +267,8 @@ export class FileManagedActivationStore {
   private nextSequence = 1;
   private tail: Promise<void> = Promise.resolve();
   private fatalError: Error | undefined;
+  /** File bytes known to end at a complete event boundary. */
+  private syncedBytes = 0;
 
   private constructor(
     readonly filePath: string,
@@ -307,6 +309,7 @@ export class FileManagedActivationStore {
       store.apply(parseEvent(line, index + 1));
     });
     if (!complete) await truncate(filePath, validLength);
+    store.syncedBytes = validLength;
     return store;
   }
 
@@ -526,22 +529,43 @@ export class FileManagedActivationStore {
   }
 
   private async persist(event: JournalEvent): Promise<void> {
+    const line = Buffer.from(`${JSON.stringify(event)}\n`);
     try {
       await mkdir(path.dirname(this.filePath), { recursive: true });
-      await appendFile(
-        this.filePath,
-        Buffer.from(`${JSON.stringify(event)}\n`),
-        {
-          flush: true,
-          mode: 0o600,
-        },
-      );
+      await appendFile(this.filePath, line, {
+        flush: true,
+        mode: 0o600,
+      });
+    } catch (error) {
+      // A failed append may have torn the tail. The open() loader repairs
+      // exactly that by truncating to the last complete line, so do the same
+      // here: if the journal is back at the last byte this store synced, the
+      // write provably never happened and the failure is transient. Only a
+      // failed repair leaves the journal's state unknown — that is fatal.
+      const failure = error instanceof Error ? error : new Error(String(error));
+      try {
+        await truncate(this.filePath, this.syncedBytes);
+      } catch (repairError) {
+        if (
+          (repairError as NodeJS.ErrnoException).code !== 'ENOENT' ||
+          this.syncedBytes !== 0
+        ) {
+          // The halt is caused by the failed repair, not the original
+          // transient write failure — keep it on the causal chain.
+          failure.cause = repairError;
+          this.fatalError = failure;
+        }
+      }
+      throw this.fatalError ?? failure;
+    }
+    try {
       this.apply(event);
     } catch (error) {
       this.fatalError =
         error instanceof Error ? error : new Error(String(error));
       throw this.fatalError;
     }
+    this.syncedBytes += line.byteLength;
   }
 
   private apply(event: JournalEvent): void {

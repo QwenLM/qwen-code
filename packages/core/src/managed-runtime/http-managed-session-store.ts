@@ -53,6 +53,13 @@ const WRITER_TOKEN = new RegExp(
 );
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Bound on background seal retries. Each attempt rides the renewal cadence
+ * (~leaseDurationMs/2); past the bound the cadence stops and the grant
+ * lapses, so a writer whose seal endpoint stays broken while renewal still
+ * works stops blocking a takeover.
+ */
+const MAX_PENDING_SEAL_ATTEMPTS = 10;
 
 export interface HttpManagedSessionStoreOptions {
   readonly baseUrl: string;
@@ -378,6 +385,9 @@ class ManagedSessionStoreHttpClient {
   private renewPromise: Promise<void> | undefined;
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
+  private sealPending = false;
+  private sealAttempts = 0;
+  private sealAbandoned = false;
   private readonly publicationAdmissions = new Map<string, string>();
 
   constructor(
@@ -846,21 +856,39 @@ class ManagedSessionStoreHttpClient {
       this.resources.clear();
       return;
     }
-    const receipt = asRecord(
-      await this.json('/writers:seal', 'POST', {
-        workspaceId: this.sessionKey.workspaceId,
-        writerId: this.writerId,
-        writerGeneration: grant.writerGeneration,
-      }),
-      'seal receipt',
-    );
-    if (
-      safeCounter(receipt['writerGeneration'], 'writerGeneration') !==
-        grant.writerGeneration ||
-      string(receipt['state'], 'state') !== 'SEALED'
-    ) {
-      throw corrupt('seal receipt does not match the active writer.');
+    let receipt: Record<string, unknown>;
+    this.sealAttempts++;
+    try {
+      receipt = asRecord(
+        await this.json('/writers:seal', 'POST', {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+        }),
+        'seal receipt',
+      );
+      if (
+        safeCounter(receipt['writerGeneration'], 'writerGeneration') !==
+          grant.writerGeneration ||
+        string(receipt['state'], 'state') !== 'SEALED'
+      ) {
+        throw corrupt('seal receipt does not match the active writer.');
+      }
+    } catch (error) {
+      // A failed seal leaves the writer ACTIVE server-side, and callers that
+      // give up after close() rejects would otherwise drop it on the floor:
+      // while the grant stayed alive but nothing retried the seal, no other
+      // writer could take the session over. Mark the seal pending and stay
+      // on the renewal cadence, so each tick keeps the grant live (a live
+      // lease blocks a takeover that would bump the writer generation out
+      // from under the retry) and retries the seal until the writer is
+      // actually sealed.
+      this.sealPending = true;
+      this.scheduleRenewal();
+      throw error;
     }
+    this.sealPending = false;
+    this.sealAttempts = 0;
     this.sealed = true;
     this.stopRenewal();
     this.resources.clear();
@@ -908,9 +936,34 @@ class ManagedSessionStoreHttpClient {
       ),
     );
     this.renewTimer = setTimeout(() => {
-      void this.renewWriter().catch(() => undefined);
+      void this.maintainWriter().catch(() => undefined);
     }, delay);
     this.renewTimer.unref();
+  }
+
+  private async maintainWriter(): Promise<void> {
+    if (!this.sealPending) {
+      // A seal abandoned at the retry bound stays abandoned: a renewal
+      // re-armed later (e.g. by assertWritable) must not resume a cadence
+      // that never seals and keeps the grant alive forever.
+      if (this.sealAbandoned) return;
+      await this.renewWriter();
+      return;
+    }
+    if (this.sealAttempts >= MAX_PENDING_SEAL_ATTEMPTS) {
+      // The seal endpoint stays broken while renewal works (e.g. a
+      // per-session poison record): renewing any longer only blocks a
+      // takeover. Stop the cadence and let the grant lapse; a later close()
+      // still retries the seal, which does not require a live lease.
+      this.sealPending = false;
+      this.sealAbandoned = true;
+      return;
+    }
+    // Keep the grant alive, then retry the pending seal. A renewal failure
+    // ends the cadence here: the grant lapses and a takeover can proceed —
+    // the same self-healing state as if the seal had never been retried.
+    await this.renewWriter();
+    await this.seal().catch(() => undefined);
   }
 
   private stopRenewal(): void {

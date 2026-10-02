@@ -87,7 +87,7 @@ public class ActionResponseCoordinator {
                     return;
                 }
                 if (error.getStatusCode() == 400) {
-                    actions.complete(op, owner, "invalid_action_response", null, clock.millis());
+                    actions.complete(op, owner, "invalid_action_response", null, true, clock.millis());
                     return;
                 }
                 throw error;
@@ -100,6 +100,25 @@ public class ActionResponseCoordinator {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
             if (settled(op, actions.response(tenant, session, operation))) {
+                return;
+            }
+            if (op.attemptCount() >= dispatch.getMaxOperationRetries()) {
+                LOG.error(
+                        "Action response exhausted retries tenant={} session={} operation={} attempts={}",
+                        tenant,
+                        session,
+                        operation,
+                        op.attemptCount(),
+                        error);
+                // The Harness never answered, so the record must not claim
+                // a harness_confirmed admission.
+                actions.complete(
+                        op,
+                        owner,
+                        "action_response_delivery_failed",
+                        null,
+                        false,
+                        clock.millis());
                 return;
             }
             long delay =
@@ -136,6 +155,7 @@ public class ActionResponseCoordinator {
                 owner,
                 matched ? null : ManagedActionStore.endedCode(action.state()),
                 matched ? action.decisionReceiptId() : null,
+                true,
                 clock.millis());
         return true;
     }

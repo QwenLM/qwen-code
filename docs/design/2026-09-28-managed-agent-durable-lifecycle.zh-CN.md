@@ -31,7 +31,7 @@ Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12
 - 第 10 节的 reader、operator、owner 角色——其来源仍是 #12867 的待决问题（Q4）；以及 Workspace 绑定 Session 的生命周期操作，它们等待该问题的答复（4.9）。
 - `archived_at` 与列表的 `include_archived`，仍为 `planned`。
 - 清除已删除 Session 的内容，以及重试窗口过后清理墓碑与 operation。两者都属于保留策略的工作。
-- `failed`、`cancelled` 与 `recovery_blocked` 结果。D4 的操作会一直重试直到完成（4.5）。
+- `failed`、`cancelled` 与 `recovery_blocked` 结果。D4 的操作在 `dispatch.max-operation-retries` 预算内重试，预算耗尽后以未确认方式完成（4.5）。
 
 ## 4. 决策
 
@@ -92,9 +92,9 @@ archive 只需要 Java 这一个权威，因此在同一个事务里完成：Ses
 3. 排空该 Session 的 Runtime 绑定。内嵌的 Runtime Broker 只是不再预热该 Session，目前还没有 Harness 级别的回收。
 4. 在一个锁住 Session 行的事务中，确认自己的认领仍然有效，完成 operation，把 Session 设为 `closed` 或墓碑，并追加 `session.closed` 或终态的 `session.deleted`。
 
-失败的尝试让 operation 回到待定状态并计数，退避沿用 dispatch 设置：从 `dispatch.retry-initial-delay` 起翻倍，直到 `dispatch.retry-max-delay`。没有最后一次尝试：operation 只有在各步骤成功之后才会完成，因此 `202` 从不表示工具已停止；Harness 调用持续失败时，operation 保持 `running`。Hosted Harness 重启之后，Java 连接器仍沿用之前的 boot，因此它的调用会以 generation 错误失败，直到 Java 也重启为止，与 Turn 分发的情况相同；期间 operation 一直等待，之后还要等旧进程的 writer 租约过期。
+失败的尝试让 operation 回到待定状态并计数，退避沿用 dispatch 设置：从 `dispatch.retry-initial-delay` 起翻倍，直到 `dispatch.retry-max-delay`。重试受 `dispatch.max-operation-retries`（默认 10 次）约束：预算用尽之前，operation 只有在各步骤成功之后才会完成，因此 `202` 从不表示工具已停止；Harness 调用持续失败时，operation 保持 `running`。预算耗尽后，operation 不再重试，但仍会尽力排空 Runtime 绑定，并以未确认（`admission_stage` 保持 `java_durable`）的方式完成，因此 settle 永远无法成功的 Session 也能到达终态，而不是永远循环。Hosted Harness 重启之后，Java 连接器仍沿用之前的 boot，因此它的调用会以 generation 错误失败，直到 Java 也重启为止，与 Turn 分发的情况相同；期间 operation 在同一预算内等待，之后还要等旧进程的 writer 租约过期。
 
-停止写入该 Session journal 的 Harness 同样无法关闭它。任何一次 journal 提交失败之后（例如在 Java 或其数据库不可用时发生的提交），Harness 会拒绝该 Session 之后的所有提交；而它的关闭要先记录其 activation 已结束，因此它对每次尝试都返回 `503`。它的 writer 租约可能仍然有效，因为 writer 自己的续约还在继续，所以其他服务器也无法完成这个 close；operation 一直保持 `running`，直到该 Harness 重启，并且如上所述 Java 也要随之重启。只有该租约也过期后，另一台服务器的 Harness 才能完成它（第 2 步）。D4 不会在没有 Harness 的情况下完成这样的 close：[契约][contract]第 10 节让 close 与 delete 仍经过既有的 Hooks 与资源结算，而只有 Harness 能报告它的 Session 已结算。
+停止写入该 Session journal 的 Harness 同样无法关闭它。任何一次 journal 提交失败之后（例如在 Java 或其数据库不可用时发生的提交），Harness 会拒绝该 Session 之后的所有提交；而它的关闭要先记录其 activation 已结束，因此它对每次尝试都返回 `503`。它的 writer 租约可能仍然有效，因为 writer 自己的续约还在继续，所以其他服务器也无法完成这个 close；operation 一直保持 `running`，直到该 Harness 重启，并且如上所述 Java 也要随之重启——或者直到 operation 的重试预算耗尽，此时它按上文所述以未确认方式完成。只有该租约也过期后，另一台服务器的 Harness 才能完成它（第 2 步）。预算用尽之前，D4 不会在没有 Harness 的情况下完成这样的 close：[契约][contract]第 10 节让 close 与 delete 仍经过既有的 Hooks 与资源结算，而只有 Harness 能报告它的 Session 已结算。
 
 两个步骤都是幂等的，因此重复的尝试是安全的。租约与 Turn 租约一样使用各服务器自己的时钟，而不是[契约收敛][closure]第 1 节要求的数据库时间，并且不续约。在默认租约（60 秒）与 Harness 请求超时（30 秒）下，同一服务器上的尝试只有在 worker 丢失后才会重叠；但时钟偏差、更短的租约或较慢的首次连接也可能让尝试重叠。认领代次让过期的尝试无法完成，重复的关闭也不会造成影响。
 

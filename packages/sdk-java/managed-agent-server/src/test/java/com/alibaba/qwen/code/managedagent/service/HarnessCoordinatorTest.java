@@ -1,11 +1,11 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -37,13 +37,48 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 class HarnessCoordinatorTest {
+    // Pins the fail-fast validation of the dispatch retry budgets: any
+    // negative budget — and a post-admission budget below the
+    // pre-admission one, which would silently strip late-admitted turns of
+    // their retries — is a startup error.
+    @ParameterizedTest(name = "pre = {0}, post = {1}, operations = {2}")
+    @CsvSource({"-1, 10, 10", "5, -1, 10", "5, 10, -1", "5, 4, 10"})
+    void rejectsInvalidDispatchRetryBudgets(int pre, int post,
+            int operations) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(pre);
+        properties.getDispatch().setMaxPostAdmissionRetries(post);
+        properties.getDispatch().setMaxOperationRetries(operations);
+        assertThrows(IllegalStateException.class, () ->
+                new HarnessCoordinator(mock(AgentStateStore.class),
+                        mock(HarnessConnector.class),
+                        new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                        directExecutor(), Clock.systemUTC(), properties));
+    }
+
+    // Positive control for the ordering guard: equal budgets are a
+    // legitimate "no extra retries after admission" policy, and zero budgets
+    // disable retries entirely.
+    @ParameterizedTest(name = "pre = {0}, post = {1}, operations = {2}")
+    @CsvSource({"5, 5, 10", "0, 0, 0"})
+    void acceptsValidDispatchRetryBudgets(int pre, int post, int operations) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getDispatch().setMaxPreAdmissionRetries(pre);
+        properties.getDispatch().setMaxPostAdmissionRetries(post);
+        properties.getDispatch().setMaxOperationRetries(operations);
+        new HarnessCoordinator(mock(AgentStateStore.class),
+                mock(HarnessConnector.class), new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(),
+                Clock.systemUTC(), properties).close();
+    }
+
     @Test
     void recoveredBoundTurnFailsBeforeAnyLegacyHarnessCall() {
         String tenantId = "tenant-bound";
@@ -662,11 +697,14 @@ class HarnessCoordinatorTest {
 
     // Protects the post-submission uncertainty invariant: once submit may
     // have been admitted, neither a lost response nor a permanent Workspace
-    // refusal ends the Turn, even with the pre-admission retry budget spent.
-    // The refusal row is not redundant with the generic catch: deleting the
-    // RuntimeBrokerException arm keeps it green by design, so the negative
-    // control is weakening that arm's guard to drop !submissionAttempted,
-    // which would make this row terminal.
+    // refusal ends the Turn while its post-admission retry budget lasts
+    // (retryCount 5 is past the pre-admission budget but below the
+    // post-admission one; exhaustion is covered by
+    // AdmittedTurnRetryTerminalStateTest). The refusal row is not redundant
+    // with the generic catch: deleting the RuntimeBrokerException arm keeps
+    // it green by design, so the negative control is weakening that arm's
+    // guard to drop !submissionAttempted, which would make this row
+    // terminal.
     @ParameterizedTest(name = "workspace refusal = {0}")
     @ValueSource(booleans = {false, true})
     void neverTerminatesOnceSubmissionMayHaveBeenAdmitted(
@@ -885,16 +923,6 @@ class HarnessCoordinatorTest {
     }
 
     private static ExecutorService directExecutor() {
-        ExecutorService executor = mock(ExecutorService.class);
-        Future<?> future = mock(Future.class);
-        doAnswer(invocation -> {
-            ((Runnable) invocation.getArgument(0)).run();
-            return null;
-        }).when(executor).execute(any(Runnable.class));
-        doAnswer(invocation -> {
-            ((Runnable) invocation.getArgument(0)).run();
-            return future;
-        }).when(executor).submit(any(Runnable.class));
-        return executor;
+        return CoordinatorTestSupport.directExecutor();
     }
 }
