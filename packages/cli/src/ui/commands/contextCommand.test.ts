@@ -1036,6 +1036,12 @@ describe('collectContextData (contextCommand)', () => {
         makeChatConfig({ total: 0, tools, declared, history }),
         false,
       );
+      // Before the first reply the estimate must account for exactly the window.
+      expect(
+        sumRows(unscaled.breakdown) +
+          unscaled.breakdown.freeSpace +
+          unscaled.breakdown.autocompactBuffer,
+      ).toBe(unscaled.contextWindowSize);
       // The provider-side total: the measured overhead plus the 300-token
       // conversation, so exactly 300 tokens are left for `messages`.
       const total =
