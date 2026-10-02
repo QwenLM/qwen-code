@@ -207,6 +207,15 @@ describe('buildBrailleLineChart', () => {
     expect(result!.yLabels).toHaveLength(chartHeight);
   });
 
+  it('labels a peak that rounds up to a million in millions', () => {
+    const data = [
+      { date: '2025-06-01', value: 1000 },
+      { date: '2025-06-02', value: 999_500 },
+    ];
+    const result = buildBrailleLineChart(data, 40, 6);
+    expect(result!.yLabels[0]).toBe('1.0m');
+  });
+
   it('generates xLabels string', () => {
     const data = [
       { date: '2025-06-01', value: 100 },

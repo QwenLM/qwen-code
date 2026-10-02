@@ -243,7 +243,8 @@ export interface BrailleLineResult {
 }
 
 function fmtAxisValue(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  // 999,500 rounds to 1000k, so it belongs in the next unit.
+  if (n >= 999_500) return `${(n / 1_000_000).toFixed(1)}m`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
   return `${n}`;
 }
