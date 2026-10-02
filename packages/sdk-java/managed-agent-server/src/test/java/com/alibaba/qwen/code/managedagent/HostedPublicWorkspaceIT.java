@@ -22,6 +22,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -35,6 +36,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.io.CleanupMode;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -63,6 +66,7 @@ class HostedPublicWorkspaceIT {
     private Path decoy;
     private String node;
     private boolean approvals;
+    private boolean durableClose;
     private final java.util.Set<String> answered = new java.util.HashSet<>();
 
     @Test
@@ -79,6 +83,58 @@ class HostedPublicWorkspaceIT {
         assertThat(answered).hasSize(8);
     }
 
+    @Test
+    @EnabledOnOs(OS.LINUX)
+    @Timeout(150)
+    void durableCloseStopsOriginalWorkersAndRetainsHistoryAndFiles() throws Exception {
+        durableClose = true;
+        runFiles();
+        List<String> sessions = jdbc.queryForList("SELECT session_id FROM managed_agent_session WHERE tenant_id = ?"
+                + " ORDER BY workspace_id", String.class, tenant);
+        for (int index = 0; index < sessions.size(); index++) {
+            String session = sessions.get(index);
+            String binding = jdbc.queryForObject("SELECT binding_id FROM qwen_runtime_binding WHERE tenant_id = ?"
+                    + " AND isolation_key = ?", String.class, tenant, session);
+            JsonNode handle = json.readTree(jdbc.queryForObject("SELECT resource_handle_json FROM qwen_runtime_binding"
+                    + " WHERE binding_id = ?", String.class, binding));
+            Path registration = temporary.resolve("broker").resolve(handle.path("resourceId").asText() + ".json");
+            long pid = json.readTree(Files.readString(registration)).path("pid").asLong();
+            var worker = ProcessHandle.of(pid).orElseThrow();
+            assertThat(worker.isAlive()).isTrue();
+            var retained = jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource"
+                    + " WHERE tenant_id = ? AND session_id = ? ORDER BY resource_id", tenant, session);
+            assertThat(retained).isNotEmpty();
+            assertThat(request("GET", "/v1/agents/sessions/" + session, null, null, "actor", 200)
+                    .path("capabilities").path("session_close").asBoolean()).isTrue();
+            boolean webShell = index == 1;
+            String route = webShell ? "/api/agent/web-shell/v1/sessions/close" : "/v1/agents/sessions/" + session + "/close";
+            Map<String, Object> body = webShell ? Map.of("sessionId", session, "idempotencyKey", "close") : null;
+            JsonNode admitted = request("POST", route, body, "close", "actor", 202);
+            String operation = admitted.path(webShell ? "operationId" : "id").asText();
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                    assertThat(request("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                            null, null, "actor", 200).path("status").asText()).isEqualTo("completed"));
+            assertThat(worker.isAlive()).isFalse();
+            assertThat(json.readTree(Files.readString(registration)).path("state").asText()).isEqualTo("RETIRED");
+            assertThat(jdbc.queryForObject("SELECT drain_receipt_json FROM qwen_runtime_binding WHERE binding_id = ?",
+                    String.class, binding)).isNotBlank();
+            assertThat(jdbc.queryForObject("SELECT binding_state FROM qwen_runtime_binding WHERE binding_id = ?",
+                    String.class, binding)).isEqualTo("RELEASED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session WHERE binding_id = ?"
+                    + " AND session_state NOT IN ('RELEASED', 'FAILED')", Integer.class, binding)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_execution_lease WHERE binding_id = ?"
+                    + " AND holder_key IS NOT NULL", Integer.class, binding)).isZero();
+            assertThat(jdbc.queryForList("SELECT resource_id, sha256 FROM qwen_managed_session_resource WHERE tenant_id = ?"
+                    + " AND session_id = ? ORDER BY resource_id", tenant, session)).containsAll(retained);
+            assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString())
+                    .contains("G0_DONE");
+            assertThat(Files.readString(temporary.resolve(index == 0 ? "workspace-a" : "workspace-b")
+                    .resolve("child/proof.txt"))).isEqualTo("after");
+            assertThat(request("POST", route, body, "close", "actor", 202)
+                    .path(webShell ? "operationId" : "id").asText()).isEqualTo(operation);
+        }
+    }
+
     private void runFiles() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the CLI first").isRegularFile();
@@ -86,7 +142,12 @@ class HostedPublicWorkspaceIT {
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
-        Files.createDirectory(temporary.resolve("broker"));
+        if (durableClose) {
+            Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
+                    PosixFilePermissions.fromString("rwx------")));
+        } else {
+            Files.createDirectory(temporary.resolve("broker"));
+        }
         List<Path> roots = List.of(Files.createDirectory(temporary.resolve("workspace-a")),
                 Files.createDirectory(temporary.resolve("workspace-b")));
         for (Path root : roots) Files.createDirectory(root.resolve("child"));
@@ -357,6 +418,7 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         if (approvals) arguments.add("--qwen.managed-agent.harness.approval-mode=default");
+        if (durableClose) arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=true");
         for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -564,6 +626,37 @@ class HostedPublicWorkspaceIT {
             harness.waitFor(10, TimeUnit.SECONDS);
         }
         if (spring != null) spring.close();
+        if (durableClose) stopDurableWorkers();
         if (model != null) model.stop(0);
+    }
+
+    private void stopDurableWorkers() throws Exception {
+        Path broker = temporary.resolve("broker");
+        if (!Files.isDirectory(broker)) return;
+        try (var registrations = Files.list(broker)) {
+            for (Path file : registrations.filter(path -> path.getFileName().toString().endsWith(".json")).toList()) {
+                JsonNode saved = json.readTree(Files.readString(file));
+                long pid = saved.path("pid").asLong();
+                if (pid <= 0) continue;
+                JsonNode handle = json.readTree(saved.path("handle").asText());
+                if (!file.getFileName().toString().equals(handle.path("resourceId").asText() + ".json")
+                        || !handle.path("hostId").asText().equals(Files.readString(Path.of("/etc/machine-id")).strip())
+                        || !handle.path("bootId").asText().equals(Files.readString(Path.of("/proc/sys/kernel/random/boot_id")).strip())) continue;
+                var worker = ProcessHandle.of(pid).orElse(null);
+                if (worker == null || !worker.isAlive()) continue;
+                try {
+                    Path process = Path.of("/proc", Long.toString(pid));
+                    String stat = Files.readString(process.resolve("stat"));
+                    String start = "ticks:" + stat.substring(stat.lastIndexOf(')') + 2).split(" ")[19];
+                    if (!start.equals(saved.path("started").asText())
+                            || !handle.path("pidNamespace").asText().equals(Files.readSymbolicLink(process.resolve("ns/pid")).toString())
+                            || !handle.path("timeNamespace").asText().equals(Files.readSymbolicLink(process.resolve("ns/time")).toString())) continue;
+                } catch (java.nio.file.NoSuchFileException exited) {
+                    continue;
+                }
+                worker.destroyForcibly();
+                worker.onExit().get(10, TimeUnit.SECONDS);
+            }
+        }
     }
 }

@@ -179,6 +179,31 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
+    public List<RuntimeSessionRecord> findByBinding(String bindingId, long generation,
+            String afterSessionId, int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Drain batch must contain 1-100 Sessions");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<RuntimeSessionRecord> result = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
+                    + " FROM qwen_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
+                    + " AND runtime_session_id > ? ORDER BY runtime_session_id LIMIT ?")) {
+                statement.setString(1, bindingId);
+                statement.setLong(2, generation);
+                statement.setString(3, afterSessionId == null ? "" : afterSessionId);
+                statement.setInt(4, limit);
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        result.add(mapSession(rows));
+                    }
+                }
+            }
+            return List.copyOf(result);
+        });
+    }
+
+    @Override
     public long countActiveByBinding(String bindingId,
             long runtimeGeneration) {
         String id = BrokerValues.requireId(bindingId, "bindingId");

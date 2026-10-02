@@ -89,6 +89,17 @@ public class ManagedAgentService {
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private ManagedActionStore actions;
+    private RuntimeWarmer runtimeWarmer;
+
+    @Autowired(required = false)
+    void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
+        this.runtimeWarmer = runtimeWarmer;
+    }
+
+    private boolean supportsClose(SessionRecord session) {
+        return session.workspace() == null || store.workspaceFilesEnabled()
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
+    }
 
     @Autowired
     void setActions(ManagedActionStore actions) {
@@ -564,8 +575,7 @@ public class ManagedAgentService {
                 session.lastSequence(),
                 session.replayFloorSequence(),
                 store.findSnapshotCoveredSequence(session.tenantId(), session.sessionId()),
-                // A Workspace-bound Session has no lifecycle operations yet;
-                // every Session serves its task list and detail (H0c).
+                // Bound close is advertised separately from archive/delete.
                 new SessionCapabilities(
                         true,
                         true,
@@ -573,7 +583,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session)),
+                        hasActions(session), supportsClose(session)),
                 publicWorkspace(session));
     }
 
@@ -597,7 +607,7 @@ public class ManagedAgentService {
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session),
-                        maySubmitWorkspaceTurn(session, actorId)));
+                        maySubmitWorkspaceTurn(session, actorId), supportsClose(session)));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

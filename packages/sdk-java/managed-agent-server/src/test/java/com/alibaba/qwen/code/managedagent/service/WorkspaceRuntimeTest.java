@@ -716,6 +716,34 @@ class WorkspaceRuntimeTest {
         assertBusy(() -> authority.claim(session.workspace(), rival));
     }
 
+    @Test
+    void closingReleasePreservesTheNewSharedHolderWithoutCurrentAuthorization() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        authority.claim(session.workspace(), fixture.record());
+        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "rival-create",
+                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", "."));
+        var rival = holder(sessions.requireSession(session.tenantId(), created.sessionId()), "rival");
+        authority.release(session.workspace(), fixture.record());
+        authority.claim(session.workspace(), rival);
+        assertThat(fixture.bindings().compareAndSet(fixture.runtime(), fixture.runtime()
+                .withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, fixture.lease(), Instant.now()))).isNotNull();
+        assertThat(new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(), fixture.record()
+                .withState(RuntimeSessionRecord.State.RELEASING, Instant.now()))).isNotNull();
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING' WHERE tenant_id = ? AND session_id = ?",
+                session.tenantId(), session.sessionId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
+        when(fixture.http().activateWorkspace(any(), any(), any(), eq(false)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().release(fixture.lease(), fixture.record().getSession()).toCompletableFuture().join();
+        assertThat(authority.isHeld(session.workspace(), rival)).isTrue();
+        assertThat(authority.hasHolder(fixture.runtime())).isFalse();
+        verify(fixture.http()).release(any(), any());
+        verify(fixture.http()).activateWorkspace(any(), any(), any(), eq(false));
+    }
+
     private TransportFixture transport(SessionRecord session) throws Exception {
         var resolver = resolver(session, temp.toRealPath());
         var resolved = resolver.resolve(session.sessionId());
