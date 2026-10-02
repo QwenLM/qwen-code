@@ -9,7 +9,10 @@ import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { HarnessToolItem } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  assertManagedSessionStableId,
+  type ManagedSessionDurableRef,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
   convertToFunctionErrorResponse,
@@ -48,6 +51,70 @@ export interface HostedRecoveryTurn {
   /** Whether the recovery acquired the Runtime Session, which a later
    * continue/cancel must release. */
   acquiredRuntime: boolean;
+}
+
+async function originalRuntimeBroker(
+  session: ManagedSession,
+  promptId: string,
+  items: readonly HarnessToolItem[],
+  options: HostedWorkspaceBrokerOptions,
+): Promise<HostedWorkspaceBroker> {
+  const owners = new Set<string>();
+  const intents = new Map(
+    session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'tool.intent')
+      .map((event) => [
+        event.payload['executionCallId'],
+        event.payload['argsRef'],
+      ]),
+  );
+  for (const item of items) {
+    if (item.outcomeSource !== 'runtime') continue;
+    const ref = intents.get(item.executionCallId) as
+      | ManagedSessionDurableRef
+      | undefined;
+    if (!ref) throw new RecoveryDeclined();
+    if (
+      ref.kind === 'managed-tool-args' &&
+      item.toolName === 'run_shell_command'
+    ) {
+      const definition = JSON.parse(
+        (
+          await session.resources.read(
+            session.authority.sessionHeader.definitionRef,
+          )
+        ).toString('utf8'),
+      ) as { hookCatalog?: unknown; mcpServers?: unknown };
+      if (definition.hookCatalog || definition.mcpServers)
+        throw new RecoveryDeclined();
+      owners.add(promptId);
+      continue;
+    }
+    if (ref.kind !== 'managed-tool-input') throw new RecoveryDeclined();
+    const route = JSON.parse(
+      (await session.resources.read(ref)).toString('utf8'),
+    ) as { harnessSessionId?: unknown; runtimeSessionId?: unknown };
+    if (
+      route.harnessSessionId !==
+        session.authority.sessionHeader.sessionKey.sessionId ||
+      typeof route.runtimeSessionId !== 'string'
+    )
+      throw new RecoveryDeclined();
+    owners.add(
+      assertManagedSessionStableId(
+        route.runtimeSessionId,
+        'recovered Runtime owner',
+      ),
+    );
+  }
+  const [runtimeSessionId] = owners;
+  if (owners.size !== 1 || !runtimeSessionId) throw new RecoveryDeclined();
+  return new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    runtimeSessionId,
+  );
 }
 
 function toolResultParts(
@@ -174,23 +241,32 @@ export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
-}): Promise<void> {
+}): Promise<HostedWorkspaceBroker> {
   const authorization = await input.session.authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return;
-  const broker = new HostedWorkspaceBroker(
-    input.brokerOptions,
-    input.session.authority.sessionHeader.sessionKey,
+  if (
+    authorization.status !== 'runnable' ||
+    authorization.checkpoint.identity.turnId !== input.promptId
+  )
+    throw new RecoveryDeclined();
+  const broker = await originalRuntimeBroker(
+    input.session,
     input.promptId,
+    authorization.checkpoint.tools?.items ?? [],
+    input.brokerOptions,
   );
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;
     const before = await broker.status(item.executionCallId);
+    if (before?.state === 'unknown')
+      throw new Error('Runtime execution outcome is unknown.');
     if (before === undefined || before.state === 'settled') continue;
     await broker.cancel(item.executionCallId).catch(() => undefined);
     const deadline = Date.now() + 30_000;
     for (;;) {
       const status = await broker.status(item.executionCallId);
+      if (status?.state === 'unknown')
+        throw new Error('Runtime execution outcome is unknown.');
       if (status === undefined || status.state === 'settled') break;
       if (Date.now() >= deadline) {
         throw new Error(
@@ -200,6 +276,7 @@ export async function stopParkedRuntimeExecutions(input: {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
+  return broker;
 }
 
 /**
@@ -235,11 +312,18 @@ export async function recoverHostedRuntimeTurn(input: {
   const items = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',
   );
-  const broker = new HostedWorkspaceBroker(
-    input.brokerOptions,
-    session.authority.sessionHeader.sessionKey,
-    promptId,
-  );
+  let broker: HostedWorkspaceBroker;
+  try {
+    broker = await originalRuntimeBroker(
+      session,
+      promptId,
+      items,
+      input.brokerOptions,
+    );
+  } catch (cause) {
+    if (cause instanceof RecoveryDeclined) return undefined;
+    throw cause;
+  }
   const pending = items.filter((item) => item.state === 'in_progress');
   const states = new Map<string, { state: string } | undefined>();
   let acquiredRuntime = false;
@@ -249,7 +333,7 @@ export async function recoverHostedRuntimeTurn(input: {
         const status = await broker.status(item.executionCallId);
         states.set(
           item.executionCallId,
-          status === undefined ? undefined : { state: status.state },
+          status?.state === 'unknown' ? undefined : status,
         );
       }
     } else {
@@ -419,7 +503,7 @@ export async function recoverHostedRuntimeTurn(input: {
       functionCallId: item.functionCallId,
       toolName: item.toolName,
       executionCallId: item.executionCallId,
-      runtimeSessionId: promptId,
+      runtimeSessionId: broker.runtimeSessionId,
       outcome:
         item.state === 'settled' || state !== undefined ? 'known' : 'unknown',
       ...(item.state === 'settled'

@@ -273,6 +273,34 @@ describe('OpenAIContentConverter', () => {
     logprobs: null,
   });
 
+  it('re-encodes Freeform exec history as Chat function messages', () => {
+    const source = String.raw`text("one\\ntwo");`;
+    const messages = toMessages(
+      ...exchange('call_exec', 'exec', { output: 'done' }, undefined, {
+        source,
+      }),
+    );
+
+    expect(messages).toEqual([
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_exec',
+            type: 'function',
+            function: { name: 'exec', arguments: JSON.stringify({ source }) },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_exec',
+        content: [{ type: 'text', text: 'done' }],
+      },
+    ]);
+  });
+
   const withStreamParser = (
     toolCallParser = new StreamingToolCallParser(),
   ): RequestContext => ({ ...requestContext, toolCallParser });
