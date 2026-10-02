@@ -310,6 +310,8 @@ export class HostedHookSession {
       authority.committedSequence,
     )) {
       if (event.kind !== 'activation.changed') continue;
+      // A renewal repeats its activation and can commit after the release.
+      if (event.payload['renewalSeq'] !== undefined) continue;
       const prior = previous;
       previous = event;
       if (prior?.payload['activationId'] === event.payload['activationId'])

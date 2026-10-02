@@ -99,10 +99,11 @@ another; neither constructs a Hook session, so release skips both and its cost
 does not grow with the number of Hook operations. Parallel Hook executions share
 one acquisition, so each earlier owner is released once. An activation installed
 by a different worker, or after a `hook_operation` activation that was never
-released, is a load after a failure and remains an owner. If the restoring
-install fails and the same worker later loads the Session again, that load is
-taken for the restore; its owner is then found only through its execution
-records.
+released, is a load after a failure and remains an owner. Renewals do not count
+toward that order, because one can be recorded after its activation is
+released. If the restoring install fails and the same worker later loads the
+Session again, that load is taken for the restore; its owner is then found only
+through its execution records.
 Before a replacement Hook owner acquires the Workspace, it releases earlier
 owners whose Hook records are all terminal, including owners reconciled through
 status. Tool-result continuation uses the same acquisition path. Broker checks

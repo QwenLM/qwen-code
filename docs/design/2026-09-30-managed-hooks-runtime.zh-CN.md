@@ -76,7 +76,8 @@ Hook owner ID 在构造时根据已经持久化的 activation ID 与 epoch 固�
 Hook session，因此释放时跳过两者，其开销不随 Hook 操作次数增长。并行的 Hook
 执行共享同一次 acquire，因此每个旧 owner 只释放一次。由另一 worker
 安装的 activation，或在 `hook_operation` activation 未释放时安装的 activation，
-属于故障后的 load，仍视为 owner。若恢复用的安装失败、同一 worker 随后再次 load
+属于故障后的 load，仍视为 owner。判断这一顺序时忽略续约，因为续约可能在其
+activation 释放之后才记录。若恢复用的安装失败、同一 worker 随后再次 load
 该 Session，这次 load 会被当作恢复；其 owner 此后只能通过 execution 记录找到。
 替换后的 Hook owner acquire Workspace 前，会释放所有 Hook 记录已终态的旧 owner，
 包括经 status 完成对账的 owner。工具结果 continuation 复用同一 acquire 入口。

@@ -1166,32 +1166,34 @@ it.each([
   },
 );
 
+async function operate(target: HostedHookSession, id: string): Promise<void> {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
+  };
+  await target.ensureReady();
+  await new ManagedHookActivationController(session).runHookOperation(
+    {
+      operationId: id,
+      occurrenceId: hostedHookOccurrenceId(HookEventName.Notification, id),
+      originTurnId: null,
+    },
+    () => target.fire(HookEventName.Notification, id, {}, signal()),
+  );
+}
+
+function released(): string[] {
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  const ids = release.mock.contexts.map(
+    (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
+  );
+  release.mockClear();
+  return ids;
+}
+
 it.each([true, false])(
   'releases only load owners after Hook operations replace the activation (detached: %s)',
   async (detached) => {
-    catalog = {
-      ...catalog,
-      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
-    };
-    const operate = async (target: HostedHookSession, id: string) => {
-      await target.ensureReady();
-      await new ManagedHookActivationController(session).runHookOperation(
-        {
-          operationId: id,
-          occurrenceId: hostedHookOccurrenceId(HookEventName.Notification, id),
-          originTurnId: null,
-        },
-        () => target.fire(HookEventName.Notification, id, {}, signal()),
-      );
-    };
-    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    const released = () => {
-      const ids = release.mock.contexts.map(
-        (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
-      );
-      release.mockClear();
-      return ids;
-    };
     for (const id of ['a', 'b', 'c']) await operate(hooks, id);
     if (detached) {
       await hooks.close();
@@ -1206,6 +1208,45 @@ it.each([true, false])(
     expect(released()).toEqual([replacement.broker.runtimeSessionId]);
   },
 );
+
+it.each([
+  ['after its install', false],
+  ['after the Hook operation activation it renews is released', true],
+])('skips an activation renewal recorded %s', async (_, late) => {
+  const { authority } = session;
+  const append = authority.appendExecutionEvent.bind(authority);
+  const renewals: Array<Promise<unknown>> = [];
+  if (late)
+    vi.spyOn(authority, 'appendExecutionEvent').mockImplementation(
+      (command, event, actor) => {
+        const pending = append(command, event, actor);
+        // The renewal timer can fire while the release is still committing.
+        if (
+          command.operation === 'releaseActivation' &&
+          authority.currentActivationSubject?.type === 'hook_operation'
+        )
+          renewals.push(authority.renewActivation({ leaseDurationMs: 60_000 }));
+        return pending;
+      },
+    );
+  await operate(hooks, 'a');
+  if (!late) await authority.renewActivation({ leaseDurationMs: 60_000 });
+  await Promise.all(renewals);
+  const changes = authority
+    .eventsInSequenceRange(1, authority.committedSequence)
+    .filter((event) => event.kind === 'activation.changed');
+  expect(
+    changes.some(
+      (event, index) =>
+        event.payload['renewalSeq'] !== undefined &&
+        changes[index - 1].payload['phase'] === 'released' &&
+        changes[index - 1].payload['activationId'] ===
+          event.payload['activationId'],
+    ),
+  ).toBe(late);
+  await hooks.close();
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+});
 
 it.each([
   ['released before another worker loads', true],

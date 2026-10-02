@@ -312,6 +312,8 @@ export class ManagedHookActivationController {
           );
         }
         restoreActivation = true;
+        // Hosted Hook release relies on this order: neither this activation
+        // nor the one the same worker restores below owns a Runtime.
         await this.session.replaceActivation({
           type: 'hook_operation',
           operationId: operation.operationId,
