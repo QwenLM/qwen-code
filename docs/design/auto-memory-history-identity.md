@@ -26,6 +26,8 @@ Keep the fork's selected window capped, but consume its remaining tail in the sa
 
 Prefix validation costs CPU proportional to the processed raw content in the opt-in experiment. Structural startup refreshes do not invalidate the index, but changes to processed conversation content intentionally restart extraction and may repeat facts. The project cursor remains shared between sessions; session changes bootstrap the current user turn. Facts already discarded by compression cannot be recovered. Media-only prompt classification and synthetic-prefix recognition retain the existing helpers' limits.
 
+Early tail consumption changes future extraction input: a later user prompt can no longer bring that old tool or model context into the next pending window, whereas it could before a subsequent no-user execution consumed the tail. User-text eligibility alone does not prove unchanged memory quality. Representative quality and cost acceptance remains required before enabling the experiment.
+
 ## Validation and acceptance
 
 Regression tests must cover a legal new session inheriting long history, a fresh long tool turn, compressed summaries and attachments, shrink followed by regrowth, same-length replacement with an unchanged boundary entry, startup-reminder refresh, asynchronous mutation, and preserved call/response pairs. Verify ineligible-tail consumption with and without a fork, pre-fork tail attestation, retained later user facts, and no extra fork or larger agent budget. Existing empty-window and zero-tool holdback tests must still pass with an attested cursor.
