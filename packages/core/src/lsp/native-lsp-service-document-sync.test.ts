@@ -2979,6 +2979,33 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).toMatch(/^No diagnostics found/);
     });
 
+    it('refuses a clean answer whose only backer could never own the file', async () => {
+      // The sole configured server is READY and returns an authoritative empty
+      // report, so nothing failed and nothing was skipped — but it declares
+      // python only, so its report says nothing about main.ts.
+      withServers([
+        [
+          'pyright',
+          {
+            ...emptyReportHandle('pyright'),
+            config: {
+              ...handle.config,
+              name: 'pyright',
+              languages: ['python'],
+            },
+          },
+        ],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
+    });
+
     it('does not excuse a failed server whose config key is capitalized', async () => {
       // `.lsp.json` keys reach `languages` unnormalized, so `"Python"` has to
       // derive `py` exactly like `"python"` does. Otherwise the relevance rule

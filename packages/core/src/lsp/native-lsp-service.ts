@@ -2001,6 +2001,7 @@ export class NativeLspService {
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
     const handles = this.getDiagnosticHandles(serverName, uri);
+    const extension = this.diagnosticFileExtension(uri);
     const allDiagnostics: LspDiagnostic[] = [];
     const failures: Array<{
       name: string;
@@ -2008,8 +2009,10 @@ export class NativeLspService {
       handle: LspServerHandle;
     }> = [];
     // Queried servers that answered with a usable report, including an
-    // authoritative empty one: the only thing that can back a clean answer.
-    let answered = 0;
+    // authoritative empty one, and of those the ones the queried file does not
+    // positively exclude. Only the latter can back a clean answer: an empty
+    // report from a server that could never own the file certifies nothing.
+    let answeredRelevant = 0;
 
     for (const [name, handle] of handles) {
       // A sync failure must reject, not report incomplete diagnostics as clean.
@@ -2058,8 +2061,8 @@ export class NativeLspService {
                 handle,
                 error: new Error('server returned only unusable diagnostics'),
               });
-            } else {
-              answered++;
+            } else if (!this.serverDeclaredIrrelevant(handle, extension)) {
+              answeredRelevant++;
             }
           } else {
             // A report without an `items` array (or a bare array) answered
@@ -2092,7 +2095,6 @@ export class NativeLspService {
       // A server the queried file provably excludes cannot veto the answer —
       // its failure says nothing about this file — but a failure or
       // unusable answer from a server that could own the file must.
-      const extension = this.diagnosticFileExtension(uri);
       const relevantFailures = failures.filter(
         ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
       );
@@ -2105,12 +2107,17 @@ export class NativeLspService {
         throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
       }
       // The relevance rule excuses a server from vetoing *another* server's
-      // answer; it cannot excuse the only answer there is. When no queried
-      // server answered and every recorded failure was filtered out above as
-      // irrelevant, the empty result certifies a file nothing analyzed. The
-      // failures ledger is non-empty here, so the rejection names a cause.
-      if (answered === 0 && failures.length > 0) {
-        throw nothingRetrievedForDiagnostics(failures, unreachable);
+      // answer; it cannot excuse the only answer there is. Nothing relevant
+      // answered, so the empty result certifies a file no queried server could
+      // analyze. Every queried server either answers or records a failure, so
+      // the ledger is empty here only when an excused server answered and
+      // nothing else went wrong — that case needs its own reason string.
+      if (answeredRelevant === 0) {
+        throw failures.length > 0
+          ? nothingRetrievedForDiagnostics(failures, unreachable)
+          : new Error(
+              'No LSP diagnostics could be retrieved (no configured server covers the queried file)',
+            );
       }
     }
     return allDiagnostics;
