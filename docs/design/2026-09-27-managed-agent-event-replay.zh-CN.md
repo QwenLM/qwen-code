@@ -156,8 +156,25 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 ### 4.6 WebShell 客户端
 
 客户端根据事件名与缺失的 id 识别 resync 帧。provider 把它转换为已有的
-`stream_gap` 事件，于是会话 hook 重新读取 transcript 并从其 `lastSequence` 之后
-继续，与收到 `stream.reconciled` 后的处理相同。
+`stream_gap` 事件，于是会话 hook 重新读取 transcript 并从其头部之后继续，与收到
+`stream.reconciled` 后的处理相同。
+
+hook 的 gap 恢复会把新 transcript 合并进当前展示的事件，而不是整体替换。快照对其
+覆盖区间（[首个事件, lastSequence]）是权威的：区间内的实时事件若不在快照中——例如
+服务端已将其组装进 Item 的流式 delta——会被丢弃而不是重复渲染；比快照头更新的实时
+事件会在读取滞后时存活。窗口之下只有用户翻页载入的事件会保留，item 投影则一律不保留
+——撤回之后服务端以原始事件为准。分页游标跟随被保留的内容：非空快照携带全量历史时
+清空；客户端没有游标、或被保留页与窗口之间出现空洞时采纳快照的游标；其余情况保留用户
+的游标。gap 重同步若未能推进游标则记为一次停滞；连续第三次停滞会显示持续存在的错误，
+任何投递的事件或推进的快照都会清零计数。
+
+流客户端容忍损坏帧。data 载荷无法解析、或解析结果没有字符串 `type` 的帧会被跳过并
+记录限流警告，后续帧会把消费者的游标推过它。而损坏帧在以下情形改为产出 resync：它是
+无 id 的 resync 标记帧；它的事件名属于「跳过即不可恢复」的一类（`action.updated`、
+`stream.reconciled`、turn 终止类、`item.tool_call.updated`、`item.tool_result.updated`）；
+连续超过三帧损坏；或整条连接只有跳过没有投递。流末尾的残缺缓冲是帧中断连：按断连记录，且不计入损坏预算。
+合成的 resync 帧携带占位水位（`replayFloorSequence: 0`、`snapshotThroughSequence: 0`），
+客户端没有任何代码读取它们。
 
 ## 5. 测试
 
@@ -186,7 +203,10 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 - 一个升级测试在 H2 的 MySQL 模式下于 V1 写入事件、执行迁移，并按规则与 Snapshot
   检查补上的身份。`ManagedAgentMySqlIT` 在 MySQL 上执行同样的升级，并在其上检查回放下限。
 - web-shell 测试解码 resync 帧，检查 provider 只产出一个 `stream_gap` 后停止，并检查
-  会话 hook 随后重新读取 transcript，从其 `lastSequence` 之后重新订阅。
+  会话 hook 随后重新读取 transcript，从其头部之后重新订阅。hook 的 gap 合并测试钉住
+  窗口语义：翻页历史存活、被取代的 delta 被丢弃、游标跟随被保留的内容、连续无法推进的
+  重同步会上报错误。流客户端的测试钉住坏帧策略：跳过按有界速率告警、不可恢复的形态触发
+  resync、帧中断连单独记录且不占预算、只有跳过的连接以 resync 结束。
 
 ## 6. 兼容性
 

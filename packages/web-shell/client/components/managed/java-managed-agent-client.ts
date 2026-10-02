@@ -50,6 +50,21 @@ const MAX_CONSECUTIVE_CORRUPT_FRAMES = 3;
 // identity, and alternating corruption would otherwise log at stream rate.
 const SKIP_LOG_EVERY = 50;
 
+// Event names a skip cannot recover from: a retracted stream.reconciled
+// would leave withdrawn text on screen, a lost turn terminal would leave the
+// last message streaming forever (and mislabel its tools later), a lost tool
+// lifecycle update would strand its card, and a lost approval update leaves
+// the Hosted approval unreachable — all resync instead of skipping.
+const RESYNC_ON_CORRUPT = new Set([
+  'action.updated',
+  'stream.reconciled',
+  'turn.completed',
+  'turn.failed',
+  'turn.cancelled',
+  'item.tool_call.updated',
+  'item.tool_result.updated',
+]);
+
 export function isJavaAgentResyncRequired(
   frame: JavaAgentEvent | JavaAgentResyncRequired,
 ): frame is JavaAgentResyncRequired {
@@ -395,7 +410,24 @@ export class JavaManagedAgentClient {
         return event;
       }
       const { data, id, name } = parseEventFrameFields(frame);
-      if (data.length === 0) return undefined; // heartbeat or comment
+      if (data.length === 0) {
+        const hasContent = frame
+          .split(/\r?\n/)
+          .some((line) => line && !line.startsWith(':'));
+        if (!hasContent) return undefined; // heartbeat or comment
+        if (trailing) {
+          // A torn trailing buffer that never reached its data line still
+          // lost a frame: say so, without charging the corruption budget.
+          console.warn(
+            `[web-shell] the Managed Agent event stream closed mid-frame; the frame at id ${id ?? 'none'} was discarded`,
+          );
+          return undefined;
+        }
+        // A mid-stream frame with id/event lines but no data line is
+        // malformed server output, not a heartbeat: count it as corrupt
+        // below instead of dropping it silently.
+        failure ??= new Error('frame has no data payload');
+      }
       if (trailing) {
         // A leftover buffer at end of stream is a mid-frame disconnect, not
         // a corrupt persisted frame: log it as such and spare the budget.
@@ -416,9 +448,7 @@ export class JavaManagedAgentClient {
         // A run of corrupt frames means the log itself is poisoned: resync
         // past the whole run instead of skipping forever.
         consecutiveCorrupt > MAX_CONSECUTIVE_CORRUPT_FRAMES ||
-        // A skipped action update leaves a pending approval unreachable with
-        // no signal anywhere; the consumer cannot reconstruct it, so resync.
-        name === 'action.updated'
+        RESYNC_ON_CORRUPT.has(name ?? '')
       ) {
         console.warn(
           `[web-shell] resyncing on a corrupt Managed Agent frame (id: ${id ?? 'none'}, event: ${name ?? 'unknown'}):`,

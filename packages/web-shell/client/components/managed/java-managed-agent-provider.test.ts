@@ -448,7 +448,6 @@ describe('createJavaManagedAgentProvider', () => {
       }),
       expect.objectContaining({ id: 4, type: 'completed' }),
     ]);
-    expect(transcript.coveredSequence).toBe(4);
     expect(transcript.olderCursor).toBeUndefined();
     expect(transcript.lastEventId).toBe(4);
   });

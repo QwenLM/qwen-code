@@ -4,6 +4,12 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
+import {
+  corruptFrame as corrupt,
+  javaDeltaEvent as javaDelta,
+  javaSessionPayload,
+  sseFrame,
+} from './managed-agent-sse.test-fixtures';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
@@ -132,8 +138,12 @@ describe('useManagedSession', () => {
 
   it('preserves loaded older pages and their paging cursor across a stream gap', async () => {
     let deliverGap!: () => void;
+    let deliverGap2!: () => void;
     const gapGate = new Promise<void>((resolve) => {
       deliverGap = resolve;
+    });
+    const gapGate2 = new Promise<void>((resolve) => {
+      deliverGap2 = resolve;
     });
     const cursors: Array<number | undefined> = [];
     let snapshotCalls = 0;
@@ -153,19 +163,26 @@ describe('useManagedSession', () => {
           });
         }
         snapshotCalls += 1;
-        return Promise.resolve(
-          snapshotCalls === 1
-            ? {
-                events: [event(5), event(6)],
-                olderCursor: 'cursor-5',
-                lastEventId: 6,
-              }
-            : {
-                events: [event(5), event(6), event(7)],
-                olderCursor: 'cursor-5',
-                lastEventId: 7,
-              },
-        );
+        if (snapshotCalls === 1) {
+          return Promise.resolve({
+            events: [event(5), event(6)],
+            olderCursor: 'cursor-5',
+            lastEventId: 6,
+          });
+        }
+        if (snapshotCalls === 2) {
+          return Promise.resolve({
+            events: [event(5), event(6), event(7)],
+            olderCursor: 'cursor-5',
+            lastEventId: 7,
+          });
+        }
+        // The second gap's window slid forward.
+        return Promise.resolve({
+          events: [event(8), event(9)],
+          olderCursor: 'cursor-8',
+          lastEventId: 9,
+        });
       },
     );
     const provider = {
@@ -178,6 +195,11 @@ describe('useManagedSession', () => {
         cursors.push(request.lastEventId);
         if (cursors.length === 1) {
           await gapGate;
+          yield { ...event(request.lastEventId ?? 0), type: 'stream_gap' };
+          return;
+        }
+        if (cursors.length === 2) {
+          await gapGate2;
           yield { ...event(request.lastEventId ?? 0), type: 'stream_gap' };
           return;
         }
@@ -226,6 +248,13 @@ describe('useManagedSession', () => {
       ]),
     );
     expect(latest?.olderCursor).toBeUndefined();
+
+    // A second gap whose window slid forward: only the user's paged pages
+    // survive below the window; the aged-out window content is trimmed.
+    deliverGap2();
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2, 3, 4, 8, 9]),
+    );
   });
 
   it('drops the paging cursor when a gap snapshot carries the full history', async () => {
@@ -508,7 +537,6 @@ describe('useManagedSession', () => {
               event(7),
             ],
             lastEventId: 7,
-            coveredSequence: 7,
           });
         }
         // Reconciliation deleted the snapshot: a raw page again.
@@ -717,9 +745,11 @@ describe('useManagedSession', () => {
         olderCursor: 'cursor-5',
         lastEventId: 6,
       })
-      // The snapshot was planned before event 7 landed: it lags the stream.
+      // The snapshot was planned before event 7 landed: it lags the stream,
+      // and re-states event 5 with different content so the resync is
+      // observable in the merged state.
       .mockResolvedValue({
-        events: [event(5), event(6)],
+        events: [{ ...event(5), data: { text: 'five' } }, event(6)],
         olderCursor: 'cursor-5',
         lastEventId: 6,
       });
@@ -754,10 +784,577 @@ describe('useManagedSession', () => {
       expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]),
     );
     deliverGap();
-    // Event 7 is newer than the snapshot head: it survives the merge.
-    await vi.waitFor(() =>
-      expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]),
+    // Gate on the resync having actually run, then: event 7 is newer than
+    // the snapshot head, so it survives the merge.
+    await vi.waitFor(() => expect(getTranscript).toHaveBeenCalledTimes(2));
+    expect(latest?.events.map((item) => item.id)).toEqual([5, 6, 7]);
+    expect(latest?.events[0]?.data).toEqual({ text: 'five' });
+  });
+
+  it('adopts the window cursor when a hole opens between the pages and the window', async () => {
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    const befores: Array<string | undefined> = [];
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) => {
+        if (request.before) befores.push(request.before);
+        if (request.before === 'cursor-5') {
+          return Promise.resolve({
+            events: [event(3), event(4)],
+            olderCursor: 'cursor-3',
+            lastEventId: 6,
+          });
+        }
+        if (request.before === 'cursor-7') {
+          return Promise.resolve({
+            events: [event(5), event(6)],
+            olderCursor: 'cursor-5',
+            lastEventId: 8,
+          });
+        }
+        return Promise.resolve(
+          befores.length === 0
+            ? {
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              }
+            : // The gap window sits far above the paged pages.
+              {
+                events: [event(7), event(8)],
+                olderCursor: 'cursor-7',
+                lastEventId: 8,
+              },
+        );
+      },
     );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if ((request.lastEventId ?? 0) === 6) {
+          await gapGate;
+          yield { ...event(6), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]),
+    );
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await vi.waitFor(() => expect(latest?.olderCursor).toBe('cursor-3'));
+
+    deliverGap();
+
+    // The paged [3,4] survive, but the cursor must move to the window's so
+    // paging can refill the hole between them.
+    await vi.waitFor(() => expect(latest?.olderCursor).toBe('cursor-7'));
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([3, 4, 5, 6, 7, 8]),
+    );
+    expect(befores).toEqual(['cursor-5', 'cursor-7']);
+  });
+
+  it('refreshes a stale retained event from the server copy', async () => {
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) => {
+        if (request.before === 'cursor-5') {
+          return Promise.resolve({
+            events: [{ ...event(3), data: { text: 'RETRACTED-ME' } }, event(4)],
+            olderCursor: 'cursor-3',
+            lastEventId: 6,
+          });
+        }
+        if (request.before === 'cursor-9') {
+          // The re-paged range carries the server's retraction of event 3.
+          return Promise.resolve({
+            events: [
+              { ...event(3), data: { text: '' } },
+              event(5),
+              event(6),
+              event(7),
+              event(8),
+            ],
+            olderCursor: 'cursor-3',
+            lastEventId: 10,
+          });
+        }
+        return Promise.resolve(
+          getTranscript.mock.calls.length === 1
+            ? {
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              }
+            : {
+                events: [event(9), event(10)],
+                olderCursor: 'cursor-9',
+                lastEventId: 10,
+              },
+        );
+      },
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if ((request.lastEventId ?? 0) === 6) {
+          await gapGate;
+          yield { ...event(6), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]),
+    );
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await vi.waitFor(() =>
+      expect(latest?.events[0]?.data).toEqual({ text: 'RETRACTED-ME' }),
+    );
+
+    deliverGap();
+    await vi.waitFor(() => expect(latest?.olderCursor).toBe('cursor-9'));
+
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    // The fresh page wins on a shared id: the retraction lands.
+    await vi.waitFor(() =>
+      expect(latest?.events[0]?.data).toEqual({ text: '' }),
+    );
+  });
+
+  it('stays exhausted after a gap once the user paged to the beginning', async () => {
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) => {
+        if (request.before === 'cursor-5') {
+          return Promise.resolve({
+            events: [event(3), event(4)],
+            olderCursor: 'cursor-3',
+            lastEventId: 6,
+          });
+        }
+        if (request.before === 'cursor-3') {
+          // The beginning: no older cursor.
+          return Promise.resolve({
+            events: [event(1), event(2)],
+            lastEventId: 6,
+          });
+        }
+        return Promise.resolve(
+          getTranscript.mock.calls.length === 1
+            ? {
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              }
+            : {
+                events: [event(5), event(6), event(7)],
+                olderCursor: 'cursor-5',
+                lastEventId: 7,
+              },
+        );
+      },
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if ((request.lastEventId ?? 0) === 6) {
+          await gapGate;
+          yield { ...event(6), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]),
+    );
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2, 3, 4, 5, 6]),
+    );
+    expect(latest?.olderCursor).toBeUndefined();
+
+    deliverGap();
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([
+        1, 2, 3, 4, 5, 6, 7,
+      ]),
+    );
+    // Everything is already loaded: the gap must not re-arm the affordance.
+    expect(latest?.olderCursor).toBeUndefined();
+    const calls = getTranscript.mock.calls.length;
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    expect(getTranscript.mock.calls.length).toBe(calls);
+  });
+
+  it('re-arms paging when a hole opens after the user paged to the beginning', async () => {
+    let deliverGap!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    const befores: Array<string | undefined> = [];
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) => {
+        if (request.before) befores.push(request.before);
+        if (request.before === 'cursor-5') {
+          return Promise.resolve({
+            events: [event(3), event(4)],
+            olderCursor: 'cursor-3',
+            lastEventId: 6,
+          });
+        }
+        if (request.before === 'cursor-3') {
+          return Promise.resolve({
+            events: [event(1), event(2)],
+            lastEventId: 6,
+          });
+        }
+        if (request.before === 'cursor-8') {
+          return Promise.resolve({
+            events: [event(5), event(6), event(7)],
+            olderCursor: 'cursor-5',
+            lastEventId: 9,
+          });
+        }
+        return Promise.resolve(
+          befores.length === 0
+            ? {
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              }
+            : // The window slid far past the paged region: a hole opened.
+              {
+                events: [event(8), event(9)],
+                olderCursor: 'cursor-8',
+                lastEventId: 9,
+              },
+        );
+      },
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if ((request.lastEventId ?? 0) === 6) {
+          await gapGate;
+          yield { ...event(6), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]),
+    );
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    // Paged to the beginning: the affordance is gone.
+    await vi.waitFor(() => expect(latest?.olderCursor).toBeUndefined());
+
+    deliverGap();
+
+    // A hole opened between the paged region and the window: exhaustion is
+    // stale, so the window's cursor is adopted and the hole stays pageable.
+    await vi.waitFor(() => expect(latest?.olderCursor).toBe('cursor-8'));
+    await act(async () => {
+      await latest!.loadOlder();
+    });
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8, 9,
+      ]),
+    );
+    expect(befores).toEqual(['cursor-5', 'cursor-3', 'cursor-8']);
+  });
+
+  it('does not count stalls separated by delivered events', async () => {
+    vi.useFakeTimers();
+    let subscribeCalls = 0;
+    let streamed = 2;
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(() =>
+      Promise.resolve({ events: [event(1)], lastEventId: streamed }),
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls <= 5) {
+          if (subscribeCalls >= 3) {
+            // A real event between stalls: the counter resets.
+            streamed += 1;
+            yield event(streamed);
+          }
+          yield { ...event(request.lastEventId ?? 0), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      // stall, stall, then every connection delivers an event before its
+      // gap — never three stalls in a row.
+      for (let round = 0; round < 8; round++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+        });
+      }
+      expect(latest?.error).toBeUndefined();
+      expect(subscribeCalls).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not count stalls separated by an advancing resync', async () => {
+    vi.useFakeTimers();
+    let snapshotCalls = 0;
+    let subscribeCalls = 0;
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(() => {
+      snapshotCalls += 1;
+      return Promise.resolve(
+        snapshotCalls === 4
+          ? // The third gap's resync advances the head: counter resets.
+            { events: [event(1), event(2), event(3)], lastEventId: 3 }
+          : { events: [event(1), event(2)], lastEventId: 2 },
+      );
+    });
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls <= 5) {
+          yield { ...event(request.lastEventId ?? 0), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    try {
+      // stall, stall, [advance resets], stall, stall — never three in a row.
+      for (let round = 0; round < 8; round++) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3000);
+        });
+      }
+      expect(latest?.error).toBeUndefined();
+      expect(subscribeCalls).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a page fetch once when a gap moved the cursor', async () => {
+    let deliverGap!: () => void;
+    let releasePage!: () => void;
+    const gapGate = new Promise<void>((resolve) => {
+      deliverGap = resolve;
+    });
+    const pageGate = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    const befores: Array<string | undefined> = [];
+    const getTranscript = vi.fn<ManagedAgentProvider['getTranscript']>(
+      (_sessionId, request) => {
+        if (request.before) befores.push(request.before);
+        if (request.before === 'cursor-5') {
+          // The page stays in flight across the gap.
+          return pageGate.then(() => ({
+            events: [event(3), event(4)],
+            olderCursor: 'cursor-3',
+            lastEventId: 6,
+          }));
+        }
+        if (request.before === 'cursor-8') {
+          return Promise.resolve({
+            events: [event(6), event(7)],
+            olderCursor: 'cursor-6',
+            lastEventId: 9,
+          });
+        }
+        return Promise.resolve(
+          befores.length === 0
+            ? {
+                events: [event(5), event(6)],
+                olderCursor: 'cursor-5',
+                lastEventId: 6,
+              }
+            : // The gap window moved the paging cursor forward.
+              {
+                events: [event(8), event(9)],
+                olderCursor: 'cursor-8',
+                lastEventId: 9,
+              },
+        );
+      },
+    );
+    const provider = {
+      getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+      getTranscript,
+      async *subscribeEvents(
+        _sessionId: string,
+        request: { lastEventId?: number; signal?: AbortSignal },
+      ) {
+        if ((request.lastEventId ?? 0) === 6) {
+          await gapGate;
+          yield { ...event(6), type: 'stream_gap' };
+          return;
+        }
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest: ReturnType<typeof useManagedSession> | undefined;
+    function Probe() {
+      latest = useManagedSession(provider, 'client-1', 'session-1');
+      return null;
+    }
+    const container = document.createElement('div');
+    root = createRoot(container);
+    act(() => root!.render(<Probe />));
+
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([5, 6]),
+    );
+    act(() => {
+      void latest!.loadOlder();
+    });
+    deliverGap();
+    await vi.waitFor(() => expect(latest?.olderCursor).toBe('cursor-8'));
+
+    await act(async () => {
+      releasePage();
+      await pageGate;
+    });
+    // The stale page is discarded and re-issued once against the new cursor.
+    await vi.waitFor(() =>
+      expect(latest?.events.map((item) => item.id)).toEqual([6, 7, 8, 9]),
+    );
+    expect(befores).toEqual(['cursor-5', 'cursor-8']);
+    expect(latest?.olderCursor).toBe('cursor-6');
   });
 
   it('suppresses a stale loadOlder failure after a gap lands the full history', async () => {
@@ -841,17 +1438,6 @@ describe('useManagedSession', () => {
 
   it('recovers past a run of corrupt frames through the resync path', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const javaDelta = (sequence: number, text: string) =>
-      JSON.stringify({
-        sequence,
-        eventId: `evt_${sequence}`,
-        sessionId: 'session-1',
-        turnId: 'turn-1',
-        type: 'item.output_text.delta',
-        createdAt: sequence,
-        data: { text },
-        terminal: false,
-      });
     const transcriptPayload = (lastSequence: number) =>
       JSON.stringify({
         items: [],
@@ -873,18 +1459,10 @@ describe('useManagedSession', () => {
     const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
       const path = String(url);
       if (path.endsWith('/sessions/get')) {
-        return new Response(
-          JSON.stringify({
-            sessionId: 'session-1',
-            agentId: 'dataworks_data_agent',
-            status: 'active',
-            title: 'Session',
-            createdAt: 1,
-            updatedAt: 1,
-            lastSequence: 2,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(javaSessionPayload(2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
       if (path.endsWith('/transcript/query')) {
         transcriptCalls += 1;
@@ -897,8 +1475,6 @@ describe('useManagedSession', () => {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         streamCursors.push(body['afterSequence']);
         const encoder = new TextEncoder();
-        const corrupt = (sequence: number) =>
-          `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             if (body['afterSequence'] === 2) {
@@ -941,34 +1517,13 @@ describe('useManagedSession', () => {
   it('surfaces an error when repeated resyncs cannot advance the cursor', async () => {
     vi.useFakeTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const javaDelta = (sequence: number, text: string) =>
-      JSON.stringify({
-        sequence,
-        eventId: `evt_${sequence}`,
-        sessionId: 'session-1',
-        turnId: 'turn-1',
-        type: 'item.output_text.delta',
-        createdAt: sequence,
-        data: { text },
-        terminal: false,
-      });
-    const corrupt = (sequence: number) =>
-      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: {"sequence":${sequence}\r\n\r\n`;
     const fetchImpl = vi.fn<typeof fetch>(async (url) => {
       const path = String(url);
       if (path.endsWith('/sessions/get')) {
-        return new Response(
-          JSON.stringify({
-            sessionId: 'session-1',
-            agentId: 'dataworks_data_agent',
-            status: 'active',
-            title: 'Session',
-            createdAt: 1,
-            updatedAt: 1,
-            lastSequence: 2,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(javaSessionPayload(2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
       if (path.endsWith('/transcript/query')) {
         // The transcript head never advances past the corrupt run.
@@ -1101,33 +1656,14 @@ describe('useManagedSession', () => {
 
   it('restores a pending action whose streamed frame was corrupt', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const javaDelta = (sequence: number, text: string) =>
-      JSON.stringify({
-        sequence,
-        eventId: `evt_${sequence}`,
-        sessionId: 'session-1',
-        turnId: 'turn-1',
-        type: 'item.output_text.delta',
-        createdAt: sequence,
-        data: { text },
-        terminal: false,
-      });
     let transcriptCalls = 0;
     const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
       const path = String(url);
       if (path.endsWith('/sessions/get')) {
-        return new Response(
-          JSON.stringify({
-            sessionId: 'session-1',
-            agentId: 'dataworks_data_agent',
-            status: 'active',
-            title: 'Session',
-            createdAt: 1,
-            updatedAt: 1,
-            lastSequence: 2,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(javaSessionPayload(2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
       if (path.endsWith('/transcript/query')) {
         transcriptCalls += 1;
@@ -1214,35 +1750,14 @@ describe('useManagedSession', () => {
 
   it('skips a corrupt streamed frame and keeps rendering later events', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const javaDelta = (sequence: number, text: string) =>
-      JSON.stringify({
-        sequence,
-        eventId: `evt_${sequence}`,
-        sessionId: 'session-1',
-        turnId: 'turn-1',
-        type: 'item.output_text.delta',
-        createdAt: sequence,
-        data: { text },
-        terminal: false,
-      });
-    const sseFrame = (sequence: number, text: string) =>
-      `id: ${sequence}\r\nevent: item.output_text.delta\r\ndata: ${javaDelta(sequence, text)}\r\n\r\n`;
     const streamBodies: Array<Record<string, unknown>> = [];
     const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
       const path = String(url);
       if (path.endsWith('/sessions/get')) {
-        return new Response(
-          JSON.stringify({
-            sessionId: 'session-1',
-            agentId: 'dataworks_data_agent',
-            status: 'active',
-            title: 'Session',
-            createdAt: 1,
-            updatedAt: 1,
-            lastSequence: 2,
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(javaSessionPayload(2), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
       if (path.endsWith('/transcript/query')) {
         return new Response(

@@ -41,13 +41,19 @@ export function useManagedSession(
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
   const cursorRef = useRef<string | undefined>(undefined);
+  // Whether any older page was ever loaded; the highest id any page returned
+  // (the paged region's top edge); and whether paging reached the beginning.
   const pagedRef = useRef(false);
+  const pagedHeadRef = useRef<number | undefined>(undefined);
+  const exhaustedRef = useRef(false);
 
   useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
     cursorRef.current = undefined;
     pagedRef.current = false;
+    pagedHeadRef.current = undefined;
+    exhaustedRef.current = false;
     setLoadingOlder(false);
     setState({ sessionId, events: [], loading: Boolean(sessionId) });
     if (!sessionId) return () => abort.abort();
@@ -80,54 +86,56 @@ export function useManagedSession(
             min === undefined || event.id < min ? event.id : min,
           undefined,
         );
-        // The transcript is assembled only while the server holds a durable
-        // snapshot; a raw page (no coveredSequence) means the items are gone
-        // (e.g. mid-reconciliation), so kept item projections would duplicate
-        // or un-retract the raw events.
-        const assembled = (transcript.coveredSequence ?? 0) > 0;
         const empty = firstId === undefined;
         // A non-empty snapshot without an older cursor already carries the
         // full history: nothing is left to page, and a stale paging cursor
         // would re-fetch raw events the snapshot has since assembled into
-        // items, duplicating them. Clearing it also voids any in-flight
-        // older-page fetch (loadOlder checks the cursor is unmoved).
+        // items, duplicating them. Paging may matter again after a later
+        // raw-page gap, so exhaustion is reset too.
         const fullHistory = !empty && transcript.olderCursor === undefined;
-        if (fullHistory) cursorRef.current = undefined;
-        else if (!empty) {
-          // The cursor must fetch below the oldest RETAINED event. When the
-          // user paged, their cursor stays valid (if a full-history gap
-          // cleared it, adopt the snapshot's); otherwise nothing below the
-          // window survives, so the view starts at the window and the
-          // snapshot's cursor is the one that cannot skip content.
-          if (pagedRef.current) cursorRef.current ??= transcript.olderCursor;
-          else cursorRef.current = transcript.olderCursor;
-        }
+        // The cursor must fetch below the oldest retained event; one
+        // decision feeds both the fetch gate (cursorRef) and the affordance
+        // (state.olderCursor). Pages top out at pagedHeadRef, so a window
+        // starting above it leaves a hole only the snapshot's own cursor
+        // can refill.
+        let nextCursor: string | undefined;
+        if (fullHistory) nextCursor = undefined;
+        else if (empty) nextCursor = cursorRef.current;
+        else if (!pagedRef.current) nextCursor = transcript.olderCursor;
+        else if (
+          pagedHeadRef.current !== undefined &&
+          pagedHeadRef.current < firstId - 1
+        ) {
+          // A hole between the paged pages and the window is content the
+          // exhaustion flag never covered: adopt the window's cursor so the
+          // hole stays pageable, and drop the now-stale exhaustion.
+          nextCursor = transcript.olderCursor;
+          exhaustedRef.current = false;
+        } else if (exhaustedRef.current) nextCursor = cursorRef.current;
+        else nextCursor = cursorRef.current ?? transcript.olderCursor;
+        if (fullHistory) exhaustedRef.current = false;
+        cursorRef.current = nextCursor;
         setState((current) => {
           const kept = empty
             ? current.events
             : current.events.filter((event) => {
                 if (event.id > transcript.lastEventId) return true;
                 if (event.id >= firstId) return false;
-                // Older than the window: only pages the user paged into
-                // survive (an unpaged prefix would otherwise grow and fuse
-                // text across the hole), and item projections only while
-                // the server still backs them.
+                // Older than the window: only events the user paged in
+                // survive (anything else would grow and fuse text across a
+                // hole), and item projections never do — the raw originals
+                // are what the server stands behind after a retraction.
                 return (
                   pagedRef.current &&
-                  (assembled || event.assembledFromItem !== true)
+                  event.id <= (pagedHeadRef.current ?? -1) &&
+                  event.assembledFromItem !== true
                 );
               });
           return {
             ...current,
             summary,
             events: mergeManagedEvents(kept, transcript.events),
-            olderCursor: fullHistory
-              ? undefined
-              : empty
-                ? current.olderCursor
-                : pagedRef.current
-                  ? (current.olderCursor ?? transcript.olderCursor)
-                  : transcript.olderCursor,
+            olderCursor: nextCursor,
             loading: false,
             error: undefined,
           };
@@ -230,31 +238,55 @@ export function useManagedSession(
     if (!abort || abort.signal.aborted || !sessionId || !before || loadingOlder)
       return;
     setLoadingOlder(true);
-    try {
-      const page = await provider.getTranscript(sessionId, {
-        clientId,
-        before,
-        limit: 100,
-        signal: abort.signal,
-      });
-      // A gap resync that landed the full history cleared the cursor while
-      // this fetch was in flight: its page carries raw events the snapshot
-      // has since assembled into items, so merging it would duplicate them.
-      if (abort.signal.aborted || cursorRef.current !== before) return;
-      cursorRef.current = page.olderCursor;
-      pagedRef.current = true;
-      setState((current) => ({
-        ...current,
-        events: mergeManagedEvents(page.events, current.events),
-        olderCursor: page.olderCursor,
-        error: undefined,
-      }));
-    } catch (error) {
-      if (!abort.signal.aborted && cursorRef.current === before)
+    const fetchPage = async (
+      cursor: string,
+      allowRetry: boolean,
+    ): Promise<void> => {
+      try {
+        const page = await provider.getTranscript(sessionId, {
+          clientId,
+          before: cursor,
+          limit: 100,
+          signal: abort.signal,
+        });
+        if (abort.signal.aborted) return;
+        // A gap resync moved the cursor while this fetch was in flight. If
+        // it cleared the cursor (full-history snapshot), the page carries
+        // raw events the snapshot has since assembled into items — merging
+        // it would duplicate them, so discard it. If it merely slid forward
+        // (a windowed gap), retry once on the new cursor instead of
+        // swallowing the click.
+        if (cursorRef.current !== cursor) {
+          const moved = cursorRef.current;
+          if (moved !== undefined && allowRetry) return fetchPage(moved, false);
+          return;
+        }
+        cursorRef.current = page.olderCursor;
+        pagedRef.current = true;
+        exhaustedRef.current = page.olderCursor === undefined;
+        if (page.events.length > 0)
+          pagedHeadRef.current = Math.max(
+            pagedHeadRef.current ?? 0,
+            ...page.events.map((event) => event.id),
+          );
+        // The fresh page wins over local copies on a shared id: the server
+        // may have corrected (e.g. retracted) the text since.
         setState((current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          events: mergeManagedEvents(current.events, page.events),
+          olderCursor: page.olderCursor,
+          error: undefined,
         }));
+      } catch (error) {
+        if (!abort.signal.aborted && cursorRef.current === cursor)
+          setState((current) => ({
+            ...current,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+      }
+    };
+    try {
+      await fetchPage(before, true);
     } finally {
       if (!abort.signal.aborted) setLoadingOlder(false);
     }

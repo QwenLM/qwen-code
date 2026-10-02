@@ -78,11 +78,6 @@ export interface ManagedAgentSessionTranscript {
   events: ManagedAgentSessionEvent[];
   olderCursor?: string;
   lastEventId: number;
-  /**
-   * Set when the response is backed by a durable snapshot (its items cover
-   * everything up to this sequence); absent/0 for a raw event page.
-   */
-  coveredSequence?: number;
 }
 
 export interface ManagedAgentTurnAdmission {
