@@ -105,10 +105,15 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
 it('keeps browser gates hosted independently of the shared Linux runner', () => {
   expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
   // Slow hosted browser installs took over 23 min, so reserve time in the
-  // 60-minute job for transcript/smoke tests and artifact upload.
+  // 60-minute job for transcript/smoke tests and artifact upload, while the
+  // install step itself stays bounded.
   expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(60);
   expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(60);
   expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(60);
+  const hostedInstall = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Install Playwright Chromium and WebKit (hosted)',
+  );
+  expect(hostedInstall['timeout-minutes']).toBe(30);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.

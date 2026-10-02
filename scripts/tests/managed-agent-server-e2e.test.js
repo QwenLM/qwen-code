@@ -5,6 +5,13 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import {
+  createSourceFile,
+  isFunctionDeclaration,
+  isVariableStatement,
+  ScriptTarget,
+  transpileModule,
+} from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const read = (file) =>
@@ -22,6 +29,65 @@ const namedScripts = (text) => [
 ];
 
 describe('managed-agent-server e2e runner', () => {
+  it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
+    const source = createSourceFile(
+      'runner.ts',
+      read('scripts/run-managed-agent-server-e2e.ts'),
+      ScriptTarget.Latest,
+      true,
+    );
+    const allocation = source.statements
+      .filter(
+        (node) =>
+          (isFunctionDeclaration(node) &&
+            ['freePort', 'startHeldExecutionStartProxy'].includes(
+              node.name?.text,
+            )) ||
+          (isVariableStatement(node) &&
+            node.declarationList.declarations.some(
+              (declaration) =>
+                declaration.name.getText(source) === 'allocatedPorts',
+            )),
+      )
+      .map((node) => node.getText(source))
+      .join('\n');
+    const { outputText } = transpileModule(allocation, {
+      compilerOptions: { target: ScriptTarget.ES2022 },
+    });
+    const sequence = [
+      33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
+      36417, 36418, 36419,
+    ];
+    const createServer = () => ({
+      once() {},
+      off() {},
+      closeAllConnections() {},
+      listen(port, _host, ready) {
+        this.port = port || sequence.shift();
+        expect(this.port).toBeDefined();
+        ready();
+      },
+      address() {
+        return { port: this.port };
+      },
+      close(done) {
+        done?.();
+      },
+    });
+    const { freePort, startHeldExecutionStartProxy } = new Function(
+      'createServer',
+      `${outputText}\nreturn { freePort, startHeldExecutionStartProxy };`,
+    )(createServer);
+    const ports = [];
+    for (const count of [4, 3]) {
+      for (let index = 0; index < count; index++) ports.push(await freePort());
+      const proxy = await startHeldExecutionStartProxy('http://127.0.0.1:1');
+      ports.push(Number(new URL(proxy.baseUrl).port));
+      await proxy.close();
+    }
+    expect(new Set(ports).size).toBe(9);
+  });
+
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
   // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
   // run silently skipped it. Pin the threshold to the criterion's delay and

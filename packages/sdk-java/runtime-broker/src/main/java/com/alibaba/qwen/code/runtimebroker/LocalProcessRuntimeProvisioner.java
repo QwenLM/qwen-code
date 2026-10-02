@@ -243,6 +243,68 @@ public final class LocalProcessRuntimeProvisioner
     }
 
     @Override
+    public boolean supportsDrainedStop() {
+        return store != null;
+    }
+
+    @Override
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        if (store == null || !binding.isDrainRequested() || !binding.getRequest().isManagedContext()
+                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(binding.getRequest().getScope().getCapabilityDigest())
+                || binding.getProvisionSeed() == null) {
+            return RuntimeProvisioner.super.stopDrained(binding);
+        }
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
+        return CompletableFuture.supplyAsync(() -> store.locked(binding.getRequest(),
+                binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
+                boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
+                if (!originalBootStopped && (!store.sameBoot(registration)
+                        || registration.state() == LocalRuntimeStore.State.LAUNCHING
+                        || registration.pid() == 0 && registration.state() != LocalRuntimeStore.State.INTENT
+                                && registration.state() != LocalRuntimeStore.State.RETIRED)) {
+                    throw LocalRuntimeStore.blocked();
+                }
+                boolean neverStarted = registration.pid() == 0;
+                var worker = originalBootStopped ? null : registration.process();
+                if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
+                    throw LocalRuntimeStore.blocked();
+                }
+                resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
+                if (worker != null) {
+                    worker.destroy();
+                    waitForStop(registration, 5);
+                    worker = registration.process();
+                    if (worker != null) {
+                        worker.destroyForcibly();
+                        waitForStop(registration, 5);
+                    }
+                }
+                if (!originalBootStopped && !neverStarted && !registration.processAbsent()) {
+                    throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                            "Original worker has not stopped.", true);
+                }
+                return new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                        binding.getProvisionSeed().getProvisionRequestId(), registration.handle(), Instant.now());
+            }), executor);
+    }
+
+    private static void waitForStop(LocalRuntimeStore.Registration registration, int seconds) {
+        long until = System.nanoTime() + Duration.ofSeconds(seconds).toNanos();
+        while (!registration.processAbsent() && System.nanoTime() < until) {
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
+                        "Worker stop was interrupted.", true, error);
+            }
+        }
+    }
+
+    @Override
     public boolean isUsable(RuntimeLease lease) {
         OwnedProcess process = owned.get(ownershipKey(lease));
         return process != null && process.alive();
