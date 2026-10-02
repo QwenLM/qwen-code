@@ -163,6 +163,9 @@ describe('AgentTool per-turn size budgets', () => {
     const tool = await buildTool();
     expect(tool.shouldDefer).toBe(true);
     expect(tool.alwaysLoad).toBe(false);
+    expect(tool.description).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
   });
 
   it('keeps the deferred summary specific enough to discover Agent', async () => {

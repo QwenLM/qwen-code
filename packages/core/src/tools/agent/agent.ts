@@ -151,7 +151,10 @@ import {
   buildAgentDelegationSection,
   resolveAgentDelegationSurface,
 } from '../../skills/agent-delegation-skill.js';
-import type { BundledReferenceSurface } from '../../skills/bundled-reference.js';
+import {
+  type BundledReferenceSurface,
+  toolSearchBridgeSentence,
+} from '../../skills/bundled-reference.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -999,6 +1002,8 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 ## Working with background agents
+
+In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}
 
 **Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
 

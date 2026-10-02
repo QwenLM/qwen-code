@@ -32,6 +32,10 @@ host turn key 缺失时不可用的 Goal 提议。
 Direct 模式先 `tool_search`、再 `tool_call`；Code Mode 通过 `exec` 调用返回的
 JavaScript 绑定。所有 host 的普通续跑、目标更新和收尾回合均使用这份指令。
 
+Agent、消息工具说明和后台 Agent 恢复通知也说明 Direct 模式下如何发现缺失的
+`list_agents`。复用已有的条件式桥接指引，兼容提前声明和会话内后续揭示；不修改
+注册表判定或执行策略。
+
 ## 风险与验收
 
 额外的发现请求可能抵消首次请求的节省，不能降低自然委派或 Goal 完成的可靠性。

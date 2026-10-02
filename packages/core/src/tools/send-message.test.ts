@@ -122,6 +122,9 @@ function expectLlm(result: ToolResult, has: string[], lacks: string[] = []) {
 describe('SendMessageTool — team mode', () => {
   it('has the correct name', () => {
     expect(noTeamTool().name).toBe('send_message');
+    expect(noTeamTool().description).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
   });
 
   it('describes text invisibility as peer-only for teammates', () => {

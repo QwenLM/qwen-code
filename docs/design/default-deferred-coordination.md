@@ -39,6 +39,11 @@ for hidden `get_goal` and `update_goal`: `tool_search` then `tool_call` in Direc
 mode, or the returned JavaScript binding through `exec` in Code Mode. This
 applies to ordinary, objective-updated, and wind-down turns on every host.
 
+Agent and message descriptions, and the recovered-agent model notice, also
+explain how to discover a missing `list_agents` in Direct mode. Reuse the
+conditional bridge sentence so eager visibility and later reveals remain valid;
+no registry predicate or execution policy changes are needed.
+
 ## Risks and acceptance
 
 An extra discovery request can offset the first-request saving. Natural
