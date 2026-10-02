@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
@@ -30,6 +31,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
@@ -51,6 +53,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
@@ -208,17 +211,22 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        requireSubmitter(tenantId, actorId, sessionId);
         requireHarness();
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
+        // Replay is a read of the recorded admission, not a re-admission:
+        // answer a same-key retry before the admission gate, which may now
+        // refuse on state that postdates the recorded admission (a
+        // re-registered Workspace, a revoked grant, a DRAINING registry),
+        // or the client can never recover the Turn it was given.
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
         }
+        requireSubmitter(tenantId, actorId, sessionId);
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
         try {
@@ -266,10 +274,30 @@ public class ManagedAgentService {
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
         validateIdempotencyKey(idempotencyKey);
-        requireSubmitter(tenantId, actorId, sessionId);
         String effectiveTitle = validRenameTitle(title);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "title", effectiveTitle));
+        // A completed rename is answered from its record before the
+        // admission gate: the gate may now refuse on state that postdates
+        // the recorded outcome, and a same-key retry must not lose it.
+        // A PENDING row falls through so beginSessionMutation answers it as
+        // replayed and the retry re-drives the unfinished mutation.
+        Optional<CommandRecord> recorded = store.findCommand(tenantId,
+                RENAME, idempotencyKey);
+        if (recorded.isPresent()) {
+            CommandRecord existing = recorded.get();
+            if (!existing.requestDigest().equals(requestDigest)
+                    || !existing.sessionId().equals(sessionId)) {
+                throw new ApiException(HttpStatus.CONFLICT,
+                        "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
+            if ("COMPLETED".equals(existing.commandStatus())) {
+                return new SessionMutationResult<>(getPublicSession(tenantId,
+                        sessionId), true);
+            }
+        }
+        requireSubmitter(tenantId, actorId, sessionId);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 RENAME, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.RENAME);
@@ -282,17 +310,17 @@ public class ManagedAgentService {
                         session.harnessBootId() != null);
                 harness.rename(tenantId, sessionId, effectiveTitle);
             } catch (RuntimeException error) {
-                // A non-retryable refusal (e.g. the Workspace authority's)
-                // is permanent: answer it with its own status and code
-                // instead of a transient 503, which would invite a fresh-key
-                // retry into session_operation_active on the still-PENDING
-                // command.
+                // A permanent failure must retire the command row it left
+                // PENDING: nothing else clears it, so every later rename
+                // with a fresh key would die in requireNoOpenOperation for
+                // the Session's life. Permanence cannot be read off the
+                // broker type alone: the connector's approval-mode
+                // IllegalStateException and a permanent (<500)
+                // DaemonHttpException wedge the row identically. Transient
+                // failures (retryable broker refusals, 5xx) keep the row so
+                // a same-key retry recovers through it.
                 if (error instanceof RuntimeBrokerException refusal
                         && !refusal.isRetryable()) {
-                    // Retire the command row this refusal would leave
-                    // PENDING: nothing else clears it, so every later rename
-                    // with a fresh key would die in
-                    // requireNoOpenOperation for the Session's life.
                     store.abandonSessionMutation(tenantId, RENAME,
                             idempotencyKey, sessionId);
                     HttpStatus status = HttpStatus.resolve(
@@ -300,6 +328,14 @@ public class ManagedAgentService {
                     throw new ApiException(
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
+                }
+                if (error instanceof IllegalStateException
+                        || (error instanceof DaemonHttpException http
+                                && http.getStatusCode() < 500)) {
+                    store.abandonSessionMutation(tenantId, RENAME,
+                            idempotencyKey, sessionId);
+                    throw new ApiException(HttpStatus.CONFLICT,
+                            "session_mutation_refused", error.getMessage());
                 }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Hosted Harness could not persist the Session title.");

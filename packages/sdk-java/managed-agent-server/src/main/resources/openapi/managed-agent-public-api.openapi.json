@@ -4617,7 +4617,7 @@
       },
       "WebShellSessionCapabilities": {
         "type": "object",
-        "required": ["tasks", "artifacts", "actions"],
+        "required": ["tasks", "artifacts", "actions", "workspaceTurns"],
         "properties": {
           "workspaceContext": {
             "type": "boolean",

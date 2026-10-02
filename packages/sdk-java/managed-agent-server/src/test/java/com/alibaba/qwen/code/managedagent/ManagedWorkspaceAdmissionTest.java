@@ -10,13 +10,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -1062,6 +1065,157 @@ class ManagedWorkspaceAdmissionTest {
                 .isZero();
         assertRefused(() -> enabled.cancelTurn(tenant, "actor-a", "cancel",
                 sessionId, "turn_missing"), "turn_not_found");
+    }
+
+    @Test
+    void sameKeySubmitReplaysTheRecordedAdmissionAfterReRegistration() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+
+        CommandAdmission first = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId,
+                List.of(new InputBlock("text", "go")));
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.turnId()).isNotBlank();
+
+        // Re-registration flips the admission gate off; the recorded
+        // admission must still answer the same-key retry — replay is a read
+        // of the record, not a re-admission.
+        jdbc.update("UPDATE managed_workspace_registry SET"
+                + " workspace_generation = workspace_generation + 1"
+                + " WHERE tenant_id = ?", tenant);
+        assertThat(service.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+
+        CommandAdmission second = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId,
+                List.of(new InputBlock("text", "go")));
+        assertThat(second.replayed()).isTrue();
+        assertThat(second.turnId()).isEqualTo(first.turnId());
+    }
+
+    @Test
+    void sameKeyRenameReplaysTheRecordedOutcomeAfterReRegistration() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+
+        var first = service.renameSession(tenant, "actor-a", "rename-1",
+                sessionId, "renamed title");
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.body().title()).isEqualTo("renamed title");
+
+        jdbc.update("UPDATE managed_workspace_registry SET"
+                + " workspace_generation = workspace_generation + 1"
+                + " WHERE tenant_id = ?", tenant);
+        assertRefused(() -> service.renameSession(tenant, "actor-a",
+                "rename-fresh", sessionId, "other"), "workspace_unavailable");
+
+        var second = service.renameSession(tenant, "actor-a", "rename-1",
+                sessionId, "renamed title");
+        assertThat(second.replayed()).isTrue();
+        assertThat(second.body().title()).isEqualTo("renamed title");
+    }
+
+    @Test
+    void permanentNonBrokerRenameFailureRetiresItsCommandRow() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        // The connector's approval-mode IllegalStateException is a permanent
+        // failure that is not a RuntimeBrokerException: it must still retire
+        // the PENDING row, or every fresh-key rename wedges on
+        // session_operation_active for the Session's life.
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    private int attaches;
+
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        if (attaches++ == 0) {
+                            throw new IllegalStateException(
+                                    "Hosted Harness did not confirm the Session approval mode");
+                        }
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        ManagedAgentService service = boundServiceWith(harness);
+
+        assertThatThrownBy(() -> service.renameSession(tenant, "actor-a",
+                "rename-1", sessionId, "first"))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("session_mutation_refused");
+                });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_command WHERE tenant_id = ? AND"
+                + " command_status = 'PENDING'", Integer.class, tenant))
+                .isZero();
+
+        var retried = service.renameSession(tenant, "actor-a", "rename-2",
+                sessionId, "second");
+        assertThat(retried.replayed()).isFalse();
+        assertThat(retried.body().title()).isEqualTo("second");
+    }
+
+    private ManagedAgentService boundServiceWithWorkingHarness() {
+        return boundServiceWith(new UnavailableHarnessConnector() {
+            @Override
+            public boolean isAvailable() {
+                return true;
+            }
+
+            @Override
+            public boolean isWorkspaceFilesAvailable() {
+                return true;
+            }
+
+            @Override
+            public Attachment createOrLoad(String tenantId, String sessionId,
+                    boolean loadExisting) {
+                return new Attachment("boot");
+            }
+
+            @Override
+            public void rename(String tenantId, String sessionId,
+                    String title) {
+            }
+        });
+    }
+
+    private ManagedAgentService boundServiceWith(HarnessConnector harness) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, properties);
+        HarnessCoordinator noopCoordinator = new HarnessCoordinator(null,
+                null, null, null, null, Clock.systemUTC(),
+                new ManagedAgentProperties()) {
+            @Override
+            public void dispatch(String tenantId, String sessionId,
+                    String turnId) {
+            }
+        };
+        return new ManagedAgentService(gated, new RequestDigests(),
+                noopCoordinator, harness, registry);
     }
 
     private String boundSession(String tenant) {
