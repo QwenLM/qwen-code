@@ -26,11 +26,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Delivery states of an operation on a store that no worker scans, with a
- * clock the test moves.
+ * deliberately skewed application clock. Claim deadlines use database time.
  */
 class ManagedSessionOperationStoreTest {
     private static final String TENANT = "operation-store";
     private final AtomicLong now = new AtomicLong(1_000);
+    private JdbcTemplate jdbc;
 
     @Test
     void onlyTheNewestClaimCompletesOrRetries() {
@@ -44,19 +45,21 @@ class ManagedSessionOperationStoreTest {
         assertThat(targets(store)).containsExactly(operationId);
 
         OperationRecord first = store.claimOperation(TENANT, sessionId,
-                operationId, "worker", Duration.ofMillis(100)).orElseThrow();
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(first.state()).isEqualTo("RUNNING");
         assertThat(first.deliveryState()).isEqualTo("LEASED");
         assertThat(store.claimOperation(TENANT, sessionId, operationId,
-                "other", Duration.ofMillis(100))).isEmpty();
+                "other", Duration.ofSeconds(30))).isEmpty();
         assertThat(targets(store)).isEmpty();
 
         // The same worker claims again after its lease expired, so only the
         // newer claim may finish.
         now.addAndGet(200);
+        assertThat(targets(store)).isEmpty();
+        jdbc.update("UPDATE managed_agent_operation SET lease_until = 0 WHERE operation_id = ?", operationId);
         assertThat(targets(store)).containsExactly(operationId);
         OperationRecord second = store.claimOperation(TENANT, sessionId,
-                operationId, "worker", Duration.ofMillis(100)).orElseThrow();
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(second.claimGeneration())
                 .isEqualTo(first.claimGeneration() + 1);
         assertThat(store.completeOperation(TENANT, sessionId, operationId,
@@ -65,18 +68,25 @@ class ManagedSessionOperationStoreTest {
                 first.claimGeneration(), 0);
         assertThat(operation(store, sessionId, operationId)).isEqualTo(second);
 
+        long retryDelay = Duration.ofDays(1).toMillis();
+        long before = databaseTime();
         store.retryOperation(TENANT, sessionId, operationId, "worker",
-                second.claimGeneration(), now.get() + 500);
+                second.claimGeneration(), now.get() + retryDelay);
+        long after = databaseTime();
+        assertThat(jdbc.queryForObject("SELECT available_at FROM managed_agent_operation WHERE operation_id = ?",
+                Long.class, operationId)).isBetween(before + retryDelay, after + retryDelay);
         OperationRecord waiting = operation(store, sessionId, operationId);
         assertThat(waiting.deliveryState()).isEqualTo("PENDING");
         assertThat(waiting.attemptCount()).isEqualTo(1);
         assertThat(targets(store)).isEmpty();
         assertThat(store.claimOperation(TENANT, sessionId, operationId,
-                "worker", Duration.ofMillis(100))).isEmpty();
+                "worker", Duration.ofSeconds(30))).isEmpty();
 
-        now.addAndGet(500);
+        now.addAndGet(retryDelay);
+        assertThat(targets(store)).isEmpty();
+        jdbc.update("UPDATE managed_agent_operation SET available_at = 0 WHERE operation_id = ?", operationId);
         OperationRecord third = store.claimOperation(TENANT, sessionId,
-                operationId, "worker", Duration.ofMillis(100)).orElseThrow();
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.completeOperation(TENANT, sessionId, operationId,
                 "worker", third.claimGeneration(), false)).isTrue();
         OperationRecord completed = operation(store, sessionId, operationId);
@@ -87,6 +97,11 @@ class ManagedSessionOperationStoreTest {
         assertThat(store.requireSession(TENANT, sessionId).status())
                 .isEqualTo("CLOSED");
         assertThat(targets(store)).isEmpty();
+    }
+
+    private long databaseTime() {
+        return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> row.getLong(1) * 1000 + row.getLong(2) / 1000);
     }
 
     // Lifecycle requests carry only their Session and kind, which the domain
@@ -112,7 +127,7 @@ class ManagedSessionOperationStoreTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
-        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc = new JdbcTemplate(dataSource);
         return new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
