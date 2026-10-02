@@ -1324,5 +1324,74 @@ describe('BaseLlmClient', () => {
       );
       expect(sentBudget()).toBe(8_092);
     });
+
+    describe('QWEN_CODE_MAX_OUTPUT_TOKENS still applies to side queries', () => {
+      // Both providers read the override only when the request carries no
+      // output limit of its own (`provider/default.ts` applyOutputTokenLimit,
+      // `anthropicContentGenerator.ts` createRequestParameters), so a budget
+      // that ignores the env var silently displaces the documented override —
+      // and can even raise the wire value. These assert the budget itself,
+      // which is the layer the providers now take the value from.
+      const ENV_KEY = 'QWEN_CODE_MAX_OUTPUT_TOKENS';
+      let saved: string | undefined;
+
+      beforeEach(() => {
+        saved = process.env[ENV_KEY];
+      });
+
+      afterEach(() => {
+        if (saved === undefined) {
+          delete process.env[ENV_KEY];
+        } else {
+          process.env[ENV_KEY] = saved;
+        }
+      });
+
+      it('caps the budget at the override instead of raising it', async () => {
+        process.env[ENV_KEY] = '2000';
+        useWindow('qwen3-coder-plus', 131_072);
+
+        // 131_072 − 500 = 130_572 of room, so an env-blind budget would send
+        // the model's own 32_768 output ceiling — 16x the 2_000 the operator
+        // asked for, i.e. the override does not merely stop applying, the
+        // wire value goes up.
+        await askText('qwen3-coder-plus', 500);
+
+        expect(sentBudget()).toBe(2_000);
+      });
+
+      it('treats the override as a ceiling, not a floor', async () => {
+        process.env[ENV_KEY] = '100000';
+        useWindow('deepseek-r1', 32_768);
+
+        await askText('deepseek-r1', 100);
+
+        // The room left in the window still binds: the override must not lift
+        // the budget back over it.
+        expect(sentBudget()).toBe(32_668);
+      });
+
+      it('ignores a malformed override', async () => {
+        process.env[ENV_KEY] = 'not-a-number';
+        useWindow('qwen3-coder-plus', 131_072);
+
+        await askText('qwen3-coder-plus', 100_000);
+
+        expect(sentBudget()).toBe(31_072);
+      });
+
+      it('still lets a caller-supplied maxOutputTokens win over the override', async () => {
+        // Documented precedence: an explicit request value outranks the env
+        // override, exactly as it did before side queries were budgeted.
+        process.env[ENV_KEY] = '2000';
+        useWindow('qwen3-coder-plus', 131_072);
+
+        await askText('qwen3-coder-plus', 100_000, {
+          config: { maxOutputTokens: 300 },
+        });
+
+        expect(sentBudget()).toBe(300);
+      });
+    });
   });
 });

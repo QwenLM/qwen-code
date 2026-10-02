@@ -41,7 +41,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { estimateContentTokens } from '../services/tokenEstimation.js';
-import { defaultOutputCeiling, tokenLimit } from './tokenLimits.js';
+import {
+  defaultOutputCeiling,
+  parsePositiveIntegerEnvValue,
+  tokenLimit,
+} from './tokenLimits.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -76,6 +80,16 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
  * `computeCompactionOutputBudget` (#7960) — and re-clamping it here would
  * shrink it against a window it is not going to.
  *
+ * `QWEN_CODE_MAX_OUTPUT_TOKENS` is folded in as a cap for the same reason a
+ * caller value is honored: both providers read that override only when the
+ * request carries no output limit of its own
+ * (`openaiContentGenerator/provider/default.ts` `applyOutputTokenLimit`,
+ * `anthropicContentGenerator.ts` `createRequestParameters`), and it is
+ * documented to take precedence over the model-limit default
+ * (`docs/users/configuration/settings.md`). Budgeting every side query would
+ * otherwise displace it — and could *raise* the wire value, since a small
+ * prompt on a large window leaves more room than the override asks for.
+ *
  * Call after `resolveForModel` so `model` is the resolved target and
  * `contents` is the slimmed payload actually sent. Caveat: on the
  * generator-error fallback in `createRuntimeViewForModel`,
@@ -91,6 +105,10 @@ function budgetOutputTokensForWindow(
   model: string,
   contentGeneratorConfig: ContentGeneratorConfig | undefined,
 ): GenerateContentConfig {
+  const envMaxOutputTokens = parsePositiveIntegerEnvValue(
+    process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+  );
+
   return {
     ...requestConfig,
     maxOutputTokens:
@@ -99,6 +117,7 @@ function budgetOutputTokensForWindow(
         1,
         Math.min(
           defaultOutputCeiling(model),
+          envMaxOutputTokens ?? Infinity,
           (contentGeneratorConfig?.contextWindowSize ??
             tokenLimit(model, 'input')) - estimateContentTokens(contents),
         ),
