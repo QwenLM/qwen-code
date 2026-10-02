@@ -415,6 +415,49 @@ describe('Host result receipts', () => {
     },
   );
 
+  it('refuses a retry that differs in any one receipt term', async () => {
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    const input = {
+      threadId,
+      runId: assignment.runId,
+      hostId: mine,
+      leaseId: assignment.lease.leaseId,
+      attempt: assignment.attempt,
+      status: 'completed' as const,
+      close: { kind: 'review' as const, summary: 'Accepted answer.' },
+      tokens: 1_050,
+    };
+    await expect(
+      applyHostRunResult(PROJECT_ROOT, input, T0 + 1),
+    ).resolves.toMatchObject({ ok: true, value: { alreadyApplied: false } });
+    const accepted = (await readThread(PROJECT_ROOT, threadId))!;
+    // One field per re-post. The identity fields are matched before the digest
+    // is compared, so these are the terms only the digest can tell apart.
+    const variants = [
+      { ...input, status: 'failed' as const },
+      { ...input, error: 'Different error.' },
+      { ...input, tokens: 1_051 },
+      { ...input, close: { kind: 'review' as const, summary: 'Different.' } },
+      {
+        ...input,
+        close: { kind: 'blocked' as const, question: input.close.summary },
+      },
+    ];
+    for (const variant of variants) {
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          variant,
+          T0 + DEFAULT_RUN_LEASE_MS + 2,
+        ),
+      ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+      expect(await readThread(PROJECT_ROOT, threadId)).toEqual(accepted);
+    }
+  });
+
   it.each(['recovery', 'cancellation'] as const)(
     'accounts late usage after %s without applying the result',
     async (reason) => {
