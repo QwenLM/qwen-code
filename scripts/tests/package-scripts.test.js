@@ -1282,7 +1282,7 @@ describe('package scripts', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-bin-'));
     const logFile = path.join(binDir, 'commands.log');
     mkdirSync(path.join(tmpRoot, 'dist'), { recursive: true });
-    writeFileSync(path.join(tmpRoot, 'dist/cli.js'), '');
+    writeFileSync(path.join(tmpRoot, 'dist/review-sources.sha256'), '');
 
     try {
       if (process.platform === 'win32') {
@@ -1435,6 +1435,7 @@ describe('package scripts', () => {
   });
 
   it('reports the failing prepare step after earlier steps succeed', () => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-root-'));
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-late-fail-'));
     const logFile = path.join(binDir, 'commands.log');
     writeFileSync(logFile, '');
@@ -1476,7 +1477,7 @@ describe('package scripts', () => {
         process.execPath,
         [path.join(root, 'scripts/prepare.js')],
         {
-          cwd: root,
+          cwd: tmpRoot,
           encoding: 'utf8',
           env: {
             ...process.env,
@@ -1497,6 +1498,7 @@ describe('package scripts', () => {
         'npm run build',
       ]);
     } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
       rmSync(binDir, { recursive: true, force: true });
     }
   });

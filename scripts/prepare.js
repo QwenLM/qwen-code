@@ -8,8 +8,9 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 // QWEN_SKIP_PREPARE=1 skips husky (prepare otherwise runs husky + generate,
-// and builds/bundles only when dist/cli.js is absent). Set it when the job
-// does an explicit build/bundle after npm ci; otherwise leave unset.
+// and builds/bundles only when dist/review-sources.sha256 is absent).
+// Set it when the job does an explicit build/bundle after npm ci; otherwise
+// leave unset.
 const skipPrepare = ['1', 'true'].includes(
   (process.env.QWEN_SKIP_PREPARE ?? '').toLowerCase(),
 );
@@ -33,10 +34,16 @@ run('npm', ['run', 'generate']);
 // For `npx https://github.com/QwenLM/qwen-code` (git install) the package is
 // cloned and `prepare` runs before packing; dist/ is gitignored so it is
 // absent there, while a registry install ships prebuilt dist/. Build on the
-// fly only when dist is missing.
-if (!existsSync('dist/cli.js')) {
+// fly only when the bundle stamp is missing (dist/review-sources.sha256 is
+// last file bundle writes — gating on dist/cli.js would accept half-written
+// dist/).
+if (!existsSync('dist/review-sources.sha256')) {
   run('npm', ['run', 'build']);
   run('npm', ['run', 'bundle']);
+} else {
+  console.log(
+    'prepare: dist/review-sources.sha256 present — skipping build/bundle (already bundled)',
+  );
 }
 
 function run(command, args = []) {
