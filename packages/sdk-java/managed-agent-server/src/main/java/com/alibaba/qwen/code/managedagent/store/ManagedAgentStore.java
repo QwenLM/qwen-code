@@ -187,9 +187,9 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("lease_owner"),
                     result.getLong("claim_generation"),
                     result.getInt("attempt_count"),
-                    result.getString("target_cwd_relative"),
-                    nullableLong(result, "expected_context_revision"),
-                    nullableLong(result, "result_context_revision"),
+                    additiveString(result, "target_cwd_relative"),
+                    additiveLong(result, "expected_context_revision"),
+                    additiveLong(result, "result_context_revision"),
                     result.getString("error_code"));
     private final RowMapper<OperationTarget> operationTargetMapper =
             (result, row) -> new OperationTarget(
@@ -2687,6 +2687,31 @@ public class ManagedAgentStore implements AgentStateStore {
             throws java.sql.SQLException {
         long value = result.getLong(name);
         return result.wasNull() ? null : value;
+    }
+
+    // The cwd columns arrive with V34; an operation read against an
+    // additive-upgrade schema that predates them (the pinned-schema upgrade
+    // ITs construct exactly that) must treat them as absent instead of
+    // erroring the whole query.
+    private static String additiveString(java.sql.ResultSet result,
+            String name) throws java.sql.SQLException {
+        return hasColumn(result, name) ? result.getString(name) : null;
+    }
+
+    private static Long additiveLong(java.sql.ResultSet result, String name)
+            throws java.sql.SQLException {
+        return hasColumn(result, name) ? nullableLong(result, name) : null;
+    }
+
+    private static boolean hasColumn(java.sql.ResultSet result, String name)
+            throws java.sql.SQLException {
+        var meta = result.getMetaData();
+        for (int column = 1; column <= meta.getColumnCount(); column++) {
+            if (name.equalsIgnoreCase(meta.getColumnLabel(column))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String publicId(String prefix) {
