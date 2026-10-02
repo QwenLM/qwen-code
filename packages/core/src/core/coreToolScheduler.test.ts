@@ -7223,6 +7223,10 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(errorMessage).toContain(
       'rejected to prevent writing truncated content',
     );
+    // The telemetry arm of the cause-versus-diagnosis distinction (#12970):
+    // a genuine max_tokens cut must keep reporting OUTPUT_TRUNCATED, never
+    // collapse into the malformed-generation INVALID_TOOL_PARAMS.
+    expect(call.response.errorType).toBe(ToolErrorType.OUTPUT_TRUNCATED);
     return errorMessage;
   }
 
@@ -7235,6 +7239,110 @@ describe('CoreToolScheduler truncated output protection', () => {
         true,
       ),
     );
+  });
+
+  // The token-limit diagnosis being withdrawn must not withdraw the data-loss
+  // guard with it: incomplete arguments mean incomplete file content either
+  // way (QwenLM/qwen-code#12970).
+  it('rejects Kind.Edit calls whose arguments were incomplete without a max_tokens cut', async () => {
+    const declarativeTool = new TestApprovalTool({
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+    } as unknown as Config);
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(declarativeTool);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: TestApprovalTool.Name,
+          args: { id: 'test-malformed' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-malformed',
+          hadIncompleteArguments: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message ?? '';
+      // Still rejected, and for the real reason.
+      expect(errorMessage).toContain(
+        'rejected to prevent writing incomplete content',
+      );
+      expect(errorMessage).toContain('malformed generation');
+      expect(errorMessage).not.toContain('was truncated due to max_tokens');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
+  });
+
+  // The non-Edit half of #12970 — and the wording the issue actually asks
+  // for: a non-Edit tool whose schema validation fails lands past the Edit
+  // guard, so its guidance must name malformed generation rather than a
+  // max_tokens cut the response's own usage disproved. The witness tool must
+  // not be Kind.Edit: Edit calls are rejected before validation and can never
+  // reach the paramGuidance branch.
+  it('attaches malformed-generation guidance to validation errors of incomplete non-Edit calls', async () => {
+    const readTool = new MockTool({
+      name: 'mockReadWithRequiredParam',
+      kind: Kind.Read,
+      params: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(readTool);
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockReadWithRequiredParam',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-malformed-nonedit',
+          hadIncompleteArguments: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message ?? '';
+      // Reached validation (not the pre-validation Edit rejection)...
+      expect(errorMessage).toContain("required property 'path'");
+      // ...and the attached guidance matches the actual cause.
+      expect(errorMessage).toContain('malformed generation');
+      expect(errorMessage).not.toContain('truncated due to max_tokens limit');
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+    }
   });
 
   it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
@@ -7302,6 +7410,70 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(messages[0]).not.toContain('RETRY LOOP DETECTED');
     expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
     expect(messages[2]).toContain('RETRY LOOP DETECTED');
+  });
+
+  // The Edit guard rejects before buildInvocation, so schema validation never
+  // runs on these calls: at the retry-loop threshold the directive must match
+  // the actual cause (repeated incomplete writes), not the validation-failure
+  // wording that would send the model re-examining a schema it never violated.
+  it('should inject the incomplete-args retry loop directive after repeated incomplete write_file rejections', async () => {
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(writeFileTool);
+
+    const messages: string[] = [];
+
+    for (let i = 1; i <= 3; i++) {
+      await scheduler.schedule(
+        [
+          {
+            callId: `incomplete-write-file-${i}`,
+            name: WriteFileTool.Name,
+            args: { file_path: '/tmp/test.txt', content: 'partial' },
+            isClientInitiated: false,
+            prompt_id: `prompt-id-write-file-incomplete-${i}`,
+            hadIncompleteArguments: true,
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i);
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      const completedCall = completedCalls?.[0];
+      expect(completedCall?.status).toBe('error');
+      if (completedCall?.status === 'error') {
+        messages.push(completedCall.response.error?.message ?? '');
+      }
+    }
+
+    expect(messages[0]).toContain(
+      'rejected to prevent writing incomplete content',
+    );
+    expect(messages[0]).not.toContain('RETRY LOOP DETECTED');
+    expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
+    // At the threshold, the directive must be the incomplete-args one: the
+    // validation wording would misdiagnose the cause, and the truncation
+    // wording would re-introduce the max_tokens blame #12970 removed.
+    expect(messages[2]).toContain('RETRY LOOP DETECTED');
+    expect(messages[2]).toContain('same incomplete file write');
+    expect(messages[2]).not.toContain('failed validation');
+    expect(messages[2]).not.toContain('truncated');
   });
 });
 
