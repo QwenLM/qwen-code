@@ -3,6 +3,10 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -16,6 +20,50 @@ public final class ManagedHookRecords {
             "planRef", "inputRef", "resultRef", "onceKey", "cancelRequested", "run");
 
     private ManagedHookRecords() {
+    }
+
+    /**
+     * The identities Hook admission keeps unique, projected into indexed
+     * columns. They never change across a record's revisions, so the first
+     * revision's projection holds for every later one. Fields that do not
+     * apply to the record's domain are null.
+     */
+    public record AdmissionKeys(String onceKeyHash, String occurrenceHash,
+            Long ordinal, String definitionHash) {
+    }
+
+    /** The admission keys of a body that its domain's validator accepted. */
+    public static AdmissionKeys admissionKeys(String domain, JsonNode record) {
+        return switch (domain) {
+            case "hook_registration" -> new AdmissionKeys(null, null, null,
+                    definitionHash(record.get("run").get("definition")));
+            case "hook_execution" -> new AdmissionKeys(
+                    record.get("onceKey").isNull() ? null
+                            : sha256(record.get("onceKey").textValue()),
+                    sha256(record.get("occurrenceId").textValue()),
+                    record.get("ordinal").longValue(), null);
+            default -> new AdmissionKeys(null, null, null, null);
+        };
+    }
+
+    /**
+     * Two pins share this key exactly when their definition ID and revision
+     * are the same, which is when their digests must agree. Identifiers
+     * carry no control character, so the separator is unambiguous, and a
+     * validated revision is an exact integer.
+     */
+    private static String definitionHash(JsonNode definition) {
+        return sha256(definition.get("definitionId").textValue() + "\u0000"
+                + definition.get("definitionRevision").longValue());
+    }
+
+    private static String sha256(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
     }
 
     public static void requireRegistration(JsonNode record) {

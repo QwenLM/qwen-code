@@ -70,6 +70,11 @@ export interface OpenManagedSessionOptions {
   /** Create requests fail when the durable authority already exists. */
   readonly requireNew?: boolean;
   /**
+   * Keeps the Stage H resources that opening verified for the caller to take;
+   * see `LocalManagedSessionAuthority.takeVerifiedExtensionResources`.
+   */
+  readonly retainVerifiedResources?: boolean;
+  /**
    * Identifies the worker advancing the session. Opening installs an activation
    * under this identity, because a writer that opens the log is by definition
    * the party advancing it, and only an activation lets a Harness append.
@@ -167,6 +172,9 @@ export async function openManagedSession(
       resources,
       ...(options.create === undefined ? {} : { create: options.create }),
       ...(options.requireNew === true ? { requireNew: true } : {}),
+      ...(options.retainVerifiedResources === true
+        ? { retainVerifiedResources: true }
+        : {}),
       // A takeover proves the sealed writer's commit position before this
       // authority may advance the log.
       ...(journal.takeoverCommitProof === undefined
