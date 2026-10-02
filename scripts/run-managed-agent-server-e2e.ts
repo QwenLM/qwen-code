@@ -1558,7 +1558,7 @@ try {
         );
         const oldGenerationTxBeforeWake = runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
         );
         signalProcessTree(harness.child, 'SIGCONT');
         if (!processTreeExists(harness.child)) {
@@ -1581,7 +1581,7 @@ try {
         // so identity, not revision, is what fencing proofs may freeze on.
         const oldGenerationTxAfterWake = runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
         );
         const awakeEvents = await fetchJson<PublicList<PublicEvent>>(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
