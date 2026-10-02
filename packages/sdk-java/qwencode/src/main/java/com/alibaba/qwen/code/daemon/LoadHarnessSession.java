@@ -9,6 +9,7 @@ public final class LoadHarnessSession {
     private final ManagedSessionStoreConnection managedSessionStore;
     private final boolean passiveManagedRuntimeRecovery;
     private final String toolProfile;
+    private final boolean driveRuntimeRecovery;
 
     public LoadHarnessSession(String harnessSessionId) {
         this(harnessSessionId, null, false);
@@ -28,11 +29,20 @@ public final class LoadHarnessSession {
     public LoadHarnessSession(String harnessSessionId,
             ManagedSessionStoreConnection managedSessionStore,
             boolean passiveManagedRuntimeRecovery, String toolProfile) {
+        this(harnessSessionId, managedSessionStore,
+                passiveManagedRuntimeRecovery, toolProfile, false);
+    }
+
+    public LoadHarnessSession(String harnessSessionId,
+            ManagedSessionStoreConnection managedSessionStore,
+            boolean passiveManagedRuntimeRecovery, String toolProfile,
+            boolean driveRuntimeRecovery) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 harnessSessionId, "harnessSessionId");
         this.managedSessionStore = managedSessionStore;
         this.passiveManagedRuntimeRecovery = passiveManagedRuntimeRecovery;
         this.toolProfile = toolProfile;
+        this.driveRuntimeRecovery = driveRuntimeRecovery;
     }
 
     String getHarnessSessionId() {
@@ -49,6 +59,9 @@ public final class LoadHarnessSession {
         }
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
+        }
+        if (driveRuntimeRecovery) {
+            result.put("driveRuntimeRecovery", true);
         }
         return result;
     }
