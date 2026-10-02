@@ -1104,7 +1104,8 @@ class ManagedWorkspaceAdmissionTest {
         var first = service.renameSession(tenant, "actor-a", "rename-1",
                 sessionId, "renamed title");
         assertThat(first.replayed()).isFalse();
-        assertThat(first.body().title()).isEqualTo("renamed title");
+        assertThat(first.body().metadata())
+                .containsEntry("title", "renamed title");
 
         jdbc.update("UPDATE managed_workspace_registry SET"
                 + " workspace_generation = workspace_generation + 1"
@@ -1115,7 +1116,8 @@ class ManagedWorkspaceAdmissionTest {
         var second = service.renameSession(tenant, "actor-a", "rename-1",
                 sessionId, "renamed title");
         assertThat(second.replayed()).isTrue();
-        assertThat(second.body().title()).isEqualTo("renamed title");
+        assertThat(second.body().metadata())
+                .containsEntry("title", "renamed title");
     }
 
     @Test
@@ -1172,7 +1174,8 @@ class ManagedWorkspaceAdmissionTest {
         var retried = service.renameSession(tenant, "actor-a", "rename-2",
                 sessionId, "second");
         assertThat(retried.replayed()).isFalse();
-        assertThat(retried.body().title()).isEqualTo("second");
+        assertThat(retried.body().metadata())
+                .containsEntry("title", "second");
     }
 
     private ManagedAgentService boundServiceWithWorkingHarness() {
