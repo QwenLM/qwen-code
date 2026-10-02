@@ -34,6 +34,7 @@ import {
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceVoiceStatus,
+  type DaemonWorkspaceProviderStatus,
   type GoalSnapshotV2,
   type SessionSource,
   type SessionSourcesResult,
@@ -76,6 +77,7 @@ type MockConnection = {
   models: Array<{
     id: string;
     label?: string;
+    baseModelId?: string;
     reasoningPreview?: {
       enabled: boolean;
       effort: string;
@@ -760,6 +762,7 @@ const {
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
+      providers: [] as DaemonWorkspaceProviderStatus[],
       settingsLoading: false,
       // A background revalidation: the real resource sets loading:true while
       // keeping the last-known-good data and status.
@@ -954,7 +957,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useProviders: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
       testState.latestProvidersHookOptions = options;
       return {
-        providers: [],
+        providers: testState.providers,
         current: undefined,
         loading: false,
         error: undefined,
@@ -11585,6 +11588,7 @@ beforeEach(() => {
   testState.settings = [];
   testState.settingsLoading = false;
   testState.settingsReloading = false;
+  testState.providers = [];
   testState.settingsError = undefined;
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
@@ -37744,11 +37748,44 @@ describe('App session callbacks', () => {
     expect(settingsReload).toHaveBeenCalled();
   });
 
-  it('decodes a pinned fastModel setting before opening the fast-model picker (#12760)', async () => {
-    // The CLI picker persists `authType:id\0<baseUrl>`; handing the raw value
-    // to the dialog makes currentIdx -1 (no registry id can contain NUL), so
-    // the picker highlights an unrelated row and Enter erases the pin.
+  it('matches a pinned fastModel to its exact ACP row before opening the picker (#12814)', async () => {
     const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    mockConnection.models = [
+      {
+        id: 'qwen-route:v1:a',
+        baseModelId: 'shared-fast',
+      },
+      {
+        id: 'qwen-route:v1:b',
+        baseModelId: 'shared-fast',
+      },
+    ];
+    testState.providers = [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: false,
+        models: [
+          {
+            modelId: 'qwen-route:v1:a',
+            baseModelId: 'shared-fast',
+            name: 'A',
+            baseUrl: 'https://exhausted-plan.example.com/v1',
+            isCurrent: false,
+            isRuntime: false,
+          },
+          {
+            modelId: 'qwen-route:v1:b',
+            baseModelId: 'shared-fast',
+            name: 'B',
+            baseUrl: 'https://free-quota.example.com/v1',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      },
+    ];
     testState.settings = [
       {
         key: 'fastModel',
@@ -37773,7 +37810,7 @@ describe('App session callbacks', () => {
       '[data-testid="model-select"]',
     );
     expect(select?.getAttribute('data-current-model-id')).toBe(
-      'shared-fast(openai)',
+      'qwen-route:v1:b',
     );
   });
 
