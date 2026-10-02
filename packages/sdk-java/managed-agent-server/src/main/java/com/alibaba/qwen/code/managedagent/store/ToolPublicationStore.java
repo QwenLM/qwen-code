@@ -107,23 +107,23 @@ public final class ToolPublicationStore {
                 && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
         Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
-        require(now != null && row.expiresAt() != null && row.expiresAt() > now.getTime(),
+        require(now != null, "Publication grant expired");
+        long nowEpoch = sessions.databaseEpochMillis(now);
+        require(row.expiresAt() != null && row.expiresAt() > nowEpoch,
                 "Publication grant expired");
         JsonNode key = binding.get("sessionKey");
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.queryForMap("SELECT workspace_id, state, writer_id, writer_generation,"
-                        + " writer_lease_until, recovery_status, activation_epoch, journal_revision"
+                        + " CASE WHEN writer_lease_until > CURRENT_TIMESTAMP(6) THEN 1 ELSE 0 END AS writer_live,"
+                        + " recovery_status, activation_epoch, journal_revision"
                         + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 row.tenant(), row.session());
-        Object leaseValue = head.get("writer_lease_until");
-        Timestamp lease = leaseValue instanceof java.time.LocalDateTime local
-                ? Timestamp.valueOf(local) : (Timestamp) leaseValue;
         require(row.workspace().equals(head.get("workspace_id")) && "ACTIVE".equals(head.get("state"))
                 && text(binding, "writerId").equals(head.get("writer_id"))
                 && ((Number) head.get("writer_generation")).longValue() == binding.get("writerGeneration").longValue()
-                && lease != null && lease.after(now) && "READY".equals(head.get("recovery_status"))
+                && ((Number) head.get("writer_live")).intValue() == 1 && "READY".equals(head.get("recovery_status"))
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
         boolean found = false;
@@ -146,7 +146,7 @@ public final class ToolPublicationStore {
                 require("active".equals(text(activation, "phase"))
                         && text(binding, "activationId").equals(text(activation, "activationId"))
                         && binding.get("activationEpoch").longValue() == activation.path("epoch").asLong()
-                        && activation.path("expiresAt").asLong() > now.getTime(),
+                        && activation.path("expiresAt").asLong() > nowEpoch,
                         "Original activation is fenced");
                 found = true;
                 break;
@@ -160,7 +160,7 @@ public final class ToolPublicationStore {
         require(equalHash(suppliedHash, (String) current.get("token_hash"))
                 && "OPEN".equals(current.get("state"))
                 && row.digest().equals(current.get("binding_digest"))
-                && ((Number) current.get("expires_at")).longValue() > now.getTime(),
+                && ((Number) current.get("expires_at")).longValue() > nowEpoch,
                 "Publication grant changed");
         return binding;
     }
