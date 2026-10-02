@@ -39,19 +39,24 @@ revision；D8c 让定义字段影响 Harness 执行，需要单独的设计。
 ### 4.1 存储
 
 Flyway `V27` 新增两张表。`managed_agent_definition` 每个 revision 一行，以租户、
-agent ID 与 revision 号为键，保存 digest、规范化 JSON 与创建时间，只插入不修改。
+agent ID 与 revision 号为键，保存 digest、请求 JSON 与创建时间，只插入不修改。
 `managed_agent_definition_command` 按租户与 `Idempotency-Key` 记录每次创建或
 更新，保存请求 digest 与该命令应答的 revision。
 
 ### 4.2 身份与 digest
 
 agent ID 由服务端生成，格式为 `agent_` 加 32 位十六进制；请求中没有 ID 字段。
-路径中的其他 ID 一律应答 `404 agent_not_found`，因此 `/v1/agents/` 下的保留名，
-以及带填充或大小写变化的变体，都不会命中已存储的行。
+`GET`/`POST /v1/agents/{agentId}` 对不符合该形式的 ID 应答 `404 agent_not_found`。
+保留名由别的路由应答：Spring 路径匹配中字面路由优先于 `{agentId}`，因此
+`/v1/agents/sessions`（GET 与 POST）与 `/v1/agents/workspaces`（GET）走 Session 与
+Workspace 路由；而某个方法没有字面兄弟路由的保留名（如 `POST /v1/agents/workspaces`）
+仍会到达定义路由并应答 `404`。两种情况下保留名都不会命中已存储的行，带填充或
+大小写变化的真实 ID 变体也不会。
 
 内容是去掉缺省与 null 可选字段后的请求；为此契约把 `skills`、`mcp_servers` 与
 `metadata` 声明为可为 null。数组元素必须是对象，`null` 元素应答 `400`。digest 是规范化 JSON（每一层键都排序）
-的 SHA-256，因此键的顺序和显式 `null` 都不会改变它。请求 digest 还包含操作类型，
+的 SHA-256，因此键的顺序不会改变它，顶层可选字段的显式 `null` 也不会。null 剥离只做一层：
+`metadata` 这类开放 map 内部嵌套的 `null` 会改变 digest。请求 digest 还包含操作类型，
 更新时还包含 agent ID。
 
 ### 4.3 语义

@@ -44,7 +44,7 @@ change Harness execution and needs its own design.
 
 Flyway `V27` adds two tables. `managed_agent_definition` holds one row per
 revision, keyed by tenant, agent ID and revision number, with the digest, the
-canonical JSON and the creation time. Rows are only inserted.
+request's JSON and the creation time. Rows are only inserted.
 `managed_agent_definition_command` records each create or update under its
 tenant and `Idempotency-Key`, with the request digest and the revision the
 command answered with.
@@ -52,16 +52,23 @@ command answered with.
 ### 4.2 Identity and digests
 
 The server generates agent IDs as `agent_` plus 32 hex digits; the request has
-no ID field. Any other path ID answers `404 agent_not_found`, so the reserved
-names under `/v1/agents/` and padded or case-folded variants never resolve to
-a stored row.
+no ID field. `GET`/`POST /v1/agents/{agentId}` answer `404 agent_not_found` for
+any ID that is not of that form. The reserved names are answered elsewhere:
+literal routes outrank `{agentId}` in Spring's path matching, so
+`/v1/agents/sessions` (GET and POST) and `/v1/agents/workspaces` (GET) reach the
+Session and Workspace routes, while a reserved name whose method has no literal
+sibling — `POST /v1/agents/workspaces` — still reaches the definition route and
+answers `404`. Either way the reserved names never resolve to a stored row, and
+neither do padded or case-folded variants of a real ID.
 
 The content is the request with absent and null optional fields removed; the
 contract declares `skills`, `mcp_servers` and `metadata` nullable for that
 reason. Array items must be objects, so a `null` item answers `400`. The
 digest is the SHA-256 of the canonical JSON (keys sorted at every level), so
-key order and an explicit `null` do not change it. The request digest also
-covers the operation and, for an update, the agent ID.
+key order does not change it, and neither does an explicit `null` for one of
+the optional top-level fields. Null stripping is one level only: a `null`
+nested inside an open map such as `metadata` does change the digest. The
+request digest also covers the operation and, for an update, the agent ID.
 
 ### 4.3 Semantics
 
