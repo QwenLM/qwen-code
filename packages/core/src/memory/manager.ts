@@ -712,7 +712,7 @@ export class MemoryManager {
   // Process-local on purpose: a restart resets it to "run", the safe side.
   private readonly extractCooldownRemaining = new Map<
     string,
-    { sessionId: string; remaining: number; armedAtHistoryLength: number }
+    { sessionId: string; remaining: number; processedOffset: number }
   >();
   // ponytail: process-local suspension; durable recovery needs a separate backlog budget.
   private readonly extractFailures = new Map<
@@ -1211,8 +1211,7 @@ export class MemoryManager {
 
     const cooldown = this.extractCooldownRemaining.get(params.projectRoot);
     if (cooldown) {
-      const pendingEntries =
-        params.history.length - cooldown.armedAtHistoryLength;
+      const pendingEntries = params.history.length - cooldown.processedOffset;
       if (
         cooldown.sessionId === params.sessionId &&
         cooldown.remaining > 0 &&
@@ -1228,7 +1227,7 @@ export class MemoryManager {
       }
       // A different session cannot inherit a no-op from the previous history.
       // Near compaction, with an unknown position, after a history shrink, or
-      // once the skipped turns fill half the extractor's window, run normally.
+      // once pending history fills half the extractor's window, run normally.
       this.extractCooldownRemaining.delete(params.projectRoot);
     }
 
@@ -1398,7 +1397,7 @@ export class MemoryManager {
       this.extractCooldownRemaining.set(params.projectRoot, {
         sessionId: params.sessionId,
         remaining: turns,
-        armedAtHistoryLength: params.history.length,
+        processedOffset: result.cursor.processedOffset ?? params.history.length,
       });
     } else {
       this.extractCooldownRemaining.delete(params.projectRoot);

@@ -1897,31 +1897,41 @@ describe('MemoryManager', () => {
         );
       });
 
-      it('arms the cooldown on a windowed no-op that stops short of the live end', async () => {
-        // The windowed arm caps the cursor below history.length by
-        // construction, so keying the arm on `processedOffset ===
-        // history.length` never arms in a tool-heavy session — the #13004
-        // waste case. The trigger is an advanced cursor, not the live end.
-        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
-        vi.mocked(runAutoMemoryExtract).mockResolvedValue({
-          ...completedNoop(),
-          cursor: {
-            sessionId: 'sess-1',
-            processedOffset: CACHE_SAFE_HISTORY_TAIL_ENTRIES,
-            updatedAt: new Date().toISOString(),
-          },
-        });
-        const mgr = new MemoryManager();
+      it.each([
+        [MAX_COOLDOWN_PENDING_HISTORY_ENTRIES, 'cooldown'],
+        [MAX_COOLDOWN_PENDING_HISTORY_ENTRIES + 1, undefined],
+      ] as const)(
+        'counts the unprocessed window remainder before skipping (%s entries)',
+        async (pendingEntries, skippedReason) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+          const windowedHistory = [
+            ...grownBy(CACHE_SAFE_HISTORY_TAIL_ENTRIES - history.length),
+            ...Array.from({ length: pendingEntries }, () =>
+              userText('Remember the release window is Friday.'),
+            ),
+          ];
+          vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+            ...completedNoop(),
+            cursor: {
+              sessionId: 'sess-1',
+              processedOffset: CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+              updatedAt: new Date().toISOString(),
+            },
+          });
+          const mgr = new MemoryManager();
 
-        await turn(mgr);
-        const next = await turn(mgr, {
-          isBelowCompactionWarn: () => true,
-          history: grownBy(MAX_COOLDOWN_PENDING_HISTORY_ENTRIES),
-        });
+          await turn(mgr, { history: windowedHistory });
+          const next = await turn(mgr, {
+            isBelowCompactionWarn: () => true,
+            history: windowedHistory,
+          });
 
-        expect(next.skippedReason).toBe('cooldown');
-        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
-      });
+          expect(next.skippedReason).toBe(skippedReason);
+          expect(runAutoMemoryExtract).toHaveBeenCalledTimes(
+            skippedReason ? 1 : 2,
+          );
+        },
+      );
 
       it('does not arm the cooldown on a completed no-op whose cursor was held', async () => {
         // The zero-tool-call guard holds the cursor at its opening offset;
