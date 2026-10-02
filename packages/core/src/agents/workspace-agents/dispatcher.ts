@@ -709,6 +709,15 @@ async function settleOrphanedHostRuns(
         if (!cancelled && !abandoned) continue;
         const agent = agents.find((candidate) => candidate.id === run.agentId);
         if (!agent || isAgentLocal(agent)) continue;
+        if (abandoned) {
+          await rebookUndeliveredTriggersInTransaction(
+            transaction,
+            thread.id,
+            run.id,
+            run.attempts,
+            now,
+          );
+        }
         await finishRunInTransaction(transaction, {
           threadId: thread.id,
           runId: run.id,

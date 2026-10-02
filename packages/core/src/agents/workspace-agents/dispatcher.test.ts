@@ -655,6 +655,94 @@ describe('dispatchOnce', () => {
     ).toHaveLength(1);
   });
 
+  it.each(['running', 'cancelling'] as const)(
+    'handles unread follow-ups when expired Host work is %s',
+    async (status) => {
+      await updateWorkspaceAgents(PROJECT_ROOT, () => [
+        ALICE,
+        { ...BOB, execution: { mode: 'managed-host', hostIds: ['ho_gone'] } },
+      ]);
+      const thread = await createThread(PROJECT_ROOT, {
+        title: 'Follow-up after Host loss',
+        assigneeAgentId: BOB.id,
+      });
+      await postMessage(PROJECT_ROOT, thread.id, {
+        from: HUMAN_AUTHOR_ID,
+        text: 'Investigate the initial request',
+      });
+      const booked = (await readThread(PROJECT_ROOT, thread.id))!;
+      const original = booked.runs[0]!;
+      expect(original.agentId).toBe(BOB.id);
+      await writeThread(PROJECT_ROOT, {
+        ...booked,
+        runs: [
+          {
+            ...original,
+            status: 'running',
+            attempts: 1,
+            acceptedMessageIds: original.triggerMessageIds,
+            consumedMessageIds: original.triggerMessageIds,
+            lease: {
+              hostId: 'ho_gone',
+              leaseId: 'ls_1',
+              attempt: 1,
+              acquiredAt: 1_000,
+              expiresAt: 2_000,
+            },
+          },
+        ],
+      });
+      await postMessage(PROJECT_ROOT, thread.id, {
+        from: HUMAN_AUTHOR_ID,
+        text: '@bob Also answer this follow-up',
+      });
+      const pending = (await readThread(PROJECT_ROOT, thread.id))!;
+      const followUp = pending.messages.at(-1)!;
+      expect(pending.runs[0]!.triggerMessageIds).toContain(followUp.id);
+      expect(pending.runs[0]!.acceptedMessageIds).not.toContain(followUp.id);
+      await writeThread(PROJECT_ROOT, {
+        ...pending,
+        runs: pending.runs.map((entry) => ({ ...entry, status })),
+      });
+
+      await dispatchOnce(PROJECT_ROOT, port(), { now: 122_000 });
+      const after = (await readThread(PROJECT_ROOT, thread.id))!;
+      expect(after.runs[0]!.status).toBe(
+        status === 'running' ? 'failed' : 'cancelled',
+      );
+      if (status === 'running') {
+        expect(after.runs).toHaveLength(2);
+        const successor = after.runs[1]!;
+        expect(successor).toMatchObject({
+          agentId: BOB.id,
+          status: 'queued',
+          triggerMessageIds: [followUp.id],
+          acceptedMessageIds: [],
+          consumedMessageIds: [],
+          attempts: 0,
+        });
+        expect(after.runs[0]!.triggerMessageIds).toEqual(
+          original.triggerMessageIds,
+        );
+        expect(
+          after.messages.find((entry) => entry.id === followUp.id)!.outcomes,
+        ).toContainEqual({
+          targetAgentId: BOB.id,
+          targetAgentName: BOB.name,
+          kind: 'coalesce',
+          into: 'queued',
+          runId: successor.id,
+        });
+      } else {
+        expect(after.runs).toHaveLength(1);
+      }
+      await dispatchOnce(PROJECT_ROOT, port(), { now: 123_000 });
+      expect((await readThread(PROJECT_ROOT, thread.id))!.runs).toHaveLength(
+        after.runs.length,
+      );
+    },
+  );
+
   it('preserves renewed and reclaimed Host work past the prior deadline', async () => {
     const { token } = await issueAgentHostEnrollment(PROJECT_ROOT);
     const { host } = await enrollAgentHost(PROJECT_ROOT, {
