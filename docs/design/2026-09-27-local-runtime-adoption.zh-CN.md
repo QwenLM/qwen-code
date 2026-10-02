@@ -34,7 +34,7 @@ machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 
 
 ## 影响组件与兼容性
 
-`LocalProcessRuntimeProvisioner` 的临时与持久模式共用 boot/ready 解析。包内本地 store 负责锁和持久记录。`RuntimeProvisioner` 及 Workspace wrapper 提供范围明确的启动恢复支持；`RuntimeBrokerService` 允许观察受支持的已保存启动记录。嵌入配置显式启用模式，并拒绝落在任何配置 Workspace 根目录下的恢复目录。无需数据库迁移或公共 API 变更。现有构造器与默认配置保持临时模式。
+`LocalProcessRuntimeProvisioner` 的临时与持久模式共用 boot/ready 解析。包内本地 store 负责锁和持久记录。`RuntimeProvisioner` 及 Workspace wrapper 提供范围明确的启动恢复支持；`RuntimeBrokerService` 允许观察受支持的已保存启动记录。嵌入配置默认启用该模式（同时设置 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` 与 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` 可退出），并拒绝落在任何配置 Workspace 根目录下的恢复目录。无需数据库迁移或公共 API 变更。现有构造器保持临时模式，默认配置使用持久模式。
 
 ## 验证与验收
 

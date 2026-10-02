@@ -12,6 +12,34 @@ import org.springframework.context.annotation.Configuration;
 
 class ManagedAgentPropertiesTest {
     @Test
+    void applicationYmlBindsTheDurableAndTrustedDefaults() throws Exception {
+        var loaded = new org.springframework.boot.env.YamlPropertySourceLoader().load(
+                "application.yml",
+                new org.springframework.core.io.ClassPathResource("application.yml"));
+        var values = new java.util.LinkedHashMap<String, Object>();
+        for (var source : loaded) {
+            var enumerable = (org.springframework.core.env.EnumerablePropertySource<?>) source;
+            for (String name : enumerable.getPropertyNames()) {
+                values.put(name, enumerable.getProperty(name));
+            }
+        }
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.runtime-broker.durable-local-process="
+                                + values.get("qwen.managed-agent.runtime-broker.durable-local-process"),
+                        "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery="
+                                + values.get("qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery"))
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    var broker = started.getBean(ManagedAgentProperties.class)
+                            .getRuntimeBroker();
+                    assertThat(broker.isDurableLocalProcess()).isTrue();
+                    assertThat(broker.isTrustedLocalRebootRecovery()).isTrue();
+                });
+    }
+
+    @Test
     void validatesWorkspaceFilesWhenSpringInitializesTheProperties() {
         ApplicationContextRunner context = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class);

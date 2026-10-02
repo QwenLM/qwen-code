@@ -57,7 +57,9 @@ class EmbeddedRuntimeBrokerTest {
             properties.getRuntimeBroker().setWorkspaceId("");
         }
         assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("requires durable local-process");
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("requires durable local-process")
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -81,7 +83,9 @@ class EmbeddedRuntimeBrokerTest {
         }
         config.setStateDirectory(storage.resolve("recovery").toString());
         assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class), properties))
-                .isInstanceOf(IllegalStateException.class).hasMessageContaining("outside Workspace roots");
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outside Workspace roots")
+                .hasMessageContaining("QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY");
     }
 
     @Test

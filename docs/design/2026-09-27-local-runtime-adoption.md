@@ -103,10 +103,12 @@ general force-unlock or PID-kill recovery is introduced.
 durable modes. A package-private local store owns locking and durable records.
 `RuntimeProvisioner` and the Workspace wrapper expose narrowly scoped startup
 recovery support. `RuntimeBrokerService` permits observation of supported saved
-startup records. Embedded configuration explicitly enables the mode and rejects
+startup records. Embedded configuration enables the mode by default (opt out
+with `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`) and rejects
 a recovery directory under any configured Workspace root. No database migration
-or public API changes are needed. Existing constructors and the default
-configuration stay ephemeral.
+or public API changes are needed. Existing constructors stay ephemeral; the
+default configuration uses the durable mode.
 
 ## Verification and acceptance
 

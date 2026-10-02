@@ -45,3 +45,5 @@ Run Java HTTP/H2 tests, the existing MySQL integration profile, real-worker Stag
 ## Acceptance evidence and limits
 
 An independent reviewer completed the physical gate on a dedicated Debian 12 Linux VM at W0e-3 head `8c2b626c`, including real reboot, power-cut controls, escaped writers, holder cleanup and receipt preservation ([round 3 report](https://github.com/QwenLM/qwen-code/pull/12869#issuecomment-5877187325)). Portable macOS tests and synthetic boot transitions remain separate evidence. Changes after that head require their own exact-head validation; the earlier physical run is not evidence that every later patch was reboot-tested.
+
+The `durable-local-process`/`trusted-local-reboot-recovery` default flip ships on portable (synthetic-identity) evidence only: under the rule above, an exact-head physical acceptance for the flip head is owed as follow-up, and the flip itself does not relax that bar.

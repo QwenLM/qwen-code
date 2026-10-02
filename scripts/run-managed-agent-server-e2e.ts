@@ -817,19 +817,19 @@ try {
         QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
         QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
         QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
-        // The new default-on durable/trusted recovery defaults stay pinned
-        // off outside the Linux workspace-Turn modes so their verified
-        // behavior is unchanged and the runner still works off Linux.
+        // Trusted reboot recovery stays pinned off in every runner mode;
+        // durable local process follows workspaceTurns. Both pins keep each
+        // mode's previously verified behavior and keep the runner starting
+        // off Linux.
+        QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
         ...(workspaceTurns
           ? {
               QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
               QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
-              QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
             }
           : {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
-              QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
             }),
         ...(durableFailover
           ? {
@@ -1194,18 +1194,15 @@ try {
           QWEN_MANAGED_AGENT_HARNESS_ENABLED: 'true',
           QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
           QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
+          QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
           ...(workspaceTurns
             ? {
                 QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
                 QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
                 QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
-                QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:
-                  'false',
               }
             : {
                 QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'false',
-                QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:
-                  'false',
               }),
           QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
           QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',

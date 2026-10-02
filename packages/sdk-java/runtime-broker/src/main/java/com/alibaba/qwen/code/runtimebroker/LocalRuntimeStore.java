@@ -47,13 +47,31 @@ final class LocalRuntimeStore {
                 if (!"Linux".equals(System.getProperty("os.name"))) {
                     throw new IOException("Durable local workers require Linux");
                 }
-                return new HostIdentity(Files.readString(Path.of("/etc/machine-id")).strip(),
+                return of(Files.readString(Path.of("/etc/machine-id")).strip(),
                         Files.readString(Path.of("/proc/sys/kernel/random/boot_id")).strip(),
                         Files.readSymbolicLink(Path.of("/proc/self/ns/pid")).toString(),
                         Files.readSymbolicLink(Path.of("/proc/self/ns/time")).toString());
             } catch (IOException error) {
-                throw new IllegalStateException("Trusted Linux host/boot identity is unavailable", error);
+                throw identityUnavailable(error);
             }
+        }
+
+        /** Malformed identity fails closed with the same operator-facing error as absence. */
+        static HostIdentity of(String hostId, String bootId, String pidNamespace, String timeNamespace) {
+            try {
+                return new HostIdentity(hostId, bootId, pidNamespace, timeNamespace);
+            } catch (IllegalArgumentException error) {
+                throw identityUnavailable(error);
+            }
+        }
+
+        private static IllegalStateException identityUnavailable(Throwable cause) {
+            return new IllegalStateException("Trusted Linux host/boot identity is unavailable"
+                    + " (/etc/machine-id, /proc/sys/kernel/random/boot_id,"
+                    + " /proc/self/ns/pid, /proc/self/ns/time); durable local-process mode requires it."
+                    + " Set QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false and"
+                    + " QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false"
+                    + " to keep ephemeral ownership.", cause);
         }
     }
 
@@ -172,6 +190,11 @@ final class LocalRuntimeStore {
                 }
             }
             validate(this.directory, true);
+        } catch (java.nio.file.attribute.UserPrincipalNotFoundException error) {
+            throw new IllegalStateException("Broker user '" + System.getProperty("user.name")
+                    + "' is not resolvable in the host password database; durable local-process mode"
+                    + " requires it. Set QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false"
+                    + " to opt out.", error);
         } catch (IOException error) {
             throw new IllegalStateException("Private local Runtime directory is unavailable", error);
         }

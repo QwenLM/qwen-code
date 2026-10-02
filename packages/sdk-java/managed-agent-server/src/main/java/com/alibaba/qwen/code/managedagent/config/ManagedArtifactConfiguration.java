@@ -20,6 +20,12 @@ public class ManagedArtifactConfiguration {
         return builder.poolSize(1).threadNamePrefix("managed-artifact-").build();
     }
 
+    /** The recovery tick runs blocking JDBC; it must never share the one-thread default pool. */
+    @Bean
+    public ThreadPoolTaskScheduler runtimeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("runtime-recovery-").build();
+    }
+
     @Bean
     @ConditionalOnMissingBean(ManagedArtifactPolicy.class)
     public ManagedArtifactPolicy managedArtifactPolicy(ManagedAgentProperties properties) {

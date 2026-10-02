@@ -54,6 +54,16 @@ class RuntimeBrokerConfigurationIntegrationTest {
     private SecretProtector secretProtector;
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private org.springframework.context.ApplicationContext context;
+
+    @Test
+    void recoveryTickRunsOnADedicatedScheduler() throws Exception {
+        assertThat(context.containsBean("runtimeRecoveryScheduler")).isTrue();
+        var scheduled = EmbeddedRuntimeBroker.class.getMethod("recoverSavedRuntimes")
+                .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
+        assertThat(scheduled.scheduler()).isEqualTo("runtimeRecoveryScheduler");
+    }
 
     @Test
     void selectsTheEmbeddedBrokerAsTheRuntimeWarmer() {

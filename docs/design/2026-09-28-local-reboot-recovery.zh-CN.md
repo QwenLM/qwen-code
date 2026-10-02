@@ -45,3 +45,5 @@ Spring 仅在启用可信本地恢复时调度有界扫描。轮转的 Binding I
 ## 验收证据与边界
 
 独立评审者已在专用 Debian 12 Linux 虚拟机上对 W0e-3 head `8c2b626c` 完成物理门禁，包括真实重启、断电对照、逃逸写入者、holder 清理和回执保留（[第三轮报告](https://github.com/QwenLM/qwen-code/pull/12869#issuecomment-5877187325)）。可移植 macOS 测试和模拟 boot 变化是独立证据。之后的改动仍需对应 head 的验证；此前的物理实测不能证明每个后续补丁也经历了重启测试。
+
+`durable-local-process` 与 `trusted-local-reboot-recovery` 的默认开启仅以可移植（合成身份）证据发布：按上述规则，翻转 head 的精确物理验收作为后续项欠付，本次翻默认不放低该门槛。
