@@ -1657,10 +1657,7 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch'
-    | 'cooldown'
-    | 'failure_limit'
-    | 'no_user_text';
+    | 'session_mismatch';
   patches_count: number;
   touched_topics: string;
   duration_ms: number;
@@ -1673,10 +1670,7 @@ export class MemoryExtractEvent implements BaseTelemetryEvent {
       | 'queued'
       | 'memory_tool'
       | 'memory_pressure'
-      | 'session_mismatch'
-      | 'cooldown'
-      | 'failure_limit'
-      | 'no_user_text';
+      | 'session_mismatch';
     patches_count: number;
     touched_topics: string[];
     duration_ms: number;
@@ -1760,7 +1754,7 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
   selector_duration_ms: number;
   /**
    * True only when the model selector was skipped because the deterministic
-   * fast result was a unique, strong, current match (#13003). Keeps a
+   * fast result matched a title/keyword and its body was absent (#13003). Keeps a
    * deliberate skip apart from a selector failure, which also reports
    * `strategy: 'heuristic'`. Undefined when the recall mode had no skip
    * decision to make (legacy mode), so the metric dimension stays off a

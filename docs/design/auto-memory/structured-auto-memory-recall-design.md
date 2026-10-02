@@ -193,9 +193,19 @@ The fast scorer and selector read the same snapshot but have different roles:
 
 Steps 2 and 4 are conditional while the experimental skip-selector knob
 (`QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT`, off by default)
-is set: a single fast hit that is strong and current suppresses the selector
-for that recall, so no selector pass runs and no refined result arrives. The
-knob is an ablation experiment; the default contract above is unchanged.
+is set: a single fast hit matching the query by title or keyword, whose body
+is not already in context, suppresses the selector. Metadata-only substring
+matches and already-present or stale bodies keep the selector. Count fast
+candidates before prompt trimming so a second match cannot disappear from the
+guard. No refined result arrives after a skip; the shared client delivers it
+as the fast phase. This is an ablation experiment; default behavior is unchanged.
+
+Extraction cadence is unchanged. The #13004 cooldown implementation was removed
+from #13158: its shutdown tail and suspended oldest windows require durable
+replay before skipped facts can be preserved. Its raw-window, timestamp,
+failure-limit and compaction changes are also removed. Historical code remains
+at `a4568de26e49`; #13004 stays open. Selector-only validation must not be cited
+as extraction, quality, or token-savings acceptance.
 
 Short Latin keywords require token boundaries, so `ai` does not match
 `explain`. Han, Hiragana, Katakana, and Hangul use a shared CJK tokenizer. Body

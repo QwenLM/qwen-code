@@ -47,7 +47,6 @@ import { FunctionCallingConfigMode } from '../core/genai-compat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from './cache-safe-history.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -222,7 +221,7 @@ export function createForkedChat(
   config: Config,
   params: CacheSafeParams,
 ): LlmChat {
-  const maxHistoryEntries = CACHE_SAFE_HISTORY_TAIL_ENTRIES;
+  const maxHistoryEntries = 40;
   const history =
     params.history.length > maxHistoryEntries
       ? params.history.slice(-maxHistoryEntries)

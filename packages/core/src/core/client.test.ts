@@ -47,7 +47,6 @@ import { MemoryManager } from '../memory/manager.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
-import { computeThresholds } from '../services/chatCompressionService.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -921,7 +920,6 @@ describe('Gemini Client (client.ts)', () => {
       }),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getChatCompression: vi.fn().mockReturnValue(undefined),
-      getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
       getUseModelRouter: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
@@ -8045,7 +8043,6 @@ Other open files:
 
       mockTurnRunFn.mockReturnValue(textTurn('Done'));
 
-      const tokenCount = vi.fn();
       const mockChat = installChat({
         getHistory: vi
           .fn()
@@ -8053,7 +8050,6 @@ Other open files:
             userText('I prefer terse responses.'),
             modelText('Done'),
           ]),
-        getLastPromptTokenCount: tokenCount,
       });
 
       const events = await run(
@@ -8068,27 +8064,7 @@ Other open files:
         sessionId: 'test-session-id',
         history: recordedHistory,
         config: mockConfig,
-        // Read only while a no-op cooldown is active (#13004).
-        isBelowCompactionWarn: expect.any(Function),
       });
-      const cooldownPosition =
-        mockMemoryManager.scheduleExtract.mock.calls.at(-1)?.[0]
-          .isBelowCompactionWarn;
-      const window = 100_000;
-      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
-        ...mockConfig.getContentGeneratorConfig()!,
-        contextWindowSize: window,
-      });
-      const { warn } = computeThresholds(
-        window,
-        mockConfig.getAutoCompactThreshold(),
-      );
-      tokenCount.mockReturnValue(0);
-      expect(cooldownPosition?.()).toBe(false);
-      tokenCount.mockReturnValue(warn - 1);
-      expect(cooldownPosition?.()).toBe(true);
-      tokenCount.mockReturnValue(warn);
-      expect(cooldownPosition?.()).toBe(false);
       expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
         2,
       );

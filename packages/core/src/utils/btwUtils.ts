@@ -38,9 +38,6 @@ export function buildBtwCacheSafeParams(
     const chat = llmClient.getChat();
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
-    // utils/ is a leaf layer (architecture/no-core-utils-upward-import), so
-    // this mirrors CACHE_SAFE_HISTORY_TAIL_ENTRIES in agents/ rather than
-    // importing it.
     const maxHistoryEntries = 40;
     const history = llmClient.getHistoryTail(maxHistoryEntries, true);
     return {

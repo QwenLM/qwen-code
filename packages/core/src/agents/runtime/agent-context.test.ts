@@ -13,7 +13,6 @@ import {
   getCurrentAgentId,
   getRuntimeContentGenerator,
   isTopLevelSession,
-  runOutsideAgentContext,
   runWithAgentContext,
   runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
@@ -22,10 +21,6 @@ import {
 } from './agent-context.js';
 import { runWithTeammateIdentity } from '../team/identity.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
-import {
-  subagentIdentityContext,
-  subagentNameContext,
-} from '../../utils/subagentNameContext.js';
 import {
   AuthType,
   type ContentGenerator,
@@ -110,27 +105,6 @@ describe('agent-context (agentId)', () => {
       }),
     ]);
     expect(results.sort()).toEqual(['a', 'b']);
-  });
-});
-
-describe('runOutsideAgentContext', () => {
-  it('clears subagent identity for main-session continuations and restores the caller', async () => {
-    const identity = { type: 'worker', id: 'worker' };
-    await runWithAgentContext('worker', () =>
-      subagentIdentityContext.run(identity, () =>
-        subagentNameContext.run('worker', async () => {
-          await runOutsideAgentContext(async () => {
-            await Promise.resolve();
-            expect(getCurrentAgentId()).toBeNull();
-            expect(subagentIdentityContext.getStore()).toBeUndefined();
-            expect(subagentNameContext.getStore()).toBeUndefined();
-          });
-          expect(getCurrentAgentId()).toBe('worker');
-          expect(subagentIdentityContext.getStore()).toBe(identity);
-          expect(subagentNameContext.getStore()).toBe('worker');
-        }),
-      ),
-    );
   });
 });
 

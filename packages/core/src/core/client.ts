@@ -57,7 +57,6 @@ import {
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
-import { computeThresholds } from '../services/chatCompressionService.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -142,7 +141,6 @@ import {
   saveCacheSafeParams,
   clearCacheSafeParams,
 } from '../agents/forkedAgent.js';
-import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 
 // Utilities
 import {
@@ -1439,10 +1437,7 @@ export class LlmClient {
   captureCacheSafeParams(): void {
     try {
       const chat = this.getChat();
-      const historyForCache = this.getHistoryTailShallow(
-        CACHE_SAFE_HISTORY_TAIL_ENTRIES,
-        true,
-      );
+      const historyForCache = this.getHistoryTailShallow(40, true);
       const cachedHistory = slimCompactionInput(
         historyForCache,
         this.config.getEffectiveInputModalities(),
@@ -1494,32 +1489,6 @@ export class LlmClient {
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.pendingMemoryPrefetch?.fastDeliveredRefs.clear();
-  }
-
-  /**
-   * Whether the last prompt sits below the compaction warn threshold (#13004).
-   * This is a cooldown heuristic, not a guarantee against compaction on the
-   * next send (which can add a large input). Unknown counts as not below.
-   */
-  private isBelowCompactionWarn(): boolean {
-    // Match the gate that decides the next send: estimatePromptTokens adds
-    // the previous response's output tokens on top of the prompt count, so
-    // this guard must too — with a thinking-heavy turn the output alone can
-    // consume the whole warn→auto buffer and the cooldown would skip turns
-    // straight across a compaction. Optional-chained: installChat mocks
-    // supply only getLastPromptTokenCount.
-    const promptTokens =
-      (this.chat?.getLastPromptTokenCount() ?? 0) +
-      (this.chat?.getLastOutputTokenCount?.() ?? 0);
-    if (promptTokens <= 0) return false;
-    const window =
-      this.config.getContentGeneratorConfig()?.contextWindowSize ??
-      DEFAULT_TOKEN_LIMIT;
-    const { warn } = computeThresholds(
-      window,
-      this.config.getAutoCompactThreshold(),
-    );
-    return promptTokens < warn;
   }
 
   /** @internal */
@@ -3171,7 +3140,6 @@ export class LlmClient {
         sessionId,
         history,
         config: this.config,
-        isBelowCompactionWarn: () => this.isBelowCompactionWarn(),
       })
       .then((result) => result.touchedTopics.length)
       .catch((error: unknown) => {

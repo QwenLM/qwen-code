@@ -65,8 +65,6 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
-import { AutoMemoryExtractionError } from './extractionAgentPlanner.js';
-import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import {
   runManagedAutoMemoryDream,
   type AutoMemoryDreamResult,
@@ -170,58 +168,6 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
-  abortSignal?: AbortSignal;
-  /**
-   * Whether the conversation is still below the compaction warn threshold.
-   * Consulted only while a no-op cooldown is active: a skipped turn is safe
-   * only if the next extraction still sees it, and compaction would replace
-   * it with a summary first. Absent means "unknown", which never skips.
-   */
-  isBelowCompactionWarn?: () => boolean;
-}
-
-/**
- * Internal experiment for #13004: after an extraction that ran, completed and
- * wrote nothing, skip this many following user turns. Enabled runs process the
- * oldest pending {@link CACHE_SAFE_HISTORY_TAIL_ENTRIES} entries and advance
- * the cursor only through that window, so a larger ending turn cannot mark
- * skipped facts unseen in the usual tail as processed. Default 0 keeps today's
- * once-per-turn cadence; not a user setting until a paired run shows memory
- * quality is unchanged.
- *
- * Coverage note: the skip half engages only where the caller supplies
- * `isBelowCompactionWarn` (the primary-chat path). The ACP / `qwen serve`
- * caller passes no such predicate, so with the knob set those sessions get
- * the windowed extraction without any cooldown skips — do not read an
- * ablation through that path.
- */
-export const EXTRACT_NOOP_COOLDOWN_TURNS_ENV =
-  'QWEN_CODE_MEMORY_EXTRACT_NOOP_COOLDOWN_TURNS';
-export const MAX_EXTRACT_NOOP_COOLDOWN_TURNS = 5;
-/**
- * Stop deferring extraction once pending history fills half a window. The
- * extractor's bounded pending slice, not this cadence bound, prevents loss.
- */
-export const MAX_COOLDOWN_PENDING_HISTORY_ENTRIES = Math.floor(
-  CACHE_SAFE_HISTORY_TAIL_ENTRIES / 2,
-);
-
-/**
- * Reads {@link EXTRACT_NOOP_COOLDOWN_TURNS_ENV}: a non-negative integer,
- * clamped to {@link MAX_EXTRACT_NOOP_COOLDOWN_TURNS}. Anything else is ignored
- * with a debug warning and falls back to 0 (off).
- */
-export function resolveExtractNoopCooldownTurns(): number {
-  const raw = process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV]?.trim();
-  if (!raw) return 0;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 0) {
-    debugLogger.warn(
-      `Ignoring ${EXTRACT_NOOP_COOLDOWN_TURNS_ENV}=${raw}: expected a non-negative integer.`,
-    );
-    return 0;
-  }
-  return Math.min(value, MAX_EXTRACT_NOOP_COOLDOWN_TURNS);
 }
 
 export interface ScheduleSkillReviewParams {
@@ -709,17 +655,6 @@ export class MemoryManager {
     string,
     { taskId: string; params: ScheduleExtractParams }
   >();
-  // User turns still to skip after a completed no-op in this session (#13004).
-  // Process-local on purpose: a restart resets it to "run", the safe side.
-  private readonly extractCooldownRemaining = new Map<
-    string,
-    { sessionId: string; remaining: number; processedOffset: number }
-  >();
-  // ponytail: process-local suspension; durable recovery needs a separate backlog budget.
-  private readonly extractFailures = new Map<
-    string,
-    { windowIdentity: string; count: number }
-  >();
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -866,29 +801,18 @@ export class MemoryManager {
 
   // ─── Drain ────────────────────────────────────────────────────────────────────
 
-  /** Wait for tracked tasks, including trailing work, within one timeout. */
+  /** Wait for all in-flight tasks to settle, with optional timeout. */
   async drain(options: DrainOptions = {}): Promise<boolean> {
-    if (this.inFlight.size === 0) return true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout =
-      options.timeoutMs && options.timeoutMs > 0
-        ? new Promise<boolean>((resolve) => {
-            timer = setTimeout(() => resolve(false), options.timeoutMs);
-          })
-        : undefined;
-    try {
-      while (this.inFlight.size > 0) {
-        const batch = Promise.allSettled([...this.inFlight.values()]).then(
-          () => true,
-        );
-        if (!(await (timeout ? Promise.race([batch, timeout]) : batch))) {
-          return false;
-        }
-      }
-      return true;
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    const promises = [...this.inFlight.values()];
+    if (promises.length === 0) return true;
+    const waitAll = Promise.allSettled(promises).then(() => true);
+    if (!options.timeoutMs || options.timeoutMs <= 0) return waitAll;
+    return Promise.race<boolean>([
+      waitAll,
+      new Promise<boolean>((resolve) =>
+        setTimeout(() => resolve(false), options.timeoutMs),
+      ),
+    ]);
   }
 
   private track<T>(taskId: string, promise: Promise<T>): Promise<T> {
@@ -1162,8 +1086,6 @@ export class MemoryManager {
    * Returns immediately with a skipped result if:
    *   - The last history turn wrote to a memory file (memory_tool)
    *   - Extraction is already running for this project (queues trailing request)
-   *   - A no-op cooldown is armed and too little history has grown since
-   *     (cooldown; #13004, opt-in)
    *
    * The trailing request starts automatically when the active extraction
    * completes.
@@ -1208,28 +1130,6 @@ export class MemoryManager {
           updatedAt: (params.now ?? new Date()).toISOString(),
         },
       } as never;
-    }
-
-    const cooldown = this.extractCooldownRemaining.get(params.projectRoot);
-    if (cooldown) {
-      const pendingEntries = params.history.length - cooldown.processedOffset;
-      if (
-        cooldown.sessionId === params.sessionId &&
-        cooldown.remaining > 0 &&
-        pendingEntries >= 0 &&
-        pendingEntries <= MAX_COOLDOWN_PENDING_HISTORY_ENTRIES &&
-        params.isBelowCompactionWarn?.() === true
-      ) {
-        cooldown.remaining--;
-        return this.recordExtractCooldownSkip(
-          params,
-          cooldown.remaining,
-        ) as never;
-      }
-      // A different session cannot inherit a no-op from the previous history.
-      // Near compaction, with an unknown position, after a history shrink, or
-      // once pending history fills half the extractor's window, run normally.
-      this.extractCooldownRemaining.delete(params.projectRoot);
     }
 
     if (this.extractRunning.has(params.projectRoot)) {
@@ -1303,38 +1203,6 @@ export class MemoryManager {
     return this.track(record.id, this.runExtract(record.id, params)) as never;
   }
 
-  async flushExtract(params: ScheduleExtractParams): Promise<boolean> {
-    if (resolveExtractNoopCooldownTurns() === 0) return true;
-    let previousOffset = -1;
-    while (true) {
-      params.abortSignal?.throwIfAborted();
-      if (this.extractRunning.has(params.projectRoot)) return false;
-      const record = makeTaskRecord(
-        'extract',
-        params.projectRoot,
-        params.sessionId,
-      );
-      this.store(record);
-      const result = await this.track(
-        record.id,
-        this.runExtract(record.id, params),
-      );
-      if (result.skippedReason && result.skippedReason !== 'no_user_text') {
-        return false;
-      }
-      const offset = result.cursor.processedOffset;
-      if (offset === params.history.length) return true;
-      if (
-        offset === undefined ||
-        offset <= previousOffset ||
-        (!result.cursorAdvanced && result.skippedReason !== 'no_user_text')
-      ) {
-        return false;
-      }
-      previousOffset = offset;
-    }
-  }
-
   /**
    * True when the runtime is under hard or critical memory pressure, as
    * reported by the shared MemoryPressureMonitor (#5147). The monitor is
@@ -1364,79 +1232,6 @@ export class MemoryManager {
     );
   }
 
-  private recordExtractCooldownSkip(
-    params: ScheduleExtractParams,
-    remaining: number,
-  ): Awaited<ReturnType<typeof runAutoMemoryExtract>> {
-    const record = makeTaskRecord(
-      'extract',
-      params.projectRoot,
-      params.sessionId,
-    );
-    this.storeWith(record, {
-      status: 'skipped',
-      progressText:
-        'Skipped: the last extraction found nothing durable; this turn is left for the next one.',
-      metadata: {
-        skippedReason: 'cooldown',
-        cooldownRemaining: remaining,
-        historyLength: params.history.length,
-      },
-    });
-    if (params.config) {
-      logMemoryExtract(
-        params.config,
-        new MemoryExtractEvent({
-          trigger: 'auto',
-          status: 'skipped',
-          skipped_reason: 'cooldown',
-          patches_count: 0,
-          touched_topics: [],
-          duration_ms: 0,
-        }),
-      );
-    }
-    return {
-      touchedTopics: [],
-      skippedReason: 'cooldown',
-      cursor: {
-        sessionId: params.sessionId,
-        updatedAt: (params.now ?? new Date()).toISOString(),
-      },
-    };
-  }
-
-  /**
-   * Arms the no-op cooldown only after an extraction that ran, completed,
-   * wrote nothing and advanced its cursor. A write, an early return with no
-   * extractor run, or a cursor held back by the zero-tool-call guard all
-   * clear it, so the next turn runs as today. Skipped results leave it as is.
-   * The windowed arm stops short of `history.length` by construction, so the
-   * trigger is an advanced cursor, not reaching the live end — otherwise a
-   * tool-heavy session (every turn outgrows the window cap) never arms the
-   * cooldown at all (#13004's measured waste case).
-   */
-  private updateExtractCooldown(
-    params: ScheduleExtractParams,
-    result: Awaited<ReturnType<typeof runAutoMemoryExtract>>,
-  ): void {
-    if (result.skippedReason) return;
-    const completedNoop =
-      result.extractorRan === true &&
-      result.touchedTopics.length === 0 &&
-      result.cursorAdvanced === true;
-    const turns = completedNoop ? resolveExtractNoopCooldownTurns() : 0;
-    if (turns > 0) {
-      this.extractCooldownRemaining.set(params.projectRoot, {
-        sessionId: params.sessionId,
-        remaining: turns,
-        processedOffset: result.cursor.processedOffset ?? params.history.length,
-      });
-    } else {
-      this.extractCooldownRemaining.delete(params.projectRoot);
-    }
-  }
-
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
@@ -1452,10 +1247,6 @@ export class MemoryManager {
     });
 
     const t0 = Date.now();
-    const preserveUnprocessedHistory = resolveExtractNoopCooldownTurns() > 0;
-    const failureKey = JSON.stringify([params.projectRoot, params.sessionId]);
-    let selectedWindow: string | undefined;
-    if (!preserveUnprocessedHistory) this.extractFailures.delete(failureKey);
     try {
       // Memory-pressure gate. Checked inside try so the finally block
       // always runs — extractRunning/extractCurrentTaskId are cleaned up
@@ -1490,25 +1281,7 @@ export class MemoryManager {
         };
       }
 
-      const result = await runAutoMemoryExtract(
-        preserveUnprocessedHistory
-          ? {
-              ...params,
-              preserveUnprocessedHistory: true,
-              canExtractWindow: (windowIdentity) => {
-                selectedWindow = windowIdentity;
-                const failure = this.extractFailures.get(failureKey);
-                return (
-                  !failure ||
-                  failure.windowIdentity !== windowIdentity ||
-                  failure.count < 3
-                );
-              },
-            }
-          : params,
-      );
-      if (!result.skippedReason) this.extractFailures.delete(failureKey);
-      this.updateExtractCooldown(params, result);
+      const result = await runAutoMemoryExtract(params);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1549,32 +1322,10 @@ export class MemoryManager {
       }
       return result;
     } catch (error) {
-      if (selectedWindow !== undefined) {
-        const previous = this.extractFailures.get(failureKey);
-        this.extractFailures.set(failureKey, {
-          windowIdentity: selectedWindow,
-          count:
-            previous?.windowIdentity === selectedWindow
-              ? previous.count + 1
-              : 1,
-        });
-      }
-      this.extractCooldownRemaining.delete(params.projectRoot);
-      const writeResult =
-        error instanceof AutoMemoryExtractionError ? error.result : undefined;
-      if (writeResult?.touchedUserScope && params.config) {
-        await this.recordUserMutation(
-          params.projectRoot,
-          params.config,
-          params.now ?? new Date(),
-        );
-      }
-      const touchedTopics = writeResult?.touchedTopics ?? [];
       const durationMs = Date.now() - t0;
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
-        metadata: { touchedTopics },
       });
       if (params.config) {
         logMemoryExtract(
@@ -1582,8 +1333,8 @@ export class MemoryManager {
           new MemoryExtractEvent({
             trigger: 'auto',
             status: 'failed',
-            patches_count: touchedTopics.length,
-            touched_topics: touchedTopics,
+            patches_count: 0,
+            touched_topics: [],
             duration_ms: durationMs,
           }),
         );
@@ -1592,26 +1343,19 @@ export class MemoryManager {
     } finally {
       this.extractCurrentTaskId.delete(params.projectRoot);
       this.extractRunning.delete(params.projectRoot);
-      this.startQueuedExtract(params.projectRoot);
+      void this.startQueuedExtract(params.projectRoot);
     }
   }
 
-  private startQueuedExtract(projectRoot: string): void {
+  private async startQueuedExtract(projectRoot: string): Promise<void> {
     if (this.extractRunning.has(projectRoot)) return;
     const queued = this.extractQueued.get(projectRoot);
     if (!queued) return;
     this.extractQueued.delete(projectRoot);
-    // runExtract rethrows; `track`'s removal handler swallows the rejection
-    // without surfacing it, so observe it here — the trailing path has no
-    // caller left to catch.
-    void this.track(
+    await this.track(
       queued.taskId,
       this.runExtract(queued.taskId, queued.params),
-    ).catch((error: unknown) => {
-      debugLogger.warn(
-        `Queued managed auto-memory extraction failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+    );
   }
 
   // ─── Skill review ─────────────────────────────────────────────────────────────
@@ -2806,8 +2550,6 @@ export class MemoryManager {
     this.extractRunning.clear();
     this.extractCurrentTaskId.clear();
     this.extractQueued.clear();
-    this.extractFailures.clear();
-    this.extractCooldownRemaining.clear();
   }
 
   /** Reset all dream scheduling state. */

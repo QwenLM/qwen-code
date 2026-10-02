@@ -95,6 +95,5 @@ export interface UserAutoMemoryMetadata {
 export interface AutoMemoryExtractCursor {
   sessionId?: string;
   processedOffset?: number;
-  processedHistoryHash?: string;
   updatedAt: string;
 }

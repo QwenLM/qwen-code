@@ -70,8 +70,6 @@ export function compactionText(props: CompactionViewProps): string {
       );
     case CompressionStatus.COMPRESSION_FAILED_API_ERROR:
       return t('Could not compress chat history due to an API error.');
-    case CompressionStatus.COMPRESSION_FAILED_MEMORY_FLUSH:
-      return t('Failed to compress chat history.');
     case CompressionStatus.NOOP:
       return 'Nothing to compress.';
     default:

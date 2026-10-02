@@ -6,7 +6,7 @@
 
 /**
  * Internal experiment for #13003: skip the model selector when the published
- * fast result is exactly one strong, current match. Structured recall only.
+ * fast result is one title/keyword match with no body in history. Structured only.
  * Off unless set to `1` or `true`; not a user setting until an ablation shows
  * recall quality is unchanged.
  *

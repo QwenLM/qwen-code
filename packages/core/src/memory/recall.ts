@@ -307,7 +307,7 @@ function scoreDocument(
   return lexicalScore + typeBoost;
 }
 
-function isStrongFastMatch(
+function matchesTitleOrKeyword(
   query: string,
   doc: ScannedAutoMemoryDocument,
 ): boolean {
@@ -326,12 +326,17 @@ function isStrongFastMatch(
       'u',
     ).test(normalizedQuery);
   };
-  if (
+  return (
     (title.length > 0 && normalizedQuery.includes(title)) ||
     keywords.some(includesKeyword)
-  ) {
-    return true;
-  }
+  );
+}
+
+function isStrongFastMatch(
+  query: string,
+  doc: ScannedAutoMemoryDocument,
+): boolean {
+  if (matchesTitleOrKeyword(query, doc)) return true;
 
   const queryTokens = tokenize(query);
   const metadata = normalizeRecallText(
@@ -486,7 +491,7 @@ export interface RelevantAutoMemoryPromptResult {
   strategy: 'none' | 'heuristic' | 'model';
   /**
    * Set only when the model selector was skipped because the fast result was
-   * a unique, strong, current match: this result IS the fast result, so the
+   * a unique title/keyword match with no body in history: this IS the fast result, so the
    * consumer delivers it as the fast phase rather than as a refined one.
    */
   selectorSkipped?: true;
@@ -725,17 +730,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         }
       }
       fastDurationMs = Date.now() - fastStartedAt;
-      // #13003: when the delivered fast result is one strong, current match,
-      // its answer is already in front of the model and the selector round
-      // trip buys nothing. Test strength and freshness, not count: the fast
-      // list is stale-body-first and a stale-body document is published
-      // without passing isStrongFastMatch, so a single delivered document
-      // may be a reread candidate that must keep the selector. One document
-      // that is strong and not stale also means no stale candidate and no
-      // second strong one. The count is taken before rendering, which may
-      // trim trailing documents to fit its budget. Proactive injection
-      // narrows from up to MAX_RELEVANT_DOCS to this one; the router, and
-      // search_memory through it, are unchanged.
+      // Count before rendering: a second candidate trimmed by the prompt
+      // budget must not turn an ambiguous recall into a selector skip.
       const uniqueStrongHit = publishedFast?.selectedDocs[0];
       if (
         !legacy &&
@@ -743,8 +739,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         fastCandidateCount === 1 &&
         publishedFast?.selectedDocs.length === 1 &&
         uniqueStrongHit !== undefined &&
-        isStrongFastMatch(query, uniqueStrongHit) &&
-        !hasStaleBodyInHistory(uniqueStrongHit, bodyPresentVersions) &&
+        matchesTitleOrKeyword(query, uniqueStrongHit) &&
+        !bodyPresentVersions?.has(toAutoMemoryRef(uniqueStrongHit)) &&
         !options.abortSignal?.aborted
       ) {
         const result: RelevantAutoMemoryPromptResult = {

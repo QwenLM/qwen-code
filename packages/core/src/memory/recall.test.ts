@@ -963,35 +963,39 @@ describe('auto-memory relevant recall', () => {
       delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
     });
 
-    it('returns the one strong, current fast hit without the selector', async () => {
-      // docs[1] is a weaker candidate the selector could have added; the skip
-      // narrows proactive injection to the unique strong hit on purpose.
-      mockSnapshot([exact, docs[1]!]);
-      const onFastResult = vi.fn();
+    it.each(['1', ' TRUE '])(
+      'skips the selector with flag %s',
+      async (flag) => {
+        process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        // docs[1] is a weaker candidate the selector could have added; the skip
+        // narrows proactive injection to the unique strong hit on purpose.
+        mockSnapshot([exact, docs[1]!]);
+        const onFastResult = vi.fn();
 
-      const result = await resolveRelevantAutoMemoryPromptForQuery(
-        '/tmp/project',
-        query,
-        { config, onFastResult },
-      );
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult },
+        );
 
-      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
-      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
-      expect(result.selectedDocs).toEqual([exact]);
-      expect(result.strategy).toBe('heuristic');
-      expect(result.selectorSkipped).toBe(true);
-      expect(result.treeSnapshot).toBe(
-        onFastResult.mock.calls[0]?.[0].treeSnapshot,
-      );
-      expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
-        config,
-        expect.objectContaining({
-          strategy: 'heuristic',
-          selector_skipped: true,
-          selector_duration_ms: 0,
-        }),
-      );
-    });
+        expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+        expect(result.selectedDocs).toEqual([exact]);
+        expect(result.strategy).toBe('heuristic');
+        expect(result.selectorSkipped).toBe(true);
+        expect(result.treeSnapshot).toBe(
+          onFastResult.mock.calls[0]?.[0].treeSnapshot,
+        );
+        expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+          config,
+          expect.objectContaining({
+            strategy: 'heuristic',
+            selector_skipped: true,
+            selector_duration_ms: 0,
+          }),
+        );
+      },
+    );
 
     it('keeps the selector when the knob is off', async () => {
       delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
@@ -1046,6 +1050,44 @@ describe('auto-memory relevant recall', () => {
 
       expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([stale]);
       expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector for a metadata-only substring match', async () => {
+      const weak = {
+        ...exact,
+        title: 'Runtime dashboard',
+        keywords: [],
+        description: 'provider fallback',
+        usageScenarios: [],
+      };
+      mockSnapshot([weak]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([weak]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when the matching body is already present', async () => {
+      mockSnapshot([exact, docs[1]!]);
+      bodyPresentVersions.set('project:reference.md', exact.mtimeMs);
+      vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+        docs[1]!,
+      ]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectedDocs).toContainEqual(docs[1]!);
       expect(result.selectorSkipped).toBeUndefined();
     });
 

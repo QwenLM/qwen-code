@@ -5,16 +5,11 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  getStartupContextLength,
-  stripSystemReminderBlocks,
-} from '../core/environmentContext.js';
-import { isApiUserPrompt } from '../services/api-user-prompt.js';
+import { partToString } from '../utils/partUtils.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
@@ -23,16 +18,12 @@ import {
   ensureAutoMemoryScaffold,
   ensureUserAutoMemoryScaffold,
 } from './store.js';
-import {
-  AutoMemoryExtractionError,
-  runAutoMemoryExtractionByAgent,
-} from './extractionAgentPlanner.js';
+import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
-import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
@@ -50,28 +41,9 @@ export interface AutoMemoryExtractResult {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch'
-    | 'cooldown'
-    | 'failure_limit'
-    | 'no_user_text';
+    | 'session_mismatch';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
-  /**
-   * True when the extraction agent actually ran and completed. Absent on every
-   * early return (no new user messages, session mismatch), which otherwise
-   * share a no-op's shape; the cooldown in `MemoryManager` must not treat
-   * those as a completed no-op (#13004).
-   */
-  extractorRan?: true;
-  /**
-   * True when this run's cursor advanced past the offset it started from.
-   * The cooldown arms on a completed no-op that consumed its window; a cursor
-   * merely held at the live end by the zero-tool-call guard must not arm it,
-   * and a windowed no-op that stops short of `history.length` must be able
-   * to (#13004's tool-heavy-session case, where the window caps below the
-   * live end every turn).
-   */
-  cursorAdvanced?: true;
 }
 
 function getSessionMismatchResult(
@@ -92,68 +64,6 @@ function getSessionMismatchResult(
       updatedAt: now.toISOString(),
     },
   };
-}
-
-/**
- * Cut-safety predicates for the pending-window boundary. A cut is unsafe when
- * the last included entry is a model entry carrying a functionCall (its
- * response falls outside the window and the trailing repair would fabricate
- * one reusing the real call's id), or when the next entry is a user entry
- * that is all functionResponse parts (the next window would open on an
- * orphaned response whose call sits in already-processed history, and no
- * extraction run would ever see it — the cursor only advances).
- */
-function endsOnOpenCall(
-  history: readonly Content[],
-  endOffset: number,
-): boolean {
-  const last = history[endOffset - 1];
-  return (
-    last?.role === 'model' &&
-    (last.parts ?? []).some((part) => part.functionCall)
-  );
-}
-
-function opensOnOrphanedResponse(
-  history: readonly Content[],
-  endOffset: number,
-): boolean {
-  const next = history[endOffset];
-  return (
-    next?.role === 'user' &&
-    (next.parts ?? []).length > 0 &&
-    (next.parts ?? []).every((part) => part.functionResponse)
-  );
-}
-
-function hasUserText(content: Content): boolean {
-  return (
-    content.role === 'user' &&
-    (content.parts ?? []).some(
-      (part) =>
-        !part.thought &&
-        (typeof part.text === 'string'
-          ? stripSystemReminderBlocks(part.text).trim().length > 0
-          : // A media-only user turn (image/file) has no text but is still
-            // user content — counting it as empty would advance the cursor
-            // past a turn no extractor ever sees, and the cursor only moves
-            // forward.
-            part.inlineData !== undefined || part.fileData !== undefined),
-    )
-  );
-}
-
-function hashProcessedHistory(
-  history: Content[],
-  floor: number,
-  offset: number,
-): string {
-  // ponytail: O(processed history); use a chat revision if hashing becomes costly.
-  const hash = createHash('sha256').update(`${floor}\n`);
-  for (let i = floor; i < offset; i++) {
-    hash.update(JSON.stringify(history[i])).update('\n');
-  }
-  return hash.digest('hex');
 }
 
 async function readExtractCursor(
@@ -177,15 +87,11 @@ async function readExtractCursor(
 async function writeExtractCursor(
   projectRoot: string,
   cursor: AutoMemoryExtractCursor,
-  abortSignal?: AbortSignal,
 ): Promise<void> {
   await atomicWriteFile(
     getAutoMemoryExtractCursorPath(projectRoot),
     `${JSON.stringify(cursor, null, 2)}\n`,
-    {
-      encoding: 'utf-8',
-      assertCanCommit: () => abortSignal?.throwIfAborted(),
-    },
+    { encoding: 'utf-8' },
   );
 }
 
@@ -223,11 +129,7 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
-  abortSignal?: AbortSignal;
-  preserveUnprocessedHistory?: boolean;
-  canExtractWindow?: (windowIdentity: string) => boolean;
 }): Promise<AutoMemoryExtractResult> {
-  params.abortSignal?.throwIfAborted();
   const now = params.now ?? new Date();
   if (!params.config) {
     throw new Error(
@@ -266,104 +168,25 @@ export async function runAutoMemoryExtract(params: {
       : 0;
   // History may shrink between extract calls (compression). Clamp to length
   // so new messages after compression are not permanently skipped.
-  let startOffset = rawOffset > params.history.length ? 0 : rawOffset;
-  let historyFloor = 0;
-  if (params.preserveUnprocessedHistory) {
-    const prefixLength = getStartupContextLength(params.history, {
-      includeCompressed: true,
-    });
-    // Compression can preserve an open call as the last prefix entry. Keep
-    // it with its real response, while skipping synthetic user context.
-    historyFloor =
-      prefixLength - (endsOnOpenCall(params.history, prefixLength) ? 1 : 0);
-    const sameSession = currentCursor.sessionId === params.sessionId;
-    const matchesHistory =
-      sameSession &&
-      Number.isInteger(rawOffset) &&
-      rawOffset >= historyFloor &&
-      rawOffset <= params.history.length &&
-      currentCursor.processedHistoryHash ===
-        hashProcessedHistory(params.history, historyFloor, rawOffset);
-    if (!matchesHistory) {
-      const compressed = prefixLength > getStartupContextLength(params.history);
-      startOffset =
-        (sameSession && currentCursor.processedHistoryHash) || compressed
-          ? historyFloor
-          : Math.max(
-              historyFloor,
-              params.history.findLastIndex(
-                (content, i) =>
-                  i >= historyFloor &&
-                  hasUserText(content) &&
-                  isApiUserPrompt(content, { excludeTaskNotifications: true }),
-              ),
-            );
-    }
-  }
-  // With turn-skipping enabled, a large ending turn can evict skipped facts
-  // from the usual tail. Process the oldest pending window instead, and never
-  // mark its unseen user text as processed.
-  let endOffset = params.preserveUnprocessedHistory
-    ? Math.min(
-        params.history.length,
-        startOffset + CACHE_SAFE_HISTORY_TAIL_ENTRIES,
-      )
-    : params.history.length;
-  // A plain index can split a model functionCall from its functionResponse:
-  // the trailing repair would fabricate a response reusing the real call's
-  // id, and the next window would open on the orphaned true output, which no
-  // extraction run ever sees (the cursor only advances). Back the cut off to
-  // a real turn boundary — but only while the window does not already reach
-  // the end of history (a session ending on an open call must still be able
-  // to arm the no-op cooldown at processedOffset === history.length), and
-  // never past startOffset (a zero-length window still writes the cursor).
-  if (params.preserveUnprocessedHistory) {
-    while (
-      endOffset < params.history.length &&
-      endOffset > startOffset &&
-      (endsOnOpenCall(params.history, endOffset) ||
-        opensOnOrphanedResponse(params.history, endOffset))
-    ) {
-      endOffset--;
-    }
-  }
-  const pendingHistory = params.history.slice(startOffset, endOffset);
-  const consumableEndOffset =
-    params.preserveUnprocessedHistory &&
-    !params.history.some((content, i) => i >= endOffset && hasUserText(content))
-      ? params.history.length
-      : endOffset;
-  // Attest the selection before the fork awaits: the parent may mutate its
-  // history while extraction runs. Holdback must retain the start identity.
-  const startHistoryHash = params.preserveUnprocessedHistory
-    ? hashProcessedHistory(params.history, historyFloor, startOffset)
-    : undefined;
-  const endHistoryHash = params.preserveUnprocessedHistory
-    ? hashProcessedHistory(params.history, historyFloor, endOffset)
-    : undefined;
-  const consumableHistoryHash =
-    consumableEndOffset === endOffset
-      ? endHistoryHash
-      : hashProcessedHistory(params.history, historyFloor, consumableEndOffset);
+  const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
 
   // Skip if there are no new, non-empty user messages in the unprocessed
-  // slice. Strip runtime reminders per part as the planner does, so a
-  // reminder-only tool response cannot trigger extraction after its text is removed.
-  const hasNewUserMessages = pendingHistory.some(hasUserText);
+  // slice. partToString runs only on this small slice and without the
+  // global whitespace regex — the .trim().length check preserves the old
+  // behaviour of ignoring empty-text user turns.
+  const hasNewUserMessages = params.history
+    .slice(startOffset)
+    .some(
+      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+    );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
-      processedOffset: consumableEndOffset,
-      ...(consumableHistoryHash && {
-        processedHistoryHash: consumableHistoryHash,
-      }),
+      processedOffset: params.history.length,
       updatedAt: now.toISOString(),
     };
-    await writeExtractCursor(params.projectRoot, cursor, params.abortSignal);
-    // No fork ever ran: name the skip so the task list and telemetry do not
-    // report this turn as a completed no-op extraction (extractorRan stays
-    // absent either way, which is what the cooldown gate keys on).
-    return { touchedTopics: [], skippedReason: 'no_user_text', cursor };
+    await writeExtractCursor(params.projectRoot, cursor);
+    return { touchedTopics: [], cursor };
   }
 
   const lateMismatch = getSessionMismatchResult(
@@ -373,149 +196,67 @@ export async function runAutoMemoryExtract(params: {
   );
   if (lateMismatch) return lateMismatch;
 
-  if (
-    startHistoryHash &&
-    endHistoryHash &&
-    params.canExtractWindow?.(
-      JSON.stringify([startHistoryHash, endHistoryHash]),
-    ) === false
-  ) {
-    return {
-      touchedTopics: [],
-      skippedReason: 'failure_limit',
-      cursor: currentCursor,
-    };
-  }
-
-  let extractionFailure: AutoMemoryExtractionError | undefined;
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
-    params.preserveUnprocessedHistory ? pendingHistory : undefined,
-    // A pending window that does not reach the end of history is a
-    // historical segment: the planner drops the recency wording and the
-    // anchor-to-today date claim, which would otherwise convert the
-    // segment's relative dates against the drain day. The previous cursor's
-    // write time is the nearest proxy for the segment's own date.
-    endOffset < params.history.length &&
-      // The stamp proxies the window's own date with the previous cursor's
-      // write time — only meaningful for the session that wrote it. A cursor
-      // from another session (or an unattested one) must not relabel today's
-      // opening turns as historical. A session-less cursor (the scaffold's
-      // bootstrap write) is unknown, not a mismatch.
-      (currentCursor.sessionId === undefined ||
-        currentCursor.sessionId === params.sessionId)
-      ? {
-          windowAsOf: currentCursor.updatedAt,
-          ...(params.abortSignal && { abortSignal: params.abortSignal }),
-        }
-      : params.abortSignal
-        ? { abortSignal: params.abortSignal }
-        : undefined,
-  ).catch((error: unknown) => {
-    if (!(error instanceof AutoMemoryExtractionError)) throw error;
-    extractionFailure = error;
-    return error.result;
-  });
+  );
 
-  try {
-    if (
-      agentResult.touchedTopics.length > 0 ||
-      (extractionFailure &&
-        (agentResult.touchedProjectScope || agentResult.touchedUserScope))
-    ) {
-      if (!extractionFailure && agentResult.touchedTopics.length > 0) {
-        await bumpMetadata(
-          params.projectRoot,
-          now,
-          params.sessionId,
-          agentResult.touchedTopics,
-        );
-      }
-      // Asymmetric failure isolation:
-      //   * project-level rebuild MUST bubble its error up. The cursor advances
-      //     only after rebuilds complete; a project rebuild failure that gets
-      //     silently swallowed would leave the memory file written, the index
-      //     stale, AND the cursor advanced — the memory becomes un-recallable
-      //     until some later session happens to trigger another rebuild. The
-      //     pre-existing `Promise.all` contract (throw → cursor stays → retry
-      //     on next session) is the durability guarantee we must preserve.
-      //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
-      //     (EACCES) must not poison the project-level rebuild or block the
-      //     cursor. Catch + warn, same shape as the user-level scaffold above.
-      const projectRebuild =
-        agentResult.touchedProjectScope || !agentResult.touchedUserScope
-          ? // Either explicitly touched, or the defensive fallback when both
-            // scope flags were unset (e.g. older planner) — both paths must
-            // surface project-level rebuild failures.
-            rebuildManagedAutoMemoryIndex(params.projectRoot)
-          : Promise.resolve();
-      const userRebuild = agentResult.touchedUserScope
-        ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
-            debugLogger.warn(
-              `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
-            );
-          })
-        : Promise.resolve();
-      await Promise.all([projectRebuild, userRebuild]);
-      await refreshMemoryInstruction(params.config, {
-        logContext: 'managed auto-memory extraction',
-      });
-    }
-
-    if (extractionFailure) throw extractionFailure;
-
-    const madeGenuineProgress =
-      agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
-    const advances = madeGenuineProgress || endOffset < params.history.length;
-
-    const cursor: AutoMemoryExtractCursor = {
-      sessionId: params.sessionId,
-      // A capped window must advance even without genuine progress, or the
-      // same slice freezes next turn. At the live end, keep the #6311 hold-back:
-      // new turns grow this slice, and a zero-tool completion must not consume
-      // it or arm the no-op cooldown.
-      // Consume a tail that the no-user gate would skip without another fork,
-      // but don't let it turn a zero-tool completion into a live-end no-op.
-      processedOffset: madeGenuineProgress
-        ? consumableEndOffset
-        : advances
-          ? endOffset
-          : startOffset,
-      ...(endHistoryHash && {
-        processedHistoryHash: madeGenuineProgress
-          ? consumableHistoryHash
-          : advances
-            ? endHistoryHash
-            : startHistoryHash,
-      }),
-      updatedAt: now.toISOString(),
-    };
-    await writeExtractCursor(params.projectRoot, cursor, params.abortSignal);
-
-    debugLogger.debug(
-      `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,
+  if (agentResult.touchedTopics.length > 0) {
+    await bumpMetadata(
+      params.projectRoot,
+      now,
+      params.sessionId,
+      agentResult.touchedTopics,
     );
-
-    return {
-      touchedTopics: agentResult.touchedTopics,
-      touchedUserScope: agentResult.touchedUserScope,
-      cursor,
-      systemMessage: agentResult.systemMessage,
-      extractorRan: true,
-      ...(cursor.processedOffset !== undefined &&
-      cursor.processedOffset > startOffset
-        ? { cursorAdvanced: true as const }
-        : {}),
-    };
-  } catch (error) {
-    if (extractionFailure && error === extractionFailure) throw error;
-    const cause = extractionFailure
-      ? new AggregateError(
-          [extractionFailure, error],
-          `${extractionFailure.message}; memory recovery failed: ${error instanceof Error ? error.message : String(error)}`,
-        )
-      : error;
-    throw new AutoMemoryExtractionError(cause, agentResult);
+    // Asymmetric failure isolation:
+    //   * project-level rebuild MUST bubble its error up. The cursor advances
+    //     only after rebuilds complete; a project rebuild failure that gets
+    //     silently swallowed would leave the memory file written, the index
+    //     stale, AND the cursor advanced — the memory becomes un-recallable
+    //     until some later session happens to trigger another rebuild. The
+    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+    //     on next session) is the durability guarantee we must preserve.
+    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
+    //     (EACCES) must not poison the project-level rebuild or block the
+    //     cursor. Catch + warn, same shape as the user-level scaffold above.
+    const projectRebuild =
+      agentResult.touchedProjectScope || !agentResult.touchedUserScope
+        ? // Either explicitly touched, or the defensive fallback when both
+          // scope flags were unset (e.g. older planner) — both paths must
+          // surface project-level rebuild failures.
+          rebuildManagedAutoMemoryIndex(params.projectRoot)
+        : Promise.resolve();
+    const userRebuild = agentResult.touchedUserScope
+      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
+          debugLogger.warn(
+            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+          );
+        })
+      : Promise.resolve();
+    await Promise.all([projectRebuild, userRebuild]);
+    await refreshMemoryInstruction(params.config, {
+      logContext: 'managed auto-memory extraction',
+    });
   }
+
+  const madeGenuineProgress =
+    agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
+
+  const cursor: AutoMemoryExtractCursor = {
+    sessionId: params.sessionId,
+    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
+    updatedAt: now.toISOString(),
+  };
+  await writeExtractCursor(params.projectRoot, cursor);
+
+  debugLogger.debug(
+    `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,
+  );
+
+  return {
+    touchedTopics: agentResult.touchedTopics,
+    touchedUserScope: agentResult.touchedUserScope,
+    cursor,
+    systemMessage: agentResult.systemMessage,
+  };
 }

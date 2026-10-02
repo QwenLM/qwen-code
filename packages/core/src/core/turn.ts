@@ -467,9 +467,6 @@ export enum CompressionStatus {
    * apart from model output quality failures.
    */
   COMPRESSION_FAILED_API_ERROR,
-
-  /** Pending memory could not be extracted before replacing the history. */
-  COMPRESSION_FAILED_MEMORY_FLUSH,
 }
 
 export function isCompressionFailureStatus(
@@ -480,8 +477,7 @@ export function isCompressionFailureStatus(
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_MEMORY_FLUSH
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
   );
 }
 

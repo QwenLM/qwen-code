@@ -369,22 +369,25 @@ describe('loggers', () => {
       });
     });
 
-    it('attaches selector_skipped to the recall metrics while the #13003 experiment is enabled', () => {
-      process.env[SKIP_SELECTOR_EXPERIMENT_ENV] = '1';
-      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+    it.each([true, false])(
+      'preserves selector_skipped=%s while enabled',
+      (skipped) => {
+        process.env[SKIP_SELECTOR_EXPERIMENT_ENV] = '1';
+        const config = makeFakeConfig({ sessionId: 'test-session-id' });
 
-      logMemoryRecall(config, makeRecallEvent(true));
+        logMemoryRecall(config, makeRecallEvent(skipped));
 
-      expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
-        config,
-        42,
-        {
-          strategy: 'heuristic',
-          docs_selected: 1,
-          selector_skipped: true,
-        },
-      );
-    });
+        expect(metrics.recordMemoryRecallMetrics).toHaveBeenCalledWith(
+          config,
+          42,
+          {
+            strategy: 'heuristic',
+            docs_selected: 1,
+            selector_skipped: skipped,
+          },
+        );
+      },
+    );
 
     it('drops the selector_skipped metric dimension when the recall had no skip decision', () => {
       // Legacy-mode recalls never reach the skip guard; stamping a constant
