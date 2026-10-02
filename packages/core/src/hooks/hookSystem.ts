@@ -10,7 +10,10 @@ import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
 import { HookAggregator, type AggregatedHookResult } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
-import { HookEventHandler } from './hookEventHandler.js';
+import {
+  HookEventHandler,
+  type ManagedHookDispatcher,
+} from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
@@ -66,7 +69,10 @@ export class HookSystem {
   /** Optional provider for automatically fetching conversation history */
   private messagesProvider?: MessagesProvider;
 
-  constructor(config: Config) {
+  constructor(
+    config: Config,
+    private readonly managedDispatcher?: ManagedHookDispatcher,
+  ) {
     // Get allowed HTTP URLs from config
     const allowedHttpUrls = config.getAllowedHttpHookUrls();
 
@@ -84,6 +90,7 @@ export class HookSystem {
       this.sessionHooksManager,
       undefined,
       this.runtimeId,
+      this.managedDispatcher,
     );
   }
 
@@ -91,11 +98,13 @@ export class HookSystem {
    * Initialize the hook system
    */
   async initialize(): Promise<void> {
+    if (this.managedDispatcher) return;
     await this.hookRegistry.initialize();
     debugLogger.debug('Hook system initialized successfully');
   }
 
   async reload(): Promise<void> {
+    if (this.managedDispatcher) return;
     await this.hookRegistry.reloadConfiguredHooks();
     debugLogger.debug('Hook system reloaded successfully');
   }
@@ -150,9 +159,15 @@ export class HookSystem {
    * when no hooks are configured for a given event.
    */
   hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    if (this.managedDispatcher)
+      return this.managedDispatcher.hasHooksForEvent(eventName);
     const event = eventName as HookEventName;
     if (this.hookRegistry.getHooksForEvent(event).length > 0) return true;
     return this.sessionHooksManager.hasHooksForEvent(event, sessionId);
+  }
+
+  isManaged(): boolean {
+    return this.managedDispatcher !== undefined;
   }
 
   async fireUserPromptSubmitEvent(

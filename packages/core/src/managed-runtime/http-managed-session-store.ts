@@ -68,9 +68,20 @@ export interface HttpManagedSessionStoreOptions {
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
+  readonly publication: HttpToolPublicationOwner;
   readonly toolResultResources: DurableToolResultResourceStore;
   assertWritable(): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface HttpToolPublicationOwner {
+  owner(): Promise<{ writerId: string; writerGeneration: number }>;
+  request(
+    path: string,
+    body: Record<string, unknown>,
+    token?: string,
+  ): Promise<unknown>;
+  rememberAdmission(publicationId: string, ref: ManagedSessionDurableRef): void;
 }
 
 export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
@@ -84,6 +95,8 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
   }
 }
 
+class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
+
 export function createHttpManagedSessionStores(
   options: HttpManagedSessionStoreOptions,
 ): HttpManagedSessionStores {
@@ -93,6 +106,13 @@ export function createHttpManagedSessionStores(
   return {
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
+    publication: {
+      owner: () => client.publicationOwner(),
+      request: (path, body, token) =>
+        client.publicationRequest(path, body, token),
+      rememberAdmission: (publicationId, ref) =>
+        client.rememberAdmission(publicationId, ref),
+    },
     toolResultResources: {
       publish: (kind, bytes, resourceId) =>
         client.publishToolResult(kind, bytes, resourceId),
@@ -260,6 +280,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         } else if (EXTENSION_RECORD_KINDS.has(ref.kind)) {
           // A Stage H record commits the resources its closed body names.
           pending.push(...collectRefs([JSON.parse(staged.bytes.toString())]));
+        } else if (ref.kind === 'managed-hook-plan') {
+          const plan = JSON.parse(staged.bytes.toString()) as {
+            messagesRef?: ManagedSessionDurableRef;
+          };
+          pending.push(...collectRefs([plan.messagesRef]));
+        } else if (ref.kind === 'managed-hook-message-chunks') {
+          const manifest = JSON.parse(staged.bytes.toString()) as {
+            parts: ManagedSessionDurableRef[];
+          };
+          pending.push(...collectRefs(manifest.parts));
         }
       }
     }
@@ -348,6 +378,7 @@ class ManagedSessionStoreHttpClient {
   private renewPromise: Promise<void> | undefined;
   private renewTimer: NodeJS.Timeout | undefined;
   private sealed = false;
+  private readonly publicationAdmissions = new Map<string, string>();
 
   constructor(
     options: HttpManagedSessionStoreOptions,
@@ -511,47 +542,90 @@ class ManagedSessionStoreHttpClient {
       );
     }
     const commitResources = this.resources.commitResources(descriptor.refs);
-    const receipt = asRecord(
-      await this.json('/transactions:commit', 'POST', {
-        workspaceId: this.sessionKey.workspaceId,
-        writerId: this.writerId,
-        writerGeneration: grant.writerGeneration,
-        expectedJournalRevision: grant.journalRevision,
-        expectedCommittedSequence: grant.committedSequence,
-        transactionId: descriptor.transactionId,
-        operation: descriptor.operation,
-        commandId: descriptor.commandId,
-        contentDigest: descriptor.contentDigest,
-        firstSequence: descriptor.firstSequence,
-        lastSequence: descriptor.lastSequence,
-        eventCount: descriptor.eventCount,
-        eventsDigest: descriptor.eventsDigest,
-        previousCommitDigest: descriptor.previousCommitDigest,
-        commitDigest: descriptor.commitDigest,
-        activationEpoch: descriptor.activationEpoch,
-        latestCheckpointResourceId: descriptor.latestCheckpointResourceId,
-        recordCount: records.length,
-        recordBytesBase64: recordBytes.toString('base64'),
-        recordDigest: sha256(recordBytes),
-        resources: commitResources,
+    const publicationIds = new Set(
+      descriptor.refs.flatMap((ref) => {
+        const id = this.publicationAdmissions.get(ref.resourceId);
+        return id === undefined ? [] : [id];
       }),
-      'commit receipt',
     );
+    if (publicationIds.size > 1) {
+      throw new ManagedSessionRecordError(
+        'Transaction mixes publication admissions.',
+      );
+    }
+    const publicationId = [...publicationIds][0];
+    const commitBody = {
+      workspaceId: this.sessionKey.workspaceId,
+      writerId: this.writerId,
+      writerGeneration: grant.writerGeneration,
+      expectedJournalRevision: grant.journalRevision,
+      expectedCommittedSequence: grant.committedSequence,
+      transactionId: descriptor.transactionId,
+      operation: descriptor.operation,
+      commandId: descriptor.commandId,
+      contentDigest: descriptor.contentDigest,
+      firstSequence: descriptor.firstSequence,
+      lastSequence: descriptor.lastSequence,
+      eventCount: descriptor.eventCount,
+      eventsDigest: descriptor.eventsDigest,
+      previousCommitDigest: descriptor.previousCommitDigest,
+      commitDigest: descriptor.commitDigest,
+      activationEpoch: descriptor.activationEpoch,
+      latestCheckpointResourceId: descriptor.latestCheckpointResourceId,
+      recordCount: records.length,
+      recordBytesBase64: recordBytes.toString('base64'),
+      recordDigest: sha256(recordBytes),
+      resources: commitResources,
+    };
+    let committed: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        committed =
+          publicationId === undefined
+            ? await this.json('/transactions:commit', 'POST', commitBody)
+            : await this.publicationRequest(
+                `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
+                commitBody,
+              );
+        break;
+      } catch (error) {
+        const uncertain =
+          (error instanceof ManagedSessionStoreHttpError &&
+            (error.status === 429 || error.status >= 500)) ||
+          error instanceof ManagedSessionStoreTransportError ||
+          error instanceof TypeError ||
+          (error instanceof DOMException &&
+            ['AbortError', 'TimeoutError'].includes(error.name));
+        if (!uncertain || attempt === 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    const receipt = asRecord(committed, 'commit receipt');
     const revision = safeCounter(receipt['journalRevision'], 'journalRevision');
     if (
       revision !== grant.journalRevision + 1 ||
-      string(receipt['transactionId'], 'transactionId') !==
-        descriptor.transactionId ||
-      string(receipt['commandId'], 'commandId') !== descriptor.commandId ||
-      string(receipt['operation'], 'operation') !== descriptor.operation ||
-      safeCounter(receipt['firstSequence'], 'firstSequence') !==
-        descriptor.firstSequence ||
-      safeCounter(receipt['lastSequence'], 'lastSequence') !==
-        descriptor.lastSequence ||
-      safeCounter(receipt['committedSequence'], 'committedSequence') !==
-        descriptor.lastSequence ||
-      nullableDigest(receipt['commitDigest'], 'commitDigest') !==
-        descriptor.commitDigest
+      (publicationId === undefined
+        ? string(receipt['transactionId'], 'transactionId') !==
+            descriptor.transactionId ||
+          string(receipt['commandId'], 'commandId') !== descriptor.commandId ||
+          string(receipt['operation'], 'operation') !== descriptor.operation ||
+          safeCounter(receipt['firstSequence'], 'firstSequence') !==
+            descriptor.firstSequence ||
+          safeCounter(receipt['lastSequence'], 'lastSequence') !==
+            descriptor.lastSequence ||
+          safeCounter(receipt['committedSequence'], 'committedSequence') !==
+            descriptor.lastSequence ||
+          nullableDigest(receipt['commitDigest'], 'commitDigest') !==
+            descriptor.commitDigest
+        : safeCounter(receipt['historyRevision'], 'historyRevision') !==
+            descriptor.lastSequence ||
+          !descriptor.refs.some(
+            (ref) =>
+              ref.resourceId ===
+              asRecord(receipt['toolOutcomeRef'], 'toolOutcomeRef')[
+                'resourceId'
+              ],
+          ))
     ) {
       throw corrupt('commit receipt does not match the submitted transaction.');
     }
@@ -563,6 +637,86 @@ class ManagedSessionStoreHttpClient {
       activationEpoch: descriptor.activationEpoch,
     };
     this.resources.releaseCommitted(commitResources);
+    for (const ref of descriptor.refs)
+      this.publicationAdmissions.delete(ref.resourceId);
+  }
+
+  async publicationOwner(): Promise<{
+    writerId: string;
+    writerGeneration: number;
+  }> {
+    await this.ensureWriter();
+    return {
+      writerId: this.writerId,
+      writerGeneration: this.requireGrant().writerGeneration,
+    };
+  }
+
+  rememberAdmission(
+    publicationId: string,
+    ref: ManagedSessionDurableRef,
+  ): void {
+    assertManagedSessionStableId(publicationId, 'publicationId');
+    const checked = assertManagedSessionDurableRef(
+      ref as unknown as ManagedSessionJsonValue,
+      'admission ref',
+    );
+    if (checked.kind !== 'managed-tool-outcome')
+      throw new ManagedSessionRecordError(
+        'Publication admission kind is invalid.',
+      );
+    const previous = this.publicationAdmissions.get(checked.resourceId);
+    if (previous !== undefined && previous !== publicationId)
+      throw new ManagedSessionRecordError('Publication admission conflicts.');
+    this.publicationAdmissions.set(checked.resourceId, publicationId);
+  }
+
+  async publicationRequest(
+    path: string,
+    body: Record<string, unknown>,
+    token?: string,
+  ): Promise<unknown> {
+    await this.ensureWriter();
+    if (
+      !/^\/(?:grants|receipts\/verify|publications\/[a-z0-9_-]{1,128}\/(?:finished|admissions\/prepare|receipts\/commit))$/u.test(
+        path,
+      )
+    )
+      throw new ManagedSessionRecordError('Publication owner path is invalid.');
+    const url = `${this.baseUrl}/internal/managed-tool-publications/v1/sessions/${encodeURIComponent(
+      this.sessionKey.sessionId,
+    )}${path}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
+    const readOnly = path.endsWith('/finished');
+    const response = await this.fetchFn(url, {
+      method: readOnly ? 'GET' : 'POST',
+      headers: {
+        Accept: 'application/json',
+        ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
+        [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
+          this.sessionKey.tenantId,
+        [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
+          this.writerToken,
+        'X-Qwen-Managed-Writer-Id': this.writerId,
+        'X-Qwen-Managed-Writer-Generation': String(
+          this.requireGrant().writerGeneration,
+        ),
+        ...(token ? { 'X-Qwen-Tool-Publication-Token': token } : {}),
+      },
+      ...(readOnly ? {} : { body: JSON.stringify(body) }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
+    });
+    if (!response.ok) {
+      const error = await readHttpError(response);
+      throw new ManagedSessionStoreHttpError(
+        response.status,
+        error.code,
+        error.message,
+      );
+    }
+    if (response.headers.get('Cache-Control') !== 'no-store')
+      throw corrupt('Publication response is missing Cache-Control: no-store.');
+    return readBoundedPublicationJson(response);
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -795,6 +949,15 @@ class ManagedSessionStoreHttpClient {
     try {
       return (await response.json()) as unknown;
     } catch (error) {
+      if (
+        error instanceof TypeError ||
+        (error instanceof DOMException &&
+          ['AbortError', 'TimeoutError'].includes(error.name))
+      ) {
+        throw new ManagedSessionStoreTransportError(
+          `Managed Session Store response failed: ${error.message}.`,
+        );
+      }
       throw corrupt(
         `Managed Session Store returned invalid JSON: ${error instanceof Error ? error.message : String(error)}.`,
       );
@@ -824,7 +987,7 @@ class ManagedSessionStoreHttpClient {
         signal: AbortSignal.timeout(this.requestTimeoutMs),
       });
     } catch (error) {
-      throw new ManagedSessionRecordError(
+      throw new ManagedSessionStoreTransportError(
         `Managed Session Store request failed: ${error instanceof Error ? error.message : String(error)}.`,
       );
     }
@@ -1196,6 +1359,28 @@ async function readHttpError(
       message: `Managed Session Store returned HTTP ${response.status}.`,
     };
   }
+}
+
+async function readBoundedPublicationJson(
+  response: Response,
+): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) throw corrupt('Publication response has no body.');
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const item = await reader.read();
+      if (item.done) break;
+      length += item.value.byteLength;
+      if (length > 4 * 1024 * 1024)
+        throw corrupt('Publication response exceeds its byte limit.');
+      chunks.push(item.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {

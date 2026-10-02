@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
@@ -117,21 +118,35 @@ final class ExtensionRecordJournal {
     CommitTransactionRequest request(String operation, String commandId,
             byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
             UnaryOperator<String> editRecords, int extraEvents) {
+        return request(operation, commandId, body, occurredAt, editEvent,
+                editRecords, extraEvents, "monitor_run", List.of());
+    }
+
+    CommitTransactionRequest requestDomain(String commandId, String domain,
+            JsonNode body, List<CommitResource> resources, long occurredAt) {
+        return request("commitMcpRecord", commandId, bytes(body), occurredAt,
+                event -> { }, records -> records, 0, domain, resources);
+    }
+
+    private CommitTransactionRequest request(String operation, String commandId,
+            byte[] body, long occurredAt, Consumer<ObjectNode> editEvent,
+            UnaryOperator<String> editRecords, int extraEvents, String domain,
+            List<CommitResource> resources) {
         String resourceId = resourceId(body);
         ObjectNode recordRef = JSON.createObjectNode()
                 .put("resourceId", resourceId)
-                .put("kind", "managed-monitor_run")
+                .put("kind", "managed-" + domain)
                 .put("schemaVersion", 1)
                 .put("byteLength", body.length)
                 .put("digest", sha256(body));
         long next = sequence + 1;
         ObjectNode event = JSON.createObjectNode().put("v", 1)
                 .put("sequence", next)
-                .put("eventId", "monitor_run:" + (domainEvents + 1));
+                .put("eventId", domain + ":" + (domainEvents + 1));
         event.putObject("sessionKey").put("tenantId", tenantId)
                 .put("workspaceId", workspaceId).put("sessionId", sessionId);
         event.put("kind", "domain.committed").put("occurredAt", occurredAt);
-        event.putObject("payload").put("domain", "monitor_run")
+        event.putObject("payload").put("domain", domain)
                 .put("version", 1).put("operationId", commandId)
                 .set("recordRef", recordRef);
         editEvent.accept(event);
@@ -139,6 +154,9 @@ final class ExtensionRecordJournal {
                 event) + line("managed_session_commit_v1",
                         JSON.createObjectNode().put("commandId", commandId)));
         String transactionId = "transaction-" + operation + "-" + commandId;
+        List<CommitResource> closure = new ArrayList<>(resources);
+        closure.add(new CommitResource(resourceId, "managed-" + domain, 1,
+                body.length, sha256(body), Base64.getEncoder().encodeToString(body)));
         return new CommitTransactionRequest(workspaceId, WRITER,
                 writerGeneration, journalRevision, sequence, transactionId,
                 operation, commandId, sha256(commandId), next,
@@ -146,10 +164,7 @@ final class ExtensionRecordJournal {
                 sha256("events-" + commandId), lastCommitDigest,
                 sha256(transactionId), 0, null, 2 + extraEvents,
                 base64(records),
-                sha256(records), List.of(new CommitResource(resourceId,
-                        "managed-monitor_run", 1, body.length,
-                        sha256(body), Base64.getEncoder()
-                                .encodeToString(body))));
+                sha256(records), closure);
     }
 
     /** Advances past a request the store committed. */

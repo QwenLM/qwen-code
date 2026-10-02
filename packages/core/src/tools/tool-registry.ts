@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
 import type {
   AnyDeclarativeTool,
   ToolResult,
@@ -31,6 +31,8 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { getCurrentAgentChat } from '../agents/runtime/agent-context.js';
+import type { LlmChat } from '../core/llm-chat.js';
 import {
   buildExecDeclaration,
   getToolExposure,
@@ -242,14 +244,18 @@ export class ToolRegistry {
   // pinDeferredToolReveal): they survive the `/clear` reset that
   // intentionally drops transient reveals so the new session starts clean.
   private pinnedDeferredReveals: Set<string> = new Set();
-  // Fingerprint of each tool as tool_search last returned it, kept across
-  // `/clear` and deliberately never pruned: an entry can only match the same
-  // server, schema name and parameter schema, so a stale one either still
-  // describes the live tool or makes tool_call ask for a fresh review.
-  // Pruning it on removal would invert that — a dropped entry reads as "never
-  // reviewed" and passes a replacement through. Bounded by the distinct tool
-  // names reviewed in this process.
+  // Fingerprint of each tool as tool_search last returned it into the current
+  // history. tool_call refuses a hidden tool with no entry, so an entry is the
+  // claim "the model has this schema in context": history replacement rebuilds
+  // it from surviving tool_search results (#12569). It survives tool
+  // removal: a disconnect does not take the schema out of history, and a
+  // reconnect is compared by fingerprint, so an identical republish still
+  // matches while a changed one asks for a fresh review.
   private reviewedDeferredDeclarations: Map<string, string> = new Map();
+  private reviewedDeclarationsByChat = new WeakMap<
+    LlmChat,
+    Map<string, string>
+  >();
   private codeModeCollisionWarnings = new Set<string>();
   // Built-in tools demoted to deferred by an active `settings.tools.eager`
   // allowlist (#9827, #10075). They are fully registered — listed
@@ -340,10 +346,28 @@ export class ToolRegistry {
   }
 
   /**
+   * A Managed session never runs a tool's side effect in the host process,
+   * so its registry takes no tool from any path, including tools registered
+   * after the session starts (image generation, workflows, advisor).
+   */
+  private refusesHostTools(): boolean {
+    return this.config.getSessionExecutionEngine?.() === 'managed';
+  }
+
+  private refusesHostTool(name: string): boolean {
+    if (!this.refusesHostTools()) return false;
+    debugLogger.info(
+      `Tool "${name}" skipped: a Managed session has no host tools.`,
+    );
+    return true;
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (this.refusesHostTool(tool.name)) return;
     if (
       this.isToolDisabled(
         tool.name,
@@ -414,6 +438,7 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -437,6 +462,7 @@ export class ToolRegistry {
    * tool while {@link preloadDeferredToolsWithinBudget} skips it.
    */
   registerPermissionDeferredFactory(name: string, factory: ToolFactory): void {
+    if (this.refusesHostTool(name)) return;
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -538,6 +564,13 @@ export class ToolRegistry {
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
+    // The writes below bypass registerTool, so this refusal covers them all.
+    if (this.refusesHostTools()) {
+      debugLogger.info(
+        'Discovered tools skipped: a Managed session has no host tools.',
+      );
+      return;
+    }
     for (const [key, tool] of source.mcpAppTools) {
       if (
         !this.mcpAppTools.has(key) &&
@@ -1022,20 +1055,141 @@ export class ToolRegistry {
     this.revealedDeferred.delete(name);
   }
 
+  private getReviewedChat(): LlmChat | undefined {
+    const chat = getCurrentAgentChat();
+    if (chat) return chat;
+    const client = this.config.getLlmClient?.();
+    return client?.isInitialized?.() ? client.getChat?.() : undefined;
+  }
+
   /** Records the declaration tool_search just returned. */
   recordReviewedDeclaration(tool: AnyDeclarativeTool): void {
-    this.reviewedDeferredDeclarations.set(
-      tool.name,
-      deferredDeclarationFingerprint(tool),
-    );
+    const chat = this.getReviewedChat();
+    const reviewed = chat
+      ? (this.reviewedDeclarationsByChat.get(chat) ?? new Map<string, string>())
+      : this.reviewedDeferredDeclarations;
+    reviewed.set(tool.name, deferredDeclarationFingerprint(tool));
+    if (chat) this.reviewedDeclarationsByChat.set(chat, reviewed);
+    // Unscoped callers must not mutate a chat's review map through an alias.
+    this.reviewedDeferredDeclarations = chat ? new Map(reviewed) : reviewed;
+  }
+
+  /** Forgets every review when starting a different session. */
+  clearReviewedDeclarations(): void {
+    this.reviewedDeferredDeclarations.clear();
+    this.reviewedDeclarationsByChat = new WeakMap();
+  }
+
+  /**
+   * Rebuilds reviews from schemas actually retained in the primary history.
+   *
+   * Replacement is the contract for history-replacement events: when a
+   * compaction or truncation removes the tool_search block entirely, the
+   * model can no longer see the schema, so the review must be forgotten.
+   * The one exception is a block that is still present but unreadable —
+   * model-facing truncation can cut a tool_search response mid-JSON, which
+   * fails the parse without meaning the review never happened: the model
+   * did receive the full schema when the response arrived. Such a name is
+   * recovered from the block's intact head and its in-memory review carries
+   * over only for that same chat; another chat cannot supply it. A name
+   * absent from every tool_search block in history is still
+   * forgotten.
+   */
+  syncReviewedDeclarations(
+    history: readonly Content[],
+    chat = this.getReviewedChat(),
+  ): void {
+    const previousReviews = chat
+      ? this.reviewedDeclarationsByChat.get(chat)
+      : this.reviewedDeferredDeclarations;
+    const derived = new Map<string, string>();
+    // Names mentioned by a tool_search block, recoverable from the block's
+    // head even when truncation cut the JSON tail.
+    const mentioned = new Set<string>();
+    for (const entry of history) {
+      for (const part of entry.parts ?? []) {
+        const response = part.functionResponse;
+        if (response?.name !== ToolNames.TOOL_SEARCH) continue;
+        const output = response.response?.['output'];
+        if (typeof output !== 'string') continue;
+        for (const mention of output.matchAll(
+          /<function>\s*\{\s*"name"\s*:\s*"([^"]+)"/gs,
+        )) {
+          mentioned.add(mention[1]!);
+        }
+        for (const match of output.matchAll(/<function>(.*?)<\/function>/gs)) {
+          try {
+            const { name, parametersJsonSchema, serverName } = JSON.parse(
+              match[1]!,
+            ) as Record<string, unknown>;
+            if (typeof name !== 'string') continue;
+            const suffix = `\u0000${name}\u0000${JSON.stringify(parametersJsonSchema)}`;
+            const previous = previousReviews?.get(name);
+            if (typeof serverName === 'string') {
+              derived.set(name, `${serverName}${suffix}`);
+            } else if (previous?.endsWith(suffix)) {
+              // Old transcripts did not serialize the MCP server identity.
+              derived.set(name, previous);
+            } else {
+              // Legacy block without server provenance, and no in-memory
+              // review to re-adopt (fresh process, or a cleared map).
+              const live = this.getTool(name);
+              if (live === undefined) {
+                // Progressive MCP discovery may not have registered the tool
+                // yet: recording the bare suffix now would refuse the call as
+                // "changed since tool_search" once the real server-prefixed
+                // fingerprint exists. Leave it unreviewed — one fresh
+                // `select:` re-arms it honestly.
+                continue;
+              }
+              if (live instanceof DiscoveredMCPTool) {
+                // Re-arm from the live tool's server identity, but only when
+                // the legacy schema is still byte-identical; a genuinely
+                // changed schema must keep refusing.
+                const liveFingerprint = deferredDeclarationFingerprint(live);
+                if (liveFingerprint === `${live.serverName}${suffix}`) {
+                  derived.set(name, liveFingerprint);
+                }
+              } else {
+                derived.set(name, suffix);
+              }
+            }
+          } catch {
+            // Truncated or malformed results do not establish a reviewed schema.
+          }
+        }
+      }
+    }
+    for (const name of mentioned) {
+      if (derived.has(name)) continue;
+      // Present but unreadable (truncated mid-block): keep the review the
+      // model genuinely received rather than disarming the tool.
+      const existing = previousReviews?.get(name);
+      if (existing !== undefined) {
+        derived.set(name, existing);
+      }
+    }
+    if (chat) this.reviewedDeclarationsByChat.set(chat, derived);
+    this.reviewedDeferredDeclarations = chat ? new Map(derived) : derived;
   }
 
   /**
    * The fingerprint recorded by {@link recordReviewedDeclaration}, or
-   * `undefined` when tool_search has not returned this tool in the session.
+   * `undefined` when tool_search has not returned this tool into the current
+   * history.
    */
   getReviewedDeclaration(name: string): string | undefined {
-    return this.reviewedDeferredDeclarations.get(name);
+    const chat = this.getReviewedChat();
+    const client = chat ? undefined : this.config.getLlmClient?.();
+    const history =
+      chat?.getHistoryShallow(true) ??
+      (client?.isInitialized?.() ? client.getHistoryShallow(true) : undefined);
+    if (history !== undefined) this.syncReviewedDeclarations(history, chat);
+    return (
+      chat
+        ? this.reviewedDeclarationsByChat.get(chat)
+        : this.reviewedDeferredDeclarations
+    )?.get(name);
   }
 
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
@@ -1090,6 +1244,9 @@ export class ToolRegistry {
    *
    * Empty in CodeModeOnly: exec describes on-demand discovery without a full
    * startup catalog or the Direct-mode reminders' tool_call instructions.
+   * The empty result also keeps the client's incomplete-bridge fallback, which
+   * reveals ordinary deferred tools, from rewriting the exec declaration and
+   * breaking the prompt cache when a deny rule removes tool_call.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
     if (this.config.getToolMode?.() === ToolMode.CodeModeOnly) {
