@@ -17,6 +17,7 @@ import type {
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
+  ManagedSessionSubject,
 } from './managed-session-records.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -115,7 +116,7 @@ export interface ManagedSession {
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
    */
-  replaceActivation(): Promise<{
+  replaceActivation(subject?: ManagedSessionSubject): Promise<{
     readonly activationId: string;
     readonly epoch: number;
   }>;
@@ -214,12 +215,13 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
-    async replaceActivation() {
+    async replaceActivation(subject) {
       await authority.releaseActivation();
       activation = await authority.installActivation({
         activationId: randomUUID(),
         workerId: options.workerId,
         leaseDurationMs: options.activationLeaseDurationMs,
+        subject,
       });
       return activation;
     },
