@@ -83,6 +83,16 @@ export interface AutoMemoryExtractionExecutionResult {
   hasToolActivity: boolean;
 }
 
+export class AutoMemoryExtractionError extends Error {
+  constructor(
+    cause: unknown,
+    readonly result: AutoMemoryExtractionExecutionResult,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'AutoMemoryExtractionError';
+  }
+}
+
 /**
  * Drop runtime reminders and hidden reasoning while preserving tool traffic,
  * which tells the extractor when the turn only read existing memory.
@@ -377,17 +387,10 @@ export async function runAutoMemoryExtractionByAgent(
     extraHistory,
   });
 
-  if (result.status !== 'completed') {
-    throw new Error(
-      result.terminateReason ||
-        'Extraction agent did not complete successfully',
-    );
-  }
-
   const { topics, touchedProjectScope, touchedUserScope } =
     touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot);
 
-  return {
+  const executionResult: AutoMemoryExtractionExecutionResult = {
     touchedTopics: topics,
     touchedProjectScope,
     touchedUserScope,
@@ -397,4 +400,12 @@ export async function runAutoMemoryExtractionByAgent(
         ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`
         : undefined,
   };
+  if (result.status !== 'completed') {
+    throw new AutoMemoryExtractionError(
+      result.terminateReason ||
+        'Extraction agent did not complete successfully',
+      executionResult,
+    );
+  }
+  return executionResult;
 }

@@ -65,6 +65,7 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtract } from './extract.js';
+import { AutoMemoryExtractionError } from './extractionAgentPlanner.js';
 import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import {
   runManagedAutoMemoryDream,
@@ -1490,10 +1491,21 @@ export class MemoryManager {
     } catch (error) {
       // A failed, aborted or MAX_TURNS run throws; the next turn retries.
       this.extractCooldownRemaining.delete(params.projectRoot);
+      const writeResult =
+        error instanceof AutoMemoryExtractionError ? error.result : undefined;
+      if (writeResult?.touchedUserScope && params.config) {
+        await this.recordUserMutation(
+          params.projectRoot,
+          params.config,
+          params.now ?? new Date(),
+        );
+      }
+      const touchedTopics = writeResult?.touchedTopics ?? [];
       const durationMs = Date.now() - t0;
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
+        metadata: { touchedTopics },
       });
       if (params.config) {
         logMemoryExtract(
@@ -1501,8 +1513,8 @@ export class MemoryManager {
           new MemoryExtractEvent({
             trigger: 'auto',
             status: 'failed',
-            patches_count: 0,
-            touched_topics: [],
+            patches_count: touchedTopics.length,
+            touched_topics: touchedTopics,
             duration_ms: durationMs,
           }),
         );

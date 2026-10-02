@@ -23,7 +23,10 @@ import {
   ensureAutoMemoryScaffold,
   ensureUserAutoMemoryScaffold,
 } from './store.js';
-import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
+import {
+  AutoMemoryExtractionError,
+  runAutoMemoryExtractionByAgent,
+} from './extractionAgentPlanner.js';
 import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
@@ -344,6 +347,7 @@ export async function runAutoMemoryExtract(params: {
   );
   if (lateMismatch) return lateMismatch;
 
+  let extractionFailure: AutoMemoryExtractionError | undefined;
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
@@ -356,83 +360,106 @@ export async function runAutoMemoryExtract(params: {
     endOffset < params.history.length
       ? { windowAsOf: currentCursor.updatedAt }
       : undefined,
-  );
+  ).catch((error: unknown) => {
+    if (!(error instanceof AutoMemoryExtractionError)) throw error;
+    extractionFailure = error;
+    return error.result;
+  });
 
-  if (agentResult.touchedTopics.length > 0) {
-    await bumpMetadata(
-      params.projectRoot,
-      now,
-      params.sessionId,
-      agentResult.touchedTopics,
-    );
-    // Asymmetric failure isolation:
-    //   * project-level rebuild MUST bubble its error up. The cursor advances
-    //     only after rebuilds complete; a project rebuild failure that gets
-    //     silently swallowed would leave the memory file written, the index
-    //     stale, AND the cursor advanced — the memory becomes un-recallable
-    //     until some later session happens to trigger another rebuild. The
-    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
-    //     on next session) is the durability guarantee we must preserve.
-    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
-    //     (EACCES) must not poison the project-level rebuild or block the
-    //     cursor. Catch + warn, same shape as the user-level scaffold above.
-    const projectRebuild =
-      agentResult.touchedProjectScope || !agentResult.touchedUserScope
-        ? // Either explicitly touched, or the defensive fallback when both
-          // scope flags were unset (e.g. older planner) — both paths must
-          // surface project-level rebuild failures.
-          rebuildManagedAutoMemoryIndex(params.projectRoot)
+  try {
+    if (
+      agentResult.touchedTopics.length > 0 ||
+      (extractionFailure &&
+        (agentResult.touchedProjectScope || agentResult.touchedUserScope))
+    ) {
+      if (!extractionFailure && agentResult.touchedTopics.length > 0) {
+        await bumpMetadata(
+          params.projectRoot,
+          now,
+          params.sessionId,
+          agentResult.touchedTopics,
+        );
+      }
+      // Asymmetric failure isolation:
+      //   * project-level rebuild MUST bubble its error up. The cursor advances
+      //     only after rebuilds complete; a project rebuild failure that gets
+      //     silently swallowed would leave the memory file written, the index
+      //     stale, AND the cursor advanced — the memory becomes un-recallable
+      //     until some later session happens to trigger another rebuild. The
+      //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+      //     on next session) is the durability guarantee we must preserve.
+      //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
+      //     (EACCES) must not poison the project-level rebuild or block the
+      //     cursor. Catch + warn, same shape as the user-level scaffold above.
+      const projectRebuild =
+        agentResult.touchedProjectScope || !agentResult.touchedUserScope
+          ? // Either explicitly touched, or the defensive fallback when both
+            // scope flags were unset (e.g. older planner) — both paths must
+            // surface project-level rebuild failures.
+            rebuildManagedAutoMemoryIndex(params.projectRoot)
+          : Promise.resolve();
+      const userRebuild = agentResult.touchedUserScope
+        ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
+            debugLogger.warn(
+              `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
+            );
+          })
         : Promise.resolve();
-    const userRebuild = agentResult.touchedUserScope
-      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
-          debugLogger.warn(
-            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
-          );
-        })
-      : Promise.resolve();
-    await Promise.all([projectRebuild, userRebuild]);
-    await refreshMemoryInstruction(params.config, {
-      logContext: 'managed auto-memory extraction',
-    });
-  }
+      await Promise.all([projectRebuild, userRebuild]);
+      await refreshMemoryInstruction(params.config, {
+        logContext: 'managed auto-memory extraction',
+      });
+    }
 
-  const madeGenuineProgress =
-    agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
-  const advances = madeGenuineProgress || endOffset < params.history.length;
+    if (extractionFailure) throw extractionFailure;
 
-  const cursor: AutoMemoryExtractCursor = {
-    sessionId: params.sessionId,
-    // A capped window must advance even without genuine progress, or the
-    // same slice freezes next turn. At the live end, keep the #6311 hold-back:
-    // new turns grow this slice, and a zero-tool completion must not consume
-    // it or arm the no-op cooldown.
-    // Consume a tail that the no-user gate would skip without another fork,
-    // but don't let it turn a zero-tool completion into a live-end no-op.
-    processedOffset: madeGenuineProgress
-      ? consumableEndOffset
-      : advances
-        ? endOffset
-        : startOffset,
-    ...(endHistoryHash && {
-      processedHistoryHash: madeGenuineProgress
-        ? consumableHistoryHash
+    const madeGenuineProgress =
+      agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
+    const advances = madeGenuineProgress || endOffset < params.history.length;
+
+    const cursor: AutoMemoryExtractCursor = {
+      sessionId: params.sessionId,
+      // A capped window must advance even without genuine progress, or the
+      // same slice freezes next turn. At the live end, keep the #6311 hold-back:
+      // new turns grow this slice, and a zero-tool completion must not consume
+      // it or arm the no-op cooldown.
+      // Consume a tail that the no-user gate would skip without another fork,
+      // but don't let it turn a zero-tool completion into a live-end no-op.
+      processedOffset: madeGenuineProgress
+        ? consumableEndOffset
         : advances
-          ? endHistoryHash
-          : startHistoryHash,
-    }),
-    updatedAt: now.toISOString(),
-  };
-  await writeExtractCursor(params.projectRoot, cursor);
+          ? endOffset
+          : startOffset,
+      ...(endHistoryHash && {
+        processedHistoryHash: madeGenuineProgress
+          ? consumableHistoryHash
+          : advances
+            ? endHistoryHash
+            : startHistoryHash,
+      }),
+      updatedAt: now.toISOString(),
+    };
+    await writeExtractCursor(params.projectRoot, cursor);
 
-  debugLogger.debug(
-    `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,
-  );
+    debugLogger.debug(
+      `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,
+    );
 
-  return {
-    touchedTopics: agentResult.touchedTopics,
-    touchedUserScope: agentResult.touchedUserScope,
-    cursor,
-    systemMessage: agentResult.systemMessage,
-    extractorRan: true,
-  };
+    return {
+      touchedTopics: agentResult.touchedTopics,
+      touchedUserScope: agentResult.touchedUserScope,
+      cursor,
+      systemMessage: agentResult.systemMessage,
+      extractorRan: true,
+    };
+  } catch (error) {
+    if (extractionFailure && error === extractionFailure) throw error;
+    const cause = extractionFailure
+      ? new AggregateError(
+          [extractionFailure, error],
+          `${extractionFailure.message}; memory recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      : error;
+    throw new AutoMemoryExtractionError(cause, agentResult);
+  }
 }

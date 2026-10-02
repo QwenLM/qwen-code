@@ -701,6 +701,35 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ).rejects.toThrow('timeout');
   });
 
+  it('retains reported memory writes when the agent fails to complete', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
+      filesTouched: [
+        '/tmp/auto-memory/project/build.md',
+        '/tmp/user-memory/user/style.md',
+        '/tmp/auto-memory/reference/read-only.md',
+      ],
+      filesWritten: [
+        '/tmp/auto-memory/project/build.md',
+        '/tmp/user-memory/user/style.md',
+        '/tmp/auto-memory-other/user/outside.md',
+      ],
+    });
+
+    await expect(
+      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
+    ).rejects.toMatchObject({
+      message: 'MAX_TURNS',
+      result: {
+        touchedTopics: ['project', 'user'],
+        touchedProjectScope: true,
+        touchedUserScope: true,
+        hasToolActivity: true,
+      },
+    });
+  });
+
   it('ignores non-memory file paths in filesTouched', async () => {
     const result = await extract([
       '/tmp/auto-memory/project/arch.md',

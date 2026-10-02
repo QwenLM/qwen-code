@@ -68,6 +68,7 @@ vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
 }));
 
 import { runAutoMemoryExtract } from './extract.js';
+import { AutoMemoryExtractionError } from './extractionAgentPlanner.js';
 import { runManagedAutoMemoryDream } from './dream.js';
 import {
   recordUserAutoMemoryMutation,
@@ -2003,6 +2004,46 @@ describe('MemoryManager', () => {
         tmp.projectRoot,
         config,
         expect.any(Date),
+      );
+    });
+
+    it('records user mutation and actual topics while extraction remains failed', async () => {
+      const failure = new AutoMemoryExtractionError('MAX_TURNS', {
+        touchedTopics: ['user'],
+        touchedProjectScope: false,
+        touchedUserScope: true,
+        hasToolActivity: true,
+      });
+      vi.mocked(runAutoMemoryExtract).mockRejectedValueOnce(failure);
+      const mgr = new MemoryManager();
+      const recordUserMutation = vi
+        .spyOn(mgr, 'recordUserMutation')
+        .mockResolvedValue();
+      const config = makeMockConfig();
+
+      await expect(
+        mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'Remember this.', config),
+        ),
+      ).rejects.toBe(failure);
+
+      expect(recordUserMutation).toHaveBeenCalledWith(
+        tmp.projectRoot,
+        config,
+        expect.any(Date),
+      );
+      expect(mgr.listTasksByType('extract', tmp.projectRoot)[0]).toMatchObject({
+        status: 'failed',
+        error: 'MAX_TURNS',
+        metadata: { touchedTopics: ['user'] },
+      });
+      expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          status: 'failed',
+          patches_count: 1,
+          touched_topics: 'user',
+        }),
       );
     });
 

@@ -10,9 +10,15 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { Content } from '@google/genai';
-import { getAutoMemoryExtractCursorPath } from './paths.js';
+import {
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryMetadataPath,
+} from './paths.js';
 import { runAutoMemoryExtract } from './extract.js';
-import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
+import {
+  AutoMemoryExtractionError,
+  runAutoMemoryExtractionByAgent,
+} from './extractionAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   rebuildManagedAutoMemoryIndex,
@@ -23,7 +29,8 @@ import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
 import { composePostCompactHistory } from '../services/postCompactAttachments.js';
 
-vi.mock('./extractionAgentPlanner.js', () => ({
+vi.mock('./extractionAgentPlanner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./extractionAgentPlanner.js')>()),
   runAutoMemoryExtractionByAgent: vi.fn(),
 }));
 
@@ -199,6 +206,153 @@ describe('auto-memory extraction', () => {
       }),
     ).rejects.toThrow('no cache-safe params');
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    'recovers failed fork writes without advancing the cursor (window: %s)',
+    async (preserveUnprocessedHistory) => {
+      const cursorBefore = await fs.readFile(
+        getAutoMemoryExtractCursorPath(projectRoot),
+        'utf-8',
+      );
+      const metadataBefore = await fs.readFile(
+        getAutoMemoryMetadataPath(projectRoot),
+        'utf-8',
+      );
+      const failure = new AutoMemoryExtractionError('MAX_TURNS', {
+        touchedTopics: ['project', 'user'],
+        touchedProjectScope: true,
+        touchedUserScope: true,
+        hasToolActivity: true,
+      });
+      vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(failure);
+
+      await expect(
+        runAutoMemoryExtract({
+          projectRoot,
+          sessionId: 'session-1',
+          config: mockConfig,
+          history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+          preserveUnprocessedHistory,
+        }),
+      ).rejects.toBe(failure);
+
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledOnce();
+      expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledOnce();
+      expect(refreshMemoryInstruction).toHaveBeenCalledOnce();
+      expect(
+        await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+      ).toBe(cursorBefore);
+      expect(
+        await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8'),
+      ).toBe(metadataBefore);
+    },
+  );
+
+  it('retains failed fork writes and both causes when project recovery fails', async () => {
+    const result = {
+      touchedTopics: ['user' as const],
+      touchedProjectScope: true,
+      touchedUserScope: true,
+      hasToolActivity: true,
+    };
+    const failure = new AutoMemoryExtractionError('MAX_TURNS', result);
+    const rebuildFailure = new Error('EISDIR: project index');
+    vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(failure);
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
+      rebuildFailure,
+    );
+    const cursorBefore = await fs.readFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      'utf-8',
+    );
+
+    const error = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+    }).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(AutoMemoryExtractionError);
+    expect(error).toMatchObject({
+      result,
+      cause: { errors: [failure, rebuildFailure] },
+    });
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledOnce();
+    expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+    expect(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ).toBe(cursorBefore);
+  });
+
+  it('retains successful fork write scope when project indexing fails', async () => {
+    const result = {
+      touchedTopics: ['user' as const],
+      touchedProjectScope: true,
+      touchedUserScope: true,
+      hasToolActivity: true,
+    };
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValueOnce(result);
+    const rebuildFailure = new Error('EISDIR: project index');
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
+      rebuildFailure,
+    );
+
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      }),
+    ).rejects.toMatchObject({ result, cause: rebuildFailure });
+  });
+
+  it('does not recover reads as writes after a failed fork', async () => {
+    const failure = new AutoMemoryExtractionError('timeout', {
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+    });
+    vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(failure);
+
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      }),
+    ).rejects.toBe(failure);
+
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds a failed fork index-only write without claiming touched topics', async () => {
+    const failure = new AutoMemoryExtractionError('MAX_TURNS', {
+      touchedTopics: [],
+      touchedProjectScope: true,
+      touchedUserScope: false,
+      hasToolActivity: true,
+    });
+    vi.mocked(runAutoMemoryExtractionByAgent).mockRejectedValueOnce(failure);
+
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember this.' }] }],
+      }),
+    ).rejects.toBe(failure);
+
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledOnce();
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(refreshMemoryInstruction).toHaveBeenCalledOnce();
   });
 
   it('extracts skipped history before a large ending turn and leaves the remainder pending', async () => {
