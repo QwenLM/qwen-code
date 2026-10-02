@@ -30,7 +30,9 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. Every response carries `X-Request-Id`, which error
+`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+`POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
+revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -52,7 +54,9 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
 Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
-[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md);
+AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-agent-definitions.md) |
+[简体中文](../../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
 ## Managed tool results (O3)
 
