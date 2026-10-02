@@ -52,8 +52,8 @@ const server = http.createServer(async (req, res) => {
   log({ route, request });
   if (route === 'attest') {
     if (mode === 'slow-attest' || mode === 'slow-stop') await new Promise((resolve) => setTimeout(resolve, 300));
-    if (mode === 'attest-refused') return send(409, { code: 'managed_runtime_identity_conflict' });
-    return send(200, {
+    // A refusal that still names the right identity: only its status tells.
+    return send(mode === 'attest-refused' ? 409 : 200, {
       ...request,
       runtimeInstanceId: boot.runtimeInstanceId,
       runtimeIncarnation: mode === 'impostor-incarnation' ? 'another incarnation' : boot.runtimeIncarnation,
