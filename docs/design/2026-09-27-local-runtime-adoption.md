@@ -15,7 +15,7 @@ tools, remote storage, or external jobs that recreate writers after reboot.
 
 ## Persistent identity and launch ordering
 
-An opt-in `runtime-broker.durable-local-process` mode uses the configured state
+`runtime-broker.durable-local-process` (on by default) uses the configured state
 directory, outside Workspace roots. Linux `/etc/machine-id` and
 `/proc/sys/kernel/random/boot_id` supply host and boot identity. The saved PID
 namespace from `/proc/self/ns/pid` and time namespace from `/proc/self/ns/time`

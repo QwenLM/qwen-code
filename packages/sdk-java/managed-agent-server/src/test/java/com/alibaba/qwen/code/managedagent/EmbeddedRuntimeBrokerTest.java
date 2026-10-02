@@ -42,8 +42,8 @@ class EmbeddedRuntimeBrokerTest {
     void usesFetchCompatibleDefaultBrokerPort() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
                 .isEqualTo(4182);
-        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isFalse();
-        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isDurableLocalProcess()).isTrue();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isTrustedLocalRebootRecovery()).isTrue();
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -206,6 +206,7 @@ class EmbeddedRuntimeBrokerTest {
         broker.setPort(0);
         broker.setToken("broker-token");
         broker.setProvisioner("static");
+        broker.setTrustedLocalRebootRecovery(false);
         broker.setWorkspaceId("workspace");
         broker.setWorkspaceGeneration("generation");
         broker.setWorkspaceCwd(Path.of(".").toRealPath().toString());

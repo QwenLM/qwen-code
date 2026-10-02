@@ -382,10 +382,12 @@ defaults to `http://127.0.0.1:4182`. When enabled, the embedded
 Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
 it does not fall back to in-memory repositories. The credential key must decode
 to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
-credentials with AES-256-GCM. By default, local worker ownership is ephemeral
-and a restarted Broker cannot adopt it. On Linux, set
-`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=true` to enable persistent
-launch registration and adoption of the same live worker. The state directory
+credentials with AES-256-GCM. By default, local worker ownership is durable:
+the Broker registers every launch and a restarted Broker adopts the same live
+worker. This requires Linux and fails startup elsewhere; on such hosts set
+`QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` to keep
+worker ownership ephemeral (a restarted Broker then cannot adopt it). The state directory
 must be persistent local storage, owned by the Broker user with mode `0700`,
 without symlinks, outside every configured Workspace root. Workers and tools
 must be trusted; same-UID hostile tools and multi-host or remote storage are
@@ -403,17 +405,18 @@ processes. The Broker recognizes `Z`/`X` workers as exited even before they are
 reaped.
 Missing or damaged records and worker death do not authorize replacement;
 worker death does not prove escaped writers stopped. No host reboot reclamation
-is enabled by this option. Old v1 handles cannot be upgraded by guessing identity.
+is enabled by this option alone. Old v1 handles cannot be upgraded by guessing identity.
 This option does not retire idle workers or prune their registration and lock
 files. With session isolation, each Hosted Session can retain a separate idle
 worker across Broker restarts; budget process, memory and state-directory growth
-before enabling it. Physical cleanup needs an evidence-preserving lifecycle;
+for it. Physical cleanup needs an evidence-preserving lifecycle;
 do not delete records to reclaim capacity.
 See the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md).
 
-For trusted same-host Linux reboot recovery, additionally set
-`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=true`. This requires
-durable local mode. A changed kernel boot ID on the original machine can prove
+Trusted same-host Linux reboot recovery is also on by default. It requires
+durable local mode with the `local-process` provisioner, so a deployment that
+opts out of durable local workers or uses another provisioner must set
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed kernel boot ID on the original machine can prove
 that original local writers stopped; worker-only death still cannot. The
 service scans eight saved bindings every five seconds, independently of current
 Session grants, and clears only the original SQL holder after all execution
@@ -421,7 +424,8 @@ receipts become terminal. Recovery never starts a replacement worker or replays
 an unknown execution. A later authorized request may create a new generation.
 Keep the same Broker user, local disks, machine identity and SQL keys; remote
 writers, restored/cloned snapshots and external jobs that recreate writers are
-outside this contract. The option remains disabled by default. The
+outside this contract. Where a matching boot identity cannot be trusted as stop
+evidence, set the option to `false`. The
 [reboot recovery design](../../../docs/design/2026-09-28-local-reboot-recovery.md)
 distinguishes portable test evidence from the dedicated Linux reboot acceptance
 gate completed at W0e-3 head `8c2b626c`. A systemd soft reboot is not stop
@@ -470,7 +474,7 @@ responses retain the SQL holder; there is no timeout-based takeover. The
 provider and file tools do not confine access to the mount root: Read/Write/Edit
 and Shell can reach other paths allowed by the worker's host permissions.
 Foreground Shell may create detached descendants. Use this only with trusted
-local workloads. The opt-in W0e recovery above handles trusted host reboot; it
+local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
 in G0 above. Later public submit, cancel and lifecycle operations remain gated;

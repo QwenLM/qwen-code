@@ -10,7 +10,7 @@
 
 ## 持久身份与启动顺序
 
-显式启用 `runtime-broker.durable-local-process` 后使用配置的状态目录，且目录必须在 Workspace 根目录之外。Linux `/etc/machine-id` 和 `/proc/sys/kernel/random/boot_id` 提供 host 与 boot 身份。检查进程前还必须匹配 `/proc/self/ns/pid` 保存的 PID namespace 和 `/proc/self/ns/time` 保存的 time namespace，因为 [Linux PID 仅在本 namespace 有效](https://docs.kernel.org/admin-guide/namespaces/compatibility-list.html)。要求内核暴露这两种 namespace 身份；不支持或无法读取时启动失败。测试通过包内构造器注入身份；部署配置不接受调用方提供的 boot 证据。
+`runtime-broker.durable-local-process`（默认开启）使用配置的状态目录，且目录必须在 Workspace 根目录之外。Linux `/etc/machine-id` 和 `/proc/sys/kernel/random/boot_id` 提供 host 与 boot 身份。检查进程前还必须匹配 `/proc/self/ns/pid` 保存的 PID namespace 和 `/proc/self/ns/time` 保存的 time namespace，因为 [Linux PID 仅在本 namespace 有效](https://docs.kernel.org/admin-guide/namespaces/compatibility-list.html)。要求内核暴露这两种 namespace 身份；不支持或无法读取时启动失败。测试通过包内构造器注入身份；部署配置不接受调用方提供的 boot 证据。
 
 machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 worker 继续存活；默认 systemd `KillMode=control-group` 单元或以 Broker 为主进程的容器也会杀死 worker。配置服务保留子进程（例如 systemd `KillMode=process`），并使用会回收孤儿进程的 init，避免积累僵尸进程。
 

@@ -34,6 +34,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
         "qwen.managed-agent.runtime-broker.credential-key="
                 + "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
         "qwen.managed-agent.runtime-broker.provisioner=static",
+        "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
         "qwen.managed-agent.runtime-broker.workspace-id=workspace",
         "qwen.managed-agent.runtime-broker.workspace-cwd=workspace",
         "qwen.managed-agent.runtime-broker.isolation-class=workspace",
