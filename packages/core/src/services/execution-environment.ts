@@ -52,13 +52,17 @@ export function stableJson(value: unknown): string {
   );
 }
 
+/** The error kind a turn fails with when a Runtime call outcome is unknown. */
+export const MANAGED_RUNTIME_OUTCOME_UNKNOWN =
+  'managed_runtime_outcome_unknown';
+
 /**
  * A Runtime tool call ended without an outcome the host could learn: the
  * call may or may not have taken effect, so it must neither be reported as
  * failed nor run again.
  */
 export class ManagedRuntimeOutcomeUnknownError extends Error {
-  readonly errorKind = 'managed_runtime_outcome_unknown';
+  readonly errorKind = MANAGED_RUNTIME_OUTCOME_UNKNOWN;
 
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);

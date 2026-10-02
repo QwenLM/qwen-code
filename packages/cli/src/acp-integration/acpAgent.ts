@@ -3218,9 +3218,7 @@ export async function runAcpAgent(
         externalToolGuardProviderAttached,
         conversationsRuntimeProvenance,
         hostExecutionEngine,
-        hostExecutionEngine === 'managed'
-          ? options?.managedRuntimeEnvironment
-          : undefined,
+        options?.managedRuntimeEnvironment,
       );
       return agentInstance;
     }, stream);

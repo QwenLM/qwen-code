@@ -5894,17 +5894,20 @@ export class Config {
   }
 
   /**
-   * Stops this Managed session's Runtime worker, once, and builds no
-   * environment afterwards. It runs before the session's log is finished, so
-   * no call the worker runs outlives the log.
+   * Stops this Managed session's Runtime worker, once. It runs before the
+   * session's log is finished, so no call the worker runs outlives the log.
+   * Afterwards the session has no environment: none is handed out or built,
+   * so a registry made later has no Runtime-backed tools.
    */
   closeManagedRuntime(): Promise<void> {
     if (isDerivedConfig(this)) {
       return (Object.getPrototypeOf(this) as Config).closeManagedRuntime();
     }
-    this.managedRuntimeClosing ??= Promise.resolve(
-      this.managedRuntimeEnvironment?.dispose(),
-    );
+    if (!this.managedRuntimeClosing) {
+      const environment = this.managedRuntimeEnvironment;
+      this.managedRuntimeEnvironment = undefined;
+      this.managedRuntimeClosing = Promise.resolve(environment?.dispose());
+    }
     return this.managedRuntimeClosing;
   }
 
@@ -7759,7 +7762,7 @@ export class Config {
     this.settingsWatcher?.stopWatching();
     // Only a Config with a Runtime waits for it, so others close their
     // writer as soon as they did.
-    if (this.managedRuntimeEnvironment) {
+    if (this.managedRuntimeEnvironment || this.managedRuntimeClosing) {
       try {
         await this.closeManagedRuntime();
       } catch (error) {

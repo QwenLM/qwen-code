@@ -1615,6 +1615,22 @@ describe('Managed Runtime tools', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
+  it('hands out no environment after closing the one it built', async () => {
+    const environment = runtimeEnvironment();
+    const config = managedConfig({
+      managedRuntimeEnvironment: () => environment,
+    });
+    expect(config.getManagedRuntimeEnvironment()).toBe(environment);
+    await config.closeManagedRuntime();
+    expect(environment.dispose).toHaveBeenCalledOnce();
+    // A stopped worker serves no later registry.
+    expect(config.getManagedRuntimeEnvironment()).toBeUndefined();
+    const registry = await config.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames()).toEqual([]);
+  });
+
   it('stops its environment once, and still finishes the log when it cannot', async () => {
     const environment = runtimeEnvironment();
     const failure = new Error('process groups survived');

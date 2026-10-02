@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   ProcessExitError,
@@ -40,9 +41,12 @@ const READY_TIMEOUT_MS = 30_000;
 /** How long a cancelled call may take to settle before its outcome is unknown. */
 const CANCEL_SETTLE_TIMEOUT_MS = 15_000;
 const STATUS_POLL_MS = 100;
+/** How long a broken call waits for its worker's exit to be observed. */
+const EXIT_GRACE_MS = 100;
 /** Every request but `execute`, which answers when its call settles. */
 const CONTROL_REQUEST_TIMEOUT_MS = 10_000;
-const RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024;
+/** Above the worker's result bound, so no answer it may give is cut off. */
+export const MANAGED_RUNTIME_RESPONSE_LIMIT_BYTES = 2 * 1024 * 1024;
 const LOCAL_CAPABILITY_DIGEST = `sha256:${createHash('sha256')
   .update('qwen-code/managed-session-runtime/1')
   .digest('hex')}`;
@@ -53,6 +57,11 @@ interface StartedWorker {
   readonly url: URL;
   readonly boot: ManagedRuntimeWorkerBoot;
   readonly routes: ReadonlyMap<string, string>;
+  /**
+   * Aborted once the worker exited: its port may then belong to any process,
+   * so nothing is sent there again.
+   */
+  readonly gone: AbortSignal;
 }
 
 interface WorkerResponse {
@@ -65,12 +74,33 @@ class WorkerTransportError extends Error {
   /** Whether the request never reached the worker, so nothing ran. */
   readonly undelivered: boolean;
 
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: ErrorOptions, undelivered?: boolean) {
     super(message, options);
     this.undelivered =
+      undelivered ??
       (options?.cause as NodeJS.ErrnoException | undefined)?.code ===
-      'ECONNREFUSED';
+        'ECONNREFUSED';
   }
+}
+
+const INSPECT_FLAG = /^--(inspect(-brk|-wait|-port)?|debug-port)($|=)/u;
+
+/**
+ * Node options without the inspector flags, which would open a debugger, or
+ * stop at the first line until one attaches, in the worker. The port flags
+ * also take their value as the next entry.
+ */
+export function withoutInspectFlags(options: readonly string[]): string[] {
+  const kept: string[] = [];
+  for (let index = 0; index < options.length; index++) {
+    const option = options[index]!;
+    if (!INSPECT_FLAG.test(option)) {
+      kept.push(option);
+    } else if (option === '--inspect-port' || option === '--debug-port') {
+      index++;
+    }
+  }
+  return kept;
 }
 
 export interface ManagedRuntimeWorkerLaunch {
@@ -86,18 +116,28 @@ export function currentCliWorkerLaunch(): ManagedRuntimeWorkerLaunch {
   if (!cliEntry) {
     throw new Error('The Managed Runtime worker needs the CLI entry script.');
   }
+  // The worker boots as this process did, with the loader vars its boot
+  // scrub removed; the worker scrubs them from its own commands.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...Object.fromEntries(processBootLoaderEnv),
+  };
+  // Node reads inspector flags from NODE_OPTIONS too, where execArgv does not
+  // show them.
+  const nodeOptions = env['NODE_OPTIONS']?.split(/\s+/u).filter(Boolean);
+  if (nodeOptions?.some((option) => INSPECT_FLAG.test(option))) {
+    const kept = withoutInspectFlags(nodeOptions);
+    if (kept.length > 0) env['NODE_OPTIONS'] = kept.join(' ');
+    else delete env['NODE_OPTIONS'];
+  }
   return {
     command: process.execPath,
     args: [
-      ...process.execArgv.filter(
-        (arg) => !/^--inspect(-brk|-wait|-port)?($|=)/.test(arg),
-      ),
+      ...withoutInspectFlags(process.execArgv),
       cliEntry,
       'managed-runtime-worker',
     ],
-    // The worker boots as this process did, with the loader vars its boot
-    // scrub removed; the worker scrubs them from its own commands.
-    env: { ...process.env, ...Object.fromEntries(processBootLoaderEnv) },
+    env,
   };
 }
 
@@ -122,12 +162,14 @@ export class ManagedSessionRuntimeWorker {
   /**
    * Runs one call to its settled result. A call the worker refused or could
    * not start resolves `not_started`; a call whose outcome cannot be learned
-   * rejects with {@link ManagedRuntimeOutcomeUnknownError}.
+   * rejects with {@link ManagedRuntimeOutcomeUnknownError}. `callId`, the
+   * host's id for the call, names it in the worker's journal too.
    */
   async execute(
     toolName: string,
     input: Record<string, unknown>,
     signal: AbortSignal,
+    callId: string = randomUUID(),
   ): Promise<ManagedToolResultPayload> {
     signal.throwIfAborted();
     // The parameters as the wire carries them: a built invocation can hold
@@ -162,7 +204,7 @@ export class ManagedSessionRuntimeWorker {
     const reference: ManagedToolReference = {
       sessionId: this.sessionId,
       promptId: promptIdContext.getStore() ?? 'unknown',
-      callId: randomUUID(),
+      callId,
       argsDigest,
     };
     let settled = false;
@@ -217,6 +259,9 @@ export class ManagedSessionRuntimeWorker {
             error: { message: 'The Runtime worker was not running.' },
           };
         }
+        // A broken connection often means the worker died: let its exit
+        // land before asking anything on the port it held.
+        await exitOrTimeout(worker.gone, EXIT_GRACE_MS);
       }
       if (response?.status === 200) {
         const result = settledResult(response.body);
@@ -281,6 +326,13 @@ export class ManagedSessionRuntimeWorker {
     giveUp: AbortSignal,
   ): Promise<ManagedToolResultPayload> {
     while (true) {
+      // A worker that exited cannot answer for the call, and its port may now
+      // belong to another process; one being closed is about to.
+      if (worker.gone.aborted || this.closed) {
+        throw new ManagedRuntimeOutcomeUnknownError(
+          'The Runtime worker exited during a tool call.',
+        );
+      }
       // One last look once the wait is over: the call may just have settled.
       const lastLook = giveUp.aborted;
       let response: WorkerResponse;
@@ -380,6 +432,11 @@ export class ManagedSessionRuntimeWorker {
       throw error;
     }
     const tracked = reservation.attach(child, { ownsProcessTree: true });
+    const gone = new AbortController();
+    void tracked.exited.then(
+      () => gone.abort(),
+      () => gone.abort(),
+    );
     try {
       child.stdin!.on('error', () => undefined);
       child.stdin!.end(JSON.stringify(boot));
@@ -396,7 +453,13 @@ export class ManagedSessionRuntimeWorker {
       ) {
         throw new Error('The Managed Runtime worker is not the one started.');
       }
-      const worker = { tracked, url: new URL(ready.url), boot, routes };
+      const worker = {
+        tracked,
+        url: new URL(ready.url),
+        boot,
+        routes,
+        gone: gone.signal,
+      };
       const attested = await this.request(worker, 'attest', {
         protocolVersion: 2,
         provisionRequestId: boot.provisionRequestId,
@@ -428,6 +491,12 @@ export class ManagedSessionRuntimeWorker {
     body: unknown,
     stop?: AbortSignal,
   ): Promise<WorkerResponse> {
+    if (worker.gone.aborted) {
+      // Nothing is sent to a port the worker no longer holds.
+      return Promise.reject(
+        new WorkerTransportError('The Runtime worker exited.', undefined, true),
+      );
+    }
     const payload = Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
       const request = http.request(
@@ -453,7 +522,7 @@ export class ManagedSessionRuntimeWorker {
           let size = 0;
           response.on('data', (chunk: Buffer) => {
             size += chunk.byteLength;
-            if (size > RESPONSE_LIMIT_BYTES) {
+            if (size > MANAGED_RUNTIME_RESPONSE_LIMIT_BYTES) {
               response.destroy(
                 new WorkerTransportError(
                   'Runtime worker response is too large.',
@@ -489,6 +558,12 @@ export class ManagedSessionRuntimeWorker {
       request.on('error', (error) =>
         reject(new WorkerTransportError(error.message, { cause: error })),
       );
+      const exited = () =>
+        request.destroy(new WorkerTransportError('The Runtime worker exited.'));
+      worker.gone.addEventListener('abort', exited, { once: true });
+      request.on('close', () =>
+        worker.gone.removeEventListener('abort', exited),
+      );
       if (stop) {
         const abandon = () =>
           request.destroy(new WorkerTransportError('Abandoned the request.'));
@@ -503,6 +578,32 @@ export class ManagedSessionRuntimeWorker {
       request.end(payload);
     });
   }
+}
+
+/** Whether `candidate` is `root` or lies below it. */
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(
+    path.resolve(root),
+    path.resolve(root, candidate),
+  );
+  return (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function exitOrTimeout(gone: AbortSignal, ms: number): Promise<void> {
+  if (gone.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      gone.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    gone.addEventListener('abort', done, { once: true });
+  });
 }
 
 function readReady(
@@ -610,7 +711,7 @@ export function createManagedRuntimeEnvironment(
     run: async (call, signal) => {
       try {
         const result = toToolResult(
-          await worker.execute(call.toolName, call.params, signal),
+          await worker.execute(call.toolName, call.params, signal, call.id),
         );
         // As Legacy, a read shows no copy of the file it returns.
         return call.toolName === ToolNames.READ_FILE && !result.error
@@ -629,16 +730,23 @@ export function createManagedRuntimeEnvironment(
     toolNames: prepared.toolNames,
     prepare: async (request, signal) => {
       const preparation = await prepared.prepare(request, signal);
-      // The worker runs foreground Shell only; refuse before asking. The
-      // prepared parameters are the validated ones.
-      if (
-        request.toolName === ToolNames.SHELL &&
-        preparation.params['is_background'] === true
-      ) {
-        await prepared.release(request.id, signal);
-        throw new Error(
-          'A Managed session runs shell commands in the foreground only.',
-        );
+      // The worker runs foreground Shell only, in the session's directory:
+      // refuse before asking what it would refuse. The prepared parameters
+      // are the validated ones.
+      if (request.toolName === ToolNames.SHELL) {
+        const directory = preparation.params['directory'];
+        const refusal =
+          preparation.params['is_background'] === true
+            ? 'A Managed session runs shell commands in the foreground only.'
+            : typeof directory === 'string' &&
+                directory !== '' &&
+                !isWithin(config.getTargetDir(), directory)
+              ? `A Managed session runs shell commands only in ${config.getTargetDir()}.`
+              : undefined;
+        if (refusal) {
+          await prepared.release(request.id, signal);
+          throw new Error(refusal);
+        }
       }
       return preparation;
     },

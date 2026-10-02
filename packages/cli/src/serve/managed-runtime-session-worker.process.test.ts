@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import {
   mkdir,
@@ -61,6 +62,30 @@ function isAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/** The command lines of every process below `root`. */
+function descendantArgs(root: number): string[] {
+  const children = new Map<number, Array<{ pid: number; args: string }>>();
+  for (const line of execFileSync('ps', ['-eo', 'pid=,ppid=,args='], {
+    encoding: 'utf8',
+  }).split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+    if (!match) continue;
+    const parent = Number(match[2]);
+    const siblings = children.get(parent) ?? [];
+    siblings.push({ pid: Number(match[1]), args: match[3]! });
+    children.set(parent, siblings);
+  }
+  const found: string[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    for (const child of children.get(pending.pop()!) ?? []) {
+      found.push(child.args);
+      pending.push(child.pid);
+    }
+  }
+  return found;
 }
 
 async function waitFor<T>(
@@ -364,8 +389,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect((await prompt(sessionId)).stopReason).toBe('end_turn');
     const [managed] = started.managed;
     expect(managed).toBeDefined();
-    // The Managed child is a process-group leader with no other process in
-    // its tree.
+    // While the idle session lives, no worker runs below this test.
+    expect(
+      descendantArgs(process.pid).filter((args) =>
+        args.includes('managed-runtime-worker'),
+      ),
+    ).toEqual([]);
     await bridge!.closeSession(sessionId);
     expect(await managed.exited).toEqual({ exitCode: 0, signalCode: null });
     await managed.registryReleased;
@@ -388,6 +417,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       ],
     });
     const running = prompt(sessionId);
+    void running.catch(() => undefined);
     const worker = await readWorker(shellOut);
     const sleepPid = Number(
       await waitFor(
@@ -398,10 +428,20 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     strayPids.push(sleepPid);
     await bridge!.cancelSession(sessionId);
     expect((await running).stopReason).toBe('cancelled');
-    // The worker settled the call only after the command stopped; the worker
-    // itself stays for the session's next call.
+    // The worker settled the call only after the command stopped.
     expect(isAlive(sleepPid)).toBe(false);
     expect(isAlive(worker.pid)).toBe(true);
+
+    // The same worker serves the session's next call.
+    const nextOut = path.join(workspace, 'next.txt');
+    turns.push(
+      {
+        toolCalls: [{ name: 'run_shell_command', args: recordWorker(nextOut) }],
+      },
+      { text: 'DONE' },
+    );
+    expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+    expect((await readWorker(nextOut)).pid).toBe(worker.pid);
   }, 120_000);
 
   it('stops the worker and its command when the Managed child dies', async () => {

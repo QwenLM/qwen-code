@@ -2926,65 +2926,77 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
-  it('closes managed writers before resource shutdown on connection EOF', async () => {
-    const innerConfig = await setupSessionMocks('managed-session');
-    const order: string[] = [];
-    // A Managed session's Runtime worker stops before its log is handed off.
-    Object.assign(innerConfig, {
-      getSessionExecutionEngine: vi.fn().mockReturnValue('managed'),
-      // A slow stop: the handoff must wait for it.
-      closeManagedRuntime: vi.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        order.push('runtime');
-      }),
-    });
-    vi.mocked(innerConfig.closeSessionWriter).mockImplementation(async () => {
-      expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
-      order.push('writer');
-    });
-    vi.mocked(innerConfig.shutdown).mockImplementation(async (options) => {
-      expect(options).toMatchObject({
-        skipSessionWriter: true,
-        strictResourceCleanup: true,
+  it.each([
+    ['stops', true],
+    ['fails to stop', false],
+  ])(
+    'closes managed writers before resource shutdown on connection EOF when the Runtime %s',
+    async (_label, stops) => {
+      const innerConfig = await setupSessionMocks('managed-session');
+      const order: string[] = [];
+      // A Managed session's Runtime worker stops before its log is handed off,
+      // and a stop that fails still lets the handoff happen.
+      Object.assign(innerConfig, {
+        getSessionExecutionEngine: vi.fn().mockReturnValue('managed'),
+        // A slow stop: the handoff must wait for it.
+        closeManagedRuntime: vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          order.push('runtime');
+          if (!stops) throw new Error('process groups survived');
+        }),
       });
-      order.push('resources');
-    });
-    const agentPromise = runAcpAgent(
-      mockConfig,
-      makeSessionSettings(),
-      mockArgv,
-      { privateParentCapability: 'expected-capability' },
-    );
-    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
-      get closed() {
-        return mockConnectionState.promise;
-      },
-    }) as AgentLike;
-    await agent.initialize({
-      clientCapabilities: {},
-      _meta: {
-        'qwen-code/private-parent-capability': 'expected-capability',
-      },
-    });
-    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      vi.mocked(innerConfig.closeSessionWriter).mockImplementation(async () => {
+        expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledOnce();
+        order.push('writer');
+      });
+      vi.mocked(innerConfig.shutdown).mockImplementation(async (options) => {
+        expect(options).toMatchObject({
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        });
+        order.push('resources');
+      });
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+        { privateParentCapability: 'expected-capability' },
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.initialize({
+        clientCapabilities: {},
+        _meta: {
+          'qwen-code/private-parent-capability': 'expected-capability',
+        },
+      });
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
-    expect(mockPrepareFileWatchersForProcessExit).not.toHaveBeenCalled();
-    mockConnectionState.resolve();
-    await agentPromise;
+      expect(mockPrepareFileWatchersForProcessExit).not.toHaveBeenCalled();
+      mockConnectionState.resolve();
+      await agentPromise;
 
-    expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
-      'never',
-    );
-    expect(innerConfig.setSessionWriterTakeoverPolicy).toHaveBeenCalledWith(
-      'certified',
-    );
-    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
-      handoff: true,
-    });
-    expect(order).toEqual(['runtime', 'writer', 'resources']);
-    expect(mockRunExitCleanup).toHaveBeenCalledOnce();
-  });
+      expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
+        'never',
+      );
+      expect(innerConfig.setSessionWriterTakeoverPolicy).toHaveBeenCalledWith(
+        'certified',
+      );
+      expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+        handoff: true,
+      });
+      // The host's own Config has no Runtime: its writer is handed off at once.
+      expect(mockConfig.closeSessionWriter).toHaveBeenCalledWith({
+        handoff: true,
+      });
+      expect(order).toEqual(['runtime', 'writer', 'resources']);
+      expect(mockRunExitCleanup).toHaveBeenCalledOnce();
+    },
+  );
 
   it('maps new-session rejection after managed shutdown begins', async () => {
     const agentPromise = runAcpAgent(
@@ -4552,7 +4564,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     'binds a new session to the paired engine %s and returns its receipt',
     async (engine) => {
       await setupSessionMocks('engine-session');
-      const { agent, agentPromise } = await bootAcpAgent();
+      // Even a host handed a Runtime gives it to no session but a Managed one.
+      const { agent, agentPromise } = await bootAcpAgent({
+        managedRuntimeEnvironment: vi.fn(),
+      });
       try {
         const response = (await agent.newSession({
           cwd: '/tmp',
@@ -4722,37 +4737,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }
     });
 
-    it("stops the Runtime worker before it finishes a closed session's log", async () => {
-      const innerConfig = await setupSessionMocks('managed-host-close');
-      const order: string[] = [];
-      Object.assign(innerConfig, {
-        // A slow stop: finishing the log must wait for it.
-        closeManagedRuntime: vi.fn(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          order.push('runtime');
-        }),
-      });
-      vi.mocked(
-        innerConfig.getChatRecordingService().finalize,
-      ).mockImplementation(() => {
-        order.push('finalize');
-      });
-      const { agent, agentPromise } = await bootManagedHost();
-      try {
-        await agent.newSession({
-          cwd: '/tmp',
-          mcpServers: [],
-          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+    it.each([
+      ['stops', true],
+      ['fails to stop', false],
+    ])(
+      "finishes a closed session's log after its Runtime %s",
+      async (_label, stops) => {
+        const innerConfig = await setupSessionMocks('managed-host-close');
+        const order: string[] = [];
+        Object.assign(innerConfig, {
+          // A slow stop: finishing the log must wait for it, and a stop that
+          // fails still lets the log finish.
+          closeManagedRuntime: vi.fn(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            order.push('runtime');
+            if (!stops) throw new Error('process groups survived');
+          }),
         });
-        await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
-          sessionId: 'managed-host-close',
+        vi.mocked(
+          innerConfig.getChatRecordingService().finalize,
+        ).mockImplementation(() => {
+          order.push('finalize');
         });
-        expect(order.slice(0, 2)).toEqual(['runtime', 'finalize']);
-      } finally {
-        mockConnectionState.resolve();
-        await agentPromise;
-      }
-    });
+        const { agent, agentPromise } = await bootManagedHost();
+        try {
+          await agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          });
+          await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+            sessionId: 'managed-host-close',
+          });
+          expect(order.slice(0, 2)).toEqual(['runtime', 'finalize']);
+        } finally {
+          mockConnectionState.resolve();
+          await agentPromise;
+        }
+      },
+    );
 
     it('does not start without a private parent', async () => {
       await expect(
@@ -5588,11 +5611,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
-  async function bootAcpAgent() {
+  async function bootAcpAgent(options?: Parameters<typeof runAcpAgent>[3]) {
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
       mockArgv,
+      options,
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
     const agent = capturedAgentFactory!({

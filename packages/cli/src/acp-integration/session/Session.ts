@@ -267,7 +267,10 @@ import {
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
 } from '@qwen-code/qwen-code-core';
-import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
+import {
+  MANAGED_RUNTIME_OUTCOME_UNKNOWN,
+  ManagedRuntimeOutcomeUnknownError,
+} from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
@@ -997,9 +1000,13 @@ function recordDaemonLoopDetected(
  * the turn fails, and so does every later one.
  */
 function managedOutcomeUnknownError(error: Error): RequestError {
-  return new RequestError(-32603, error.message, {
-    errorKind: 'managed_runtime_outcome_unknown',
-  });
+  // The cause, such as the socket failure, is what tells an operator why.
+  const cause = error.cause instanceof Error ? error.cause.message : undefined;
+  return new RequestError(
+    -32603,
+    cause ? `${error.message} (${cause})` : error.message,
+    { errorKind: MANAGED_RUNTIME_OUTCOME_UNKNOWN },
+  );
 }
 
 function createLoopDetectedTurnError(
@@ -5052,7 +5059,7 @@ export class Session implements SessionContext {
       const managedOutcomeUnknown =
         error instanceof RequestError &&
         (error.data as { errorKind?: unknown } | undefined)?.errorKind ===
-          'managed_runtime_outcome_unknown';
+          MANAGED_RUNTIME_OUTCOME_UNKNOWN;
       const controlledAbort =
         !managedOutcomeUnknown &&
         (abortReason === USER_CANCEL_ABORT_REASON ||

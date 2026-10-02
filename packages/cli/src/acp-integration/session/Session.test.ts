@@ -37210,6 +37210,7 @@ describe('Session', () => {
             .mockReturnValue(ApprovalMode.YOLO);
           const unknown = new ManagedRuntimeOutcomeUnknownError(
             'The Runtime worker stopped answering for a tool call.',
+            { cause: new Error('read ECONNRESET') },
           );
           const tool = {
             name: 'write_file',
@@ -37245,7 +37246,8 @@ describe('Session', () => {
             }),
           ).rejects.toMatchObject({
             code: -32603,
-            message: unknown.message,
+            // The cause tells an operator why the outcome was lost.
+            message: `${unknown.message} (read ECONNRESET)`,
             data: { errorKind: 'managed_runtime_outcome_unknown' },
           });
           // No failure result for the model to act on, and no next request.
@@ -37330,6 +37332,61 @@ describe('Session', () => {
             ).not.toHaveBeenCalled();
           },
         );
+
+        it('releases a prepared call the user rejected', async () => {
+          const release = vi.fn().mockResolvedValue(undefined);
+          const execute = vi.fn();
+          const tool = {
+            name: 'write_file',
+            kind: core.Kind.Edit,
+            build: vi.fn().mockReturnValue({
+              params: { file_path: '/tmp/test.txt', content: 'x' },
+              getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+              getConfirmationDetails: vi.fn().mockResolvedValue({
+                type: 'info',
+                title: 'Confirm write',
+                prompt: 'write',
+                onConfirm: vi.fn(),
+              }),
+              getDescription: vi.fn().mockReturnValue('write'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute,
+              release,
+            }),
+          };
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          vi.mocked(mockClient.requestPermission).mockResolvedValue({
+            outcome: { outcome: 'cancelled' },
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'write_file',
+                        args: { file_path: '/tmp/test.txt', content: 'x' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValue(createStreamWithChunks([]));
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'write the file' }],
+          });
+
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+          await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+          expect(execute).not.toHaveBeenCalled();
+        });
 
         it('releases a prepared call that permission denied', async () => {
           const release = vi.fn().mockResolvedValue(undefined);

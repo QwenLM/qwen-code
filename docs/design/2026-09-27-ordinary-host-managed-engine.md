@@ -33,7 +33,10 @@ is for CI and review while waiting; it does not change the deferred delivery
 schedule or register or enable the engine. M2 follows the same way: it adds
 the Managed host and its tests, registers and enables nothing, and leaves M5,
 M6 and the delivery schedule where the scheduling update put them. M5a, the
-first part of M5, does the same for the Runtime-backed tools.
+first part of M5, adds the Runtime-backed tools and their tests: it registers
+no engine and no daemon route, its tools run only in a host already selected
+as Managed, and it leaves M5b, M5c, M6 and the delivery schedule where the
+scheduling update put them.
 
 Design for the Managed execution engine of ordinary `qwen serve` hosts, the
 part of #12737 that [paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)
@@ -842,8 +845,10 @@ parts, in this order, each with its own exit check:
   Legacy Shell inherits its host's, so the workspace `.env` and the session
   variables reach its commands. The child's boot scrub removed the loader
   variables that only started it; the worker boots with the same ones and
-  scrubs them in turn, so its commands never see them. The private parent
-  variables the child deletes at startup never reach it.
+  scrubs them in turn, so its commands never see them. Inspector flags, in
+  its arguments or in `NODE_OPTIONS`, are dropped, so the worker opens no
+  debugger and never waits for one. The private parent variables the child
+  deletes at startup never reach it.
 - **Lifetime.** The worker runs in its own process group, with an IPC channel
   that carries no messages. When the channel closes, however the child ended,
   the worker stops its calls, lets them settle and exits. The child tracks the
@@ -854,8 +859,11 @@ parts, in this order, each with its own exit check:
   exiting, then SIGKILL after the grace period. A stop the registry cannot
   prove, such as a process group that outlives the deadline or a worker that
   died before the registry saw its process tree, is logged and the log is
-  still finished; M5c keeps the engine quarantined on it. A worker that
-  exited between calls is replaced at the next call.
+  still finished; M5c keeps the engine quarantined on it. Once the worker
+  exited, the host sends nothing to the port it held, which any process may
+  take: a call in flight then has an unknown outcome. A worker that exited
+  between calls is replaced at the next call, and after the close the session
+  has no environment, so a registry made later has no Runtime-backed tools.
 
 #### Tools in the host
 
@@ -880,9 +888,10 @@ parts, in this order, each with its own exit check:
   changes them, as unescaping a path a second time does: the worker runs what
   the host approved and nothing else.
 - **Executed in the worker.** The worker runs the same core tools without
-  approval, because the host has already decided. A background Shell is
-  refused in the host before anything is asked, because the worker runs
-  foreground commands only.
+  approval, because the host has already decided. A background Shell, or a
+  Shell `directory` outside the session's directory, is refused in the host
+  before anything is asked, because the worker runs foreground commands in
+  that directory only.
 - **Results.** The worker returns the tool's model content. The host reports
   it as the result and shows its text, except for a read, which shows no copy
   of the file, as in Legacy; diffs and live Shell output do not reach the
