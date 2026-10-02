@@ -60,6 +60,7 @@ function fixture() {
     configRef: 'config',
     policyRef: 'policy',
     approvalMode: 'default',
+    retirement: null,
     publicSession: {
       version: 1,
       status: 'READY',
@@ -631,7 +632,132 @@ async function shellFixture(
   return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
 }
 
+function retiredFixture(turnId: string | null = null) {
+  const f = fixture();
+  f.append([
+    f.event('domain.committed', {
+      domain: 'session_metadata',
+      version: 1,
+      operationId: 'title',
+      recordRef: f.resource('managed-session_metadata', {
+        operationId: 'title',
+        revision: 1,
+        previousRecordRef: null,
+        title: 'retained',
+      }),
+    }),
+  ]);
+  const state = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'retained',
+    coveredSequence: 1,
+    activationId: 'activation',
+    turnId,
+    promptId: turnId,
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: null,
+  });
+  const checkpointRef = f.resource('managed-checkpoint', state);
+  f.append([
+    f.event('checkpoint.committed', {
+      checkpointId: 'retained',
+      coveredSequence: 1,
+      previousCheckpointId: null,
+      stateRef: checkpointRef,
+      boundary: null,
+    }),
+  ]);
+  f.source.head = {
+    ...f.source.head,
+    state: 'DELETED',
+    writerId: null,
+    writerLeaseUntil: null,
+    latestCheckpointResourceId: null,
+  };
+  Object.assign(f.source.publicSession, { status: 'DELETED', deletedAt: 1 });
+  Object.assign(f.source, {
+    retirement: {
+      tenantId: KEY.tenantId,
+      sessionId: SESSION,
+      operationId: 'delete',
+      generation: 1,
+      retiredAt: 2,
+      recoveryProtected: false,
+    },
+  });
+  return { ...f, checkpointRef };
+}
+
 describe('verifyRecoverySession', () => {
+  it('verifies retained settled checkpoint bytes after permanent retirement clears its pointer', async () => {
+    const f = retiredFixture();
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.read).toHaveBeenCalledWith(f.checkpointRef);
+    expect(f.complete.size).toBe(f.refs.size);
+  });
+
+  it('requires retirement evidence before accepting a cleared checkpoint pointer', async () => {
+    const f = retiredFixture();
+    Object.assign(f.source, { retirement: null });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'pinned private head',
+    );
+  });
+
+  it.each([
+    { tenantId: 'foreign' },
+    { sessionId: 'foreign' },
+    { operationId: '' },
+    { generation: 2 },
+    { retiredAt: 1.5 },
+    { recoveryProtected: true },
+  ])('rejects unsupported retirement evidence (%j)', async (damage) => {
+    const f = retiredFixture();
+    Object.assign(f.source.retirement!, damage);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'invalid pinned retirement',
+    );
+  });
+
+  it('rejects retirement without the public tombstone or with a remaining writer', async () => {
+    const f = retiredFixture();
+    Object.assign(f.source.publicSession, { status: 'CLOSED' });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'invalid pinned retirement',
+    );
+    Object.assign(f.source.publicSession, { status: 'DELETED' });
+    f.source.head = { ...f.source.head, writerId: 'remaining-writer' };
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'invalid pinned retirement',
+    );
+  });
+
+  it('still rejects unfinished work and corrupt checkpoint bytes after retirement', async () => {
+    const pending = retiredFixture('pending-turn');
+    await expect(
+      verifyRecoverySession(pending.source, pending.io),
+    ).rejects.toThrow('unfinished Harness work');
+    const corrupt = retiredFixture();
+    corrupt.resources.set(corrupt.checkpointRef.resourceId, Buffer.from('{}'));
+    await expect(
+      verifyRecoverySession(corrupt.source, corrupt.io),
+    ).rejects.toThrow('resource bytes conflict');
+  });
+
+  it('still rejects a changed watermark after retirement', async () => {
+    const f = retiredFixture();
+    f.source.head = {
+      ...f.source.head,
+      journalRevision: f.source.head.journalRevision + 1,
+    };
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'pinned private head',
+    );
+  });
   it('verifies route and usage resources written by an actual Hosted model turn without Hooks', async () => {
     const f = await hostedModelFixture();
     expect(f.attempts.map((event) => event.payload['state'])).toEqual([

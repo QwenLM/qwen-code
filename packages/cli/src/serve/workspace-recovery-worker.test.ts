@@ -81,6 +81,7 @@ async function fixture() {
         createdAt: 1,
       },
       head: null,
+      retirement: null,
     };
     const sourceJson = JSON.stringify(source);
     return {

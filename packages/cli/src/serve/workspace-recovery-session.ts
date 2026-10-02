@@ -74,13 +74,21 @@ export interface RecoverySessionSource {
     readonly turnId: string | null;
     readonly createdAt: number;
   };
+  readonly retirement: {
+    readonly tenantId: string;
+    readonly sessionId: string;
+    readonly operationId: string;
+    readonly generation: number;
+    readonly retiredAt: number;
+    readonly recoveryProtected: boolean;
+  } | null;
   readonly head: {
     readonly tenantId: string;
     readonly workspaceId: string;
     readonly sessionId: string;
     readonly state: string;
     readonly storageVersion: number;
-    readonly writerId: string;
+    readonly writerId: string | null;
     readonly writerGeneration: number;
     readonly writerLeaseUntil: string | null;
     readonly journalRevision: number;
@@ -276,6 +284,28 @@ export async function verifyRecoverySession(
 ): Promise<{ fileHistory: 'captured' | 'not_captured' }> {
   encodeManagedContextBinding(source.binding);
   const head = source.head;
+  const retirement = source.retirement;
+  requireValue(
+    retirement == null ||
+      (retirement.tenantId === source.binding.tenantId &&
+        retirement.sessionId === source.sessionId &&
+        typeof retirement.operationId === 'string' &&
+        retirement.operationId.length > 0 &&
+        retirement.operationId.length <= 128 &&
+        retirement.generation === 1 &&
+        Number.isSafeInteger(retirement.retiredAt) &&
+        retirement.retiredAt > 0 &&
+        retirement.recoveryProtected === false &&
+        source.publicSession.status === 'DELETED' &&
+        Number.isSafeInteger(source.publicSession.deletedAt) &&
+        Number(source.publicSession.deletedAt) > 0 &&
+        (!head ||
+          (head.state === 'DELETED' &&
+            head.latestCheckpointResourceId === null &&
+            head.writerId === null &&
+            head.writerLeaseUntil === null))),
+    'invalid pinned retirement',
+  );
   let revision = 0;
   let sequence = 0;
   let commitDigest: string | null = null;
@@ -902,8 +932,10 @@ export async function verifyRecoverySession(
         sequence === head.committedSequence &&
         commitDigest === head.lastCommitDigest &&
         activationEpoch === head.activationEpoch &&
-        (latestCheckpoint?.ref.resourceId ?? null) ===
-          head.latestCheckpointResourceId),
+        (retirement
+          ? head.latestCheckpointResourceId === null
+          : (latestCheckpoint?.ref.resourceId ?? null) ===
+            head.latestCheckpointResourceId)),
     'journal does not match pinned private head',
   );
   requireValue(

@@ -534,6 +534,32 @@ public final class WorkspaceRecoveryStore {
                     "latestCheckpointResourceId", "latest_checkpoint_resource_id", "compactedThroughRevision", "compacted_through_revision",
                     "recoveryStatus", "recovery_status", "recoveryDetailCode", "recovery_detail_code");
         }
+        var retirements = jdbc.queryForList("SELECT tenant_id, session_id, operation_id, generation, retired_at,"
+                + " recovery_protected FROM qwen_output_session_retirement WHERE tenant_key = ? AND session_key = ?",
+                hash(tenant), hash(session));
+        check(retirements.size() <= 1, "source_drift");
+        source.putNull("retirement");
+        if (!retirements.isEmpty()) {
+            var retirement = retirements.getFirst();
+            check(tenant.equals(retirement.get("tenant_id")) && session.equals(retirement.get("session_id"))
+                    && "DELETED".equals(row.get("status")) && row.get("deleted_at") instanceof Number
+                    && ((Number) row.get("deleted_at")).longValue() > 0
+                    && ((Number) retirement.get("generation")).longValue() == 1
+                    && ((Number) retirement.get("retired_at")).longValue() > 0
+                    && !ToolPublicationRetentionStore.flag(retirement, "recovery_protected"), "source_drift");
+            JsonNode retiredHead = source.path("head");
+            check(retiredHead.isNull() || "DELETED".equals(retiredHead.path("state").asText())
+                    && retiredHead.path("latestCheckpointResourceId").isNull()
+                    && retiredHead.path("writerId").isNull() && retiredHead.path("writerLeaseUntil").isNull(), "source_drift");
+            check(count("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
+                    + " AND operation_id = ? AND operation_kind = 'DELETE' AND state = 'COMPLETED'"
+                    + " AND delivery_state = 'CONFIRMED' AND completed_at IS NOT NULL",
+                    tenant, session, retirement.get("operation_id")) == 1, "source_drift");
+            ObjectNode value = source.putObject("retirement");
+            fields(value, retirement, "tenantId", "tenant_id", "sessionId", "session_id", "operationId", "operation_id",
+                    "generation", "generation", "retiredAt", "retired_at");
+            value.put("recoveryProtected", false);
+        }
         return source;
     }
 

@@ -51,6 +51,16 @@ class WorkspaceRecoveryMySqlIT {
     }
 
     @Test
+    void pinsRetainedRetirementWithoutReopeningItsCheckpointOrWriter() {
+        fixture.pinsRetainedRetirementWithoutReopeningItsCheckpointOrWriter();
+    }
+
+    @Test
+    void retirementDriftInvalidatesThePinnedCut() {
+        fixture.retirementDriftInvalidatesThePinnedCut();
+    }
+
+    @Test
     void leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones() {
         fixture.leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones();
     }

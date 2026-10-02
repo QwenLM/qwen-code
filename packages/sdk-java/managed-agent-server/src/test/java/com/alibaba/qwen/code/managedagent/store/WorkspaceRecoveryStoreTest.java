@@ -81,6 +81,57 @@ class WorkspaceRecoveryStoreTest {
     }
 
     @Test
+    void pinsRetainedRetirementWithoutReopeningItsCheckpointOrWriter() {
+        String session = session("workspace-a");
+        head(session);
+        String operation = retireSession(session);
+        var before = jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session);
+        var retirement = jdbc.queryForMap("SELECT * FROM qwen_output_session_retirement WHERE session_id = ?", session);
+        JsonNode source = call(capture(), "sessions").path("sessions").get(0).path("source");
+        assertThat(source.path("retirement").path("operationId").asText()).isEqualTo(operation);
+        assertThat(source.path("retirement").path("tenantId").asText()).isEqualTo("tenant");
+        assertThat(source.path("retirement").path("sessionId").asText()).isEqualTo(session);
+        assertThat(source.path("retirement").path("generation").asInt()).isEqualTo(1);
+        assertThat(source.path("retirement").path("retiredAt").asLong()).isPositive();
+        assertThat(source.path("retirement").path("recoveryProtected").asBoolean()).isFalse();
+        assertThat(source.path("head").path("latestCheckpointResourceId").isNull()).isTrue();
+        assertThat(source.path("head").path("writerId").isNull()).isTrue();
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_managed_session_journal_head WHERE session_id = ?", session)).isEqualTo(before);
+        assertThat(jdbc.queryForMap("SELECT * FROM qwen_output_session_retirement WHERE session_id = ?", session)).isEqualTo(retirement);
+    }
+
+    @Test
+    void retirementDriftInvalidatesThePinnedCut() {
+        String session = session("workspace-a");
+        head(session);
+        retireSession(session);
+        var capture = capture();
+        jdbc.update("UPDATE qwen_output_session_retirement SET retired_at = retired_at + 1 WHERE session_id = ?", session);
+        assertThatThrownBy(() -> capture.call("sessionComplete", object().put("sessionId", session).set("summary", object())))
+                .hasMessageContaining("source_drift");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"owner", "generation", "protected", "operation", "public", "head"})
+    void refusesInconsistentRetirementEvidence(String damage) {
+        String session = session("workspace-a");
+        head(session);
+        retireSession(session);
+        switch (damage) {
+            case "owner" -> jdbc.update("UPDATE qwen_output_session_retirement SET tenant_id = 'foreign' WHERE session_id = ?", session);
+            case "generation" -> jdbc.update("UPDATE qwen_output_session_retirement SET generation = 2 WHERE session_id = ?", session);
+            case "protected" -> jdbc.update("UPDATE qwen_output_session_retirement SET recovery_protected = TRUE WHERE session_id = ?", session);
+            case "operation" -> jdbc.update("UPDATE managed_agent_operation SET delivery_state = 'PENDING' WHERE session_id = ?", session);
+            case "public" -> jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED' WHERE session_id = ?", session);
+            case "head" -> jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = 'retained' WHERE session_id = ?", session);
+            default -> throw new AssertionError(damage);
+        }
+        assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Integer.class)).isZero();
+    }
+
+    @Test
     void leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones() {
         String session = session("workspace-a");
         head(session);
@@ -369,6 +420,21 @@ class WorkspaceRecoveryStoreTest {
                 + " created_at, updated_at) VALUES ('tenant', 'private-key', ?, 1, 'SEALED', 1, 'original',"
                 + " '2000-01-01 00:00:00', ?, 1, 1, ?, 1, 0, 'READY', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
                 session, "a".repeat(64), "b".repeat(64));
+    }
+
+    private String retireSession(String session) {
+        String operation = UUID.randomUUID().toString();
+        // Workspace-bound public admission is unavailable; exercise retained DELETE completion.
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETING' WHERE session_id = ?", session);
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id, session_id, operation_id, operation_kind,"
+                + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
+                + " session_status_before, lease_owner, claim_generation, available_at, created_at, updated_at)"
+                + " VALUES ('tenant', ?, ?, 'DELETE', '', 'delete', 'digest', 'RUNNING', 'JAVA_DURABLE',"
+                + " 'LEASED', 'ACTIVE', 'worker', 1, 0, 0, 0)", session, operation);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = 'retained' WHERE session_id = ?", session);
+        assertThat(new TransactionTemplate(manager).<Boolean>execute(status ->
+                sessions.completeOperation("tenant", session, operation, "worker", 1, false))).isTrue();
+        return operation;
     }
 
     private WorkspaceRecoveryStore capture() {

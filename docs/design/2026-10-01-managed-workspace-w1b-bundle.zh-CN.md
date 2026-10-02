@@ -2,7 +2,7 @@
 
 [English](2026-10-01-managed-workspace-w1b-bundle.md) | [简体中文](2026-10-01-managed-workspace-w1b-bundle.zh-CN.md)
 
-状态：已实现，本地验证通过，部署验收待完成。已整合 main `0a5f518b4`，包含已合并的
+状态：已实现，本地验证通过，部署验收待完成。已整合 main `49b6c900`，包含已合并的
 文件历史依赖 [#13110](https://github.com/QwenLM/qwen-code/pull/13110) `e083d6a6b`。
 保留其最终的准备失败回滚修复及恢复测试。
 属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。完成
@@ -52,6 +52,13 @@ writer 身份和状态、journal revision、committed sequence、last commit dig
 activation epoch、checkpoint、compaction 和 recovery 状态。缺失 head 记为未初始化，
 不能创建历史。已有 head 但尚无已提交 genesis 时拒绝捕获。活动工作、未完成生命周期操作、存活 writer 租约、不支持的
 compaction 和 blocked recovery 拒绝捕获。
+
+主干永久删除会清空私有 checkpoint 指针，但保留 journal 和资源字节。固定原始
+退役 owner、operation、generation、数据库时间和恢复保护，要求匹配的已确认、
+已完成 DELETE 及公共删除墓碑。只有这些证据允许 DELETED head 没有 writer 或
+checkpoint 指针；仍校验全部原始 journal 水位、checkpoint 和资源，并要求工作
+已结算。没有退役证据的历史删除记录仍严格核对指针。退役变化使固定恢复点失效。
+这不恢复 Session 或重开 writer；公共 Workspace-bound DELETE 准入仍不可用。
 
 每次提交派生记录前复查 Session；封存或记录兼容性前复查完整成员集合与来源摘要。
 新 Session、纯模型提交、绑定变化、writer 续租及新增已接受工作使旧恢复点失效。
@@ -132,7 +139,7 @@ operation/tenant/storage ID，可选 `afterSessionId`，每页 32 个固定 Sess
 和 Session 校验器。共享生产代码只增加纯 Session Store 解析器导出和类型化只读
 W1a guard 查询，以及 npm 入口和打包 CLI bootstrap 的精确私有 flag 分派；分派先于
 普通 CLI/model 或继承的更新启动。现有 HTTP Session 读写、Hosted Turn 路由和 Runtime Worker 派发
-继续使用既有路径。V30 派生队列索引支持 asset key 分页及 Session/state 引用选择。
+继续使用既有路径。V31 派生队列索引支持 asset key 分页及 Session/state 引用选择。
 
 Session 分页和引用队列持久保存并限制批次大小，每次读取一个 journal 事务或
 资源，复用协议解析和摘要链校验，不累积整个 Session log。文件按 1 MiB 块计算
@@ -256,9 +263,10 @@ Broker/Harness/Worker、真实阿里云 OSS、四个物理 kill 时点及 20,916
 另在相同 Linux 装置验证了 `0919b9d8`，包括四项评审修复、五个物理中断窗口和真实 OSS
 拒绝对照。它覆盖该版本，不覆盖后续主干整合。维护者架构签核及整合版本的支持平台
 验收仍待完成；CI 绿灯和 Ready 状态不能替代这些门槛。
-#13110 已合入主干。本次整合 main `47463b79`，保留其 V26 工具结果投影、
-V27 Hosted Hooks 记录、V28 准入索引和 V29 准入回填；仅将尚未合入的 W1b
-恢复元数据移到 V30，SQL 字节不变，不改写主干迁移历史。
+#13110 已合入主干。本次整合 main `49b6c900`，保留其 V26 工具结果投影、
+V27 Hosted Hooks 记录、V28 准入索引、V29 准入回填及 V30 Session-owned
+工具输出保留；仅将尚未合入的 W1b 恢复元数据移到 V31，SQL 字节不变，
+不改写主干迁移历史。
 [第三轮部署报告](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5944274897)
 确认 `e50e2c37` 的 V28 有效，但发现普通 Hosted 模型 route/usage 支持缺失；
 其成功的 Linux runbook 和中断检查使用该版本加候选白名单修复。本次纳入这两种
@@ -267,8 +275,11 @@ V27 Hosted Hooks 记录、V28 准入索引和 V29 准入回填；仅将尚未合
 仍不在 W1b 支持的闭包内，会拒绝 capture；本次不认证或激活 Hook 恢复。
 
 普通模型资源修复 `258c57ed` 推送后，与更新主干的合并 CI 因两个 V28 迁移拒绝。
-修改前，独立打包 Flyway/H2 探针已复现冲突。V30 解决编号重复，新库及
-main-V29 数据库升级需要新的制品检查。应用过分支专用 W1b V27 或 V28 的
+修改前，独立打包 Flyway/H2 探针已复现冲突，`e3055f49` 将 W1b 移到 V30。
+随后主干整合 #13084，用 V30 保存工具输出保留状态；另一独立打包 Flyway/H2
+探针在修改前复现此次冲突。V31 保留新的主干历史，新库及 main-V30 升级
+需要新的制品检查。保留端口分配修复 `1d55ed37`；其通过的 Hosted 故障切换
+CI 使用旧主干，不认证此次整合。应用过分支专用 W1b V27、V28 或 V30 的
 预发布数据库不属于支持的主干升级路径：这些编号对应不同主干迁移，校验必须拒绝
 不匹配的历史。不执行自动历史修补、回滚或数据库重建。旧 Linux/OSS 证据继续
 归属原提交，不作为此次后续整合的验收。

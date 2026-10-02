@@ -1652,6 +1652,16 @@ class ToolPublicationStoreTest {
     static ApiFixture largeApiFixture(int total) throws Exception {
         var fixture = new ToolPublicationStoreTest();
         fixture.setup();
+        return largeApiFixture(total, fixture);
+    }
+
+    static ApiFixture largeApiFixture(int total, javax.sql.DataSource source) throws Exception {
+        var fixture = new ToolPublicationStoreTest();
+        fixture.initialize(source);
+        return largeApiFixture(total, fixture);
+    }
+
+    private static ApiFixture largeApiFixture(int total, ToolPublicationStoreTest fixture) throws Exception {
         var jdbc = fixture.jdbc;
         var manager = fixture.manager;
         var sessions = fixture.sessions;
@@ -1971,6 +1981,43 @@ class ToolPublicationStoreTest {
         return new ApiFixture(fixture.jdbc, fixture.manager, fixture.publicResults, fixture.publicSessions,
                 fixture.apiReader, fixture.projectionProperties, publicationPolicy(), fixture.publicWorkspaces,
                 fixture.apiPublications);
+    }
+
+    @Test
+    void acceptedProducerEvidenceFeedsRetirementEligibility() {
+        var fixture = apiFixture();
+        assertThat(fixture.jdbc().queryForObject("SELECT write_evidence AND accepted_complete FROM qwen_tool_publication",
+                Boolean.class)).isTrue();
+        fixture.jdbc().update("INSERT INTO qwen_output_session_retirement (tenant_key, session_key, tenant_id,"
+                + " session_id, operation_id, generation, retired_at, recovery_protected)"
+                + " VALUES (?, ?, 'tenant-1', 'session-1', 'delete-1', 1, 1, FALSE)", digest("tenant-1"), digest("session-1"));
+        fixture.jdbc().update("UPDATE qwen_tool_publication SET retention_state = 'RETIRING'");
+        var retention = new com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore(fixture.jdbc(), fixture.manager());
+        assertThat(retention.observe(Duration.ZERO)).singleElement()
+                .extracting(com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore.Candidate::blocker).isNull();
+    }
+
+    @Test
+    void retiredRootRejectsProjectionWhilePublicSessionIsStillReadable() {
+        var fixture = apiFixture();
+        var artifact = fixture.results().listArtifacts("tenant-1", "session-1", null, null, null, 100)
+                .artifacts().getFirst();
+        fixture.jdbc().update("DELETE FROM managed_agent_artifact");
+        fixture.jdbc().update("DELETE FROM managed_agent_event");
+        fixture.jdbc().update("UPDATE managed_agent_tool_result SET work_state = 'PENDING', next_attempt_at = 0");
+        var claim = fixture.results().claim().orElseThrow();
+        fixture.jdbc().update("INSERT INTO qwen_output_session_retirement (tenant_key, session_key, tenant_id,"
+                + " session_id, operation_id, generation, retired_at, recovery_protected)"
+                + " VALUES (?, ?, 'tenant-1', 'session-1', 'delete-1', 1, 1, FALSE)", digest("tenant-1"), digest("session-1"));
+        var projection = new ManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
+                artifact.binding(), artifact.manifestRef(), List.of(artifact), fixture.policy().version());
+        assertThat(fixture.results().complete(claim, projection, fixture.policy().version())).isFalse();
+        assertThat(fixture.jdbc().queryForMap("SELECT work_state, claim_until, failure_code FROM managed_agent_tool_result"))
+                .containsEntry("work_state", "SUPPRESSED").containsEntry("claim_until", null)
+                .containsEntry("failure_code", "session_retired");
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM managed_agent_artifact", Long.class)).isZero();
+        assertThat(fixture.jdbc().queryForObject("SELECT COUNT(*) FROM managed_agent_event", Long.class)).isZero();
+        assertThat(fixture.sessions().requireSession("tenant-1", "session-1").status()).isNotEqualTo("DELETED");
     }
 
     @Test
