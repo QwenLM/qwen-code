@@ -1162,6 +1162,25 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void hookControlsStayWithTheAcquiredSessionAndNeverProvisionForLookup() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String kind : List.of("hook-catalog", "hook-execute", "hook-status", "hook-cancel")) {
+                Map<String, Object> operation = Map.of("kind", kind, "operationId", "operation",
+                        "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+                assertEquals("ok", join(fixture.service.control("harness", "runtime", operation)));
+                assertEquals(operation, fixture.transport.lastControl);
+            }
+            Map<String, Object> foreign = Map.of("kind", "hook-status", "operationId", "lookup",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "foreign", "sessionId", "harness"));
+            assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
+            assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+        }
+    }
+
+    @Test
     void refusesIllFormedMcpStringsBeforeForwarding() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             join(fixture.service.acquire("harness", "runtime", "bootstrap"));
