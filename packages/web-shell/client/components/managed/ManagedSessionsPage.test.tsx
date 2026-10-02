@@ -587,6 +587,24 @@ describe('ManagedSessionsPage', () => {
         (node) => node.textContent,
       ),
     ).toContain('Only the Session creator can answer this approval.');
+    // On screen is not enough: the reason is a sibling of the dialog, and a
+    // polite region that mounts with its text already in place announces
+    // nothing, so the dialog's own description is what carries the cause to a
+    // screen-reader user. Widening it must not drop the arguments caveat.
+    const card = container.querySelector('[data-testid="managed-approval"]')!;
+    const described = (
+      card
+        .querySelector('[role="alertdialog"]')!
+        .getAttribute('aria-describedby') ?? ''
+    )
+      .split(' ')
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' | ');
+    expect(described).toContain(
+      'Only the Session creator can answer this approval.',
+    );
+    expect(described).toContain('Tool arguments are unavailable');
   });
 
   it('stops explaining a creator-only refusal once the Session has no approval left', async () => {

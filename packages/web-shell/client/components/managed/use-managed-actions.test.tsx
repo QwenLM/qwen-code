@@ -392,6 +392,45 @@ describe('useManagedActions', () => {
     expect(hook.latest?.answerError).toBeUndefined();
   });
 
+  it('latches the Session the answer was aimed at, not the one now selected', async () => {
+    let rejectAnswer!: (failure: Error) => void;
+    const respond = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectAnswer = reject;
+        }),
+    );
+    const listPending = vi.fn().mockResolvedValue([pending]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    let refusedAnswer!: Promise<unknown>;
+    await act(async () => {
+      refusedAnswer = hook
+        .latest!.respond(pending.actionId, 'allow')
+        .catch((failure: unknown) => failure);
+    });
+
+    // The Session nav has no in-flight guard, so the viewer can already be
+    // looking at their own Session when the 403 lands. Latching that one would
+    // disable a card they may well be allowed to answer, while the Session that
+    // actually refused keeps offering one guaranteed 403 per click.
+    hook.rerender({ sessionId: 'session-2' });
+    await act(async () => {
+      rejectAnswer(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+      await refusedAnswer;
+    });
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    hook.rerender({ sessionId: 'session-1' });
+    expect(hook.latest?.respondForbidden).toBe(true);
+  });
+
   it('restores the retry budget when the reader is withdrawn and back', async () => {
     vi.useFakeTimers();
     const listPending = vi

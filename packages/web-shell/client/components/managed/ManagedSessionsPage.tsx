@@ -161,6 +161,7 @@ function ManagedSessionsContent({
   // is told about it: without this the dialog describes only the tool name and
   // a screen-reader user confirms an approval whose arguments are missing.
   const argumentsCaveatId = useId();
+  const answerNoticeId = useId();
   const approvals = useManagedActions(
     provider,
     enabled ? sessionId : undefined,
@@ -176,12 +177,12 @@ function ManagedSessionsContent({
         : null,
     [approvals.action, messages],
   );
-  const approvalCause = approvals.answerError;
-  const approvalForbidden =
-    typeof approvalCause === 'object' &&
-    approvalCause !== null &&
-    'code' in approvalCause &&
-    approvalCause.code === 'action_forbidden';
+  // The reason line below is mounted exactly when this holds, so the dialog can
+  // point at it without ever leaving a dangling IDREF. A latch-only render has
+  // no `alert` node and no operable option left, so this line is the only place
+  // a screen-reader user can hear why the card is dead.
+  const answerNoticeShown =
+    approvals.answerError !== undefined || approvals.respondForbidden;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -547,9 +548,14 @@ function ManagedSessionsContent({
                 // the latch is scoped to the Session rather than the Action.
                 disabled={approvals.respondForbidden}
                 extraDescriptionId={
-                  pendingApproval.rawInput === undefined
-                    ? argumentsCaveatId
-                    : undefined
+                  [
+                    pendingApproval.rawInput === undefined
+                      ? argumentsCaveatId
+                      : null,
+                    answerNoticeShown ? answerNoticeId : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' ') || undefined
                 }
                 onConfirm={(actionId, optionId) =>
                   approvals.respond(actionId, optionId)
@@ -586,23 +592,22 @@ function ManagedSessionsContent({
           {/* `answerError` is only exposed for the Action on screen, so this
               guard only bounds the latch: the reason describes a card, and
               once the Session has none there is nothing left to explain. */}
-          {pendingApproval !== null &&
-            (approvals.answerError !== undefined ||
-              approvals.respondForbidden) && (
-              <p
-                // The first refusal is news; the latch that keeps every later
-                // approval of this Session disabled only restates it, so it is
-                // a status line rather than a second alert.
-                role={approvals.answerError !== undefined ? 'alert' : 'status'}
-                className="text-sm text-destructive"
-              >
-                {t(
-                  approvals.respondForbidden || approvalForbidden
-                    ? 'managed.approval.forbidden'
-                    : 'managed.approval.failed',
-                )}
-              </p>
-            )}
+          {pendingApproval !== null && answerNoticeShown && (
+            <p
+              id={answerNoticeId}
+              // The first refusal is news; the latch that keeps every later
+              // approval of this Session disabled only restates it, so it is
+              // a status line rather than a second alert.
+              role={approvals.answerError !== undefined ? 'alert' : 'status'}
+              className="text-sm text-destructive"
+            >
+              {t(
+                approvals.respondForbidden
+                  ? 'managed.approval.forbidden'
+                  : 'managed.approval.failed',
+              )}
+            </p>
+          )}
           <ManagedSessionProgress
             summary={summary}
             submitting={
