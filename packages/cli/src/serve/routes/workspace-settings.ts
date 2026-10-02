@@ -29,6 +29,7 @@ import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js'
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   isAuxModelSelectorSettingKey,
+  isCleanPublicProviderBaseUrl,
   publicAuxModelSelectorValue,
 } from '../../utils/aux-model-selector.js';
 import {
@@ -258,8 +259,23 @@ export function prepareSettingWrite(
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
+    let persistedValue = value;
+    if (
+      scope === SettingScope.Workspace &&
+      typeof value === 'string' &&
+      isAuxModelSelectorSettingKey(key)
+    ) {
+      const nul = value.indexOf('\0');
+      if (nul >= 0) {
+        const selector = value.slice(0, nul);
+        const baseUrl = value.slice(nul + 1);
+        if (baseUrl && !isCleanPublicProviderBaseUrl(baseUrl)) {
+          persistedValue = selector;
+        }
+      }
+    }
     return {
-      persistedValue: value,
+      persistedValue,
       // Aux-model selectors persist with their endpoint suffix (runtime
       // routing resolves against it), but the value answered to and
       // broadcast to clients must not carry userinfo credentials.
