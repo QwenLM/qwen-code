@@ -1356,9 +1356,6 @@ describe('normalizeResponsesParameters', () => {
   });
 
   it('keeps a nested open object open, and an explicit closed one closed', () => {
-    // A nested `{type:'object'}` means "any object"; `properties: {}` alone
-    // reads as "an empty object" to a backend that constrains decoding to
-    // the schema (#12889).
     expect(
       normalizeResponsesParameters({
         type: 'object',
