@@ -1550,6 +1550,40 @@ export function createTurnSettledHarnessCheckpoint(input: {
   };
 }
 
+/** An after-tool Hook ended the turn before its results reached a model. */
+export function createHookStoppedRuntimeHarnessCheckpoint(input: {
+  readonly previous: HarnessCheckpointV1;
+  readonly checkpointId: string;
+  readonly coveredSequence: number;
+  readonly previousCheckpointId: string | null;
+}): HarnessCheckpointV1 {
+  const items = input.previous.tools?.items ?? [];
+  if (
+    input.previous.continuation.phase !== 'results_ready' ||
+    items.length === 0 ||
+    items.some((item) => item.state !== 'settled') ||
+    items.every((item) => item.consumed)
+  ) {
+    throw new ManagedSessionRecordError(
+      'Hook stop requires settled Runtime results not yet consumed by a model.',
+    );
+  }
+  return {
+    ...input.previous,
+    identity: {
+      ...input.previous.identity,
+      checkpointId: input.checkpointId,
+      coveredSequence: input.coveredSequence,
+      previousCheckpointId: input.previousCheckpointId,
+    },
+    resume: {
+      ...input.previous.resume,
+      throughSequence: input.coveredSequence,
+    },
+    continuation: { phase: 'turn_settled', pendingEventIds: [] },
+  };
+}
+
 /**
  * After the original Runtime receipts are present on the next model
  * request, mark those settled items consumed. Phase stays

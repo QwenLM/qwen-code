@@ -34,6 +34,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
   assertManagedSessionDurableRef,
+  assertManagedSessionStableId,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
@@ -55,6 +56,18 @@ import {
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
+import type {
+  HostedHookSession,
+  HostedPromptHookRunner,
+} from './hosted-hook-session.js';
+import {
+  HookEventName,
+  PreToolUseHookOutput,
+  createHookOutput,
+  type HookOutput,
+} from '@qwen-code/qwen-code-core/hooks/types.js';
+import { hostedHookOccurrenceId } from './hosted-hook-session.js';
+import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { waitForTurn } from './hosted-turn-wait.js';
 import { boundedShellPreview } from './managed-shell-publisher.js';
 import {
@@ -184,6 +197,18 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+function physicalToolStatus(
+  response: Record<string, unknown> | undefined,
+): 'success' | 'error' | 'cancelled' {
+  if (response?.['executionStatus'] !== undefined)
+    return response['executionStatus'] === 'success'
+      ? 'success'
+      : response['executionStatus'] === 'cancelled'
+        ? 'cancelled'
+        : 'error';
+  return response?.['error'] ? 'error' : 'success';
+}
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -194,6 +219,7 @@ export class HostedToolRecoveryRequiredError extends Error {
 }
 
 export class HostedWorkspaceToolTurn {
+  hookStopReason?: string;
   private readonly broker: HostedWorkspaceBroker;
   private readonly warmed: Promise<void>;
   private acquired = false;
@@ -208,9 +234,11 @@ export class HostedWorkspaceToolTurn {
   private readonly shell?: HostedShellTurnOptions;
   // Once an approval expires nobody is answering, so the Turn asks no more.
   private unanswered = false;
+  private promptHookRunner?: HostedPromptHookRunner;
+  private readonly hookPermission = new Map<string, 'allow' | 'deny'>();
 
   constructor(
-    options: HostedWorkspaceBrokerOptions,
+    private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
     private readonly harness: ManagedHarnessHandle,
     private readonly promptId: string,
@@ -231,6 +259,7 @@ export class HostedWorkspaceToolTurn {
     shell?: HostedShellTurnOptions,
     private readonly approval?: HostedApprovalTurnOptions,
     private readonly mcp?: HostedMcpSession,
+    private readonly hooks?: HostedHookSession,
   ) {
     this.publication =
       publicationOrShell && 'owner' in publicationOrShell
@@ -242,6 +271,7 @@ export class HostedWorkspaceToolTurn {
         : shell;
     this.broker =
       mcp?.broker ??
+      hooks?.broker ??
       new HostedWorkspaceBroker(
         options,
         session.authority.sessionHeader.sessionKey,
@@ -267,6 +297,90 @@ export class HostedWorkspaceToolTurn {
   async resumeCommittedResults(): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
+    const saved = await readHostedFileHistory(this.session);
+    if (saved?.pendingTurn) {
+      this.uncertain = true;
+      try {
+        if (
+          saved.pendingTurn !== this.promptId ||
+          !(await canSettleHostedFileHistory(this.session, saved))
+        )
+          throw new Error('Hosted file history requires recovery.');
+        const authorization =
+          await this.session.authority.harnessRunAuthorization();
+        if (authorization.status !== 'runnable')
+          throw new Error('Hosted file history requires recovery.');
+        const owners = new Set<string>();
+        for (const item of authorization.checkpoint.tools?.items ?? []) {
+          if (
+            item.modelMessageId !== saved.pendingMessageId ||
+            !['write_file', 'edit'].includes(item.toolName)
+          )
+            continue;
+          const intent = this.session.authority
+            .eventsInSequenceRange(1, this.session.authority.committedSequence)
+            .findLast(
+              (event) =>
+                event.kind === 'tool.intent' &&
+                event.payload['executionCallId'] === item.executionCallId &&
+                event.payload['batchId'] === saved.pendingMessageId,
+            );
+          const inputRef = assertManagedSessionDurableRef(
+            intent?.payload['argsRef'],
+            'file history tool input',
+          );
+          if (inputRef.kind !== 'managed-tool-input')
+            throw new Error('Hosted file history owner conflicts.');
+          const input = JSON.parse(
+            (await this.session.resources.read(inputRef)).toString(),
+          ) as { harnessSessionId: unknown; runtimeSessionId: unknown };
+          if (
+            input.harnessSessionId !==
+              this.session.authority.sessionHeader.sessionKey.sessionId ||
+            typeof input.runtimeSessionId !== 'string'
+          )
+            throw new Error('Hosted file history owner conflicts.');
+          owners.add(
+            assertManagedSessionStableId(
+              input.runtimeSessionId,
+              'file history Runtime owner',
+            ),
+          );
+        }
+        if (owners.size !== 1)
+          throw new Error('Hosted file history owner conflicts.');
+        const originalId = [...owners][0];
+        const original =
+          originalId === this.broker.runtimeSessionId
+            ? this.broker
+            : new HostedWorkspaceBroker(
+                this.options,
+                this.session.authority.sessionHeader.sessionKey,
+                originalId,
+              );
+        await original.warm();
+        await original.acquire();
+        const state = await original.fileHistory({
+          kind: 'raw-file-history',
+          action: 'snapshot',
+        });
+        if (!isDeepStrictEqual(state.snapshots, saved.state.snapshots))
+          throw new Error('Original file history snapshots changed.');
+        await commitHostedFileHistory(this.session, {
+          schemaVersion: 1,
+          state,
+          pendingTurn: null,
+          pendingUndo: null,
+        });
+        if (original === this.broker) {
+          this.acquired = true;
+          this.uncertain = false;
+          return;
+        }
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+    }
     await this.acquire(true);
     this.uncertain = false;
   }
@@ -274,33 +388,15 @@ export class HostedWorkspaceToolTurn {
   private async acquire(recovering = false): Promise<void> {
     this.uncertain = true;
     try {
-      await this.broker.acquire();
+      if (this.hooks && !this.mcp) await this.hooks.acquire();
+      else await this.broker.acquire();
       this.acquired = true;
       if (!this.mcp) {
         const saved = await readHostedFileHistory(this.session);
         if (saved?.pendingUndo)
           throw new Error('Hosted file history requires recovery.');
-        if (saved?.pendingTurn) {
-          if (
-            !recovering ||
-            saved.pendingTurn !== this.promptId ||
-            !(await canSettleHostedFileHistory(this.session, saved))
-          )
-            throw new Error('Hosted file history requires recovery.');
-          const state = await this.broker.fileHistory({
-            kind: 'raw-file-history',
-            action: 'snapshot',
-          });
-          if (!isDeepStrictEqual(state.snapshots, saved.state.snapshots))
-            throw new Error('Original file history snapshots changed.');
-          await commitHostedFileHistory(this.session, {
-            schemaVersion: 1,
-            state,
-            pendingTurn: null,
-            pendingUndo: null,
-          });
-          return;
-        }
+        if (saved?.pendingTurn)
+          throw new Error('Hosted file history requires recovery.');
         try {
           await this.broker.fileHistory({
             kind: 'raw-file-history',
@@ -310,7 +406,7 @@ export class HostedWorkspaceToolTurn {
         } catch (cause) {
           // A saved continuation still needs this original runtime ID.
           if (recovering || !isHostedFileHistoryRefusal(cause)) throw cause;
-          await this.broker.release();
+          if (!this.hooks) await this.broker.release();
           this.acquired = false;
           throw new HostedFileHistoryRefusedError(
             cause.reason ?? cause.message,
@@ -335,103 +431,385 @@ export class HostedWorkspaceToolTurn {
     model: string,
     signal: AbortSignal,
   ): Promise<Part[]> {
+    if (!this.hooks) return this.executeNative(calls, parts, model, signal);
+    const responses = await this.executeNative(calls, parts, model, signal);
+    return this.completeHookResults(calls, responses, model, signal);
+  }
+
+  private async completeHookResults(
+    calls: ToolCallRequestInfo[],
+    responses: Part[],
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    if (!this.hooks) return responses;
+    const contextParts: Part[] = [];
+    const history = await this.session.sink.project();
+    const assistant = history.findLast(
+      (entry) =>
+        entry.type === 'assistant' &&
+        entry.daemonPromptId === this.promptId &&
+        entry.message?.parts?.some(
+          (part) => part.functionCall?.id === calls[0]?.callId,
+        ),
+    );
+    const intents = this.session.authority
+      .eventsInSequenceRange(1, this.session.authority.committedSequence)
+      .filter(
+        (entry) =>
+          entry.kind === 'tool.intent' &&
+          entry.payload['batchId'] === assistant?.uuid,
+      );
+    const preToolOutputs = new Map<string, PreToolUseHookOutput>();
+    const effective = await Promise.all(
+      calls.map(async (call) => {
+        const marker = this.session.authority.extensionRecord(
+          'hook_execution',
+          hostedHookOccurrenceId(
+            HookEventName.PreToolUse,
+            `${this.promptId}:${call.callId}`,
+          ),
+        );
+        if (!marker) return call;
+        const record = parseHookExecution(marker.record);
+        const original = JSON.parse(
+          (await this.session.resources.read(record.inputRef)).toString(),
+        ) as { tool_input?: Record<string, unknown> };
+        const saved = record.resultRef
+          ? (JSON.parse(
+              (await this.session.resources.read(record.resultRef)).toString(),
+            ) as { output?: HookOutput })
+          : undefined;
+        if (saved?.output)
+          preToolOutputs.set(
+            call.callId,
+            new PreToolUseHookOutput(saved.output),
+          );
+        return {
+          ...call,
+          args:
+            (saved?.output?.hookSpecificOutput?.['updatedInput'] as
+              | Record<string, unknown>
+              | undefined) ??
+            original.tool_input ??
+            call.args,
+        };
+      }),
+    );
+    for (const [ordinal, call] of effective.entries()) {
+      const dispatched = intents.some(
+        (entry) => entry.payload['ordinal'] === ordinal,
+      );
+      const response = responses.find(
+        (part) => part.functionResponse?.id === call.callId,
+      )?.functionResponse?.response;
+      const preToolOutput = preToolOutputs.get(call.callId);
+      const beforeContext = preToolOutput?.getAdditionalContext();
+      if (
+        beforeContext &&
+        response?.['executionStatus'] !== 'cancelled' &&
+        (!preToolOutput?.isAsk() || dispatched)
+      )
+        contextParts.push({ text: beforeContext });
+      if (!dispatched) continue;
+      if (response?.['executionStatus'] === 'not_started') continue;
+      const failed = physicalToolStatus(response) !== 'success';
+      const result = await this.hooks.fire(
+        failed ? HookEventName.PostToolUseFailure : HookEventName.PostToolUse,
+        `${this.promptId}:${call.callId}`,
+        {
+          tool_name: call.name,
+          tool_input: call.args,
+          tool_use_id: call.callId,
+          ...(failed
+            ? {
+                error: String(
+                  response?.['error'] ??
+                    response?.['executionStatus'] ??
+                    'Tool failed',
+                ),
+                is_interrupt: response?.['executionStatus'] === 'cancelled',
+              }
+            : { tool_response: response }),
+          permission_mode: this.approval?.settings.mode ?? 'yolo',
+          prompt_id: this.promptId,
+        },
+        signal,
+        this.promptHookRunner,
+      );
+      const output =
+        result &&
+        createHookOutput(
+          failed ? HookEventName.PostToolUseFailure : HookEventName.PostToolUse,
+          result,
+        );
+      if (output?.shouldStopExecution())
+        this.hookStopReason ??=
+          output.getEffectiveReason() || 'Stopped by Hook.';
+      const context = output?.getAdditionalContext();
+      if (context) contextParts.push({ text: context });
+    }
+    const batch = await this.hooks.fire(
+      HookEventName.PostToolBatch,
+      `${this.promptId}:${calls.map((call) => call.callId).join(':')}`,
+      {
+        tool_calls: effective.map((call) => {
+          const response = responses.find(
+            (part) => part.functionResponse?.id === call.callId,
+          )?.functionResponse?.response;
+          return {
+            tool_name: call.name,
+            tool_input: call.args,
+            tool_use_id: call.callId,
+            status: physicalToolStatus(response),
+            tool_response: response,
+          };
+        }),
+        permission_mode: this.approval?.settings.mode ?? 'yolo',
+        prompt_id: this.promptId,
+      },
+      signal,
+      this.promptHookRunner,
+    );
+    const output =
+      batch && createHookOutput(HookEventName.PostToolBatch, batch);
+    if (output?.shouldStopExecution())
+      this.hookStopReason ??= output.getEffectiveReason() || 'Stopped by Hook.';
+    const context = output?.getAdditionalContext();
+    if (context) contextParts.push({ text: context });
+    if (contextParts.length) {
+      if (!this.messageFitsInline('tool_result', contextParts, model)) {
+        this.hookStopReason ??=
+          'Hook context exceeds the inline Session Store limit.';
+        return [...responses];
+      }
+      const batchId = `${this.promptId}:${calls.map((call) => call.callId).join(':')}`;
+      const uuid = shellHistoryId(`${batchId}:hook-context`);
+      if (!history.some((entry) => entry.uuid === uuid))
+        await this.commit('tool_result', contextParts, model, {
+          uuid,
+          timestamp: assistant?.timestamp ?? new Date(0).toISOString(),
+        });
+    }
+    return [...responses, ...contextParts];
+  }
+
+  async resumeHookResults(
+    responses: readonly Part[],
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    if (!this.hooks) return [...responses];
+    const history = await this.session.sink.project();
+    const assistant = history.findLast(
+      (entry) =>
+        entry.type === 'assistant' &&
+        entry.daemonPromptId === this.promptId &&
+        entry.message?.parts?.some((part) => part.functionCall),
+    );
+    if (!assistant?.message?.parts)
+      throw new HostedToolRecoveryRequiredError(
+        'Original Hook batch is unavailable.',
+      );
+    const calls = assistant.message.parts.flatMap((part) =>
+      part.functionCall
+        ? [
+            {
+              name: part.functionCall.name!,
+              callId: part.functionCall.id!,
+              args: part.functionCall.args ?? {},
+              isClientInitiated: false,
+              prompt_id: this.promptId,
+            },
+          ]
+        : [],
+    );
+    const contextId = shellHistoryId(
+      `${this.promptId}:${calls.map((call) => call.callId).join(':')}:hook-context`,
+    );
+    const savedContext =
+      history.find((entry) => entry.uuid === contextId)?.message?.parts ?? [];
+    const original = savedContext.length
+      ? responses.slice(0, -savedContext.length)
+      : [...responses];
+    return this.completeHookResults(
+      calls,
+      original,
+      assistant.model ?? model,
+      signal,
+    );
+  }
+
+  setPromptHookRunner(runner: HostedPromptHookRunner): void {
+    this.promptHookRunner = runner;
+  }
+
+  private async executeNative(
+    calls: ToolCallRequestInfo[],
+    parts: Part[],
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
     signal.throwIfAborted();
     if (this.mcp) await waitForTurn(this.warmed, signal);
     const declarations = this.advertised ?? (await this.declarations(signal));
-    const ids = new Set<string>();
-    const requests = calls.map((call) => {
-      const runtimeCallId = randomUUID();
-      const mcpInput = this.mcp?.toolInput(call.name, call.args, runtimeCallId);
-      const isShell = call.name === 'run_shell_command';
-      if (
-        !declarations.some((tool) => tool.name === call.name) ||
-        ids.has(call.callId) ||
-        call.wasOutputTruncated === true
-      )
-        throw new Error('Hosted Workspace profile refused a tool call.');
-      ids.add(call.callId);
-      let validationError: string | undefined;
-      let input: Record<string, unknown>;
-      if (mcpInput) {
-        input = { ...mcpInput.input };
-      } else if (isShell) {
-        const args = call.args;
-        const unsupportedKey = Object.keys(args).find(
-          (key) =>
-            !['command', 'timeout', 'description', 'is_background'].includes(
-              key,
-            ),
-        );
-        if (typeof args['command'] !== 'string' || !args['command'].trim()) {
-          validationError = 'Hosted Shell requires a nonempty command.';
-        } else if (unsupportedKey !== undefined) {
-          validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
-        } else if (
-          args['is_background'] !== undefined &&
-          args['is_background'] !== false &&
-          !(
-            typeof args['is_background'] === 'string' &&
-            args['is_background'].toLowerCase() === 'false'
+    this.hookPermission.clear();
+    if (this.hooks && this.approval) {
+      calls = await Promise.all(
+        calls.map(async (call) => {
+          if (!hostedApprovalAsks(this.approval!.settings, call.name))
+            return call;
+          const output = await this.hooks!.fire(
+            HookEventName.PermissionRequest,
+            `${this.promptId}:${call.callId}`,
+            {
+              tool_name: call.name,
+              tool_input: call.args,
+              tool_use_id: call.callId,
+              prompt_id: this.promptId,
+            },
+            signal,
+            this.promptHookRunner,
+          );
+          const decision = output?.hookSpecificOutput?.['decision'] as
+            | {
+                behavior?: 'allow' | 'deny';
+                updatedInput?: Record<string, unknown>;
+              }
+            | undefined;
+          if (decision?.behavior)
+            this.hookPermission.set(call.callId, decision.behavior);
+          if (
+            output?.continue === false ||
+            output?.decision === 'block' ||
+            output?.decision === 'deny'
           )
-        ) {
-          validationError =
-            'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
-        } else if (
-          args['description'] !== undefined &&
-          typeof args['description'] !== 'string'
-        ) {
-          validationError = 'Hosted Shell description must be a string.';
-        } else if (
-          args['timeout'] !== undefined &&
-          (!Number.isSafeInteger(args['timeout']) ||
-            (args['timeout'] as number) < 1 ||
-            (args['timeout'] as number) > 600000)
-        ) {
-          validationError =
-            'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
-        }
-        if (this.publication && args['is_background'] !== undefined) {
-          validationError = 'Hosted Shell requires one foreground command.';
-        }
-        input = this.publication
-          ? { ...args }
-          : { ...args, is_background: false };
-      } else {
-        const file = call.args['file_path'];
-        input = { ...call.args };
-        const filePathError =
-          'Hosted file tools require file_path relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct file_path and retry.';
-        if (typeof file !== 'string') {
-          validationError = filePathError;
+            this.hookPermission.set(call.callId, 'deny');
+          return decision?.updatedInput
+            ? { ...call, args: decision.updatedInput }
+            : call;
+        }),
+      );
+    }
+    const prepareRequests = (source: ToolCallRequestInfo[]) => {
+      const ids = new Set<string>();
+      return source.map((call) => {
+        const runtimeCallId = randomUUID();
+        const mcpInput = this.mcp?.toolInput(
+          call.name,
+          call.args,
+          runtimeCallId,
+        );
+        const isShell = call.name === 'run_shell_command';
+        if (
+          !declarations.some((tool) => tool.name === call.name) ||
+          ids.has(call.callId) ||
+          call.wasOutputTruncated === true
+        )
+          throw new Error('Hosted Workspace profile refused a tool call.');
+        ids.add(call.callId);
+        let validationError: string | undefined;
+        let input: Record<string, unknown>;
+        if (mcpInput) {
+          input = { ...mcpInput.input };
+        } else if (isShell) {
+          const args = call.args;
+          const unsupportedKey = Object.keys(args).find(
+            (key) =>
+              !['command', 'timeout', 'description', 'is_background'].includes(
+                key,
+              ),
+          );
+          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
+            validationError = 'Hosted Shell requires a nonempty command.';
+          } else if (unsupportedKey !== undefined) {
+            validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+          } else if (
+            args['is_background'] !== undefined &&
+            args['is_background'] !== false &&
+            !(
+              typeof args['is_background'] === 'string' &&
+              args['is_background'].toLowerCase() === 'false'
+            )
+          ) {
+            validationError =
+              'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+          } else if (
+            args['description'] !== undefined &&
+            typeof args['description'] !== 'string'
+          ) {
+            validationError = 'Hosted Shell description must be a string.';
+          } else if (
+            args['timeout'] !== undefined &&
+            (!Number.isSafeInteger(args['timeout']) ||
+              (args['timeout'] as number) < 1 ||
+              (args['timeout'] as number) > 600000)
+          ) {
+            validationError =
+              'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
+          }
+          if (this.publication && args['is_background'] !== undefined) {
+            validationError = 'Hosted Shell requires one foreground command.';
+          }
+          input = this.publication
+            ? { ...args }
+            : { ...args, is_background: false };
         } else {
-          try {
-            input['file_path'] = normalizeWorkspaceRelativePath(file.trim());
-          } catch (cause) {
-            if (!(cause instanceof InvalidWorkspaceRelativePathError))
-              throw cause;
+          const file = call.args['file_path'];
+          input = { ...call.args };
+          const filePathError =
+            'Hosted file tools require file_path relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct file_path and retry.';
+          if (typeof file !== 'string') {
             validationError = filePathError;
+          } else {
+            try {
+              input['file_path'] = normalizeWorkspaceRelativePath(file.trim());
+            } catch (cause) {
+              if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                throw cause;
+              validationError = filePathError;
+            }
           }
         }
-      }
-      const encoded = this.encodeToolInput(
-        mcpInput ?? { toolName: call.name, input },
-      );
-      return {
-        call,
-        validationError,
-        input,
-        isShell,
-        inputDigest: isShell ? managedToolDigest(input) : undefined,
-        mcp: mcpInput !== undefined,
-        ...encoded,
-        argsDigest: `sha256:${managedToolDigest(input)}`,
-        publicationId: isShell && this.publication ? randomUUID() : null,
-        runtimeCallId,
-      };
-    });
+        const encoded = this.encodeToolInput(
+          mcpInput ?? { toolName: call.name, input },
+        );
+        return {
+          call,
+          validationError,
+          input,
+          isShell,
+          inputDigest: isShell ? managedToolDigest(input) : undefined,
+          mcp: mcpInput !== undefined,
+          ...encoded,
+          argsDigest: `sha256:${managedToolDigest(input)}`,
+          publicationId: isShell && this.publication ? randomUUID() : null,
+          runtimeCallId,
+        };
+      });
+    };
+    let requests = prepareRequests(calls);
     if (!this.messageFitsInline('assistant', parts, model))
       throw new Error(
         'Hosted assistant record exceeds the inline Session Store limit.',
+      );
+    if (
+      calls.some(
+        (call) =>
+          !this.messageFitsInline(
+            'tool_result',
+            convertToFunctionErrorResponse(
+              call.name,
+              call.callId,
+              [],
+              'The turn was cancelled before this tool call ran.',
+            ),
+            model,
+          ),
+      )
+    )
+      throw new Error(
+        'Hosted tool cancellation exceeds the inline Session Store limit.',
       );
     signal.throwIfAborted();
     if (requests.some((request) => request.validationError)) {
@@ -505,6 +883,87 @@ export class HostedWorkspaceToolTurn {
       }
       messageId = await this.commit('assistant', parts, model);
       refusals = await this.approve(requests, messageId, inputRefs, signal);
+      if (this.hooks) {
+        const updated = requests.map((request) => request.call);
+        const askAgain = new Set<number>();
+        for (const [index, request] of requests.entries()) {
+          if (refusals[index]) continue;
+          const output = await this.hooks.fire(
+            HookEventName.PreToolUse,
+            `${this.promptId}:${request.call.callId}`,
+            {
+              tool_name: request.call.name,
+              tool_input: request.call.args,
+              tool_use_id: request.call.callId,
+              permission_mode: this.approval?.settings.mode ?? 'yolo',
+              prompt_id: this.promptId,
+            },
+            signal,
+            this.promptHookRunner,
+          );
+          const parsed = output && new PreToolUseHookOutput(output);
+          const permission = parsed?.getPermissionDecision();
+          if (
+            parsed?.shouldStopExecution() ||
+            parsed?.isBlockingDecision() ||
+            permission === 'deny'
+          ) {
+            refusals[index] =
+              parsed?.getEffectiveReason() ||
+              'PreToolUse Hook denied the call.';
+            continue;
+          }
+          const input = output?.hookSpecificOutput?.['updatedInput'];
+          if (
+            input &&
+            typeof input === 'object' &&
+            !Array.isArray(input) &&
+            !isDeepStrictEqual(input, request.call.args)
+          ) {
+            updated[index] = {
+              ...request.call,
+              args: input as Record<string, unknown>,
+            };
+            inputRefs.delete(index);
+            if (
+              this.approval &&
+              hostedApprovalAsks(this.approval.settings, request.call.name)
+            )
+              askAgain.add(index);
+          }
+          if (permission === 'ask') askAgain.add(index);
+        }
+        const revised = prepareRequests(updated);
+        requests = requests.map((request, index) =>
+          updated[index] === request.call ? request : revised[index],
+        );
+        for (const [index, request] of requests.entries()) {
+          if (refusals[index]) continue;
+          if (request.validationError) {
+            refusals[index] = request.validationError;
+            continue;
+          }
+          if (askAgain.has(index)) {
+            if (!this.approval) {
+              refusals[index] =
+                'Hook requires approval, but no approval policy is available.';
+              continue;
+            }
+            const inputRef = await this.session.resources.publish(
+              'managed-tool-input',
+              request.inputBytes,
+            );
+            inputRefs.set(index, inputRef);
+            refusals[index] = await this.ask(
+              this.approval,
+              request.call,
+              inputRef,
+              messageId,
+              signal,
+            );
+          }
+        }
+      }
     } catch (cause) {
       throw new HostedToolRecoveryRequiredError(cause);
     }
@@ -1328,6 +1787,7 @@ export class HostedWorkspaceToolTurn {
         const response = converted[0].functionResponse;
         response.response = {
           ...response.response,
+          executionStatus: envelope.executionStatus,
           manifestRef,
           captureStatus: envelope.capture?.captureStatus ?? 'unavailable',
           previewTruncated: envelope.capture?.previewTruncated ?? false,
@@ -1461,12 +1921,21 @@ export class HostedWorkspaceToolTurn {
     inputRefs: Map<number, ManagedSessionDurableRef>,
     signal: AbortSignal,
   ): Promise<Array<string | undefined>> {
-    const refusals: Array<string | undefined> = requests.map(() => undefined);
+    const refusals: Array<string | undefined> = requests.map((request) =>
+      this.hookPermission.get(request.call.callId) === 'deny'
+        ? 'PermissionRequest Hook denied the call.'
+        : undefined,
+    );
     const approval = this.approval;
     if (!approval) return refusals;
     let asked = false;
     for (const [index, request] of requests.entries()) {
-      if (!hostedApprovalAsks(approval.settings, request.call.name)) continue;
+      if (
+        refusals[index] ||
+        this.hookPermission.get(request.call.callId) === 'allow' ||
+        !hostedApprovalAsks(approval.settings, request.call.name)
+      )
+        continue;
       asked = true;
       if (signal.aborted) break;
       if (this.unanswered) {
@@ -1570,8 +2039,10 @@ export class HostedWorkspaceToolTurn {
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
     if (!this.acquired) return;
     try {
-      await this.harness.settleConsumedRuntimeContinuation();
-      if (!this.mcp) await this.broker.release();
+      if (this.hookStopReason)
+        await this.harness.settleHookStoppedRuntimeContinuation();
+      else await this.harness.settleConsumedRuntimeContinuation();
+      if (!this.mcp && !this.hooks) await this.broker.release();
       this.acquired = false;
     } catch (cause) {
       this.uncertain = true;

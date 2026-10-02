@@ -541,6 +541,44 @@ it('stops observation immediately when the original execution is terminally unkn
   expect(paths).toHaveLength(1);
 });
 
+it('forwards hook recovery to the original owner and rejects a changed receipt identity', async () => {
+  let changed = false;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/tool-sessions/turn/control');
+    expect(body['operation']).toMatchObject({
+      kind: 'hook-status',
+      targetOperationId: 'original-hook',
+    });
+    return {
+      body: {
+        ...identity,
+        result: {
+          operationId: changed ? 'different-hook' : 'original-hook',
+          state: 'outcome_unknown',
+        },
+      },
+    };
+  });
+  const control = {
+    kind: 'hook-status' as const,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: 'session',
+    },
+    operationId: 'lookup',
+    targetOperationId: 'original-hook',
+  };
+  expect(await broker.hookControl(control)).toEqual({
+    operationId: 'original-hook',
+    state: 'outcome_unknown',
+  });
+  changed = true;
+  await expect(broker.hookControl(control)).rejects.toThrow(
+    'Hook response identity',
+  );
+});
+
 it('preserves a worker history refusal reason', async () => {
   const broker = await fixture(() => ({
     code: 409,
@@ -579,13 +617,15 @@ it('resolves a durable execution status for recovery reports', async () => {
   });
 });
 
-it('reads unknown only from a definitive not-found', async () => {
+it('distinguishes unknown outcomes from definitive not-found records', async () => {
   const missing = await fixture(() => ({
     code: 404,
     body: { code: 'runtime_execution_not_found' },
   }));
   await expect(missing.status('execution')).resolves.toBeUndefined();
 
+  // A terminally abandoned record carries the terminal marker, so it reads
+  // as a definitive unknown the stop path may skip.
   const abandoned = await fixture(() => ({
     code: 409,
     body: {
@@ -595,15 +635,15 @@ it('reads unknown only from a definitive not-found', async () => {
   }));
   await expect(abandoned.status('execution')).resolves.toBeUndefined();
 
-  // A still-reconcilable UNKNOWN record carries no terminal marker, so the
-  // read fails closed instead of reporting a running execution as stopped.
-  const unreconciled = await fixture(() => ({
+  // A still-reconcilable UNKNOWN carries no marker, so it reaches the caller
+  // as a state instead of reading as stopped.
+  const unknown = await fixture(() => ({
     code: 409,
     body: { code: 'runtime_broker_execution_unknown' },
   }));
-  await expect(unreconciled.status('execution')).rejects.toEqual(
-    new HostedWorkspaceBrokerRejection(409, 'runtime_broker_execution_unknown'),
-  );
+  await expect(unknown.status('execution')).resolves.toEqual({
+    state: 'unknown',
+  });
 
   const failing = await fixture(() => ({
     code: 500,

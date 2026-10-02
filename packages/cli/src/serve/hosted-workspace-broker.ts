@@ -25,6 +25,11 @@ import type {
   ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 
+import type {
+  ManagedHookControl,
+  ManagedHookOperationView,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+
 export interface HostedWorkspaceBrokerOptions {
   baseUrl: string;
   token: string;
@@ -456,6 +461,27 @@ export class HostedWorkspaceBroker {
     return result as unknown as ManagedMcpOperationView;
   }
 
+  async hookControl(
+    operation: ManagedHookControl,
+  ): Promise<ManagedHookOperationView> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !==
+        (operation.kind === 'hook-status' || operation.kind === 'hook-cancel'
+          ? operation.targetOperationId
+          : operation.operationId) ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime Hook response identity is invalid.');
+    return result as unknown as ManagedHookOperationView;
+  }
+
   async acknowledgeV3(
     id: string,
     receipt: {
@@ -478,29 +504,34 @@ export class HostedWorkspaceBroker {
   }
 
   /**
-   * Read-only execution state for recovery reports. A definitive not-found or
-   * a terminally abandoned answer resolves to undefined; anything else fails
-   * the caller — a recovery report must never read "unknown" from a transient
-   * error.
+   * Read-only execution state. A definitive not-found or a terminally
+   * abandoned record resolves to undefined; a still-reconcilable unknown is
+   * not proof that execution stopped and reaches the caller as the `unknown`
+   * state.
    */
   async status(id: string): Promise<{ state: string } | undefined> {
     let response: Record<string, unknown>;
     try {
       response = await this.request(`/executions/${encodeURIComponent(id)}`);
     } catch (cause) {
-      if (
-        cause instanceof HostedWorkspaceBrokerRejection &&
-        ((cause.status === 404 &&
-          cause.code === 'runtime_execution_not_found') ||
-          // Only an ABANDONED record is a definitive terminal unknown; the
-          // Broker marks it with details.terminal while a still-reconcilable
-          // UNKNOWN record carries no marker and must fail closed here, or a
+      if (cause instanceof HostedWorkspaceBrokerRejection) {
+        if (
+          cause.status === 404 &&
+          cause.code === 'runtime_execution_not_found'
+        )
+          return undefined;
+        if (
+          cause.status === 409 &&
+          cause.code === 'runtime_broker_execution_unknown'
+        ) {
+          // Only an ABANDONED record is a definitive terminal unknown — the
+          // Broker marks it with details.terminal; a still-reconcilable
+          // UNKNOWN carries no marker and must keep reaching the caller, or a
           // running execution would read as already stopped.
-          (cause.status === 409 &&
-            cause.code === 'runtime_broker_execution_unknown' &&
-            cause.details?.['terminal'] === true))
-      )
-        return undefined;
+          if (cause.details?.['terminal'] === true) return undefined;
+          return { state: 'unknown' };
+        }
+      }
       throw cause;
     }
     if (response['executionCallId'] !== id)
