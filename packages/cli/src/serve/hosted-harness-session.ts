@@ -1858,6 +1858,7 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.hooksBusy)
       return error(res, 409, 'hosted_hook_operation_active');
     if (session.mcpBusy || session.mcpRecovering)
@@ -2478,6 +2479,9 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
@@ -2522,6 +2526,12 @@ export function registerHostedHarnessSessionRoutes(
     const continueAuthorization = await session.managed.authority
       .harnessRunAuthorization()
       .catch(() => undefined);
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.active) return error(res, 409, 'hosted_turn_active');
     if (
       continueAuthorization?.status !== 'runnable' ||
       continueAuthorization.checkpoint.continuation.phase !== 'results_ready'
@@ -2716,6 +2726,9 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/managed-runtime/cancel', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
     if (session.hooks) return error(res, 409, 'hosted_hook_recovery_required');
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
@@ -2761,6 +2774,12 @@ export function registerHostedHarnessSessionRoutes(
     const cancelAuthorization = await session.managed.authority
       .harnessRunAuthorization()
       .catch(() => undefined);
+    if (identity(req, sessions) !== session)
+      return error(res, 404, 'hosted_session_not_found');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    if (session.mcpBusy || session.mcpRecovering)
+      return error(res, 409, 'hosted_mcp_operation_active');
+    if (session.active) return error(res, 409, 'hosted_turn_active');
     if (cancelAuthorization?.status !== 'runnable') {
       releaseRecoveredRuntime(session);
       return error(res, 409, 'hosted_turn_recovery_required');
