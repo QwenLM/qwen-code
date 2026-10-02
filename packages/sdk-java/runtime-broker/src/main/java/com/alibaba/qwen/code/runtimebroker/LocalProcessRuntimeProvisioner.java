@@ -255,8 +255,11 @@ public final class LocalProcessRuntimeProvisioner
                 || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);
         }
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
         return CompletableFuture.supplyAsync(() -> store.locked(binding.getRequest(),
-                binding.getProvisionSeed(), binding.getResourceHandle(), false, (resource, registration) -> {
+                binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
                 boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
                 if (!originalBootStopped && (!store.sameBoot(registration)
                         || registration.state() == LocalRuntimeStore.State.LAUNCHING

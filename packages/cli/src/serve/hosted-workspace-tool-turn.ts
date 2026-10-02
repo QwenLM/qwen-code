@@ -909,6 +909,8 @@ export class HostedWorkspaceToolTurn {
             permission === 'deny'
           ) {
             refusals[index] =
+              (permission === 'deny' &&
+                parsed?.getPermissionDecisionReason()) ||
               parsed?.getEffectiveReason() ||
               'PreToolUse Hook denied the call.';
             continue;

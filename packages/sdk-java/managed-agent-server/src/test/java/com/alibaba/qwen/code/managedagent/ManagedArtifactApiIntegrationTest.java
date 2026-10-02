@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -418,6 +419,22 @@ class ManagedArtifactApiIntegrationTest {
             ((com.fasterxml.jackson.databind.node.ObjectNode) changed).put(field, "unknown");
             assertThat(contract.validate("/components/schemas/PublicToolResult", changed)).isNotEmpty();
         }
+    }
+
+    @Test
+    void deletionDuringLeaseAdmissionPreservesPublicNotFound() {
+        var reader = org.mockito.Mockito.spy(fixture.reader());
+        org.mockito.Mockito.doAnswer(call -> {
+            fixture.jdbc().update("UPDATE managed_agent_session SET status = 'DELETED' WHERE session_id = 'session-1'");
+            throw new com.alibaba.qwen.code.managedagent.api.ApiException(org.springframework.http.HttpStatus.CONFLICT,
+                    "tool_output_session_retired", "Retired during lease admission");
+        }).when(reader).lease(org.mockito.ArgumentMatchers.any());
+        var service = new ManagedArtifactService(sessions, fixture.results(), reader, fixture.policy(), fixture.properties());
+        assertThatThrownBy(() -> service.content(new com.alibaba.qwen.code.managedagent.api.TenantContext("tenant-1", "reader"),
+                "session-1", stdout.path("id").asText(), stdout.path("revision").asText(), null, null, null,
+                new org.springframework.mock.web.MockHttpServletResponse()))
+                .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(org.springframework.http.HttpStatus.NOT_FOUND));
     }
 
     private static MockHttpServletRequestBuilder bytes(JsonNode artifact) {

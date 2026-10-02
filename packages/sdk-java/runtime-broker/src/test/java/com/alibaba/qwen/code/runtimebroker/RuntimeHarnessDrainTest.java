@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -14,7 +15,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class RuntimeHarnessDrainTest {
@@ -85,6 +90,53 @@ class RuntimeHarnessDrainTest {
             service.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
             assertEquals(0, provisioner.stops);
             assertEquals(0, transport.releases);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"PROVISIONING,false", "PROVISIONING,true", "RECOVERY_BLOCKED,false", "RECOVERY_BLOCKED,true"})
+    @DisabledOnOs(OS.WINDOWS)
+    void closeRetiresUnstartedBindingsBeforeTheirHandleWasSaved(String state, boolean intentExists,
+            @TempDir Path directory) throws Exception {
+        var initial = bindings.findOrCreate(request);
+        var seed = initial.getProvisionSeed();
+        var store = new LocalRuntimeStore(directory.toRealPath(), DurableLocalProcessRuntimeProvisionerTest.HOST);
+        try (var local = new LocalProcessRuntimeProvisioner(java.util.List.of("must-not-run"), directory,
+                new HttpRuntimeTransport(), null, store)) {
+            if (intentExists) {
+                local.ensureResource(request, seed, null).toCompletableFuture().get(5, TimeUnit.SECONDS);
+            }
+            if ("RECOVERY_BLOCKED".equals(state)) {
+                var claimed = bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
+                var blocked = bindings.compareAndSet(claimed,
+                        claimed.withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now()));
+                assertNotNull(blocked);
+                bindings.releaseOperation(blocked.getBindingId(), "setup", blocked.getOperationGeneration());
+            }
+            assertNull(bindings.findById(initial.getBindingId()).getResourceHandle());
+            try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.failedFuture(new AssertionError()),
+                    local, transport, bindings, sessions, executions, "drainer",
+                    Duration.ofSeconds(2), Duration.ofSeconds(2))) {
+                service.requestHarnessDrain("tenant", "harness");
+                service.drainHarnessSession("tenant", "harness").toCompletableFuture().get(5, TimeUnit.SECONDS);
+                var retired = bindings.findById(initial.getBindingId());
+                assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+                assertNotNull(retired.getDrainReceipt());
+                assertTrue(retired.getDrainReceipt().matches(retired));
+                assertNull(retired.getLossEvidence());
+                var registration = store.locked(request, seed, retired.getResourceHandle(), false,
+                        (resource, saved) -> saved);
+                assertEquals(LocalRuntimeStore.State.RETIRED, registration.state());
+                assertEquals(0, registration.pid());
+                assertNull(registration.process());
+                assertEquals(0, transport.releases);
+                var delayed = assertThrows(ExecutionException.class,
+                        () -> local.provision(request, seed).toCompletableFuture().get(5, TimeUnit.SECONDS));
+                assertEquals("runtime_broker_recovery_blocked",
+                        assertInstanceOf(RuntimeBrokerException.class, delayed.getCause()).getCode());
+                assertThrows(RuntimeBrokerException.class, () -> bindings.findOrCreate(request));
+                service.drainHarnessSession("tenant", "harness").toCompletableFuture().get(5, TimeUnit.SECONDS);
+            }
         }
     }
 
