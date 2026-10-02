@@ -1035,7 +1035,7 @@ public class ManagedSessionStore {
                 head.lastCommitDigest(), head.activationEpoch(), replayed);
     }
 
-    long databaseEpochMillis(Timestamp timestamp) {
+    private long databaseEpochMillis(Timestamp timestamp) {
         // DATETIME uses the database zone; keep fractions outside MariaDB's bind.
         return jdbc.queryForObject("SELECT UNIX_TIMESTAMP(CAST(? AS DATETIME(6)))",
                 Long.class, wholeSeconds(timestamp)) * 1_000
