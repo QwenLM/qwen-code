@@ -365,6 +365,58 @@ describe('Hosted Harness no-tool session', () => {
     await rm(state.root, { recursive: true, force: true });
   });
 
+  it('refuses a new prompt while the journal close is still sealing', async () => {
+    const server = await app();
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = LocalJsonlManagedSessionJournalHandle.prototype.seal;
+    vi.spyOn(
+      LocalJsonlManagedSessionJournalHandle.prototype,
+      'seal',
+    ).mockImplementation(async function (
+      this: LocalJsonlManagedSessionJournalHandle,
+      commit,
+    ) {
+      entered();
+      await gate;
+      await original.call(this, commit);
+    });
+    const closing = headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).then((response) => response);
+    await started;
+    try {
+      const prompt = [{ type: 'text', text: 'late input' }];
+      const rejected = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        });
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.code).toBe('hosted_session_closing');
+      expect(state.model).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    expect((await closing).status).toBe(204);
+  });
+
   it('runs and queries a Hook-only operation without opening a user turn', async () => {
     const { server, authorize, requests } = await hookApp();
     const operationId = randomUUID();
@@ -414,52 +466,49 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it.each([
-    ['a Hook operation', 200],
-    ['Session deletion', 204],
-  ])(
-    'refuses a prompt with a Hook diagnostic while %s runs',
-    async (trigger, settled) => {
-      const { server, authorize } = await hookApp();
-      const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
-      const original = control.getMockImplementation()!;
-      let dispatched!: () => void;
-      const started = new Promise<void>((resolve) => (dispatched = resolve));
-      let finish!: () => void;
-      const held = new Promise<void>((resolve) => (finish = resolve));
-      control.mockImplementation(async (operation) => {
-        if (operation.kind === 'hook-execute') {
-          dispatched();
-          await held;
-        }
-        return original(operation);
-      });
-      const running = (
-        trigger === 'Session deletion'
-          ? headers(supertest(server).delete(`/session/${SESSION_ID}`))
-          : authorize(
-              supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
-            ).send({
-              operationId: randomUUID(),
-              event: 'Notification',
-              input: { message: 'ready', notification_type: 'test' },
-            })
-      ).then(
-        (response) => response,
-        () => undefined,
-      );
-      await started;
-      try {
-        const refused = await authorize(
-          supertest(server).post(`/session/${SESSION_ID}/prompt`),
-        ).send({});
-        expect(refused.status).toBe(409);
-        expect(refused.body.code).toBe('hosted_hook_operation_active');
-      } finally {
-        finish();
+    ['a Hook operation', 200, 'hosted_hook_operation_active'],
+    ['Session deletion', 204, 'hosted_session_closing'],
+  ])('refuses a prompt while %s runs', async (trigger, settled, code) => {
+    const { server, authorize } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    let dispatched!: () => void;
+    const started = new Promise<void>((resolve) => (dispatched = resolve));
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => (finish = resolve));
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-execute') {
+        dispatched();
+        await held;
       }
+      return original(operation);
+    });
+    const running = (
+      trigger === 'Session deletion'
+        ? headers(supertest(server).delete(`/session/${SESSION_ID}`))
+        : authorize(
+            supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+          ).send({
+            operationId: randomUUID(),
+            event: 'Notification',
+            input: { message: 'ready', notification_type: 'test' },
+          })
+    ).then(
+      (response) => response,
+      () => undefined,
+    );
+    await started;
+    try {
+      const refused = await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      ).send({});
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe(code);
+    } finally {
+      finish();
       expect((await running)?.status).toBe(settled);
-    },
-  );
+    }
+  });
 
   it.each(['continue', 'cancel'])(
     'refuses Runtime-only %s for a Hook Session without changing its owner or records',
@@ -2230,11 +2279,16 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   it.each([
-    ['an MCP configuration', 'mcp-configure', 202],
-    ['Session deletion', 'mcp-release', 204],
+    [
+      'an MCP configuration',
+      'mcp-configure',
+      202,
+      'hosted_mcp_operation_active',
+    ],
+    ['Session deletion', 'mcp-release', 204, 'hosted_session_closing'],
   ] as const)(
-    'refuses a prompt with an MCP diagnostic while %s runs',
-    async (trigger, parked, settled) => {
+    'refuses a prompt while %s runs',
+    async (trigger, parked, settled, code) => {
       const { server, authorize } = await mcpApp();
       await authorize(
         supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
@@ -2287,11 +2341,11 @@ describe('Hosted Harness no-tool session', () => {
           supertest(server).post(`/session/${SESSION_ID}/prompt`),
         ).send({});
         expect(refused.status).toBe(409);
-        expect(refused.body.code).toBe('hosted_mcp_operation_active');
+        expect(refused.body.code).toBe(code);
       } finally {
         finish();
+        expect((await running)?.status).toBe(settled);
       }
-      expect((await running)?.status).toBe(settled);
     },
   );
 
@@ -6490,6 +6544,108 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     return { server, loaded };
   }
+
+  it.each(
+    (['continue', 'cancel'] as const).flatMap((route) =>
+      (['closing', 'authorizing', 'detached'] as const).map((phase) => ({
+        route,
+        phase,
+      })),
+    ),
+  )(
+    'fences recovery $route admission when $phase',
+    async ({ route, phase }) => {
+      await parkToolTurn();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      const { server, loaded } = await loadReplacement();
+      expect(loaded.status).toBe(200);
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      const clientId = loaded.body.clientId as string;
+      state.model.mockClear();
+      const cancel = vi.mocked(HostedWorkspaceBroker.prototype.cancel);
+      cancel.mockClear();
+      let finishRelease!: () => void;
+      let finishAuthorization!: () => void;
+      const releaseGate = new Promise<void>((resolve) => {
+        finishRelease = resolve;
+      });
+      const authorizationGate = new Promise<void>((resolve) => {
+        finishAuthorization = resolve;
+      });
+      let releasing = false;
+      let authorizing = false;
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'release',
+      ).mockImplementationOnce(async () => {
+        releasing = true;
+        await releaseGate;
+      });
+      if (phase !== 'closing') {
+        const original =
+          LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+        vi.spyOn(
+          LocalManagedSessionAuthority.prototype,
+          'harnessRunAuthorization',
+        ).mockImplementation(async function (
+          this: LocalManagedSessionAuthority,
+        ) {
+          const authorization = await original.call(this);
+          authorizing = true;
+          await authorizationGate;
+          return authorization;
+        });
+      }
+      const admit = () =>
+        replacementHeaders(
+          supertest(server).post(
+            `/session/${SESSION_ID}/managed-runtime/${route}`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({ promptId: PROMPT_ID, ...recovery })
+          .then((response) => response);
+      let request: Promise<supertest.Response> | undefined;
+      let closing: Promise<supertest.Response> | undefined;
+      try {
+        if (phase !== 'closing') {
+          request = admit();
+          await vi.waitFor(() => expect(authorizing).toBe(true));
+        }
+        closing = replacementHeaders(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        ).then((response) => response);
+        await vi.waitFor(() => expect(releasing).toBe(true));
+        if (phase === 'detached') {
+          finishRelease();
+          expect((await closing).status).toBe(204);
+        }
+        if (phase === 'closing') request = admit();
+        finishAuthorization();
+        const refused = await request!;
+        expect(refused.status).toBe(phase === 'detached' ? 404 : 409);
+        expect(refused.body.code).toBe(
+          phase === 'detached'
+            ? 'hosted_session_not_found'
+            : 'hosted_session_closing',
+        );
+        expect(state.model).not.toHaveBeenCalled();
+        expect(cancel).not.toHaveBeenCalled();
+        finishRelease();
+        expect((await closing).status).toBe(204);
+      } finally {
+        finishAuthorization();
+        finishRelease();
+        await request;
+        await closing;
+      }
+    },
+  );
 
   it('keeps a bare cold load of a parked Turn inert', async () => {
     await parkToolTurn();
