@@ -924,3 +924,62 @@ describe('managed-runtime-provider/1', () => {
     });
   });
 });
+
+it('validates raw file history ownership, paths and the closed operation shape', () => {
+  const state = {
+    ownerSessionId: session.harnessSessionId,
+    snapshots: [],
+    files: {},
+  };
+  expect(
+    parseManagedRuntimeProviderOperation(
+      { kind: 'raw-file-history', action: 'bind', state },
+      session,
+    ),
+  ).toMatchObject({ state });
+  const prepare = {
+    kind: 'raw-file-history',
+    action: 'prepare',
+    promptId: 'original-prompt',
+    paths: ['a'],
+  };
+  expect(parseManagedRuntimeProviderOperation(prepare, session)).toEqual(
+    prepare,
+  );
+  for (const operation of [
+    {
+      kind: 'raw-file-history',
+      action: 'bind',
+      state: { ...state, ownerSessionId: session.runtimeSessionId },
+    },
+    {
+      kind: 'raw-file-history',
+      action: 'prepare',
+      promptId: '',
+      paths: ['a'],
+    },
+    {
+      kind: 'raw-file-history',
+      action: 'prepare',
+      promptId: session.runtimeSessionId,
+      paths: ['../a'],
+    },
+    {
+      kind: 'raw-file-history',
+      action: 'prepare',
+      promptId: session.runtimeSessionId,
+      paths: ['/a'],
+    },
+    { kind: 'raw-file-history', action: 'snapshot', unknown: true },
+  ])
+    expect(() =>
+      parseManagedRuntimeProviderOperation(operation, session),
+    ).toThrow();
+  expect(() =>
+    parseManagedRuntimeProviderResult(
+      { kind: 'raw-file-history', action: 'snapshot' },
+      { ...state, files: { a: null } },
+      session,
+    ),
+  ).toThrow();
+});

@@ -143,6 +143,10 @@ class ManagedExtensionRecordContractTest {
         }
         assertEquals(List.of(), wrong);
         assertEquals(8 * 8 + 7 * 7 + 10 * 10, pairs);
+        assertFalse(ManagedExtensionRecords.isTransitionAllowed(null,
+                "reserved", "admitted"));
+        assertFalse(ManagedExtensionRecords.isTransitionAllowed("run",
+                null, "admitted"));
         assertFalse(ManagedExtensionRecords.isTransitionAllowed("run",
                 "reserved", null));
         assertFalse(ManagedExtensionRecords.isTransitionAllowed("task",

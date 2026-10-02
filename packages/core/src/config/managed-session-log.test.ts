@@ -20,6 +20,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from './approval-mode.js';
 import { Config, type ConfigParameters } from './config.js';
 import { Storage } from './storage.js';
+import { MCPServerConfig } from './mcp-server-config.js';
+import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
+import { McpClientManager } from '../tools/mcp-client-manager.js';
+import type { AnyDeclarativeTool } from '../tools/tools.js';
 import {
   ManagedSessionRecordRefusedError,
   type ChatRecord,
@@ -1327,5 +1331,109 @@ describe('Managed Session log recording', () => {
     expect(() => recorder.bindManagedSink(writer)).toThrow(
       SessionWriterUnavailableError,
     );
+  });
+});
+
+describe('Managed host tools', () => {
+  it('builds a registry without offering it any tool', async () => {
+    const offers = [
+      vi.spyOn(ToolRegistry.prototype, 'registerTool'),
+      vi.spyOn(ToolRegistry.prototype, 'registerFactory'),
+      vi.spyOn(ToolRegistry.prototype, 'registerPermissionDeferredFactory'),
+    ];
+    const legacy = await managedConfig({
+      sessionExecutionEngine: 'legacy',
+    }).createToolRegistry(undefined, { skipDiscovery: true });
+    expect(legacy.getAllToolNames()).not.toHaveLength(0);
+    expect(offers.some((offer) => offer.mock.calls.length > 0)).toBe(true);
+    for (const offer of offers) offer.mockClear();
+
+    const managed = await managedConfig().createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(managed.getAllToolNames()).toEqual([]);
+    for (const offer of offers) expect(offer).not.toHaveBeenCalled();
+  });
+
+  it('hands a pending MCP budget callback to its registry once', async () => {
+    const setOnBudgetEvent = vi.spyOn(
+      McpClientManager.prototype,
+      'setOnBudgetEvent',
+    );
+    const config = managedConfig();
+    const callback = vi.fn();
+    config.setMcpBudgetEventCallback(callback);
+
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    expect(setOnBudgetEvent).toHaveBeenCalledExactlyOnceWith(callback);
+
+    // A later registry, such as a subagent's, does not inherit it.
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    expect(setOnBudgetEvent).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      'legacy',
+      ['discovered_tool', 'late_deferred', 'late_factory', 'late_tool'],
+    ],
+    ['managed', []],
+  ] as const)(
+    'a %s registry keeps %j of the tools registered later',
+    async (engine, kept) => {
+      const config = managedConfig({ sessionExecutionEngine: engine });
+      const registry = new ToolRegistry(config);
+      const tool = {
+        name: 'late_tool',
+        shouldDefer: false,
+      } as unknown as AnyDeclarativeTool;
+      const factory = async () => tool;
+      registry.registerTool(tool);
+      registry.registerFactory('late_factory', factory);
+      registry.registerPermissionDeferredFactory('late_deferred', factory);
+      const source = new ToolRegistry(
+        managedConfig({ sessionExecutionEngine: 'legacy' }),
+      );
+      const discovered = Object.create(DiscoveredTool.prototype, {
+        name: { value: 'discovered_tool' },
+      }) as DiscoveredTool;
+      source.registerTool(discovered);
+      registry.copyDiscoveredToolsFrom(source);
+
+      expect(registry.getAllToolNames().sort()).toEqual(kept);
+    },
+  );
+
+  it('has no MCP servers and starts no MCP discovery', async () => {
+    const mcpServers = { configured: new MCPServerConfig('node') };
+    expect(
+      managedConfig({
+        sessionExecutionEngine: 'legacy',
+        mcpServers,
+      }).getMcpServers(),
+    ).toHaveProperty('configured');
+    const config = managedConfig({ mcpServers });
+    expect(config.getMcpServers()).toEqual({});
+
+    const initializeInternal = vi
+      .spyOn(
+        config as unknown as {
+          initializeInternal(options?: unknown): Promise<void>;
+        },
+        'initializeInternal',
+      )
+      .mockResolvedValue(undefined);
+    await config.initialize();
+    expect(initializeInternal).toHaveBeenCalledWith(
+      expect.objectContaining({ skipMcpDiscovery: true }),
+    );
+
+    // A settings reload or a working-directory change reconciles MCP servers
+    // after initialization; a Managed session starts none.
+    (config as unknown as { initialized: boolean }).initialized = true;
+    const getToolRegistry = vi.spyOn(config, 'getToolRegistry');
+    await config.reinitializeMcpServers(mcpServers);
+    expect(getToolRegistry).not.toHaveBeenCalled();
+    await config.closeSessionWriter();
   });
 });

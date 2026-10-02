@@ -856,14 +856,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                     boundedRecoveryText(execution, "runtimeSessionId", context),
                     progressCursor, outcome, status));
         }
-        Object admitted = recovery.get("continuationAdmitted");
-        if (admitted != null && !(admitted instanceof Boolean)) {
-            throw new DaemonProtocolException(context
-                    + "._meta managed Runtime continuationAdmitted"
-                    + " must be a boolean");
-        }
         return new HarnessRuntimeRecovery(phase, checkpointId, activationId,
-                Boolean.TRUE.equals(admitted), executions);
+                executions);
     }
 
     private static String boundedRecoveryText(Map<String, Object> value,

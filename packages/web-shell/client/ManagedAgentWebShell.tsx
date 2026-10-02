@@ -18,6 +18,7 @@ import {
 } from './themeContext';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 
+/** Change productScope with tenant/actor identity so saved selections and output caches are discarded. */
 export interface ManagedAgentWebShellProps
   extends JavaManagedAgentProviderOptions {
   sessionId?: string;
@@ -47,6 +48,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     agentId,
     productScope,
     enableWorkspaceBinding,
+    saveArtifact,
   } = props;
   const resolvedLanguage = normalizeLanguage(language);
   const provider = useMemo(
@@ -60,6 +62,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
         agentId,
         productScope,
         enableWorkspaceBinding,
+        saveArtifact,
       }),
     [
       baseUrl,
@@ -70,6 +73,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       agentId,
       productScope,
       enableWorkspaceBinding,
+      saveArtifact,
     ],
   );
   const [selection, setSelection] = useState(() => ({
