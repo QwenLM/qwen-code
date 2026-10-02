@@ -1313,7 +1313,7 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false}
+                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -1329,7 +1329,7 @@ class ManagedAgentApiContractTest {
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
                 assertThat(other.get("capabilities"))
-                        .isEqualTo(json("{\"tasks\":true,\"artifacts\":false,\"actions\":false}"));
+                        .isEqualTo(json("{\"tasks\":true,\"artifacts\":false,\"actions\":false,\"sessionClose\":true}"));
             }
         }
 

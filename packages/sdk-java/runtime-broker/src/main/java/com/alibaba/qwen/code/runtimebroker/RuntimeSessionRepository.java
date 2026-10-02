@@ -9,5 +9,8 @@ public interface RuntimeSessionRepository {
     RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
             RuntimeSessionRecord replacement);
 
+    java.util.List<RuntimeSessionRecord> findByBinding(String bindingId, long generation,
+            String afterSessionId, int limit);
+
     long countActiveByBinding(String bindingId, long runtimeGeneration);
 }
