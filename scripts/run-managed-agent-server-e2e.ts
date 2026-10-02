@@ -1982,9 +1982,14 @@ try {
 } finally {
   // A frozen Harness holds SIGTERM pending from stopChild; wake it before
   // teardown so teardown does not burn the 10-second stall on every path,
-  // failure or success.
+  // failure or success. `harness` is try-block scoped, so reach it through
+  // the children registry by its start() name.
   if (freeze) {
-    signalProcessTree(harness.child, 'SIGCONT');
+    for (const child of children) {
+      if (child.name === 'Hosted Harness') {
+        signalProcessTree(child.child, 'SIGCONT');
+      }
+    }
   }
   for (const child of children.reverse()) {
     await stopChild(child.child);
