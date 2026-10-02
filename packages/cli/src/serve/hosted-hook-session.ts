@@ -59,6 +59,12 @@ export class HostedHookRecoveryRequiredError extends Error {
   }
 }
 
+export class HostedHookInputConflictError extends Error {
+  constructor() {
+    super('Hook occurrence input conflict.');
+  }
+}
+
 export type HostedPromptHookRunner = (
   config: PromptHookConfig,
   event: HookEventName,
@@ -547,7 +553,7 @@ export class HostedHookSession {
     const running = this.occurrences.get(key);
     if (running) {
       if (!isDeepStrictEqual(running.input, input))
-        throw new Error('Hook occurrence input conflict.');
+        throw new HostedHookInputConflictError();
       return running.result;
     }
     const promise = this.occurrenceQueue.then(() =>
@@ -587,7 +593,7 @@ export class HostedHookSession {
           ? plan.refusedInputDigest !== semanticInputDigest(fields)
           : !isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields))
       )
-        throw new Error('Hook occurrence input conflict.');
+        throw new HostedHookInputConflictError();
       if (marker.run.execution === 'not_started_proven')
         return cancelledResult().output;
       if (marker.resultRef)
