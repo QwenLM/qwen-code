@@ -143,9 +143,6 @@ export interface HostedWorkspaceContextSlot {
   write(context: string): void;
 }
 
-/** The instruction files a Hosted turn reads from the Workspace root. */
-export const HOSTED_WORKSPACE_CONTEXT_FILES = ['QWEN.md', 'AGENTS.md'];
-
 function shellHistoryId(executionCallId: string): string {
   const bytes = createHash('sha1')
     .update('qwen-hosted-shell-history/1:')
@@ -538,69 +535,32 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
-   * Reads the Workspace's root instruction files through the acquired Runtime
-   * and offers them to the Session's context slot. Best-effort: any failure
-   * leaves the slot untouched and is logged, never thrown into the turn.
+   * Reads the Workspace's project instruction files through the acquired
+   * Runtime and offers them to the Session's context slot. The read is a
+   * Runtime control, not a tool execution: it reserves nothing in the
+   * execution ledger, so a failure leaves nothing to cancel or recover.
+   * Best-effort: any failure leaves the slot untouched and is logged, never
+   * thrown into the turn.
    */
   private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
     const slot = this.context;
     if (!slot) return;
-    // A failed read leaves a reserved execution no recovery path can
-    // enumerate — cancel it before swallowing. An aborted read must not
-    // latch the slot at all: `''` means "the Workspace has none", so writing
-    // after a cancel would turn a retryable miss into permanent absence.
-    let inFlight: string | undefined;
     try {
-      const sections: string[] = [];
-      // A cancelled or never-started read says nothing about the file — mark
-      // the batch indefinite and skip the write, so the slot stays
-      // undefined and a later turn retries instead of latching "no context".
-      let indefinite = false;
-      for (const name of HOSTED_WORKSPACE_CONTEXT_FILES) {
-        if (signal.aborted) return;
-        const payloadJson = JSON.stringify({
-          toolName: 'read_file',
-          input: { file_path: name },
-        });
-        const callId = randomUUID();
-        const executionCallId = await this.broker.prepare(
-          callId,
-          `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`,
-          undefined,
-          this.promptId,
-        );
-        inFlight = executionCallId;
-        const result = await this.broker.execute(
-          executionCallId,
-          payloadJson,
-          signal,
-        );
-        inFlight = undefined;
-        if (
-          result.executionStatus === 'cancelled' ||
-          result.executionStatus === 'not_started'
-        ) {
-          indefinite = true;
-          continue;
-        }
-        if (result.executionStatus !== 'success') continue;
-        const text = (result.responseParts as Array<{ text?: unknown }>)
-          .flatMap((part) =>
-            part && typeof part.text === 'string' ? [part.text] : [],
+      const files = await this.broker.workspaceContext();
+      // `''` means "the Workspace has none", so an aborted turn must not
+      // latch it: the slot stays undefined and a later turn retries.
+      if (signal.aborted) return;
+      slot.write(
+        files
+          .map(({ name, text }) => ({ name, text: text.trim() }))
+          .filter(({ text }) => text)
+          .map(
+            ({ name, text }) =>
+              `--- Context from: ${name} ---\n${text}\n--- End of Context from: ${name} ---`,
           )
-          .join('\n')
-          .trim();
-        if (text)
-          sections.push(
-            `--- Context from: ${name} ---\n${text}\n--- End of Context from: ${name} ---`,
-          );
-      }
-      if (signal.aborted || indefinite) return;
-      slot.write(sections.join('\n\n'));
+          .join('\n\n'),
+      );
     } catch (cause) {
-      if (inFlight !== undefined) {
-        await this.broker.cancel(inFlight).catch(() => undefined);
-      }
       writeStderrLineSafe(
         'qwen serve: Hosted Workspace context read failed: ' + String(cause),
       );

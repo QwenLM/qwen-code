@@ -679,7 +679,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     .thenApply(bytes -> ManagedHookProtocol.response(bytes, session, immutable));
         }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
-        if ("history".equals(immutable.get("kind")) || "raw-file-history".equals(immutable.get("kind"))) {
+        // Workspace context reads the Session's files directly, as file history
+        // does: neither needs a provider Session acquired first.
+        if (Set.of("history", "raw-file-history", "workspace-context").contains(immutable.get("kind"))) {
             return provider(lease, session, immutable);
         }
         return provider(lease, session, Map.of("kind", "acquire"))

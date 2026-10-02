@@ -343,6 +343,10 @@ async function hookApp() {
 
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
       ownerSessionId: SESSION_ID,
@@ -1525,19 +1529,7 @@ describe('Hosted Harness no-tool session', () => {
       ),
     ).toHaveLength(1);
     expect(state.model).toHaveBeenCalledOnce();
-    // The acquisition also dispatches the two Workspace-context reads through
-    // the same broker; count only the model-driven execution.
-    expect(
-      execute.mock.calls.filter((call) => {
-        const payload = JSON.parse(call[1] as string) as {
-          input?: { file_path?: string };
-        };
-        return (
-          payload.input?.file_path !== 'QWEN.md' &&
-          payload.input?.file_path !== 'AGENTS.md'
-        );
-      }),
-    ).toHaveLength(1);
+    expect(execute).toHaveBeenCalledOnce();
     expect(
       requests.filter((operation) => operation.kind === 'hook-execute'),
     ).toHaveLength(1);
@@ -3217,10 +3209,7 @@ describe('Hosted Harness no-tool session', () => {
       );
       try {
         expect(descriptor).toBeDefined();
-        // The model's Shell call plus the one-time Workspace context reads.
-        expect(execute).toHaveBeenCalledTimes(
-          ending === 'execution-error' ? 2 : 3,
-        );
+        expect(execute).toHaveBeenCalledOnce();
         expect(close).toHaveBeenCalledOnce();
         await expect(
           fetch(descriptor!.url, {
@@ -5275,6 +5264,10 @@ describe('Hosted Harness tool approvals', () => {
     vi.waitFor(check, { timeout: 10_000 });
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
@@ -5569,9 +5562,7 @@ describe('Hosted Harness tool approvals', () => {
     expect((await answer(clientId, second, 'allow')).status).toBe(200);
     await finished(clientId);
 
-    // Two turns dispatch one Write each; each attach's first acquisition also
-    // reads the Workspace instruction files (two reads per attach).
-    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(6);
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(2);
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
@@ -5678,19 +5669,7 @@ describe('Hosted Harness tool approvals', () => {
         recoveryBlocked: true,
       }),
     );
-    // The model's Edit was never dispatched: the only dispatches are the
-    // one-time Workspace instruction reads after the first acquisition.
-    const dispatched = vi
-      .mocked(HostedWorkspaceBroker.prototype.execute)
-      .mock.calls.map(
-        ([, payload]) =>
-          (JSON.parse(payload) as { input?: { file_path?: string } }).input
-            ?.file_path,
-      );
-    expect(dispatched.length).toBeGreaterThan(0);
-    expect(
-      dispatched.every((file) => file === 'QWEN.md' || file === 'AGENTS.md'),
-    ).toBe(true);
+    expect(HostedWorkspaceBroker.prototype.prepare).not.toHaveBeenCalled();
     expect((await answer('allow')).body.code).toBe(
       'hosted_turn_recovery_required',
     );
@@ -5768,8 +5747,7 @@ describe('Hosted Harness tool approvals', () => {
           recoveryBlocked: true,
         }),
       );
-      // The original Edit plus the first attach's two context reads.
-      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
       await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
         .set('X-Qwen-Client-Id', clientId)
         .send({})
@@ -5801,8 +5779,7 @@ describe('Hosted Harness tool approvals', () => {
           recoveryBlocked: false,
         });
       });
-      // The original Edit plus the first attach's two context reads.
-      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
       expect(HostedWorkspaceBroker.prototype.fileHistory).toHaveBeenCalledWith(
         expect.objectContaining({
           action: phase === 'pending-snapshot' ? 'snapshot' : 'bind',
@@ -5824,8 +5801,7 @@ describe('Hosted Harness tool approvals', () => {
           ).send({ managedSessionStore: store(), toolProfile: files })
         ).status,
       ).toBe(200);
-      // The original Edit plus the first attach's two context reads.
-      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
       expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
     },
   );
@@ -5841,19 +5817,7 @@ describe('Hosted Harness tool approvals', () => {
         recoveryBlocked: false,
       }),
     );
-    // The model's Edit was never dispatched: the only dispatches are the
-    // one-time Workspace instruction reads after the first acquisition.
-    const dispatched = vi
-      .mocked(HostedWorkspaceBroker.prototype.execute)
-      .mock.calls.map(
-        ([, payload]) =>
-          (JSON.parse(payload) as { input?: { file_path?: string } }).input
-            ?.file_path,
-      );
-    expect(dispatched.length).toBeGreaterThan(0);
-    expect(
-      dispatched.every((file) => file === 'QWEN.md' || file === 'AGENTS.md'),
-    ).toBe(true);
+    expect(HostedWorkspaceBroker.prototype.prepare).not.toHaveBeenCalled();
     expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -5920,8 +5884,7 @@ describe('Hosted Harness tool approvals', () => {
     await submit(second);
     expect((await answer('allow')).status).toBe(200);
     await finished();
-    // The allowed Edit plus the first attach's two context reads.
-    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
     const transcript = await headers(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', clientId);
@@ -5991,8 +5954,7 @@ describe('Hosted Harness tool approvals', () => {
     await submit(randomUUID());
     expect((await answer('allow')).status).toBe(200);
     await finished();
-    // The allowed Edit plus the first attach's two context reads.
-    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
+    expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledOnce();
   });
   it.each([
     'success',
@@ -6531,6 +6493,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
   let acquireSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
@@ -7168,42 +7134,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
     const EXEC_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const EXEC_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-    // The Workspace-context fetch reserves its own executions through the
-    // same prepare call; route by the request digest instead of call order.
-    const contextDigests = new Set(
-      ['QWEN.md', 'AGENTS.md'].map(
-        (name) =>
-          `sha256:${createHash('sha256')
-            .update(
-              JSON.stringify({
-                toolName: 'read_file',
-                input: { file_path: name },
-              }),
-            )
-            .digest('hex')}`,
-      ),
-    );
-    const pendingIds = [EXEC_A, EXEC_B];
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockImplementation(
-      async (_callId, digest) =>
-        contextDigests.has(digest)
-          ? randomUUID()
-          : (pendingIds.shift() ?? EXEC_B),
-    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare')
+      .mockResolvedValueOnce(EXEC_A)
+      .mockResolvedValue(EXEC_B);
     const execute = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'execute')
-      .mockImplementation((id, payload, signal) => {
-        // The Workspace-context reads ride the same broker; settle them
-        // immediately so they never consume the parked-execution ids.
-        if (
-          typeof payload === 'string' &&
-          (payload.includes('QWEN.md') || payload.includes('AGENTS.md'))
-        ) {
-          return Promise.resolve({
-            executionStatus: 'success',
-            responseParts: [{ text: '' }],
-          }) as never;
-        }
+      .mockImplementation((id, _payload, signal) => {
         if (id === EXEC_A) {
           return Promise.resolve({
             executionStatus: 'success',

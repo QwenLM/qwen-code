@@ -9,6 +9,11 @@ import { promises as fs } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
+import {
+  MANAGED_WORKSPACE_CONTEXT_FILES,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
@@ -282,6 +287,57 @@ export class ManagedToolExecutor {
     } finally {
       this.historyControls.delete(sessionId);
     }
+  }
+
+  /**
+   * Reads the Session's project instruction files outside the execution
+   * ledger: they are the harness's own context, not a model tool call, so
+   * they reserve no execution and leave nothing to recover. A missing,
+   * unreadable or out-of-Workspace file is simply absent from the result.
+   */
+  async readWorkspaceContext(
+    sessionId: string,
+  ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
+    this.assertLegacySession(sessionId);
+    const tools = await this.toolsFor({
+      sessionId,
+      promptId: sessionId,
+      callId: 'workspace-context',
+      argsDigest: '',
+    });
+    if (!tools?.directory || tools.isActive?.() === false)
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    const boundary = tools.workspaceRoot ?? tools.directory;
+    const files: ManagedWorkspaceContextFile[] = [];
+    for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {
+      let text: string;
+      try {
+        // A symlink planted in the Workspace (git preserves them) must not
+        // promote a host file into the system instruction.
+        const real = await fs.realpath(path.join(tools.directory, name));
+        const rel = path.relative(boundary, real);
+        if (
+          rel === '..' ||
+          rel.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(rel)
+        )
+          continue;
+        text = await fs.readFile(real, 'utf8');
+      } catch {
+        continue;
+      }
+      if (text.length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS) {
+        const note =
+          '\n[Truncated: the file exceeds the Hosted context limit.]';
+        text =
+          text.slice(0, MANAGED_WORKSPACE_CONTEXT_FILE_CHARS - note.length) +
+          note;
+      }
+      files.push({ name, text });
+    }
+    return { files };
   }
 
   constructor(
@@ -805,10 +861,8 @@ export class ManagedToolExecutor {
       ) {
         // The mount realpaths the Session directory; the file half needs the
         // same check or a symlink planted in the Workspace (git preserves
-        // them) turns a read into a host-path one — and the harness's
-        // automatic context read promotes what it reads into the system
-        // instruction. A file that does not exist yet falls through to the
-        // tool's own not-found report.
+        // them) turns a read into a host-path one. A file that does not
+        // exist yet falls through to the tool's own not-found report.
         let real: string | undefined;
         try {
           real = await fs.realpath(params['file_path']);

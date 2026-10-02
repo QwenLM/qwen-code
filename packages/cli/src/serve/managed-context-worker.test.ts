@@ -1036,8 +1036,7 @@ describe('Managed context tool gate', () => {
     });
 
     // A planted symlink targeting a file outside the mount must not be
-    // followed — the harness's context read promotes what it reads into the
-    // system instruction.
+    // followed.
     const outside = workspace(['staged']);
     fs.writeFileSync(
       path.join(outside, 'staged/host-secret.txt'),

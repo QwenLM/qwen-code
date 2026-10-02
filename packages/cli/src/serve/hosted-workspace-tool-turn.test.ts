@@ -55,6 +55,7 @@ import {
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
+  workspaceContext: vi.fn(),
   warm: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
@@ -72,6 +73,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
+    workspaceContext = broker.workspaceContext;
     warm = broker.warm;
     acquire = broker.acquire;
     prepare = broker.prepare;
@@ -181,6 +183,7 @@ beforeEach(async () => {
   });
   harness = createManagedHarnessHandle(session);
   await harness.ensureRunnable();
+  broker.workspaceContext.mockResolvedValue([]);
   broker.prepare.mockImplementation(async () => randomUUID());
   broker.execute.mockResolvedValue({
     executionStatus: 'success',
@@ -1137,31 +1140,12 @@ function turnWithContext(
   );
 }
 
-it('reads Workspace instructions once after the first acquisition', async () => {
+it('reads Workspace instructions once, outside the execution ledger', async () => {
   const slot = contextSlot();
-  broker.execute.mockImplementation(async (_id: string, payload: string) => {
-    const parsed = JSON.parse(payload) as {
-      toolName: string;
-      input: { file_path?: string };
-    };
-    if (parsed.input.file_path === 'AGENTS.md')
-      return {
-        executionStatus: 'error',
-        responseParts: [],
-        error: { message: 'File does not exist' },
-      };
-    return {
-      executionStatus: 'success',
-      responseParts: [
-        {
-          text:
-            parsed.input.file_path === 'QWEN.md'
-              ? '# Project Rules\nAlways test.'
-              : 'original result',
-        },
-      ],
-    };
-  });
+  broker.workspaceContext.mockResolvedValue([
+    { name: 'QWEN.md', text: '# Project Rules\nAlways test.\n' },
+    { name: 'AGENTS.md', text: '   ' },
+  ]);
   turn = turnWithContext(slot);
   await turn.execute(
     [calls[0]],
@@ -1169,11 +1153,13 @@ it('reads Workspace instructions once after the first acquisition', async () => 
     'model',
     new AbortController().signal,
   );
-  expect(slot.value).toContain('--- Context from: QWEN.md ---');
-  expect(slot.value).toContain('# Project Rules');
-  expect(slot.value).not.toContain('AGENTS.md');
-  // Two context reads precede the model's own dispatch.
-  expect(broker.execute).toHaveBeenCalledTimes(3);
+  expect(slot.value).toBe(
+    '--- Context from: QWEN.md ---\n# Project Rules\nAlways test.\n--- End of Context from: QWEN.md ---',
+  );
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+  // The context read reserves no execution: only the model's call does.
+  expect(broker.prepare).toHaveBeenCalledOnce();
+  expect(broker.execute).toHaveBeenCalledOnce();
   await turn.consumeResults();
   await turn.finish();
 
@@ -1195,33 +1181,11 @@ it('reads Workspace instructions once after the first acquisition', async () => 
   await second.consumeResults();
   await second.finish();
   // The fetched context is reused: no further context reads.
-  expect(broker.execute).toHaveBeenCalledTimes(4);
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
 });
 
-it('does not latch the context slot when its reads are cancelled', async () => {
-  // An aborted read resolves `{executionStatus: 'cancelled'}` (the broker
-  // POSTs :cancel instead of throwing). Writing `''` then would pin "no
-  // Workspace context" for the Session's whole attached life — the retry
-  // gate reads `undefined` as "not fetched yet", so the slot must stay
-  // undefined and the next turn must re-dispatch both reads.
+it('latches an empty context when the Workspace has no instruction files', async () => {
   const slot = contextSlot();
-  broker.execute.mockImplementation(async (_id: string, payload: string) => {
-    const parsed = JSON.parse(payload) as {
-      toolName: string;
-      input: { file_path?: string };
-    };
-    if (
-      parsed.input.file_path === 'QWEN.md' ||
-      parsed.input.file_path === 'AGENTS.md'
-    ) {
-      // Context read payload — cancelled, as an aborted signal produces.
-      return { executionStatus: 'cancelled', responseParts: [] };
-    }
-    return {
-      executionStatus: 'success',
-      responseParts: [{ text: 'original result' }],
-    };
-  });
   turn = turnWithContext(slot);
   await turn.execute(
     [calls[0]],
@@ -1229,59 +1193,33 @@ it('does not latch the context slot when its reads are cancelled', async () => {
     'model',
     new AbortController().signal,
   );
-  expect(slot.read()).toBeUndefined();
-  // Both cancelled reads ran; the write was skipped because the batch is
-  // indefinite — no latched "no context" for this Session.
-  const ctxAfterFirst = broker.execute.mock.calls.filter(([, payload]) =>
-    ['QWEN.md', 'AGENTS.md'].includes(
-      (JSON.parse(payload as string) as { input?: { file_path?: string } })
-        .input?.file_path ?? '',
-    ),
-  ).length;
-  expect(ctxAfterFirst).toBe(2);
+  expect(slot.read()).toBe('');
   await turn.consumeResults();
   await turn.finish();
+});
 
-  const second = turnWithContext(slot, 'prompt-2');
-  await second.execute(
-    [{ ...calls[0], callId: 'call-next' }],
-    [
-      {
-        functionCall: {
-          id: 'call-next',
-          name: 'read_file',
-          args: { file_path: 'file.txt' },
-        },
-      },
-    ],
-    'model',
-    new AbortController().signal,
-  );
-  await second.consumeResults();
-  await second.finish();
-  // The slot was never latched, so the retry turn re-dispatches both reads.
-  const ctxTotal = broker.execute.mock.calls.filter(([, payload]) =>
-    ['QWEN.md', 'AGENTS.md'].includes(
-      (JSON.parse(payload as string) as { input?: { file_path?: string } })
-        .input?.file_path ?? '',
-    ),
-  ).length;
-  expect(ctxTotal).toBe(4);
+it('does not latch the context slot when the turn is aborted during the read', async () => {
+  // Writing `''` after an abort would pin "no Workspace context" for the
+  // Session's whole attached life — the retry gate reads `undefined` as
+  // "not fetched yet", so the slot must stay undefined.
+  const slot = contextSlot();
+  const controller = new AbortController();
+  broker.workspaceContext.mockImplementation(async () => {
+    controller.abort();
+    return [];
+  });
+  turn = turnWithContext(slot);
+  await turn
+    .execute([calls[0]], [parts[0]], 'model', controller.signal)
+    .catch(() => undefined);
+  await turn.finish().catch(() => undefined);
+  expect(broker.workspaceContext).toHaveBeenCalledOnce();
+  expect(slot.read()).toBeUndefined();
 });
 
 it('never blocks a turn when the Workspace context read fails', async () => {
   const slot = contextSlot();
-  let first = true;
-  broker.execute.mockImplementation(async () => {
-    if (first) {
-      first = false;
-      throw new Error('Broker transport down');
-    }
-    return {
-      executionStatus: 'success',
-      responseParts: [{ text: 'original result' }],
-    };
-  });
+  broker.workspaceContext.mockRejectedValue(new Error('Broker transport down'));
   turn = turnWithContext(slot);
   const responses = await turn.execute(
     [calls[0]],
@@ -1293,12 +1231,8 @@ it('never blocks a turn when the Workspace context read fails', async () => {
     output: 'original result',
   });
   expect(slot.value).toBeUndefined();
-  // The failed context read reserved a durable execution (prepare), so the
-  // swallow must cancel it — otherwise the record stays active and
-  // releaseSession 409s the Session for good. Assert by the reserved id:
-  // the first execute call's execution id is the context read's own.
-  const contextExecutionId = broker.execute.mock.calls[0][0];
-  expect(broker.cancel).toHaveBeenCalledWith(contextExecutionId);
+  // Nothing was reserved, so nothing needs cancelling.
+  expect(broker.cancel).not.toHaveBeenCalled();
   await turn.consumeResults();
   await turn.finish();
 });

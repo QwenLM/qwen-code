@@ -15,7 +15,7 @@ Instructions therefore need a Workspace-sourced path, not a lifted guard.
 
 This slice delivers one: the first time a Hosted Workspace turn acquires the
 Runtime, the Harness reads the root instruction files (`QWEN.md`, `AGENTS.md`)
-through the existing Broker prepare/execute path and keeps the assembled text
+through a `workspace-context` Runtime control and keeps the assembled text
 on the attached Session. Every model request assembles its system prompt from
 `Config.getUserMemory()` at request time, so the Harness injects the fetched
 text through `Config.setUserMemory` — after `initialize()` for the first
@@ -44,9 +44,18 @@ them.
 
 ## Failure semantics
 
-The read is best-effort. A missing file, a tool error, a transport failure, or
-a Broker refusal leaves the Session without context and the turn unaffected;
-the failure is logged on the Harness's stderr. The slot records a completed
+The read is a Runtime control, not a tool execution: it reserves nothing in
+the execution ledger, writes no `qwen_tool_execution` row, and leaves nothing
+to cancel or recover, so the fault gates' execution counts and broker
+operation sequences are unchanged. The Runtime reads the files from the
+Session directory, skips any whose real path leaves the Workspace (a planted
+symlink must not promote a host file into the system instruction), and caps
+each at 64 Ki characters so the reply stays under the 1 MiB control limit.
+
+The read is best-effort. A missing file, a transport failure, or a Broker
+refusal leaves the Session without context and the turn unaffected; the
+failure is logged on the Harness's stderr. An aborted turn never latches the
+slot. The slot records a completed
 fetch — including "the Workspace has no instruction files" — so the read
 happens at most once per attached Session.
 
@@ -54,7 +63,7 @@ happens at most once per attached Session.
 
 Each file that reads back non-blank contributes one section in the same shape
 the local hierarchical memory uses: `--- Context from: <name> ---`, the
-content as `read_file` returned it, and the closing marker. Sections join with
+file's trimmed content, and the closing marker. Sections join with
 a blank line. Names stay Workspace-relative; the Runtime host's physical paths
 never appear.
 
@@ -64,13 +73,21 @@ never appear.
   failure isolation from the turn it rode in on.
 - CLI model turn: the per-request injection point; safe mode unchanged.
 - CLI session: the attached Session holds the fetched text for its lifetime.
-- Core and Java: unchanged.
+- CLI Runtime worker: the `workspace-context` provider control, answered
+  from the executor outside the execution ledger.
+- Java Runtime Broker: admits `workspace-context` on the provider control
+  shape and forwards it without acquiring a provider Session, as raw file
+  history does.
+- Core: unchanged.
 
 ## Validation and acceptance
 
-Turn-level tests pin: the two reads happen on the first acquisition and never
-again for the attached Session; a missing file contributes nothing; a
-transport failure neither blocks nor fails the turn. Model-level tests pin the
+Turn-level tests pin: the read happens on the first acquisition, reserves no
+execution, and never repeats for the attached Session; a missing file
+contributes nothing; an aborted turn leaves the slot unset; a transport
+failure neither blocks nor fails the turn. Worker-level tests pin symlink
+confinement and the per-file cap; protocol tests pin the closed result
+shape in both languages. Model-level tests pin the
 injection order — pre-fetched context is set before the first request, and a
 fetch landing mid-turn is set before the next request. Session-level tests
 keep their recovery and redispatch guarantees, with the context reads named
@@ -78,8 +95,7 @@ explicitly where dispatch counts are asserted.
 
 ## Risks and open questions
 
-The two reads pay the full durable prepare/execute cost once per attached
-Session; a lighter read-only dispatch is tracked separately. Whether the
+Whether the
 context should be pinned durably (and revisioned through the ContextBinding
 contract) remains the maintainers' call; the injection point built here does
 not change under either answer.
