@@ -38,6 +38,7 @@ import {
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 
 let root: string;
 let session: ManagedSession;
@@ -1164,6 +1165,103 @@ it.each([
     expect(Boolean(replacement.broker.runtime)).toBe(allowed);
   },
 );
+
+it.each([true, false])(
+  'releases only load owners after Hook operations replace the activation (detached: %s)',
+  async (detached) => {
+    catalog = {
+      ...catalog,
+      hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
+    };
+    const operate = async (target: HostedHookSession, id: string) => {
+      await target.ensureReady();
+      await new ManagedHookActivationController(session).runHookOperation(
+        {
+          operationId: id,
+          occurrenceId: hostedHookOccurrenceId(HookEventName.Notification, id),
+          originTurnId: null,
+        },
+        () => target.fire(HookEventName.Notification, id, {}, signal()),
+      );
+    };
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    const released = () => {
+      const ids = release.mock.contexts.map(
+        (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
+      );
+      release.mockClear();
+      return ids;
+    };
+    for (const id of ['a', 'b', 'c']) await operate(hooks, id);
+    if (detached) {
+      await hooks.close();
+      expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+    }
+    await reopenSession();
+    const replacement = new HostedHookSession(options, session, pin);
+    await operate(replacement, 'd');
+    expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+    await operate(replacement, 'e');
+    await replacement.close();
+    expect(released()).toEqual([replacement.broker.runtimeSessionId]);
+  },
+);
+
+it.each([
+  ['released before another worker loads', true],
+  ['still open when the same worker installs', false],
+])(
+  'still releases a load that follows an unrestored Hook operation activation (%s)',
+  async (_, released) => {
+    await hooks.ensureReady();
+    await session.replaceActivation({
+      type: 'hook_operation',
+      operationId: 'lost',
+      occurrenceId: 'lost',
+    });
+    let crashed: HostedHookSession;
+    if (released) {
+      await session.releaseActivation();
+      await reopenSession();
+      crashed = new HostedHookSession(options, session, pin);
+    } else {
+      const activation = await session.authority.installActivation({
+        activationId: randomUUID(),
+        workerId: 'worker',
+        leaseDurationMs: 60_000,
+      });
+      crashed = new HostedHookSession(options, { ...session, activation }, pin);
+    }
+    await crashed.acquire();
+    await reopenSession();
+    const replacement = new HostedHookSession(options, session, pin);
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    await replacement.acquire();
+    expect(
+      release.mock.contexts.map(
+        (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
+      ),
+    ).toEqual([hooks.broker.runtimeSessionId, crashed.broker.runtimeSessionId]);
+  },
+);
+
+it('shares one acquisition between parallel callers', async () => {
+  await hooks.ensureReady();
+  await reopenSession();
+  const replacement = new HostedHookSession(options, session, pin);
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  release.mockClear();
+  acquire.mockClear();
+  await Promise.all([replacement.acquire(), replacement.acquire()]);
+  expect(release.mock.contexts).toEqual([
+    expect.objectContaining({
+      runtimeSessionId: hooks.broker.runtimeSessionId,
+    }),
+  ]);
+  expect(acquire).toHaveBeenCalledOnce();
+});
 
 it('leaves a shared MCP broker for its owner to release', async () => {
   const shared = new HostedWorkspaceBroker(
