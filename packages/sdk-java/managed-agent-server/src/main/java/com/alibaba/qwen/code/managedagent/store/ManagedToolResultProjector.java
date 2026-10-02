@@ -73,17 +73,23 @@ public class ManagedToolResultProjector {
     }
 
     public void project(Claim claim) {
-        try {
+        var data = publications.getIfAvailable();
+        try (var lease = data == null ? null : data.readLease(claim.source().sessionKey())) {
             var statuses = jdbc.query("SELECT status FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
                     (row, index) -> row.getString(1), claim.source().tenantId(), claim.source().sessionId());
             if (statuses.stream().anyMatch(status -> List.of("DELETING", "DELETED").contains(status))) {
                 store.fail(claim, "SUPPRESSED", "session_unavailable");
                 return;
             }
-            Projection projection = resolve(claim.source());
+            Runnable guard = lease == null ? () -> ToolPublicationRetentionStore.requireLive(jdbc,
+                    claim.source().tenantId(), claim.source().sessionId()) : lease::check;
+            Projection projection = resolve(claim.source(), lease, guard);
             if (projection == null) {
                 store.fail(claim, "UNSUPPORTED", "unsupported_receipt_producer");
             } else {
+                if (lease != null) {
+                    lease.check();
+                }
                 store.complete(claim, projection, policy.version());
             }
         } catch (NoSuchElementException error) {
@@ -101,7 +107,8 @@ public class ManagedToolResultProjector {
         store.fail(claim, state, code);
     }
 
-    private Projection resolve(Source source) throws IOException {
+    private Projection resolve(Source source, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) throws IOException {
+        guard.run();
         store.verifySource(source);
         var candidates = jdbc.queryForList("SELECT p.*, CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantine_mark FROM qwen_tool_publication p WHERE scope_key = ? AND tenant_id = ?"
                         + " AND workspace_id = ? AND session_id = ? AND execution_key = ?",
@@ -142,7 +149,9 @@ public class ManagedToolResultProjector {
         ToolPublicationDataStore data = publications.getIfAvailable();
         JsonNode outcome;
         if (notStarted) {
+            guard.run();
             outcome = inlineOutcome(source);
+            guard.run();
         } else {
             require("REFERENCED".equals(publication.get("producer_phase"))
                             && source.outcomeRef().path("resourceId").asText().equals(publication.get("admission_resource_id"))
@@ -152,9 +161,9 @@ public class ManagedToolResultProjector {
             if (data == null) {
                 throw new IllegalStateException("Publication reader is unavailable");
             }
-            outcome = exact(data, source, publicationId, source.outcomeRef());
+            outcome = exact(data, source, publicationId, source.outcomeRef(), lease, guard);
             JsonNode terminal = ToolPublicationContract.readJson(data.readResource(source.sessionKey(), publicationId,
-                    (String) publication.get("terminal_resource_id")));
+                    (String) publication.get("terminal_resource_id"), lease, guard));
             require(terminal.equals(outcome.path("envelope")), "Original terminal envelope changed");
         }
         require(outcome.path("schemaVersion").asInt(-1) == 1, "Outcome version is invalid");
@@ -180,7 +189,7 @@ public class ManagedToolResultProjector {
             if (!manifestRef.isNull()) {
                 require("managed-tool-result-manifest".equals(manifestRef.path("kind").asText()),
                         "Manifest kind conflicts");
-                manifest = exact(data, source, publicationId, manifestRef);
+                manifest = exact(data, source, publicationId, manifestRef, lease, guard);
                 validateManifest(source, binding, envelope, manifest);
             } else {
                 require("unavailable".equals(capture.path("captureStatus").asText()), "Capture manifest is missing");
@@ -208,7 +217,7 @@ public class ManagedToolResultProjector {
                         .put("sha256", stream.path("digest").asText()).put("media_type", "application/octet-stream")
                         .put("availability", "available").put("created_at", createdAt);
                 Artifact artifact = new Artifact(descriptor, source, publicationId, binding, manifestRef, streamId, 0);
-                verified.put(id, reader.verified(artifact));
+                verified.put(id, reader.verified(artifact, lease, guard));
                 artifacts.add(artifact);
             }
         }
@@ -234,7 +243,7 @@ public class ManagedToolResultProjector {
             int length = (int) Math.min(8192, size);
             var stream = verified.get(selected.descriptor().path("id").asText());
             if (stream.rangeVerificationBytes(0, length) <= 1024 * 1024) {
-                byte[] bytes = reader.readRange(selected, stream, 0, length, () -> {});
+                byte[] bytes = reader.readRange(selected, stream, 0, length, guard);
                 String text = sanitizePreview(new String(bytes, StandardCharsets.UTF_8));
                 String bounded = boundPreview(text);
                 boolean truncated = size > length || bounded.length() < text.length();
@@ -286,8 +295,8 @@ public class ManagedToolResultProjector {
         return verifyBytes(source.outcomeRef(), bytes);
     }
 
-    private static JsonNode exact(ToolPublicationDataStore data, Source source, String publication, JsonNode ref) {
-        return verifyBytes(ref, data.readResource(source.sessionKey(), publication, ref.path("resourceId").asText()));
+    private static JsonNode exact(ToolPublicationDataStore data, Source source, String publication, JsonNode ref, ToolPublicationRetentionStore.ReadLease lease, Runnable guard) {
+        return verifyBytes(ref, data.readResource(source.sessionKey(), publication, ref.path("resourceId").asText(), lease, guard));
     }
 
     private static JsonNode verifyBytes(JsonNode ref, byte[] bytes) {

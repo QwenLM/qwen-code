@@ -55,11 +55,15 @@ For each row, record: tree total before and after, the run's final
 reports is the same total admission enforces — it includes `trimmedTokens`, so
 it must not drop when row 6 trims.
 
-## Not covered by this change
+## Remote Agent Hosts (#12582)
 
-Runs executed on a remote Agent Host (#12582) report no session token total
-to the coordinator's dispatch port, so the running check does not see their
-spend until the result lands. Admission still applies.
+A Host running Qwen Code reports its attempt's spend (the session total minus
+the total when the turn started) with every progress post, about every 2 s,
+and with its result. The coordinator records it, so admission and the running
+check both count remote spend, and a remote run stopped for budget ends when
+its next lease renewal is refused. Codex and Claude Code runs report no spend
+and are still uncharged. Add a row to the matrix: bind `lead` to a remote Host
+and repeat row 1.
 
 ## Report back
 
