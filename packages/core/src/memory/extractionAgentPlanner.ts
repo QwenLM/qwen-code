@@ -339,6 +339,7 @@ export async function runAutoMemoryExtractionByAgent(
   projectRoot: string,
   history?: Content[],
   opts?: {
+    abortSignal?: AbortSignal;
     /**
      * Set when `history` is the pending window and the cursor is behind: the
      * previous cursor's write time, the nearest proxy for the window's own
@@ -397,6 +398,7 @@ export async function runAutoMemoryExtractionByAgent(
       ToolNames.EDIT,
     ],
     extraHistory,
+    abortSignal: opts?.abortSignal,
   });
 
   const { topics, touchedProjectScope, touchedUserScope } =

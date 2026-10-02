@@ -139,6 +139,19 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(systemPrompt).toContain('at most 64 characters');
   });
 
+  it('passes the lifecycle cancellation signal to the fork', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+    const abortSignal = new AbortController().signal;
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', undefined, {
+      abortSignal,
+    });
+    expect(forkedCall()?.abortSignal).toBe(abortSignal);
+  });
+
   it('uses the pending extraction window with the same media filtering as the cached tail', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',

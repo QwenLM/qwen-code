@@ -37,6 +37,8 @@ import * as postCompactModule from './postCompactAttachments.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
+import { EXTRACT_NOOP_COOLDOWN_TURNS_ENV } from '../memory/manager.js';
+import { subagentIdentityContext } from '../utils/subagentNameContext.js';
 import {
   content,
   fnCall,
@@ -170,6 +172,82 @@ async function expectGate(
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   }
 }
+
+describe('memory flush before compaction', () => {
+  afterEach(() => {
+    delete process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV];
+    vi.restoreAllMocks();
+  });
+
+  it.each([false, true])(
+    'flushes memory before hooks and summary (complete=%s)',
+    async (complete) => {
+      process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+      const history = turns('Remember Friday.', 'Understood.');
+      const chat = fakeChat(history);
+      vi.mocked(chat.getHistoryShallow).mockImplementation((curated) =>
+        curated ? msgs(2) : history,
+      );
+      const order: string[] = [];
+      const flushExtract = vi.fn().mockImplementation(async () => {
+        order.push('memory');
+        return complete;
+      });
+      const preCompact = vi.fn().mockImplementation(async () => {
+        order.push('hook');
+      });
+      const query = spySideQuery('summary', usage(10, 5));
+      const config = fakeConfig({
+        hookSystem: {
+          firePreCompactEvent: preCompact,
+          firePostCompactEvent: resolvedFn(),
+        },
+        extra: {
+          getManagedAutoMemoryEnabled: () => true,
+          getMemoryManager: () => ({ flushExtract }),
+          getProjectRoot: () => '/tmp/project',
+          getSessionId: () => 'session',
+        },
+      });
+      const result = await compressWith(chat, config);
+      expect(flushExtract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          history,
+          projectRoot: '/tmp/project',
+          sessionId: 'session',
+        }),
+      );
+      if (complete) {
+        expect(order).toEqual(['memory', 'hook']);
+        expect(query).toHaveBeenCalled();
+      } else {
+        expectNoNewHistory(
+          result,
+          CompressionStatus.COMPRESSION_FAILED_MEMORY_FLUSH,
+        );
+        expect(order).toEqual(['memory']);
+        expect(query).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('does not flush a memory fork through its own manager', async () => {
+    process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+    const flushExtract = vi.fn().mockResolvedValue(true);
+    const config = fakeConfig({
+      extra: {
+        getManagedAutoMemoryEnabled: () => true,
+        getMemoryManager: () => ({ flushExtract }),
+      },
+    });
+    spySideQuery('summary', usage(10, 5));
+    await subagentIdentityContext.run(
+      { type: 'managed-auto-memory-extractor', id: 'fork' },
+      () => compressWith(fakeChat(msgs(2)), config),
+    );
+    expect(flushExtract).not.toHaveBeenCalled();
+  });
+});
 
 const SNAPSHOT_SUMMARY: [string, object] = [
   '<state_snapshot>summary</state_snapshot>',

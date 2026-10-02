@@ -343,7 +343,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/ui/utils/backgroundWorkUtils.ts',
   'packages/cli/src/ui/utils/clipboardUtils.ts',
   'packages/cli/src/ui/utils/commandUtils.ts',
-  'packages/cli/src/ui/utils/compression-text.ts',
   'packages/cli/src/ui/utils/export/export-transcript-document.ts',
   'packages/cli/src/ui/utils/export/normalize.ts',
   'packages/cli/src/ui/utils/formatters.ts',

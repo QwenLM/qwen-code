@@ -170,6 +170,7 @@ export interface ScheduleExtractParams {
   history: Content[];
   now?: Date;
   config?: Config;
+  abortSignal?: AbortSignal;
   /**
    * Whether the conversation is still below the compaction warn threshold.
    * Consulted only while a no-op cooldown is active: a skipped turn is safe
@@ -1300,6 +1301,38 @@ export class MemoryManager {
     );
     this.store(record);
     return this.track(record.id, this.runExtract(record.id, params)) as never;
+  }
+
+  async flushExtract(params: ScheduleExtractParams): Promise<boolean> {
+    if (resolveExtractNoopCooldownTurns() === 0) return true;
+    let previousOffset = -1;
+    while (true) {
+      params.abortSignal?.throwIfAborted();
+      if (this.extractRunning.has(params.projectRoot)) return false;
+      const record = makeTaskRecord(
+        'extract',
+        params.projectRoot,
+        params.sessionId,
+      );
+      this.store(record);
+      const result = await this.track(
+        record.id,
+        this.runExtract(record.id, params),
+      );
+      if (result.skippedReason && result.skippedReason !== 'no_user_text') {
+        return false;
+      }
+      const offset = result.cursor.processedOffset;
+      if (offset === params.history.length) return true;
+      if (
+        offset === undefined ||
+        offset <= previousOffset ||
+        (!result.cursorAdvanced && result.skippedReason !== 'no_user_text')
+      ) {
+        return false;
+      }
+      previousOffset = offset;
+    }
   }
 
   /**

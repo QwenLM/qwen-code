@@ -177,11 +177,15 @@ async function readExtractCursor(
 async function writeExtractCursor(
   projectRoot: string,
   cursor: AutoMemoryExtractCursor,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   await atomicWriteFile(
     getAutoMemoryExtractCursorPath(projectRoot),
     `${JSON.stringify(cursor, null, 2)}\n`,
-    { encoding: 'utf-8' },
+    {
+      encoding: 'utf-8',
+      assertCanCommit: () => abortSignal?.throwIfAborted(),
+    },
   );
 }
 
@@ -219,9 +223,11 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
+  abortSignal?: AbortSignal;
   preserveUnprocessedHistory?: boolean;
   canExtractWindow?: (windowIdentity: string) => boolean;
 }): Promise<AutoMemoryExtractResult> {
+  params.abortSignal?.throwIfAborted();
   const now = params.now ?? new Date();
   if (!params.config) {
     throw new Error(
@@ -353,7 +359,7 @@ export async function runAutoMemoryExtract(params: {
       }),
       updatedAt: now.toISOString(),
     };
-    await writeExtractCursor(params.projectRoot, cursor);
+    await writeExtractCursor(params.projectRoot, cursor, params.abortSignal);
     // No fork ever ran: name the skip so the task list and telemetry do not
     // report this turn as a completed no-op extraction (extractorRan stays
     // absent either way, which is what the cooldown gate keys on).
@@ -399,8 +405,13 @@ export async function runAutoMemoryExtract(params: {
       // bootstrap write) is unknown, not a mismatch.
       (currentCursor.sessionId === undefined ||
         currentCursor.sessionId === params.sessionId)
-      ? { windowAsOf: currentCursor.updatedAt }
-      : undefined,
+      ? {
+          windowAsOf: currentCursor.updatedAt,
+          ...(params.abortSignal && { abortSignal: params.abortSignal }),
+        }
+      : params.abortSignal
+        ? { abortSignal: params.abortSignal }
+        : undefined,
   ).catch((error: unknown) => {
     if (!(error instanceof AutoMemoryExtractionError)) throw error;
     extractionFailure = error;
@@ -480,7 +491,7 @@ export async function runAutoMemoryExtract(params: {
       }),
       updatedAt: now.toISOString(),
     };
-    await writeExtractCursor(params.projectRoot, cursor);
+    await writeExtractCursor(params.projectRoot, cursor, params.abortSignal);
 
     debugLogger.debug(
       `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,

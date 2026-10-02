@@ -19,7 +19,6 @@
  */
 
 import {
-  CompressionStatus,
   findProviderByCredentials,
   getExtensionDisplayName,
   getMCPServerStatus,
@@ -27,6 +26,7 @@ import {
   resolveMetadataKey,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import type {
   Config,
   SessionMetrics,
@@ -860,6 +860,8 @@ export function projectCompression(compression: {
         : 'Chat history compression did not reduce size. This may indicate issues with the compression prompt.';
     case CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR:
       return 'Could not compress chat history due to a token counting error.';
+    case CompressionStatus.COMPRESSION_FAILED_MEMORY_FLUSH:
+      return 'Failed to compress chat history.';
     case CompressionStatus.NOOP:
       return 'Nothing to compress.';
     default:

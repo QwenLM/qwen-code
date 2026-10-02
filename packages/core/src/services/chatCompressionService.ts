@@ -24,6 +24,9 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { combineAbortSignals } from '../utils/abortController.js';
+import { subagentIdentityContext } from '../utils/subagentNameContext.js';
+import { resolveExtractNoopCooldownTurns } from '../memory/manager.js';
 import {
   estimateContentChars,
   resolveCompactionTuning,
@@ -551,6 +554,43 @@ export class ChatCompressionService {
           compressionStatus: CompressionStatus.NOOP,
         },
       };
+    }
+
+    if (
+      resolveExtractNoopCooldownTurns() > 0 &&
+      config.getManagedAutoMemoryEnabled() &&
+      !subagentIdentityContext.getStore()
+    ) {
+      // ponytail: one two-minute flush budget; scheduled replay if more is needed.
+      const flush = combineAbortSignals([signal], { timeoutMs: 120_000 });
+      let completed = false;
+      try {
+        completed = await config.getMemoryManager().flushExtract({
+          projectRoot: config.getProjectRoot(),
+          sessionId: config.getSessionId(),
+          history: chat.getHistoryShallow(),
+          config,
+          abortSignal: flush.signal,
+        });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        config
+          .getDebugLogger()
+          .warn(`Memory flush before compaction failed: ${error}`);
+      } finally {
+        flush.cleanup();
+      }
+      if (!completed) {
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount: originalTokenCount,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_MEMORY_FLUSH,
+          },
+        };
+      }
     }
 
     // Fire PreCompact hook before compression begins. Pass any user-supplied

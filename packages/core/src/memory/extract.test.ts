@@ -148,6 +148,39 @@ describe('auto-memory extraction', () => {
     expect(cursor.processedHistoryHash).toBeUndefined();
   });
 
+  it('forwards cancellation and leaves the cursor untouched after the fork', async () => {
+    const controller = new AbortController();
+    const before = await fs.readFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      'utf-8',
+    );
+    vi.mocked(runAutoMemoryExtractionByAgent).mockImplementationOnce(
+      async (_config, _root, _history, options) => {
+        expect(options?.abortSignal).toBe(controller.signal);
+        controller.abort(new Error('cancelled'));
+        return {
+          touchedTopics: [],
+          touchedProjectScope: false,
+          touchedUserScope: false,
+          hasToolActivity: true,
+        };
+      },
+    );
+
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [{ role: 'user', parts: [{ text: 'Remember Friday.' }] }],
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toThrow('cancelled');
+    expect(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ).toBe(before);
+  });
+
   it('skips a session mismatch without advancing the cursor', async () => {
     vi.mocked(getCacheSafeParamsSessionId)
       .mockReturnValueOnce('session-1')

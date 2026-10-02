@@ -1951,6 +1951,77 @@ describe('MemoryManager', () => {
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
       });
 
+      it('flushes history skipped by cooldown through consecutive windows', async () => {
+        process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+        vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce(completedNoop());
+        const mgr = new MemoryManager();
+        await turn(mgr);
+        const pending = [...history, userText('Remember Friday.')];
+        expect(
+          (
+            await turn(mgr, {
+              history: pending,
+              isBelowCompactionWarn: () => true,
+            })
+          ).skippedReason,
+        ).toBe('cooldown');
+        const abortSignal = new AbortController().signal;
+        for (const processedOffset of [40, 80, 85]) {
+          vi.mocked(runAutoMemoryExtract).mockResolvedValueOnce({
+            ...completedNoop(),
+            cursor: { ...completedNoop().cursor, processedOffset },
+          });
+        }
+        const completeHistory = [
+          ...pending,
+          ...Array.from({ length: 83 }, () =>
+            userText('Another durable fact.'),
+          ),
+        ];
+
+        expect(
+          await mgr.flushExtract({
+            projectRoot: tmp.projectRoot,
+            sessionId: 'sess-1',
+            history: completeHistory,
+            abortSignal,
+          }),
+        ).toBe(true);
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(4);
+        expect(
+          vi
+            .mocked(runAutoMemoryExtract)
+            .mock.calls.slice(1)
+            .every(
+              ([params]) =>
+                params.history === completeHistory &&
+                params.abortSignal === abortSignal,
+            ),
+        ).toBe(true);
+      });
+
+      it.each(['failure_limit', 'held'] as const)(
+        'does not report an incomplete flush as complete (%s)',
+        async (reason) => {
+          process.env[EXTRACT_NOOP_COOLDOWN_TURNS_ENV] = '2';
+          const { cursorAdvanced: _unused, ...held } = completedNoop();
+          vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+            ...held,
+            ...(reason === 'failure_limit' ? { skippedReason: reason } : {}),
+          });
+          const mgr = new MemoryManager();
+          expect(
+            await mgr.flushExtract({
+              projectRoot: tmp.projectRoot,
+              sessionId: 'sess-1',
+              history:
+                reason === 'held' ? [...history, userText('pending')] : history,
+            }),
+          ).toBe(false);
+          expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+        },
+      );
+
       it.each([
         [
           'grow past half the extractor window',

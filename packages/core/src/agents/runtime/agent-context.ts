@@ -19,6 +19,10 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  subagentIdentityContext,
+  subagentNameContext,
+} from '../../utils/subagentNameContext.js';
 import { runOutsideHookExecutionOwner } from '../../hooks/hook-execution-context.js';
 import type { LlmChat } from '../../core/llm-chat.js';
 import type {
@@ -185,7 +189,11 @@ export function getRuntimeContentGenerator():
  * with this helper.
  */
 export function runOutsideAgentContext<T>(fn: () => T): T {
-  return storage.exit(() => runOutsideHookExecutionOwner(fn));
+  return storage.exit(() =>
+    subagentIdentityContext.exit(() =>
+      subagentNameContext.exit(() => runOutsideHookExecutionOwner(fn)),
+    ),
+  );
 }
 
 /**

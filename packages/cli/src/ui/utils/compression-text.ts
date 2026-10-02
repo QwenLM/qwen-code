@@ -7,7 +7,7 @@
 import {
   CompressionStatus,
   isCompressionFailureStatus,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/core/turn.js';
 import { t } from '../../i18n/index.js';
 
 export const formatCompressionTokenCount = (
@@ -76,6 +76,8 @@ export function getCompressionStatusText({
       );
     case CompressionStatus.COMPRESSION_FAILED_API_ERROR:
       return t('Could not compress chat history due to an API error.');
+    case CompressionStatus.COMPRESSION_FAILED_MEMORY_FLUSH:
+      return t('Failed to compress chat history.');
     case CompressionStatus.NOOP:
       return 'Nothing to compress.';
     default:
