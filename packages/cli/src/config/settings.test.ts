@@ -109,6 +109,11 @@ const MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
   SETTINGS_DIRECTORY_NAME,
   'settings.json',
 );
+const RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
+  RESOLVED_MOCK_WORKSPACE_DIR,
+  SETTINGS_DIRECTORY_NAME,
+  'settings.json',
+);
 
 // A more flexible type for test data that allows arbitrary properties.
 type TestSettings = Settings & {
@@ -2330,19 +2335,22 @@ describe('Settings Loading and Merging', () => {
 
     it('exposes Workspace recovery metadata while preserving the corrupted copy', () => {
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+        (p: fs.PathLike) => p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
           typeof p === 'number'
             ? Buffer.from('{broken')
-            : p === MOCK_WORKSPACE_SETTINGS_PATH
+            : p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH
               ? '{broken'
               : '{}',
       );
-      const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+      const loaded = loadSettings(RESOLVED_MOCK_WORKSPACE_DIR);
       expect(loaded.corruptedPath).toBe(
-        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+        `${RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      );
+      expect(fs.realpathSync).toHaveBeenCalledWith(
+        RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
       );
       expect(loaded.wasRecovered).toBe(false);
       expect(fs.writeFileSync).toHaveBeenCalledWith(
@@ -2354,13 +2362,13 @@ describe('Settings Loading and Merging', () => {
 
     it('keeps Workspace recovery available when the preserved file cannot be reset', () => {
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+        (p: fs.PathLike) => p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
           typeof p === 'number'
             ? Buffer.from('{broken')
-            : p === MOCK_WORKSPACE_SETTINGS_PATH
+            : p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH
               ? '{broken'
               : '{}',
       );
@@ -2374,9 +2382,12 @@ describe('Settings Loading and Merging', () => {
           return 100;
         },
       );
-      const loaded = loadSettings(MOCK_WORKSPACE_DIR);
+      const loaded = loadSettings(RESOLVED_MOCK_WORKSPACE_DIR);
       expect(loaded.corruptedPath).toBe(
-        `${MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+        `${RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+      );
+      expect(fs.realpathSync).toHaveBeenCalledWith(
+        RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
       );
       expect(loaded.wasRecovered).toBe(false);
       expect(loaded.workspace.settings).toEqual({});
@@ -2388,13 +2399,13 @@ describe('Settings Loading and Merging', () => {
 
     it('refuses to reset malformed Workspace settings when no copy can be preserved', () => {
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+        (p: fs.PathLike) => p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
           typeof p === 'number'
             ? Buffer.from('{broken')
-            : p === MOCK_WORKSPACE_SETTINGS_PATH
+            : p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH
               ? '{broken'
               : '{}',
       );
@@ -2404,8 +2415,13 @@ describe('Settings Loading and Merging', () => {
           return 100;
         },
       );
-      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
-        'Cannot preserve malformed workspace settings',
+      expect(() => loadSettings(RESOLVED_MOCK_WORKSPACE_DIR)).toThrow(
+        `Cannot preserve malformed workspace settings ${RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH}: EACCES`,
+      );
+      expect(fs.openSync).toHaveBeenCalledWith(
+        `${RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+        'wx',
+        expect.any(Number),
       );
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
@@ -2674,21 +2690,25 @@ describe('Settings Loading and Merging', () => {
 
     it('refuses recovery when the previous preserved copy cannot be removed', () => {
       (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+        (p: fs.PathLike) => p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH,
       );
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) =>
           typeof p === 'number'
             ? Buffer.from('{broken')
-            : p === MOCK_WORKSPACE_SETTINGS_PATH
+            : p === RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH
               ? '{broken'
               : '{}',
       );
       (fs.rmSync as Mock).mockImplementation(() => {
         throw new Error('EACCES');
       });
-      expect(() => loadSettings(MOCK_WORKSPACE_DIR)).toThrow(
-        'Cannot preserve malformed workspace settings',
+      expect(() => loadSettings(RESOLVED_MOCK_WORKSPACE_DIR)).toThrow(
+        `Cannot preserve malformed workspace settings ${RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH}: EACCES`,
+      );
+      expect(fs.rmSync).toHaveBeenCalledWith(
+        `${RESOLVED_MOCK_WORKSPACE_SETTINGS_PATH}.corrupted`,
+        { force: true },
       );
       expect(fs.copyFileSync).not.toHaveBeenCalled();
       expect(fs.writeFileSync).not.toHaveBeenCalled();
