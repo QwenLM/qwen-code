@@ -2028,7 +2028,7 @@ export class LocalManagedSessionAuthority {
         ...(input.subject ? { subject: input.subject } : {}),
       },
     );
-    await this.commitActivation({
+    const receipt = await this.commitActivation({
       activationId: input.activationId,
       epoch,
       workerId: input.workerId,
@@ -2040,6 +2040,14 @@ export class LocalManagedSessionAuthority {
       operation: 'installActivation',
       subject: input.subject,
     });
+    // The install's command identity is its activation ID, so a repeated ID
+    // replays the earlier receipt without appending; the epoch above would
+    // then name an activation the log never recorded.
+    if (receipt.replayed) {
+      throw new ManagedSessionConflictError(
+        `activation ${input.activationId} was already installed.`,
+      );
+    }
     return { activationId: input.activationId, epoch };
   }
 
@@ -2148,13 +2156,13 @@ export class LocalManagedSessionAuthority {
     readonly operation: string;
     readonly renewalSeq?: number;
     readonly subject?: ManagedSessionSubject;
-  }): Promise<void> {
+  }): Promise<ManagedSessionCommitReceipt> {
     // A renewal repeats the install's phase under the same activation, so it
     // needs its own command and event identity or the log's idempotency and
     // event-id uniqueness would reject it as a duplicate of the install.
     const renewalSuffix =
       input.renewalSeq === undefined ? '' : `:renewal:${input.renewalSeq}`;
-    await this.appendExecutionEvent(
+    return this.appendExecutionEvent(
       {
         operation: input.operation,
         commandId: `${input.activationId}:${input.phase}${renewalSuffix}`,

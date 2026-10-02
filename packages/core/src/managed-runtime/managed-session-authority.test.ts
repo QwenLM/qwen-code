@@ -774,6 +774,29 @@ describe('managed session authority activation fences', () => {
       await reopened.release();
     });
 
+    it('refuses to install an activation ID the log already holds', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      const install = () =>
+        opened.authority.installActivation({
+          activationId: 'act-once',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+      const installed = await install();
+      await opened.authority.releaseActivation();
+      const committed = opened.authority.committedSequence;
+
+      await expect(install()).rejects.toThrow(ManagedSessionConflictError);
+      expect(opened.authority.committedSequence).toBe(committed);
+      expect(opened.authority.currentActivation).toMatchObject({
+        activationId: 'act-once',
+        epoch: installed.epoch,
+        phase: 'released',
+      });
+      await opened.release();
+    });
+
     it('does not renew a released activation', async () => {
       const fixture = await createFixture();
       const opened = await openRenewable(fixture, () => 1_000_000);

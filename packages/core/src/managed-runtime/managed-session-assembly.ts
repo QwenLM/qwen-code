@@ -115,7 +115,11 @@ export interface ManagedSession {
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
-   * The successor's ID is random unless `activationId` names it.
+   * The successor's ID is random unless `activationId` names it. Hosted Hook
+   * release reads a random successor as a load that may own a Hook Runtime,
+   * so a successor that never acquires one carries a `hook_operation` subject
+   * or the ID `managedHookRestoreActivationId` derives. A named ID must be new
+   * to the log; installing one twice is refused.
    */
   replaceActivation(
     subject?: ManagedSessionSubject,

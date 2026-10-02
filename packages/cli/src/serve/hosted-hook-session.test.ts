@@ -1263,14 +1263,14 @@ it.each([
   ['released before the same worker loads again', true, true],
 ])(
   'still releases a load that follows an unrestored Hook operation activation (%s)',
-  async (_, released, sameWorker) => {
+  async (_, releasedFirst, sameWorker) => {
     await hooks.ensureReady();
     await session.replaceActivation({
       type: 'hook_operation',
       operationId: 'lost',
       occurrenceId: 'lost',
     });
-    if (released) await session.releaseActivation();
+    if (releasedFirst) await session.releaseActivation();
     let crashed: HostedHookSession;
     if (sameWorker) {
       const activation = await session.authority.installActivation({
@@ -1286,14 +1286,12 @@ it.each([
     await crashed.acquire();
     await reopenSession();
     const replacement = new HostedHookSession(options, session, pin);
-    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    release.mockClear();
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockClear();
     await replacement.acquire();
-    expect(
-      release.mock.contexts.map(
-        (broker) => (broker as HostedWorkspaceBroker).runtimeSessionId,
-      ),
-    ).toEqual([hooks.broker.runtimeSessionId, crashed.broker.runtimeSessionId]);
+    expect(released()).toEqual([
+      hooks.broker.runtimeSessionId,
+      crashed.broker.runtimeSessionId,
+    ]);
   },
 );
 
@@ -1301,16 +1299,11 @@ it('shares one acquisition between parallel callers', async () => {
   await hooks.ensureReady();
   await reopenSession();
   const replacement = new HostedHookSession(options, session, pin);
-  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
   const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
-  release.mockClear();
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockClear();
   acquire.mockClear();
   await Promise.all([replacement.acquire(), replacement.acquire()]);
-  expect(release.mock.contexts).toEqual([
-    expect.objectContaining({
-      runtimeSessionId: hooks.broker.runtimeSessionId,
-    }),
-  ]);
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
   expect(acquire).toHaveBeenCalledOnce();
 });
 

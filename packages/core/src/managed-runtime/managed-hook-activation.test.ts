@@ -292,6 +292,17 @@ describe('Managed Hook model activation', () => {
     ).resolves.toBe('retry');
   });
 
+  it('derives a stable restore activation ID', () => {
+    // A later build must still recognize the restores an earlier one recorded.
+    const id = managedHookRestoreActivationId(
+      '00000000-0000-4000-8000-000000000000',
+    );
+    expect(id).toBe('f31ba97f-91c5-5815-83c9-3da5e9cec2bc');
+    expect(id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
   it('serializes prompt Hooks inside a turn and preserves the checkpoint', async () => {
     const { session, controller } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();

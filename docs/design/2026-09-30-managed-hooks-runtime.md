@@ -97,10 +97,13 @@ Only load activations name owners. Each lifecycle Hook operation installs a
 `hook_operation` activation, and when it finishes it installs a restore
 activation whose ID is derived from the activation the operation replaced. The
 log always holds that activation, so the restore is recognized even when the
-`hook_operation` activation failed to install. Neither constructs a Hook
-session, so release skips both and its cost does not grow with the number of
-Hook operations. A load always installs a random activation ID, so it remains
-an owner even after a Hook operation that failed or was never restored.
+`hook_operation` activation failed to install. The restore keeps the default
+activation subject, so the record format is unchanged, and the log refuses an
+activation ID it already holds, so a derived ID cannot replay an earlier
+install. Neither constructs a Hook session, so release skips both and its cost
+does not grow with the number of Hook operations. A load always installs a
+random activation ID, so it remains an owner even after a Hook operation that
+failed or was never restored.
 Parallel Hook executions share one acquisition, so each earlier owner is
 released once. A restore recorded before restore IDs were derived is released
 like a load, and the Broker answers that release with 404.
