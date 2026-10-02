@@ -5,6 +5,7 @@
  */
 
 import type { CommandModule } from 'yargs';
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
 interface UpdateArgs {
@@ -55,11 +56,15 @@ export const updateCommand: CommandModule<object, UpdateArgs> = {
       try {
         targetVersion = normalizeVersion(argv.targetVersion).slice(1);
       } catch (err) {
-        writeStderrLine(
-          t('Update failed: {{error}}', {
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
+        // The flag value is raw argv: collapse whitespace and strip terminal
+        // escapes, control and bidi-format characters before echoing it.
+        const reason = stripAnsiAndControl(
+          (err instanceof Error ? err.message : String(err)).replace(
+            /\s+/g,
+            ' ',
+          ),
+        ).replace(/\p{Cf}/gu, '');
+        writeStderrLine(t('Update failed: {{error}}', { error: reason }));
         process.exitCode = 1;
         return;
       }

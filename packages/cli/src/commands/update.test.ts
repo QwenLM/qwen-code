@@ -139,11 +139,17 @@ describe('update command', () => {
     '01.2.3',
     '1.2.3-01',
     '1.2.3?x=1',
+    // Raw argv carrying an OSC-52 sequence: the rejection must not echo
+    // terminal escapes to stderr.
+    '1.2.3\u001b]52;c;aGk=\u0007',
   ])(
     'rejects invalid target %s before discovery or installation',
     async (targetVersion) => {
       await updateCommand.handler({ ...updateArgs, targetVersion });
       expect(process.exitCode).toBe(1);
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.not.stringContaining('\u001b'),
+      );
       expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
       expect(getInstallationInfo).not.toHaveBeenCalled();
       expect(performStandaloneUpdate).not.toHaveBeenCalled();

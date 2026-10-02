@@ -483,11 +483,31 @@ describe('standalone-update', () => {
           recursive: true,
         });
         fs.mkdirSync(path.join(fixture, 'qwen-code', 'lib'));
-        fs.writeFileSync(
-          path.join(fixture, 'qwen-code', 'node', 'bin', 'node'),
-          `#!/bin/sh\nprintf '%s\\n' '${reportedVersion}'\n`,
-          { mode: 0o755 },
-        );
+        const versionPrinter = `#!/bin/sh\nprintf '%s\\n' '${reportedVersion}'\n`;
+        if (options.runtime === 'bun') {
+          // Mirror installBunRuntime in scripts/create-standalone-package.js:
+          // the runtime lives at bun/bin/bun and node/bin/node is a shim
+          // execing it, so the smoke test exercises that two-hop chain.
+          fs.mkdirSync(path.join(fixture, 'qwen-code', 'bun', 'bin'), {
+            recursive: true,
+          });
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'bun', 'bin', 'bun'),
+            versionPrinter,
+            { mode: 0o755 },
+          );
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'node', 'bin', 'node'),
+            '#!/usr/bin/env sh\nexec "$(dirname "$0")/../../bun/bin/bun" "$@"\n',
+            { mode: 0o755 },
+          );
+        } else {
+          fs.writeFileSync(
+            path.join(fixture, 'qwen-code', 'node', 'bin', 'node'),
+            versionPrinter,
+            { mode: 0o755 },
+          );
+        }
         fs.writeFileSync(path.join(fixture, 'qwen-code', 'lib', 'cli.js'), '');
         // The shipped launcher execs lib/cli-entry.js; `entryless` stages a
         // repacked archive without it.
