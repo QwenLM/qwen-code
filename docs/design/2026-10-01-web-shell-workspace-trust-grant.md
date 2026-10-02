@@ -82,14 +82,25 @@ daemon evaluates.
 | Runtime not active                                      | 503 `workspace_runtime_unavailable`      |
 | Trust file malformed, unreadable, or not a regular file | 500 `trusted_folders_invalid`            |
 | Generation closed mid-request                           | generation-closed response, as elsewhere |
-| Already trusted                                         | 200, idempotent                          |
+| Already trusted, runtime active                         | 200, idempotent                          |
 
 That trust-file row is narrower than it reads. A dangling symlink reads as no
 file at all, so the grant replaces it with a regular file holding only the new
-rule and answers 200. Corruption the write itself discovers answers 500
-`internal_error`, not `trusted_folders_invalid`. And the malformed/unreadable
-verdict comes from a cached load that nothing clears in production, so a file
-repaired afterwards keeps answering 500 until the daemon restarts.
+rule and answers 200. Corruption the write itself discovers mostly answers 500
+`trusted_folders_invalid`: a symlinked or otherwise non-regular trust file, a
+document whose root is not a JSON object, and a rule carrying an invalid trust
+level all raise `FatalConfigError` from the writer. Only a document that is
+syntactically invalid JSON — and was still valid when the daemon first cached
+it — reaches the write as a plain parse failure and answers 500
+`internal_error`. And the malformed/unreadable verdict comes from a cached load
+that nothing clears in production, so a file repaired afterwards keeps
+answering 500 until the daemon restarts.
+
+The already-trusted row likewise assumes an active runtime. A successful grant
+starts a rebuild that moves the entry to `transitioning`, and while it is there
+both grant routes answer 503 `workspace_runtime_unavailable` with
+`Retry-After: 1`, even though the trust record is already written. Clients must
+read that 503 as retryable-until-applied, not as a failed decision.
 
 Writing the exact workspace path at the deepest matching depth also overrides
 a shallower `DO_NOT_TRUST` parent rule, and re-keying the same path replaces an
