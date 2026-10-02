@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.sql.Timestamp;
 import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
@@ -106,9 +105,7 @@ public final class ToolPublicationStore {
         require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
                 && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
-        Timestamp now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
-        require(now != null, "Publication grant expired");
-        long nowEpoch = sessions.databaseEpochMillis(now);
+        long nowEpoch = ToolPublicationRetentionStore.now(jdbc);
         require(row.expiresAt() != null && row.expiresAt() > nowEpoch,
                 "Publication grant expired");
         JsonNode key = binding.get("sessionKey");
