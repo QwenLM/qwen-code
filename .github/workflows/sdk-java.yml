@@ -18,12 +18,17 @@ on:
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
+      - 'integration-tests/baselines/hosted-latency.json'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
+      - 'scripts/check-flyway-migrations.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -43,12 +48,17 @@ on:
       - 'packages/cli/src/acp-integration/**'
       - 'packages/acp-bridge/**'
       - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
+      - 'integration-tests/baselines/hosted-latency.json'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
+      - 'scripts/check-flyway-migrations.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -196,6 +206,28 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
 
+  # The Flyway duplicate-version guard of #12940. managed-agent-server
+  # allocates migration versions by hand across two locations that share one
+  # sequence, so two green PRs can collide once both merge; the test that
+  # catches it boots a database and runs only in the slow lanes below. This
+  # job is the fast lane: a filename scan, seconds in, on every pull request —
+  # whose checkout is the prospective merge result — and on every push.
+  # runtime-broker and qwencode carry no migrations today but share the
+  # namespace: managed-agent-server depends on both at compile scope, so
+  # Flyway resolves classpath:db/migration across the jars and a version
+  # claimed in any of them collides with managed-agent-server's exactly like
+  # an in-module duplicate.
+  flyway-migrations:
+    name: 'Flyway migration version uniqueness'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Check Flyway migration versions are unique'
+        run: 'node scripts/check-flyway-migrations.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
+
   mysql-integration:
     name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
     runs-on: 'ubuntu-latest'
@@ -262,7 +294,9 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    # The step ceilings (12+10+20) leave room for the uncapped setup steps;
+    # a healthy run measured ~20 min end to end.
+    timeout-minutes: 60
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -317,6 +351,11 @@ jobs:
           -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
       - name: 'Check that every Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server'
+      - name: 'Check Hosted latency measurements'
+        run: |-
+          test -s packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+          cd integration-tests
+          npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
         timeout-minutes: 10
         env:
@@ -324,12 +363,28 @@ jobs:
         run: >-
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml
           -Pfault-gates -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" test
+      - name: 'Install MySQL binaries for the failover E2E'
+        run: |-
+          if ! command -v mysqld >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
+          fi
+      - name: 'Run in-flight owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-inflight-failover
+      - name: 'Run continuation owner failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'hosted-harness-mysql-reports'
-          path: 'packages/sdk-java/managed-agent-server/target/failsafe-reports/'
+          path: |
+            packages/sdk-java/managed-agent-server/target/failsafe-reports/
+            packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
           retention-days: 7
 
   daemon-e2e:

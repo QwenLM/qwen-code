@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import jakarta.annotation.PreDestroy;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -190,6 +191,10 @@ public class HarnessCoordinator {
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error);
             }
+        } catch (RuntimeBrokerException error) {
+            terminal = !submissionAttempted.get() && !error.isRetryable()
+                    ? fail(claimed, error.getCode(), error.getMessage())
+                    : transientFailure(claimed, submissionAttempted.get(), error);
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error);
@@ -205,7 +210,7 @@ public class HarnessCoordinator {
             AtomicBoolean leaseLost, AtomicBoolean submissionAttempted) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
-        if (session.workspace() != null) {
+        if (session.workspace() != null && !harness.isWorkspaceFilesAvailable()) {
             return fail(claimed, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
@@ -222,11 +227,16 @@ public class HarnessCoordinator {
             warmRuntime(session, claimed);
         }
         requireLease(leaseLost);
-        Attachment attachment = recoveringCancellation
-                ? harness.createOrLoad(session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null, true)
-                : harness.createOrLoad(session.tenantId(), session.sessionId(),
-                        session.harnessBootId() != null);
+        Attachment attachment;
+        if (session.harnessBootId() != null) {
+            // A previously attached Session may hold a parked Turn; the
+            // takeover load settles or reports it. Plain loads stay inert.
+            attachment = harness.recoverManagedRuntime(session.tenantId(),
+                    session.sessionId(), recoveringCancellation);
+        } else {
+            attachment = harness.createOrLoad(session.tenantId(),
+                    session.sessionId(), false);
+        }
         HarnessRuntimeRecovery runtimeRecovery = attachment.runtimeRecovery();
         if (runtimeRecovery != null
                 && runtimeRecovery.hasUnknownOutcome()) {

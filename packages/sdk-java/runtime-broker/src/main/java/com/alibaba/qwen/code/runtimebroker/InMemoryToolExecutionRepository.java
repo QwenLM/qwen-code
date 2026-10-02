@@ -6,6 +6,8 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Comparator;
 import java.util.Map;
+import java.util.List;
+import java.util.TreeMap;
 
 /** Process-local execution ledger for tests and single-node use. */
 public final class InMemoryToolExecutionRepository
@@ -208,6 +210,19 @@ public final class InMemoryToolExecutionRepository
     public synchronized ToolExecutionRecord resolveUnknown(
             ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
+        return resolve(expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public synchronized ToolExecutionRecord resolveUnsettled(
+            ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        return resolve(expected, resolutionResult, resolutionTime, false);
+    }
+
+    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime,
+            boolean unknownOnly) {
         if (expected == null) {
             throw new IllegalArgumentException("expected is required");
         }
@@ -215,15 +230,38 @@ public final class InMemoryToolExecutionRepository
                 expected.getExecutionCallId());
         if (current == null || !current.sameIdentity(expected)
                 || current.getVersion() != expected.getVersion()
-                || current.getState()
-                        != ToolExecutionRecord.State.UNKNOWN) {
+                || !current.needsReconciliation()
+                || unknownOnly && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
             return null;
         }
-        ToolExecutionRecord resolved = current.resolveUnknown(
+        ToolExecutionRecord resolved = current.resolveUnsettled(
                 resolutionResult, resolutionTime)
                 .withVersion(current.getVersion() + 1);
         recordsById.put(resolved.getExecutionCallId(), resolved);
         return resolved;
+    }
+
+    @Override
+    public synchronized List<ToolExecutionRecord> findUnsettled(
+            RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        TreeMap<String, ToolExecutionRecord> batch = new TreeMap<>();
+        for (ToolExecutionRecord record : recordsById.values()) {
+            if (record.belongsTo(session) && record.needsReconciliation()) {
+                String key = JdbcRepositorySupport.valueKey(record.getExecutionCallId());
+                if (key.compareTo(after) > 0) {
+                    batch.put(key, record);
+                    if (batch.size() > limit) {
+                        batch.pollLastEntry();
+                    }
+                }
+            }
+        }
+        return List.copyOf(batch.values());
     }
 
     @Override

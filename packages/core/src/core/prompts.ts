@@ -278,9 +278,11 @@ export interface PromptToolSurface {
  * Which tools each gated line of `## Using Your Tools` talks about. A line
  * survives only when every tool it names is declared: a line that named a
  * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. Lines absent from this table are policy
- * that holds regardless of the tool surface (tool fallback, parallel calls,
- * respecting denials) and are never dropped.
+ * the defect this gating exists to fix. A deferred tool is reachable but not
+ * declared, so its line drops too; its selection rule travels in the first
+ * description line the deferred-tool reminder shows instead (#12702). Lines
+ * absent from this table are policy that holds regardless of the tool surface
+ * (tool fallback, parallel calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;
@@ -438,7 +440,7 @@ function getToolGuidanceSection(
   if (codeModeOnly) {
     return `
 ## Using Your Tools
-- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<name>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<jsName>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
 - **Tool Discovery:** If a needed tool's signature is absent from '${ToolNames.EXEC}', use the top-level '${ToolNames.TOOL_SEARCH}' when available. Read its returned schema and JavaScript name before calling that tool in a later '${ToolNames.EXEC}' program.
 - **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
   - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
@@ -447,7 +449,7 @@ function getToolGuidanceSection(
   - To search for files use \`tools.${ToolNames.GLOB}\` instead of find or ls
   - To search the content of files, use \`tools.${ToolNames.GREP}\` instead of grep or rg
   - Reserve \`tools.${ToolNames.SHELL}\` for system commands and terminal operations that require shell execution.
-- **Batch Into One Program:** Put independent calls in a single '${ToolNames.EXEC}' program and await them together with \`Promise.all\`. Sequence calls only when a later one needs a value an earlier one produced. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. A denied or failed call aborts the whole program, so keep a call that may be refused out of a batch you would then have to repeat.
+- **Batch Into One Program:** Put independent searches and reads in a single '${ToolNames.EXEC}' program with \`await Promise.allSettled([...])\`. Inspect every result: print fulfilled outputs and rejected reasons with \`String(result.reason)\`. The runtime runs safe calls concurrently within its limit; one rejected promise leaves the other results available. Keep dependent actions, mutations, and approvals sequential. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. User cancellation still stops unfinished calls.
 - **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
 ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when referring to files with tools like \`tools.${ToolNames.READ_FILE}\` or \`tools.${ToolNames.WRITE_FILE}\`. Relative paths are not supported.
 - **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
@@ -459,7 +461,7 @@ ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when re
   }
   // CodeModeOnly is deliberately not gated above: there the declared surface is
   // `exec` plus a few direct controls, while the tools this section names are
-  // reached as `tools.<name>` inside `exec` and are not declarations at all.
+  // reached as `tools.<jsName>` inside `exec` and are not declarations at all.
   const directGuidance = `
 ## Using Your Tools
 - **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
@@ -1044,14 +1046,18 @@ model: [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.SHELL}
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
 model: I'll inspect the source, tests, and dependencies. Independent reads go in one program.
 [tool_call: ${ToolNames.EXEC} with source:
-const [tests, requirements, source] = await Promise.all([
+const results = await Promise.allSettled([
   tools.${ToolNames.GLOB}({ pattern: 'tests/test_auth.py' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/requirements.txt' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/src/auth.py' }),
 ]);
-text(tests.output);
-text(requirements.output);
-text(source.output);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
 ]
 (After finding /path/to/tests/test_auth.py)
 [tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/tests/test_auth.py' })).output);]
@@ -1070,19 +1076,22 @@ Refactored the auth logic; the linter and tests passed.
 <example>
 user: Write tests for someFile.ts
 model:
-I'll read the source and an existing test together to follow project conventions.
+I'll read the source and an existing test, and check whether the target test file exists.
 [tool_call: ${ToolNames.EXEC} with source:
-const [source, existing] = await Promise.all([
+const results = await Promise.allSettled([
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.ts' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/existingTest.test.ts' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' }),
 ]);
-text(source.output);
-text(existing.output);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
 ]
-(After reviewing both)
-Now I'll check whether the intended test file already exists. A failed call aborts the whole program, so this probe stays on its own.
-[tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' })).output);]
-(After ${ToolNames.READ_FILE} reports that /path/to/someFile.test.ts does not exist)
+(After reviewing the successful reads and confirming that /path/to/someFile.test.ts does not exist)
 [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.WRITE_FILE}({ file_path: '/path/to/someFile.test.ts', content: '(test code content)' });]
 (After confirming the project's test command)
 [tool_call: ${ToolNames.EXEC} with source:

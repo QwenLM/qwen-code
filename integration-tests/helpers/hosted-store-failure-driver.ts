@@ -47,6 +47,7 @@ const reports = config.sessions.map((session) => ({
   faults: 0,
   operations: [] as string[],
   target: undefined as Transaction | undefined,
+  targetDigest: '',
   receipt: undefined as Receipt | undefined,
   restoreTransactions: [] as Transaction[],
 }));
@@ -138,12 +139,14 @@ const proxy = createServer(async (req, res) => {
     const commit = store && url.pathname.endsWith('/transactions:commit');
     const target = commit && !restoring && selected(fields, report.fault);
     if (target) {
-      assert.equal(
-        report.faults++,
-        0,
-        'Harness must not retry the failed write',
-      );
-      report.target = fields;
+      assert(report.faults < 3, 'Harness exceeded the commit retry budget');
+      report.faults++;
+      const digest = createHash('sha256').update(body).digest('hex');
+      if (report.target) assert.equal(digest, report.targetDigest);
+      else {
+        report.target = fields;
+        report.targetDigest = digest;
+      }
     }
     const upstream = await fetch(url, init);
     const bytes = Buffer.from(await upstream.arrayBuffer());
@@ -155,12 +158,16 @@ const proxy = createServer(async (req, res) => {
     if (target) {
       if (report.fault.endsWith('-reply')) {
         assert.equal(upstream.status, 200, bytes.toString());
-        assert.equal(json.replayed, false);
-        report.receipt = json;
-        // Probe the Store's exact-request replay contract without retrying the Harness write.
-        const replay = await fetch(url, init);
-        assert.equal(replay.status, 200, await replay.clone().text());
-        assert.deepEqual(await replay.json(), { ...json, replayed: true });
+        assert.equal(json.replayed, report.faults > 1);
+        if (report.receipt)
+          assert.deepEqual(json, { ...report.receipt, replayed: true });
+        else {
+          report.receipt = json;
+          const replay = await fetch(url, init);
+          assert.equal(replay.status, 200, await replay.clone().text());
+          assert.deepEqual(await replay.json(), { ...json, replayed: true });
+        }
+        // Lose every bounded retry's reply to retain the unknown-write probe.
         res.destroy();
         return;
       }
@@ -308,7 +315,7 @@ try {
     await waitUntil(
       async () => !(await json(`${route}/status`)).hasActivePrompt,
     );
-    assert.equal(current.faults, 1, `${current.fault}: fault did not fire`);
+    assert.equal(current.faults, 3, `${current.fault}: retries not exhausted`);
     assert.equal((await json(`${route}/status`)).recoveryBlocked, true);
     assert.equal(current.modelCalls, current.fault === 'turn-reply' ? 2 : 1);
     const records = await transcript();
@@ -408,7 +415,7 @@ try {
       'decoy',
     );
     console.log(
-      `FG6B ${current.fault}: faults=1, modelCalls=${calls}, starts=${started ? 1 : 0}, cold=${completed ? 'committed' : 'blocked'}`,
+      `FG6B ${current.fault}: faults=${current.faults}, modelCalls=${calls}, starts=${started ? 1 : 0}, cold=${completed ? 'committed' : 'blocked'}`,
     );
   }
   if (proxyFailure) throw proxyFailure;
