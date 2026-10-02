@@ -9,23 +9,12 @@ import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
-  parseHostedFileHistoryState,
-  type HostedFileHistoryState,
+  parseHostedFileHistoryRecord,
+  type HostedFileHistoryRecord,
 } from './hosted-file-history-protocol.js';
 
-export interface HostedFileHistoryRecord {
-  schemaVersion: 1;
-  state: HostedFileHistoryState;
-  pendingTurn: string | null;
-  pendingMessageId?: string;
-  pendingUndo: { requestId: string; promptId: string } | null;
-  undoReceipts?: Array<{
-    requestId: string;
-    promptId: string;
-    filesChanged: string[];
-    conflict: boolean;
-  }>;
-}
+export { HOSTED_UUID } from './hosted-file-history-protocol.js';
+export type { HostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 
 export class HostedFileHistoryRefusedError extends Error {}
 
@@ -95,34 +84,12 @@ export async function readHostedFileHistory(
 ): Promise<HostedFileHistoryRecord | undefined> {
   const latest = session.authority.domainRecord('file_history');
   if (!latest) return undefined;
-  const record = JSON.parse(
-    (await session.resources.read(latest.recordRef)).toString('utf8'),
-  ) as HostedFileHistoryRecord;
-  if (
-    record.schemaVersion !== 1 ||
-    !(record.pendingTurn === null || typeof record.pendingTurn === 'string') ||
-    (record.pendingMessageId !== undefined &&
-      (typeof record.pendingMessageId !== 'string' || !record.pendingTurn)) ||
-    !(
-      record.pendingUndo === null ||
-      (typeof record.pendingUndo?.requestId === 'string' &&
-        typeof record.pendingUndo.promptId === 'string')
-    )
-  )
-    throw new Error('Invalid Hosted file history record.');
-  return {
-    schemaVersion: 1,
-    state: parseHostedFileHistoryState(
-      record.state,
-      session.authority.sessionHeader.sessionKey.sessionId,
+  return parseHostedFileHistoryRecord(
+    JSON.parse(
+      (await session.resources.read(latest.recordRef)).toString('utf8'),
     ),
-    pendingTurn: record.pendingTurn,
-    ...(record.pendingMessageId !== undefined
-      ? { pendingMessageId: record.pendingMessageId }
-      : {}),
-    pendingUndo: record.pendingUndo,
-    undoReceipts: record.undoReceipts ?? [],
-  };
+    session.authority.sessionHeader.sessionKey.sessionId,
+  );
 }
 
 export async function canSettleHostedFileHistory(
