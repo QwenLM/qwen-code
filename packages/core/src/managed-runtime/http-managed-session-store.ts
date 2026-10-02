@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { isIPv4 } from 'node:net';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import {
   MANAGED_SESSION_COMMIT_SUBTYPE,
@@ -54,6 +55,18 @@ const WRITER_TOKEN = new RegExp(
 const DEFAULT_LEASE_DURATION_MS = 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
+// WHATWG URL normalizes IPv4 literals (127.1 → 127.0.0.1) and keeps IPv6
+// brackets; a 127.-prefixed DNS name (127.example.com) is not an IPv4 literal.
+function isLoopbackHostname(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  return (
+    lower === 'localhost' ||
+    lower.endsWith('.localhost') ||
+    (isIPv4(lower) && lower.startsWith('127.')) ||
+    lower === '[::1]'
+  );
+}
+
 export interface HttpManagedSessionStoreOptions {
   readonly baseUrl: string;
   readonly sessionKey: ManagedSessionKey;
@@ -63,6 +76,12 @@ export interface HttpManagedSessionStoreOptions {
   readonly fetchFn?: typeof fetch;
   /** Test and controlled-recovery hook. Normal callers generate a fresh token. */
   readonly writerToken?: string;
+  /**
+   * Opt-in for plaintext http:// broker URLs on non-loopback hosts. Writer
+   * tokens cross the wire unencrypted on such URLs, so they are refused
+   * without this flag.
+   */
+  readonly allowInsecureHttp?: boolean;
 }
 
 export interface HttpManagedSessionStores {
@@ -422,6 +441,15 @@ class ManagedSessionStoreHttpClient {
     ) {
       throw new ManagedSessionRecordError(
         'baseUrl must be an HTTP(S) URL without credentials, query, or fragment.',
+      );
+    }
+    if (
+      parsed.protocol === 'http:' &&
+      !isLoopbackHostname(parsed.hostname) &&
+      options.allowInsecureHttp !== true
+    ) {
+      throw new ManagedSessionRecordError(
+        'baseUrl uses plaintext HTTP on a non-loopback host; writer tokens would cross the wire unencrypted. Pass allowInsecureHttp: true to opt in.',
       );
     }
     this.baseUrl = parsed.toString().replace(/\/$/, '');

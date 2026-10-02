@@ -142,7 +142,7 @@ describe('Managed Session store shared contract', () => {
       );
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: fixture.sessionKey,
       writerId: 'fixture-writer',
       writerToken: 'a'.repeat(32),
@@ -183,7 +183,7 @@ describe('Managed Session store shared contract', () => {
   it('preserves every shared Java error classification', async () => {
     for (const expected of Object.values(fixture.errors)) {
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: fixture.sessionKey,
         writerId: 'fixture-writer',
         writerToken: 'a'.repeat(32),

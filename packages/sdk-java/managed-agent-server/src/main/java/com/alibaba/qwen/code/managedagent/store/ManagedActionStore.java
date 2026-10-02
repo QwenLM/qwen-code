@@ -16,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -64,20 +65,44 @@ public class ManagedActionStore {
             throw new ApiException(HttpStatus.FORBIDDEN,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        if (key == null
-                || jdbc.queryForObject(
+        byte[] creator = jdbc.queryForObject(
+                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        if (creator != null) {
+            if (key != null && Arrays.equals(creator, key)) {
+                return;
+            }
+            throw forbidden();
+        }
+        int owners = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                Integer.class, tenantId, sessionId);
+        if (owners == 0) {
+            // No recorded creator: an anonymous open-mode Session is
+            // tenant-owned, matching its read semantics.
+            return;
+        }
+        if (key != null
+                && jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
                                         + " tenant_id = ? AND session_id = ? AND actor_id = ?",
                                 Integer.class,
                                 tenantId,
                                 sessionId,
                                 key)
-                        != 1) {
-            throw new ApiException(
-                    HttpStatus.FORBIDDEN,
-                    "action_forbidden",
-                    "Only the Session's creator may answer its Actions.");
+                        == 1) {
+            return;
         }
+        throw forbidden();
+    }
+
+    private static ApiException forbidden() {
+        return new ApiException(
+                HttpStatus.FORBIDDEN,
+                "action_forbidden",
+                "Only the Session's creator may answer its Actions.");
     }
 
     void apply(

@@ -29,9 +29,18 @@ import java.util.Map;
 import java.util.Optional;
 
 public interface AgentStateStore {
-    Admission insertSessionCommand(String tenantId, String operation,
+    default Admission insertSessionCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, null, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest);
+    }
+
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,

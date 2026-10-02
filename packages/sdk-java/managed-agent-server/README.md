@@ -356,6 +356,43 @@ no direct store admission or test Broker replacement is needed.
 Design: [English](../../../docs/design/2026-09-29-hosted-public-workspace-admission.md)
 | [简体中文](../../../docs/design/2026-09-29-hosted-public-workspace-admission.zh-CN.md).
 
+### Broker authentication and writer credentials
+
+`QWEN_MANAGED_AGENT_AUTH_MODE` selects how the public surface
+(`/v1/agents/**` and the WebShell adapter) authenticates its caller:
+`auto` (the default) resolves to `open` when `server.address` is loopback
+and refuses to start otherwise, `open` keeps the header-asserted tenant and
+the optional trusted-actor stand-in for local runs, and `signed` requires
+every public request to carry `X-Qwen-Actor-Id`,
+`X-Qwen-Signature-Timestamp` (epoch seconds, within
+`QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT`, default `5m`) and
+`X-Qwen-Signature: v1=<hex HMAC-SHA256>` over
+`"qwen-broker-auth-v1\n" + METHOD + "\n" + path + "\n" + tenant + "\n" +
+actor + "\n" + timestamp`, keyed by
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` (at least 32 bytes). Signed mode
+cannot be combined with `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
+
+`QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` switches writer tokens from
+self-minted to broker-provisioned: the writer credential becomes an HMAC
+over `(tenantId, workspaceId, sessionId)` that the Broker hands to the
+Harness in the attach payload, and the store rejects any other token,
+including during a free lease window. A configured key must be at least 32
+bytes. A Broker that intentionally serves the store over plaintext HTTP
+inside a trusted network sets
+`QWEN_MANAGED_AGENT_SESSION_STORE_ALLOW_INSECURE_HTTP=true`, which the
+attach payload forwards to the Harness so its client accepts the URL. The
+internal surface
+(`/internal/**`) may move to its own listener via
+`QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT` and
+`QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS` (default `127.0.0.1`); either
+port then answers 404 for the other surface's routes. Leaving loopback —
+public or internal — requires signed mode or a configured binding key
+respectively, unless `QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true`
+explicitly overrides the guard.
+
+Design: [English](../../../docs/design/managed-agent-broker-auth.md)
+| [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).
+
 ### Broker deployment
 
 The Broker starts before the first Hosted Harness connection, so the supported

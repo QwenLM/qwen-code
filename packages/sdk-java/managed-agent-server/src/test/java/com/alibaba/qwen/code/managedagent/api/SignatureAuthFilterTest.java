@@ -1,0 +1,186 @@
+package com.alibaba.qwen.code.managedagent.api;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.alibaba.qwen.code.managedagent.config.BrokerSecurity;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
+import java.net.InetAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.core.Ordered;
+import org.springframework.mock.web.MockFilterChain;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+
+class SignatureAuthFilterTest {
+    private static final String KEY =
+            "0123456789abcdef0123456789abcdef";
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Test
+    void staysOutOfOpenModeAndRunsBeforeTheHeaderStandIn() throws Exception {
+        SignatureAuthFilter filter = filter(open());
+        MockHttpServletRequest request = request("GET",
+                "/v1/agents/sessions");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(request, response, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNull();
+        assertThat(filter.getOrder())
+                .isEqualTo(Ordered.HIGHEST_PRECEDENCE + 10);
+    }
+
+    @Test
+    void acceptsAValidSignatureAndInstallsThePrincipal() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        String timestamp = now();
+        MockHttpServletRequest request = request("POST",
+                "/v1/agents/sessions");
+        request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/v1/agents/sessions", "tenant-a", "actor-a",
+                        timestamp));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(request, response, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isInstanceOfSatisfying(
+                        AuthenticatedTenantActor.class, actor -> {
+                            assertThat(actor.tenantId()).isEqualTo("tenant-a");
+                            assertThat(actor.actorId()).isEqualTo("actor-a");
+                        });
+    }
+
+    @Test
+    void rejectsMissingAndWrongSignatures() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        String timestamp = now();
+
+        MockHttpServletResponse missing = new MockHttpServletResponse();
+        MockHttpServletRequest unsigned = request("GET",
+                "/v1/agents/sessions");
+        filter.doFilter(unsigned, missing, new MockFilterChain());
+        assertThat(missing.getStatus()).isEqualTo(401);
+        assertThat(missing.getContentAsString())
+                .contains("authentication_required");
+
+        MockHttpServletResponse wrong = new MockHttpServletResponse();
+        MockHttpServletRequest forged = request("GET",
+                "/v1/agents/sessions");
+        forged.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        forged.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        forged.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("GET", "/v1/agents/sessions", "tenant-a", "attacker",
+                        timestamp));
+        filter.doFilter(forged, wrong, new MockFilterChain());
+        assertThat(wrong.getStatus()).isEqualTo(401);
+        assertThat(wrong.getContentAsString()).contains("invalid_signature");
+
+        MockHttpServletResponse stale = new MockHttpServletResponse();
+        MockHttpServletRequest old = request("GET", "/v1/agents/sessions");
+        String oldTimestamp = Long.toString(
+                System.currentTimeMillis() / 1000L - 3600);
+        old.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        old.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, oldTimestamp);
+        old.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("GET", "/v1/agents/sessions", "tenant-a", "actor-a",
+                        oldTimestamp));
+        filter.doFilter(old, stale, new MockFilterChain());
+        assertThat(stale.getStatus()).isEqualTo(401);
+        assertThat(stale.getContentAsString()).contains("invalid_signature");
+    }
+
+    @Test
+    void doesNotCoverTheInternalSurfaceAndIgnoresAMissingTenant()
+            throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        MockHttpServletRequest internal = new MockHttpServletRequest("POST",
+                "/internal/managed-session-store/v1/sessions/s/writers:acquire");
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(internal, new MockHttpServletResponse(), chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNull();
+
+        MockHttpServletRequest noTenant = new MockHttpServletRequest("GET",
+                "/v1/agents/sessions");
+        MockFilterChain second = new MockFilterChain();
+        filter.doFilter(noTenant, new MockHttpServletResponse(), second);
+        assertThat(((HttpServletRequest) second.getRequest())
+                .getUserPrincipal()).isNull();
+    }
+
+    @Test
+    void coversTheWebShellSurface() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        MockHttpServletResponse unsigned = new MockHttpServletResponse();
+        filter.doFilter(request("POST",
+                "/api/agent/web-shell/v1/sessions/query"), unsigned,
+                new MockFilterChain());
+        assertThat(unsigned.getStatus()).isEqualTo(401);
+
+        String timestamp = now();
+        MockHttpServletRequest signedRequest = request("POST",
+                "/api/agent/web-shell/v1/sessions/query");
+        signedRequest.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        signedRequest.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER,
+                timestamp);
+        signedRequest.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("POST", "/api/agent/web-shell/v1/sessions/query",
+                        "tenant-a", "actor-a", timestamp));
+        MockHttpServletResponse accepted = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(signedRequest, accepted, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNotNull();
+    }
+
+    private static MockHttpServletRequest request(String method,
+            String path) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method,
+                path);
+        request.addHeader(TenantContextFilter.HEADER, "tenant-a");
+        return request;
+    }
+
+    private static SignatureAuthFilter filter(BrokerSecurity security) {
+        return new SignatureAuthFilter(security, JSON);
+    }
+
+    private static BrokerSecurity open() throws Exception {
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        return new BrokerSecurity(new ManagedAgentProperties(), server);
+    }
+
+    private static BrokerSecurity signed() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        return new BrokerSecurity(properties, server);
+    }
+
+    private static String now() {
+        return Long.toString(System.currentTimeMillis() / 1000L);
+    }
+
+    private static String sign(String method, String uri, String tenant,
+            String actor, String timestamp) throws Exception {
+        String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
+                + "\n" + tenant + "\n" + actor + "\n" + timestamp;
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(KEY.getBytes(StandardCharsets.UTF_8),
+                "HmacSHA256"));
+        return "v1=" + HexFormat.of().formatHex(
+                mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
+    }
+}

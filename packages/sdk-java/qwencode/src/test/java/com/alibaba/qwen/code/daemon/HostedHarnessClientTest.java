@@ -109,6 +109,8 @@ class HostedHarnessClientTest {
                                             .tenantId("tenant-a")
                                             .workspaceId("workspace-a")
                                             .writerId(BOOT_ID)
+                                            .writerToken("qwt1_"
+                                                    + "a".repeat(43))
                                             .leaseDuration(
                                                     Duration.ofSeconds(45))
                                             .build())
@@ -134,8 +136,18 @@ class HostedHarnessClientTest {
                 "\"workspaceId\":\"workspace-a\""));
         assertTrue(body.get().contains("\"writerId\":\"" + BOOT_ID
                 + "\""));
+        assertTrue(body.get().contains("\"writerToken\":\"qwt1_"
+                + "a".repeat(43) + "\""));
         assertTrue(body.get().contains("\"leaseDurationMs\":45000"));
         assertFalse(body.get().contains("cwd"));
+        assertThrows(IllegalArgumentException.class,
+                () -> ManagedSessionStoreConnection.builder()
+                        .baseUri(URI.create("https://store.example/"))
+                        .tenantId("tenant-a")
+                        .workspaceId("workspace-a")
+                        .writerId(BOOT_ID)
+                        .writerToken("short")
+                        .build());
     }
 
     @Test

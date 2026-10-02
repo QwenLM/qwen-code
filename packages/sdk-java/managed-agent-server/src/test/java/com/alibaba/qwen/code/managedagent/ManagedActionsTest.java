@@ -544,6 +544,57 @@ class ManagedActionsTest {
                 .isZero();
     }
 
+    @Test
+    void hostedSessionsAnswerThroughTheirRecordedCreator() throws Exception {
+        String tenant = tenant();
+        String anonymous = hostedSession(tenant, null);
+        ActionJournal open = action(tenant, anonymous,
+                System.currentTimeMillis(), 9007199254740991L);
+        // No recorded creator: the tenant-scoped caller answers, matching
+        // the read semantics of a non-Workspace Session.
+        readAccepted(auth(post(path(anonymous, open.id) + "/responses"),
+                tenant, "anyone")
+                        .header("Idempotency-Key", "open-answer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")));
+
+        String owned = hostedSession(tenant, "owner");
+        ActionJournal journal = action(tenant, owned,
+                System.currentTimeMillis(), 9007199254740991L);
+        mvc.perform(auth(post(path(owned, journal.id) + "/responses"),
+                tenant, "other")
+                        .header("Idempotency-Key", "foreign-answer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+        mvc.perform(post(path(owned, journal.id) + "/responses")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "anonymous-answer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+        readAccepted(auth(post(path(owned, journal.id) + "/responses"),
+                tenant, "owner")
+                        .header("Idempotency-Key", "owner-answer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(response("allow")));
+    }
+
+    private String hostedSession(String tenant, String actor)
+            throws Exception {
+        MockHttpServletRequestBuilder create = post("/v1/agents/sessions")
+                .header(TenantContextFilter.HEADER, tenant)
+                .header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}");
+        if (actor != null) {
+            create = auth(create, tenant, actor);
+        }
+        return readAccepted(create).path("id").asText();
+    }
+
     private ActionJournal action(String tenant, String session, long created, long expiry)
             throws Exception {
         ActionJournal journal = new ActionJournal(journals, tenant, session, created, expiry);
