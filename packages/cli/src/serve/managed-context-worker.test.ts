@@ -1029,7 +1029,10 @@ describe('Managed context tool gate', () => {
     const root = workspace(['services/api/src', 'services/web']);
     fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), '');
     fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
-    fs.symlinkSync(path.join('..', 'web'), path.join(root, 'services/api/peek'));
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
     const origin = await startWorker({ ...BOOT, mountRoot: root });
     await post(origin, CONTEXT, installation('session-1', 'services/api'));
     await post(origin, CONTEXT, installation('session-2', 'services/web'));

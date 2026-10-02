@@ -797,10 +797,7 @@ export class ManagedToolExecutor {
         // segment so a literal `a/..b/*.ts` stays usable.
         const pattern =
           typeof params['pattern'] === 'string' ? params['pattern'] : '';
-        if (
-          path.isAbsolute(pattern) ||
-          pattern.split(/[\\/]/).includes('..')
-        ) {
+        if (path.isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..')) {
           throw new Error(
             'Glob pattern must stay within the Workspace directory.',
           );
@@ -1143,11 +1140,14 @@ function sameInvocation(
 function relativizeGlobText(text: string, directory: string): string {
   const root = path.resolve(directory);
   const prefix = root.endsWith(path.sep) ? root : root + path.sep;
-  const bareRoot = new RegExp(
-    root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![/\\w.-])',
-    'g',
-  );
-  return text.split(prefix).join('').replace(bareRoot, '.');
+  const escape = (value: string) =>
+    value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // ponytail: strip the root only where it begins a path token. An unanchored
+  // split/join also ate the separators of a nested directory whose name
+  // repeats the root, fusing two real paths into one that does not exist.
+  const tokenPrefix = new RegExp(`(?<![\\w./\\\\-])${escape(prefix)}`, 'g');
+  const bareRoot = new RegExp(escape(root) + '(?![/\\w.-])', 'g');
+  return text.replace(tokenPrefix, '').replace(bareRoot, '.');
 }
 
 /** Both of glob's model-facing channels carry paths, so both are rewritten. */
