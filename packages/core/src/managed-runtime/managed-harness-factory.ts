@@ -9,6 +9,7 @@ import {
   createAwaitActionHarnessCheckpoint,
   createAwaitRuntimeHarnessCheckpoint,
   createConsumedRuntimeResultsHarnessCheckpoint,
+  createHookStoppedRuntimeHarnessCheckpoint,
   createInitialHarnessCheckpoint,
   createModelOutputCommittedHarnessCheckpoint,
   createResultsReadyHarnessCheckpoint,
@@ -220,6 +221,11 @@ export interface ManagedHarnessHandle {
    * finishes. No-op until every settled receipt is consumed.
    */
   settleConsumedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null>;
+  /**
+   * Trusted Harness calls this only after an original after-tool Hook stop
+   * has settled. Close that continuation without claiming model consumption.
+   */
+  settleHookStoppedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null>;
 }
 
 /**
@@ -787,6 +793,34 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
       });
       await this.commitHarnessCheckpoint(
         `harness:turn_settled:${this.activation.activationId}:${identity.coveredSequence}`,
+        checkpoint,
+        null,
+      );
+      return checkpoint;
+    });
+  }
+
+  async settleHookStoppedRuntimeContinuation(): Promise<HarnessCheckpointV1 | null> {
+    return this.mutateCheckpoint(async () => {
+      this.assertNotDetached();
+      this.assertCurrentActivation();
+      const previous = (await this.requireRunnableAuthorization()).checkpoint;
+      const items = previous.tools?.items ?? [];
+      if (
+        previous.continuation.phase !== 'results_ready' ||
+        items.length === 0 ||
+        items.some((item) => item.state !== 'settled') ||
+        items.every((item) => item.consumed)
+      ) {
+        return null;
+      }
+      const identity = this.nextCheckpointIdentity();
+      const checkpoint = createHookStoppedRuntimeHarnessCheckpoint({
+        previous,
+        ...identity,
+      });
+      await this.commitHarnessCheckpoint(
+        `harness:hook_stopped:${this.activation.activationId}:${identity.coveredSequence}`,
         checkpoint,
         null,
       );
