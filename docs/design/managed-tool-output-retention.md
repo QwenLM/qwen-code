@@ -4,7 +4,7 @@
 
 ## Problem and baseline
 
-O2 creates immutable foreground Shell stdout/stderr, manifests, pages and original outcomes in SQL and private OSS. O3 projects them into public Tool Results and Artifacts. Neither implementation currently proves that writers and readers have stopped before deleting bytes. This implementation is based on main `93efe3558`, including merged O3 `6310dd38d` and publication recovery fixes. Retention uses migration V28 after current main’s V27 hook-record migration; the existing V26 projection migration is unchanged.
+O2 creates immutable foreground Shell stdout/stderr, manifests, pages and original outcomes in SQL and private OSS. O3 projects them into public Tool Results and Artifacts. Neither implementation currently proves that writers and readers have stopped before deleting bytes. This implementation is based on main `93efe3558`, including merged O3 `6310dd38d` and publication recovery fixes. Retention uses migration V30 after current main’s V29 hook-admission backfill migration; the existing V26 projection migration is unchanged.
 
 ## Contract and scope
 

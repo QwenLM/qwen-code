@@ -4,7 +4,7 @@
 
 ## 问题与基线
 
-O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V28 迁移，接在当前 main 的 V27 hook record 迁移之后；已有 V26 投影迁移保持不变。
+O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V30 迁移，接在当前 main 的 V29 hook admission backfill 迁移之后；已有 V26 投影迁移保持不变。
 
 ## 契约与范围
 
