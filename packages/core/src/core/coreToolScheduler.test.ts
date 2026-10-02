@@ -3531,7 +3531,7 @@ describe('CoreToolScheduler', () => {
     },
   );
 
-  it.each(['read_mcp_resource', 'search_memory'])(
+  it.each(['read_mcp_resource', 'search_memory', 'tool_search'])(
     'exempts %s from the persistence spill gate',
     async (toolName) => {
       // The name-keyed spill gate (≈28k: 25k + 3k headroom) must not stub a
@@ -12131,6 +12131,46 @@ describe('Fire hook functions integration', () => {
           ['shell', Kind.Execute, { command: 'git status' }, true],
           ['shell', Kind.Execute, { command: 'rm -rf build' }, false],
         );
+      });
+
+      it('treats Bash as safe for Code Mode regardless of the command', () => {
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.SHELL,
+            Kind.Execute,
+            { command: 'rm -rf build' },
+            'code_mode',
+          ),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe(ToolNames.SHELL, Kind.Execute, {
+            command: 'rm -rf build',
+          }),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.SHELL,
+            undefined,
+            { command: 'rm -rf build' },
+            'code_mode',
+          ),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.MONITOR,
+            Kind.Execute,
+            {},
+            'code_mode',
+          ),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.IMAGE_GEN,
+            Kind.Execute,
+            {},
+            'code_mode',
+          ),
+        ).toBe(false);
       });
 
       it('treats a shell call with a non-string command as unsafe (fail-closed)', () => {

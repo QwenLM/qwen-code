@@ -209,6 +209,7 @@ import {
   createInstructionsLoadedCallback,
 } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
+import type { ManagedHookDispatcher } from '../hooks/hookEventHandler.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -1184,6 +1185,8 @@ export interface ConfigParameters {
   eagerTools?: string[];
   /** Replace ordinary model-facing tools with the isolated exec bridge. */
   codeModeOnly?: boolean;
+  /** Use Responses Custom Tool text input for exec in Code Mode Only. */
+  freeform?: boolean;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -2218,6 +2221,7 @@ export interface ConfigInitializeOptions {
    * helpers use this to avoid loading or subscribing user/workspace hooks.
    */
   skipHooks?: boolean;
+  managedHookDispatcher?: ManagedHookDispatcher;
   /**
    * Skip SkillManager creation and file watching. Read-only replay helpers do
    * not need skill discovery and must not start long-lived watchers.
@@ -2851,6 +2855,7 @@ export class Config {
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
   private readonly toolMode: ToolModeValue;
+  private readonly freeform: boolean;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -3555,6 +3560,8 @@ export class Config {
       params.codeModeOnly && !this.bareMode && !this.safeMode
         ? ToolMode.CodeModeOnly
         : ToolMode.Direct;
+    this.freeform =
+      this.toolMode === ToolMode.CodeModeOnly && params.freeform === true;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -4100,8 +4107,12 @@ export class Config {
 
     // Bare mode and read-only replay helpers skip all hook loading and execution.
     recordStartupEvent('config_initialize_hooks_start');
-    if (!options?.skipHooks && !this.getDisableAllHooks()) {
-      this.hookSystem = new HookSystem(this);
+    if (
+      !this.shellExecutionSandbox &&
+      (options?.managedHookDispatcher ||
+        (!options?.skipHooks && !this.getDisableAllHooks()))
+    ) {
+      this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
 
@@ -6068,6 +6079,9 @@ export class Config {
       if (skillTool && 'clearLoadedSkills' in skillTool) {
         (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
       }
+      // Reviews belong to the previous history. The new primary chat restores
+      // its own schema evidence when loading its history (#12569).
+      this.toolRegistry?.clearReviewedDeclarations?.();
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
@@ -8121,6 +8135,10 @@ export class Config {
 
   getCodeModeOnly(): boolean {
     return this.toolMode === ToolMode.CodeModeOnly;
+  }
+
+  getFreeform(): boolean {
+    return this.freeform;
   }
 
   getToolMode(): ToolModeValue {
@@ -10622,6 +10640,7 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     if (this.shellExecutionSandbox) return true;
+    if (this.hookSystem?.isManaged()) return false;
     return this.disableAllHooks || this.getBareMode() || this.isSafeMode();
   }
 

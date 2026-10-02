@@ -208,11 +208,8 @@ export function parseManagedRuntimeProviderOperation(
           parseHostedFileHistoryState(op['state'], session.harnessSessionId);
       } else if (action === 'prepare') {
         keys(op, ['kind', 'action', 'promptId', 'paths']);
-        if (
-          op['promptId'] !== session.runtimeSessionId ||
-          !Array.isArray(op['paths']) ||
-          !op['paths'].length
-        )
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+        if (!Array.isArray(op['paths']) || !op['paths'].length)
           throw new ManagedRuntimeProviderProtocolError();
         op['paths'].forEach(historyPath);
       } else if (action === 'rewind') {

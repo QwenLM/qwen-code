@@ -954,6 +954,63 @@ describe('managed harness factory', () => {
     await session.close();
   });
 
+  it('settles an after-tool Hook stop without claiming consumption, survives cold reopen and allows the next turn', async () => {
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    await handle.commitAwaitRuntimeBatch([await runtimeCommit(session)], {
+      turnId: 'turn-1',
+      promptId: 'prompt-1',
+    });
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    const bytes = Buffer.from(
+      '{"outcome":"completed","output":"original physical receipt"}',
+    );
+    const outcomeRef = await session.resources.publish(
+      'managed-tool-outcome',
+      bytes,
+    );
+    const ready = await handle.resolveAwaitRuntime('ex-1', outcomeRef);
+    expect(await handle.settleConsumedRuntimeContinuation()).toBeNull();
+    const stopped = await handle.settleHookStoppedRuntimeContinuation();
+    expect(stopped?.continuation.phase).toBe('turn_settled');
+    expect(stopped?.tools).toEqual(ready?.tools);
+    expect(stopped?.tools?.items[0]).toMatchObject({
+      state: 'settled',
+      consumed: false,
+      outcomeRef,
+    });
+    expect(stopped?.runtime).toEqual(ready?.runtime);
+    expect(await session.resources.read(outcomeRef)).toEqual(bytes);
+    expect(await handle.settleHookStoppedRuntimeContinuation()).toBeNull();
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    const restored = await open(workspace);
+    try {
+      const successor = createManagedHarnessHandle(restored);
+      const restoredCheckpoint = await successor.ensureRunnable();
+      expect(restoredCheckpoint.continuation.phase).toBe('turn_settled');
+      expect(restoredCheckpoint.tools).toEqual(ready?.tools);
+      expect(await restored.resources.read(outcomeRef)).toEqual(bytes);
+      await successor.commitDurableWait(waitCommit(await waitRefs(restored)), {
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      });
+      const next = parseHarnessCheckpointV1(
+        (await restored.authority.readCheckpointState())!,
+      );
+      expect(next.identity).toMatchObject({
+        turnId: 'turn-2',
+        promptId: 'prompt-2',
+      });
+      expect(next.continuation.phase).toBe('await_action');
+    } finally {
+      await restored.close();
+    }
+  });
+
   it('keeps await_runtime across a cold reopen until results are settled', async () => {
     const workspace = await createWorkspace();
     const session = await open(workspace);
@@ -1191,6 +1248,48 @@ describe('managed harness factory', () => {
         turnId: 'turn-1',
         promptId: 'turn-1',
       }),
+    ).resolves.toMatchObject({ kind: 'durable_wait' });
+    await session.close();
+  });
+
+  it('lets the activation that consumed a taken-over batch commit the next one', async () => {
+    const session = await open(await createWorkspace());
+    const previous = createManagedHarnessHandle(session);
+    await previous.ensureRunnable();
+    const turn = { turnId: 'turn-1', promptId: 'turn-1' };
+    await previous.commitAwaitRuntimeBatch(
+      [await runtimeCommit(session)],
+      turn,
+    );
+    await previous.detach();
+    await session.replaceActivation();
+    const next = createManagedHarnessHandle(session);
+    await next.resolveAwaitRuntime(
+      'ex-1',
+      await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      ),
+    );
+    const consumed = await next.consumeRuntimeResults();
+    expect(consumed?.identity.activationId).toBe(
+      session.activation.activationId,
+    );
+
+    await expect(
+      next.commitAwaitRuntimeBatch(
+        [
+          {
+            ...(await runtimeCommit(session)),
+            functionCallId: 'fc-2',
+            executionCallId: 'ex-2',
+            invocationBindingId: 'bind-2',
+            modelMessageId: 'msg-2',
+            attemptId: 'att-fc-2',
+          },
+        ],
+        turn,
+      ),
     ).resolves.toMatchObject({ kind: 'durable_wait' });
     await session.close();
   });
