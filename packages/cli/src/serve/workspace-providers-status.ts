@@ -37,6 +37,7 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+import { publicAuxModelSelectorValue } from '../utils/aux-model-selector.js';
 import { buildModelReasoningRoutePreview } from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 import { getModelConfigurationKey } from './model-configuration.js';
@@ -375,7 +376,13 @@ function buildCurrent(
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
-    ...(fastModelId ? { fastModelId } : {}),
-    ...(visionModelId ? { visionModelId } : {}),
+    // The aux selectors persist as `authType:id\0baseUrl`; publish the
+    // credential-stripped form like the neighbouring baseUrl field.
+    ...(fastModelId
+      ? { fastModelId: publicAuxModelSelectorValue(fastModelId) }
+      : {}),
+    ...(visionModelId
+      ? { visionModelId: publicAuxModelSelectorValue(visionModelId) }
+      : {}),
   };
 }

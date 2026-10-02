@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -28,11 +29,20 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../../utils/aux-model-selector.js';
+import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  parseAcpModelOption,
+  resolveAcpFastModelSelector,
+} from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
@@ -149,7 +159,8 @@ function rejectWorkspaceRestrictedWrite(
   return false;
 }
 
-function getAllowedKeys(includeLiveVoice = false): Set<string> {
+/** Keys the daemon may serve to Web Shell clients; exported for tests. */
+export function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
@@ -192,8 +203,14 @@ function buildSettingsResponse(
       key,
     );
 
+    // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix can
+    // embed userinfo credentials, so the served value is the scrubbed one.
     const publicValue = (value: unknown) =>
-      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+      key === 'mcpServers'
+        ? redactMcpServersSetting(value)
+        : typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     const effective = LIVE_MANAGED_SETTINGS.has(key)
       ? (userVal ?? def.default)
       : (mergedEffective ?? def.default);
@@ -247,7 +264,40 @@ export function prepareSettingWrite(
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
-    return { persistedValue: value, publicValue: value };
+    let persistedValue = value;
+    if (
+      key === 'fastModel' &&
+      typeof value === 'string' &&
+      (value.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(value).authType)
+    ) {
+      const { merged } = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      const models = new ModelsConfig({
+        modelProvidersConfig: merged.modelProviders,
+        providerProtocolConfig: merged.providerProtocol,
+      });
+      persistedValue = resolveAcpFastModelSelector(
+        value,
+        models.getAllConfiguredModels(),
+      );
+      if (persistedValue === null) {
+        throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    return {
+      persistedValue,
+      // Aux-model selectors persist with their endpoint suffix (runtime
+      // routing resolves against it), but the value answered to and
+      // broadcast to clients must not carry userinfo credentials.
+      publicValue:
+        typeof persistedValue === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(persistedValue)
+          : persistedValue,
+    };
   }
   const existing =
     loadSettings(workspace, {

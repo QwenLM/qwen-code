@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import java.time.Duration;
 import java.util.List;
@@ -53,23 +54,38 @@ class LostResponseFaultGateTest {
             names = {"DROP", "RESET", "DELAY"})
     void aLostExecuteResponseIsReconciledAndNeverReplayed(
             FaultProxy.Action loss) throws Exception {
+        lostExecuteResponse(loss, false);
+    }
+
+    /** The same loss where one call creates and dispatches the execution. */
+    @ParameterizedTest
+    @EnumSource(value = FaultProxy.Action.class,
+            names = {"DROP", "RESET", "DELAY"})
+    void aLostImmediateExecuteResponseIsReconciledAndNeverReplayed(
+            FaultProxy.Action loss) throws Exception {
+        lostExecuteResponse(loss, true);
+    }
+
+    private void lostExecuteResponse(FaultProxy.Action loss,
+            boolean immediate) throws Exception {
         proxy.schedule("execute", loss == FaultProxy.Action.DELAY
                 ? FaultProxy.Fault.delay(FaultGateRig.REQUEST_TIMEOUT
                         .plusSeconds(3))
                 : FaultProxy.Fault.of(loss));
         acquire();
-        Map<String, Object> reference = FaultGateRig.shell("call-1",
+        FaultGateRig.ToolCall reference = FaultGateRig.shell("call-1",
                 "echo ran >> marker");
-        String execution = broker.create(HARNESS, SESSION, "key-1",
-                reference).object().getString("executionCallId");
+        String execution = create(immediate, reference).object()
+                .getString("executionCallId");
+        assertEquals(immediate ? null : "deferred", rig.execution(execution)
+                .getReference().get("dispatchMode"));
 
         rig.awaitExecution(execution, record -> record.getState()
                 == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
         rig.awaitMarker("marker", List.of("ran"));
 
         // A same-key retry joins the UNKNOWN record and dispatches nothing.
-        JSONObject retried = broker.create(HARNESS, SESSION, "key-1",
-                reference).object();
+        JSONObject retried = create(immediate, reference).object();
         assertEquals(execution, retried.getString("executionCallId"));
         assertEquals("UNKNOWN", retried.getString("state"));
         // The Runtime joins a retry of the same identity to the call it
@@ -77,9 +93,10 @@ class LostResponseFaultGateTest {
         RuntimeLease lease = rig.activeBinding().getLease();
         HttpRuntimeTransport runtime = new HttpRuntimeTransport();
         Map<String, Object> joined = runtime.execute(lease, rig.session(),
-                reference).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                reference.reference(), JSON.parseObject(reference.payloadJson()))
+                .toCompletableFuture().get(30, TimeUnit.SECONDS);
         Map<String, Object> status = runtime.status(lease, rig.session(),
-                reference, 0).toCompletableFuture().get(30,
+                reference.reference(), 0).toCompletableFuture().get(30,
                         TimeUnit.SECONDS);
         assertEquals("settled", status.get("state"));
         assertEquals(joined, status.get("result"));
@@ -191,10 +208,47 @@ class LostResponseFaultGateTest {
                 .getBindingId());
     }
 
+    @Test
+    void aTransientConfirmFailureKeepsAnOwnedWorkerReady()
+            throws Exception {
+        broker.warm(HARNESS).requireOk();
+        RuntimeBindingRecord original = rig.activeBinding();
+        proxy.schedule("attest", FaultProxy.Action.RESET);
+
+        BrokerProcess.Reply failed = broker.warm(HARNESS);
+        assertFalse(failed.ok());
+        assertEquals(503, failed.status());
+        assertTrue(failed.retryable());
+        assertEquals(RuntimeBindingRecord.State.READY,
+                rig.activeBinding().getState());
+        assertEquals(original.getBindingId(), rig.activeBinding()
+                .getBindingId());
+
+        assertEquals("READY", broker.warm(HARNESS).object()
+                .getString("state"));
+        assertEquals(original.getBindingId(), rig.activeBinding()
+                .getBindingId());
+        RuntimeScope other = new RuntimeScope(rig.scope.getTenantId(),
+                "workspace-b", rig.scope.getWorkspaceGeneration(),
+                rig.scope.getCanonicalCwd(), rig.scope.getCapabilityDigest(),
+                rig.scope.getIsolationClass());
+        RuntimeProvisionRequest candidate = new RuntimeProvisionRequest(
+                other, null, LocalProcessRuntimeProvisioner.KIND);
+        assertEquals(RuntimeBindingRecord.State.PROVISIONING,
+                rig.bindings.findOrCreate(candidate).getState());
+    }
+
     private void acquire() {
         assertEquals("READY", broker.warm(HARNESS).object()
                 .getString("state"), rig.logs());
         broker.acquire(HARNESS, SESSION).requireOk();
+    }
+
+    private BrokerProcess.Reply create(boolean immediate,
+            FaultGateRig.ToolCall call) {
+        return immediate
+                ? broker.createImmediate(HARNESS, SESSION, "key-1", call)
+                : broker.create(HARNESS, SESSION, "key-1", call);
     }
 
     @SuppressWarnings("unchecked")

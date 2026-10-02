@@ -18,10 +18,20 @@ public final class RuntimeObservation {
     private final String runtimeInstanceId;
     private final String leaseId;
     private final long epoch;
+    private final RuntimeRecoveryEvidence lossEvidence;
+    private final RuntimeRecoveryEvidence stopEvidence;
 
     private RuntimeObservation(Outcome outcome,
             RuntimeResourceHandle handle, URI endpoint,
             String runtimeInstanceId, String leaseId, long epoch) {
+        this(outcome, handle, endpoint, runtimeInstanceId, leaseId, epoch, null, null);
+    }
+
+    private RuntimeObservation(Outcome outcome, RuntimeResourceHandle handle,
+            URI endpoint, String runtimeInstanceId, String leaseId, long epoch,
+            RuntimeRecoveryEvidence lossEvidence, RuntimeRecoveryEvidence stopEvidence) {
+        this.lossEvidence = lossEvidence;
+        this.stopEvidence = stopEvidence;
         if (outcome == null) {
             throw new IllegalArgumentException("outcome is required");
         }
@@ -66,6 +76,24 @@ public final class RuntimeObservation {
     public static RuntimeObservation notFound() {
         return new RuntimeObservation(Outcome.NOT_FOUND, null, null, null,
                 null, 0);
+    }
+
+    public static RuntimeObservation notFound(RuntimeRecoveryEvidence loss,
+            RuntimeRecoveryEvidence stop) {
+        if (loss == null || loss.fact() != RuntimeRecoveryEvidence.Fact.JOURNAL_LOST
+                || stop != null && stop.fact() != RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED) {
+            throw new IllegalArgumentException("Loss evidence is required");
+        }
+        return new RuntimeObservation(Outcome.NOT_FOUND, loss.resourceHandle(),
+                null, null, null, 0, loss, stop);
+    }
+
+    public RuntimeRecoveryEvidence getLossEvidence() {
+        return lossEvidence;
+    }
+
+    public RuntimeRecoveryEvidence getStopEvidence() {
+        return stopEvidence;
     }
 
     public static RuntimeObservation conflict(RuntimeResourceHandle handle) {

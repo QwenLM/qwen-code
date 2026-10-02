@@ -54,7 +54,7 @@ class ProcessCrashFaultGateTest {
     }
 
     @Test
-    void aWorkerKilledMidExecutionLeavesItUnknownWithoutEvidence()
+    void aWorkerExitEndsUnknownExecutionButKeepsItsWriterDomainPinned()
             throws Exception {
         FaultProxy proxy = rig.proxy();
         BrokerProcess broker = rig.broker("broker", proxy,
@@ -70,18 +70,18 @@ class ProcessCrashFaultGateTest {
                 == ToolExecutionRecord.State.UNKNOWN, "UNKNOWN execution");
         assertEvidenceUnavailable(broker.reconcile(HARNESS, SESSION,
                 execution));
-        // The dead generation is retired, and a new one serves new work.
-        assertEquals(RuntimeBindingRecord.State.FAILED,
+        assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.bindings.findById(bindingId).getState());
-        JSONObject replacement = broker.warm(HARNESS).object();
-        assertEquals("READY", replacement.getString("state"));
-        assertFalse(bindingId.equals(replacement.getString("bindingId")));
-        // Nothing the new generation says can settle the old call.
-        assertEvidenceUnavailable(broker.reconcile(HARNESS, SESSION,
-                execution));
-        ToolExecutionRecord unknown = rig.execution(execution);
-        assertEquals(ToolExecutionRecord.State.UNKNOWN, unknown.getState());
-        assertNull(unknown.getResult());
+        BrokerProcess.Reply warm = broker.warm(HARNESS);
+        assertEquals("runtime_broker_runtime_lost", warm.code(),
+                () -> warm.message() + rig.logs());
+        assertEquals(bindingId, rig.activeBinding().getBindingId());
+        assertEquals("ABANDONED", broker.reconcile(HARNESS, SESSION,
+                execution).object().getString("outcome"));
+        ToolExecutionRecord abandoned = rig.execution(execution);
+        assertEquals(ToolExecutionRecord.State.ABANDONED, abandoned.getState());
+        assertNull(abandoned.getResult());
+        assertNull(rig.activeBinding().getStopEvidence());
         rig.holdMarker("marker", List.of("start"), Duration.ofSeconds(4));
         assertEquals(1, proxy.count("execute"));
     }
@@ -114,6 +114,7 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
         rig.awaitDispatchLapse(execution);
+        ToolExecutionRecord beforeTakeover = rig.execution(execution);
         second.acquire(HARNESS, SESSION).requireOk();
         // Before reuse, the restarted Broker re-proves the worker's identity:
         // once as the provisioner observes it, once as the service adopts it.
@@ -129,11 +130,18 @@ class ProcessCrashFaultGateTest {
                 adopted.getLease().getEndpoint());
         assertTrue(second.workers().isEmpty());
 
-        // A same-key retry fences the lapsed claim instead of replaying it.
+        ToolExecutionRecord afterTakeover = rig.execution(execution);
+        if (window == Window.BEFORE_COMMIT) {
+            assertEquals(ToolExecutionRecord.State.SETTLED, afterTakeover.getState());
+            assertEquals(beforeTakeover.getVersion() + 1, afterTakeover.getVersion());
+            assertEquals(beforeTakeover.getDispatchOwner(), afterTakeover.getDispatchOwner());
+            assertEquals(beforeTakeover.getDispatchGeneration(), afterTakeover.getDispatchGeneration());
+        }
+        // A retry returns the scan's receipt or fences an unresolved lapsed claim.
         JSONObject retried = second.create(HARNESS, SESSION, "key-1",
                 FaultGateRig.shell("call-1", SLOW)).object();
         assertEquals(execution, retried.getString("executionCallId"));
-        assertEquals("UNKNOWN", retried.getString("state"));
+        assertEquals(afterTakeover.isSettled() ? "SETTLED" : "UNKNOWN", retried.getString("state"));
 
         if (window == Window.AFTER_CLAIM) {
             // The worker never saw the call, so it has no evidence to give.
@@ -147,7 +155,8 @@ class ProcessCrashFaultGateTest {
         } else {
             FaultGateRig.await(() -> second.reconcile(HARNESS, SESSION,
                     execution).object().getString("outcome"),
-                    "RESOLVED"::equals, "reconciliation from evidence");
+                    outcome -> "RESOLVED".equals(outcome) || "ALREADY_SETTLED".equals(outcome),
+                    "reconciliation from evidence");
             ToolExecutionRecord settled = rig.execution(execution);
             assertEquals("success", settled.getExecutionStatus());
             Map<String, Object> status = new HttpRuntimeTransport().status(
@@ -164,13 +173,11 @@ class ProcessCrashFaultGateTest {
     }
 
     /**
-     * Pins today's production behaviour. {@link LocalProcessRuntimeProvisioner}
+     * Pins the default ephemeral behaviour. {@link LocalProcessRuntimeProvisioner}
      * keeps worker ownership in memory, so a restarted Broker observes its
      * worker as UNKNOWN until the reconciliation deadline: the binding is
      * neither adopted nor retired, and the orphaned worker keeps running.
-     * Recoverable local-process provisioning is follow-up work in the
-     * runtime-binding reconciliation design; this gate flips to adoption
-     * when it lands.
+     * DurableLocalRuntimeFaultGateTest covers the explicitly enabled durable mode.
      */
     @Test
     void theProductionProvisionerCannotAdoptAfterARestart()
@@ -209,13 +216,11 @@ class ProcessCrashFaultGateTest {
     }
 
     /**
-     * Pins today's behaviour for #12670: once a restart proves the worker
-     * gone, the unsettled execution pins the LOST generation, so the
-     * placement can neither be reclaimed nor released. Update this gate when
-     * #12670 is decided.
+     * A test provisioner can prove the old journal gone after a restart.
+     * Process exit alone cannot prove every writer in its domain stopped.
      */
     @Test
-    void aHostCrashPinsTheLostGenerationBehindTheUnsettledCall()
+    void aLostJournalEndsPollingWithoutReleasingTheWriterDomain()
             throws Exception {
         BrokerProcess first = rig.broker("first", rig.proxy(),
                 FaultGateRig.Provisioner.RECOVERABLE);
@@ -231,19 +236,27 @@ class ProcessCrashFaultGateTest {
         BrokerProcess second = rig.broker("second", secondProxy,
                 FaultGateRig.Provisioner.RECOVERABLE);
 
-        BrokerProcess.Reply acquire = second.acquire(HARNESS, SESSION);
+        BrokerProcess.Reply acquire = FaultGateRig.await(
+                () -> second.acquire(HARNESS, SESSION),
+                reply -> !"runtime_provision_fenced".equals(reply.code())
+                        && !"runtime_broker_reconcile_timeout".equals(reply.code()),
+                "original Runtime loss after recovery fencing");
         assertFalse(acquire.ok());
-        assertEquals("runtime_broker_runtime_lost", acquire.code());
+        assertEquals("runtime_broker_runtime_lost", acquire.code(),
+                () -> acquire.message() + rig.logs());
         assertEquals(RuntimeBindingRecord.State.LOST,
                 rig.activeBinding().getState());
-        assertEquals("runtime_broker_runtime_lost",
-                second.warm(HARNESS).code());
+        BrokerProcess.Reply warm = second.warm(HARNESS);
+        assertEquals("runtime_broker_runtime_lost", warm.code(),
+                () -> warm.message() + rig.logs());
         assertEquals("runtime_reconciliation_required",
                 second.release(HARNESS, SESSION).code());
-        assertEquals("IN_FLIGHT", second.reconcile(HARNESS, SESSION,
+        assertEquals("ABANDONED", second.reconcile(HARNESS, SESSION,
                 execution).object().getString("outcome"));
-        assertEquals(ToolExecutionRecord.State.EXECUTING,
+        assertEquals(ToolExecutionRecord.State.ABANDONED,
                 rig.execution(execution).getState());
+        assertTrue(rig.execution(execution).getResult() == null);
+        assertTrue(rig.activeBinding().getStopEvidence() == null);
         assertTrue(second.workers().isEmpty());
         rig.holdMarker("marker", List.of("start"), Duration.ofSeconds(4));
         assertEquals(0, secondProxy.count("execute"));

@@ -6,6 +6,7 @@
 
 import type {
   ApprovalMode,
+  McpAppToolResult,
   BackgroundNotificationTurn,
   ManagedToolV2Client,
   GoalControlRequest,
@@ -46,7 +47,10 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
-import type { SessionAttachmentReference } from './sessionAttachments.js';
+import type {
+  SessionAttachmentReference,
+  SessionAttachmentUploadMetadata,
+} from './sessionAttachments.js';
 import type {
   ServeSessionAgentsStatus,
   ServeSessionAgentTrace,
@@ -824,6 +828,16 @@ export interface BridgeBranchSessionRequest {
   sourceId?: string;
   replayInheritedHistory?: boolean;
   atRecordId?: string;
+  /** Daemon-internal target id used to prepare durable worktree metadata. */
+  targetSessionId?: string;
+  /** Persist the fork without restoring it inside the bridge. */
+  persistOnly?: boolean;
+}
+
+export interface BridgeSessionExecutionSnapshot {
+  workspaceCwd: string;
+  effectiveCwd: string;
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgePersistedBranchedSession {
@@ -1284,6 +1298,23 @@ export interface BridgeClientRequestContext {
     };
   };
   /**
+   * The workspace-agent run this prompt is a turn of. Trusted: injected by the
+   * daemon dispatcher, never populated from caller-controlled ACP metadata.
+   *
+   * Present on every prompt the dispatcher sends to an agent session, and on
+   * nothing else. The child re-establishes its run frame from this, which is
+   * what lets the thread tools know which thread they are acting on.
+   */
+  agentRun?: {
+    workspaceId: string;
+    agentId: string;
+    runId: string;
+    threadId: string;
+    rootThreadId: string;
+    attempt: number;
+    contextThroughSequence?: number;
+  };
+  /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
    * populate this from request input, so an external caller cannot use it to
@@ -1358,9 +1389,17 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+/**
+ * Which workspace-agent run a prompt is one turn of.
+ *
+ * Trusted like {@link DAEMON_CHANNEL_DELIVERY_META_KEY}: the bridge strips this
+ * wire key from every caller and re-injects it only from the daemon-supplied
+ * request context. An agent's thread tools act on whatever this names, so a
+ * caller that could set it could make one agent post as another.
+ */
+export const DAEMON_AGENT_RUN_META_KEY = 'qwen.daemon.agentRun';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
-
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 // Bare (unprefixed) key by contract: the SDK wire type
@@ -1482,6 +1521,7 @@ export interface MidTurnQueueEntry {
   eventDetailMode?: LiveReplayMode;
   messageId: string;
   text: string;
+  agentRun?: BridgeClientRequestContext['agentRun'];
   /**
    * Image content blocks attached to the message. The drain
    * combines them with `text` into structured `items` for the ACP child;
@@ -1852,7 +1892,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     req: BridgeRestoreSessionRequest,
   ): Promise<BridgeRestoredSession>;
 
-  /** Restore latest-state forks; leave historical checkpoint forks persisted. */
+  /** Restore forks unless persistOnly is set. */
   branchSession(
     sessionId: string,
     req: BridgeBranchSessionRequest,
@@ -2240,6 +2280,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionSummary(sessionId: string): BridgeSessionSummary;
 
+  /** Daemon-internal execution location; never populated from client input. */
+  getSessionExecutionSnapshot(
+    sessionId: string,
+  ): BridgeSessionExecutionSnapshot;
+
   /**
    * Record a client heartbeat for the session. Throws
    * `SessionNotFoundError` for unknown ids and `InvalidClientIdError`
@@ -2377,6 +2422,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /** Execute an App-visible tool through the bound session permission pipeline. */
+  callMcpAppTool(
+    sessionId: string,
+    request: BridgeMcpAppToolCall,
+    signal: AbortSignal,
+    context: { clientId: string },
+  ): Promise<McpAppToolResult>;
 
   /** Read sanitized Skill and MCP snapshots for a live session. */
   getSessionResourcesStatus(
@@ -2593,8 +2646,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Change the approval mode of a live session and broadcast an
-   * `approval_mode_changed` event. `opts.persist === true` also writes
-   * `tools.approvalMode` to workspace settings.
+   * `approval_mode_changed` event. The mode is session-local and may be
+   * restored from that session's transcript; `opts.persist === true` also
+   * writes `tools.approvalMode` to workspace settings.
    */
   setSessionApprovalMode(
     sessionId: string,
@@ -2691,6 +2745,33 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
+
+  createSessionAttachmentUpload(
+    sessionId: string,
+    metadata: SessionAttachmentUploadMetadata,
+    context?: BridgeClientRequestContext,
+  ): { uploadId: string };
+
+  appendSessionAttachmentUpload(
+    sessionId: string,
+    uploadId: string,
+    offset: number,
+    data: Buffer,
+    context?: BridgeClientRequestContext,
+  ): { offset: number };
+
+  completeSessionAttachmentUpload(
+    sessionId: string,
+    uploadId: string,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
+  ): Promise<SessionAttachmentReference>;
+
+  cancelSessionAttachmentUpload(
+    sessionId: string,
+    uploadId: string,
+    context?: BridgeClientRequestContext,
+  ): void;
 
   storeSessionAttachment(
     sessionId: string,
@@ -2974,10 +3055,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    *  Status hooks, so the sampler treats them as absent (→ 0 / skipped). */
   readonly pendingPromptTotal?: number;
 
+  /** Number of live ACP channels (spawned and not dying): one per engine
+   *  that has a child, so up to two on a paired Bridge. Optional — see
+   *  {@link pendingPromptTotal}; absent means at most one. */
+  readonly liveChannelCount?: number;
+
   /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
    *  chart), or undefined before the first successful poll / when no child is
-   *  live. Synchronous cache read for the metrics sampler. Optional — see
-   *  {@link pendingPromptTotal}. */
+   *  live. On a paired Bridge it combines the fresh reading of each live
+   *  child: rss and cpu are summed, the age is the oldest, heap marks keep
+   *  their maxima. Synchronous cache read for the metrics sampler. Optional —
+   *  see {@link pendingPromptTotal}. */
   getChildResourceSnapshot?():
     | {
         rssBytes: number;
@@ -2992,9 +3080,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
          *  measured zero and an unmeasured child are different claims, and
          *  only the first may be read as "this child needed no heap". */
         heap?: ChildHeapReport;
+        /** How many children the reading covers. Absent on bridges predating
+         *  the field, which cover exactly one. */
+        children?: number;
+        /** How many of those children contributed to `heap`. Absent on
+         *  bridges predating the field: one when `heap` is present. */
+        heapReported?: number;
       }
     | undefined;
-  /** Poll the live child's resource extMethod and refresh the cache that
+  /** Poll each live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
    *  sampler each tick. Optional — see {@link pendingPromptTotal}. */
   refreshChildResource?(): Promise<void>;
@@ -3057,3 +3151,12 @@ export interface ShellCommandResult {
 
 /** @deprecated Use `AcpSessionBridge` instead. */
 export type HttpAcpBridge = AcpSessionBridge;
+
+export interface BridgeMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export type BridgeMcpAppToolResult = McpAppToolResult;

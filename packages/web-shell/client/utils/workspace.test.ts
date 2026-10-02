@@ -12,6 +12,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   hasMultipleWorkspaces,
+  isAgentCollaborationEnabledForWorkspace,
   isNonPrimaryWorkspaceSession,
   mergeSessionsById,
   workspaceBasename,
@@ -47,6 +48,55 @@ describe('workspaceBasename', () => {
   it('falls back to the whole string when there are no segments', () => {
     expect(workspaceBasename('/')).toBe('/');
     expect(workspaceBasename('')).toBe('');
+  });
+});
+
+describe('isAgentCollaborationEnabledForWorkspace', () => {
+  it('stays off without the collaboration capability', () => {
+    const capabilities = caps([
+      { ...ws('/workspace'), agentCollaborationEnabled: true },
+    ]);
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(false);
+  });
+
+  it('stays off when the daemon omits the feature list', () => {
+    const capabilities = {
+      v: 1,
+      mode: 'native',
+      modelServices: [],
+      workspaces: [ws('/workspace')],
+    } as unknown as DaemonCapabilities;
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(false);
+  });
+
+  it('uses the per-workspace opt-in when the daemon advertises it', () => {
+    const capabilities = caps([
+      { ...ws('/enabled'), agentCollaborationEnabled: true },
+      { ...ws('/disabled'), agentCollaborationEnabled: false },
+    ]);
+    capabilities.features = ['agent_collaboration_v1'];
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/enabled'),
+    ).toBe(true);
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/disabled'),
+    ).toBe(false);
+  });
+
+  it('keeps compatibility with daemons that only advertise the global tag', () => {
+    const capabilities = caps([ws('/workspace')]);
+    capabilities.features = ['agent_collaboration_v1'];
+
+    expect(
+      isAgentCollaborationEnabledForWorkspace(capabilities, '/workspace'),
+    ).toBe(true);
   });
 });
 
