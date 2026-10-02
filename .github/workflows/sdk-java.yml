@@ -1,10 +1,12 @@
 name: 'SDK Java'
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - 'main'
       - 'release/**'
+      - 'codex/managed-tool-result-o4-2'
     paths:
       - 'packages/sdk-java/**'
       - '**/.mvn/**'
@@ -332,6 +334,7 @@ jobs:
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
       - name: 'Install Managed Agent dependencies'
+        id: 'managed_dependencies'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: |-
@@ -385,6 +388,31 @@ jobs:
           path: |
             packages/sdk-java/managed-agent-server/target/failsafe-reports/
             packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json
+          retention-days: 7
+
+      - name: 'Verify O4 filesystem process and capacity gates'
+        id: 'o4_mysql'
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
+        timeout-minutes: 12
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+          MYSQL_PWD: 'hosted-fixture'
+          QWEN_O4_MYSQL_PASSWORD: 'hosted-fixture'
+        run: |-
+          mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port="${MYSQL_PORT}" --user=root -e 'CREATE DATABASE qwen_o4_ci'
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml \
+            -Po4-mysql-gates \
+            -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dqwen.o4.mysql.user=root clean verify checkstyle:check && \
+            node scripts/check-failsafe-reports.js o4-mysql packages/sdk-java/managed-agent-server
+
+      - name: 'Upload O4 gate reports'
+        if: "${{ always() && steps.o4_mysql.outcome != 'skipped' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'o4-mysql-gate-reports'
+          path: 'packages/sdk-java/managed-agent-server/target/failsafe-reports/'
           retention-days: 7
 
   daemon-e2e:

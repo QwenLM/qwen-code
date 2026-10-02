@@ -4,15 +4,17 @@
 
 ## 部署决策
 
-物理回收保持关闭。O2/O3 已合并；本门禁分片已对齐 main 93efe3558 上修复后的 O4-1/O4-2 栈。退役与回收使用前向迁移 V27/V28，落地前再次核对 main 的最新版本。本分支迁移是前向增量，不能复用 main 上已经部署的版本。启用清理前必须升级**全部 Java publication writer**：旧实例可以绕过 attempt 台账执行 PUT，破坏写入闭合证据。
+物理回收保持关闭。O2/O3、O4-1 已合并；本门禁分片已对齐 main 9478f2873 上恢复后的 O4-2。退役与回收使用 V30/V33，中间为 recovery V31 与 close V32；落地前联合 SQL、Java 两个迁移目录再次核对 main 最新编号。临时 close 或 collection 数据库历史需要显式核对或重建，不自动执行 Flyway repair。启用清理前必须升级**全部 Java publication writer**：旧实例可以绕过 attempt 台账执行 PUT，破坏写入闭合证据。
 
 默认 `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED=false`，删除宽限期为 `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE=24h`。物理回收关闭时仍执行观察。close、archive、ACK、事件过期及 Runtime 回收不会退役 Session 保留根。Session 成功删除建立不可逆的退役时间；修改宽限期不会重置时间。部署保持 24 小时策略，零宽限期仅用于全新隔离测试。
 
-当前 O3 基线对绑定 Workspace 的 Session 生命周期 operation admission 返回 `workspace_unavailable`。因此，公开删除原子性测试使用关联私有输出 owner 的 legacy 公开 Session fixture。O4 提供受保护的完成屏障，不启用尚未完成的 Workspace 生命周期路径。完整 Hosted 门禁首先必须确认实际删除路径进入同一完成屏障。
+当前基线绑定 Workspace 的 Session DELETE 仍返回 `workspace_unavailable`；已合入的 close/drain 路径不会退役输出。因此，公开删除原子性测试使用关联私有输出 owner 的 legacy 公开 Session fixture。O4 提供受保护的完成屏障，不启用尚未完成的 Workspace 删除路径。完整 Hosted 门禁首先必须确认实际删除路径进入同一完成屏障。
 
 只有下面的真实数据库、真实 OSS 及完整 Hosted 前台 Shell 门禁在目标部署 revision 上全部通过后，才能启用物理回收。不可用或跳过的门禁不算通过。本文不授权开启生产 GC。
 
 ## 可复现门禁入口
+
+SDK Java workflow 也对本堆叠 PR 的 O4-2 base 执行，并提供按分支手动触发入口。Linux MySQL 8.4 job 先保留完整 Hosted 报告，再单独运行 clean O4 文件系统 profile 与源码导出的完整性检查。O4 fixture 不能替代失败或跳过的 Hosted 家族、真实 OSS 或下面的完整前台 Shell 验收。测试 workflow 不开启部署 GC。
 
 使用 Java 21，先按 Java SDK 和 Runtime Broker 的 README 构建并安装本 checkout 的依赖。O4 profile 要求启用 `performance_schema` 的真实 MySQL 8.4，不会静默替换为 H2。提供已有专用数据库 URL，库名以 `qwen_o4_` 开头，例如 `jdbc:mysql://127.0.0.1:3306/qwen_o4_gate`。测试身份需要隔离测试服务器上的 CREATE/DROP DATABASE 权限，以及对 `performance_schema.data_lock_waits`、`performance_schema.data_locks`、`performance_schema.threads` 的 SELECT 权限。这些元数据仅用于按 writer 连接 ID、随机库名和 tenant 表观察真实 InnoDB 锁等待。每个用例创建全新随机 `qwen_o4_` 数据库、迁移并只删除该生成库；不会清理传入的数据库。主测试数据源使用最多四个连接的池，删库前先关闭池。runner 中断后，清理前核对生成库名、用例目录及自己创建的子进程 PID；不得删除传入库。
 
@@ -42,7 +44,7 @@ mvn -f packages/sdk-java/managed-agent-server/pom.xml \
   node scripts/check-failsafe-reports.js o4-oss packages/sdk-java/managed-agent-server
 ```
 
-通过 `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` 及可选 `OSS_SESSION_TOKEN` 提供正常测试身份。通过 `OSS_DELETE_DENIED_ACCESS_KEY_ID`、`OSS_DELETE_DENIED_ACCESS_KEY_SECRET` 及可选 `OSS_DELETE_DENIED_SESSION_TOKEN` 提供负面测试身份。负面身份必须允许 GetBucketVersioning 和 GetBucketAcl，但拒绝新测试前缀的 DeleteObject；缺少身份会使门禁失败。两个身份均经同一个生产工厂执行固定地域 HTTPS endpoint 校验、V4 签名和零隐式重试。teardown 只重试尚未确认删除的 key，失败 PUT 的 key 仍被跟踪。OSS fork 总预算为 5400 秒，与每个容量方法的 1800 秒超时分开，为两个容量及继承的进程/数据库用例留出时间。保留完整分段读回证据；这些预算不保证慢速或限流链路能通过。fork 被杀后不能假定 cleanup 已执行：核对生成库、子进程 PID 及记录的全新 o4-tests/<UUID>/ 前缀，只删除本用例拥有的精确 key。应答丢失 fixture 在真实 OSS 删除成功后抛异常，不宣称网络自身丢掉了应答。
+通过 `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET` 及可选 `OSS_SESSION_TOKEN` 提供正常测试身份。通过 `OSS_DELETE_DENIED_ACCESS_KEY_ID`、`OSS_DELETE_DENIED_ACCESS_KEY_SECRET` 及可选 `OSS_DELETE_DENIED_SESSION_TOKEN` 提供负面测试身份。负面身份必须允许 GetBucketVersioning 和 GetBucketAcl，但拒绝新测试前缀的 DeleteObject；缺少身份会使门禁失败。两个身份均经同一个生产工厂执行固定地域 HTTPS endpoint 校验、V4 签名和零隐式重试。非零 SDK 上限仅将失败 GET 状态交给始终拒绝原生重放的策略，有界显式 GET 重试在每次请求前检查原守卫；PUT 和 DELETE 仍各只有一次 SDK 尝试。teardown 只重试尚未确认删除的 key，失败 PUT 的 key 仍被跟踪。OSS fork 总预算为 5400 秒，与每个容量方法的 1800 秒超时分开，为两个容量及继承的进程/数据库用例留出时间。保留完整分段读回证据；这些预算不保证慢速或限流链路能通过。fork 被杀后不能假定 cleanup 已执行：核对生成库、子进程 PID 及记录的全新 o4-tests/<UUID>/ 前缀，只删除本用例拥有的精确 key。应答丢失 fixture 在真实 OSS 删除成功后抛异常，不宣称网络自身丢掉了应答。
 
 ## 完整 Hosted 部署验收
 

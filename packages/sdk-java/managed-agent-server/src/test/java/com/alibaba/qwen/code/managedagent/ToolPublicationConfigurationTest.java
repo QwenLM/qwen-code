@@ -67,7 +67,14 @@ class ToolPublicationConfigurationTest {
         try {
             assertThat(client.getClientConfiguration().getSignatureVersion())
                     .isEqualTo(com.aliyun.oss.common.comm.SignVersion.V4);
-            assertThat(client.getClientConfiguration().getMaxErrorRetry()).isZero();
+            assertThat(client.getClientConfiguration().getMaxErrorRetry()).isEqualTo(1);
+            var request = new com.aliyun.oss.common.comm.RequestMessage("private-test-bucket", "key");
+            request.setMethod(com.aliyun.oss.HttpMethod.PUT);
+            var response = new com.aliyun.oss.common.comm.ResponseMessage(
+                    new com.aliyun.oss.common.comm.ServiceClient.Request());
+            response.setStatusCode(503);
+            assertThat(client.getClientConfiguration().getRetryStrategy().shouldRetry(
+                    new com.aliyun.oss.OSSException("write failure"), request, response, 0)).isFalse();
         } finally { client.shutdown(); }
         settings.setOssEndpoint("http://oss-cn-hangzhou.aliyuncs.com");
         assertThatThrownBy(() -> ToolPublicationConfiguration.buildOss(properties, credentials))
