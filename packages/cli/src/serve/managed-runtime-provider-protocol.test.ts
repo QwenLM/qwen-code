@@ -938,6 +938,15 @@ it('validates raw file history ownership, paths and the closed operation shape',
       session,
     ),
   ).toMatchObject({ state });
+  const prepare = {
+    kind: 'raw-file-history',
+    action: 'prepare',
+    promptId: 'original-prompt',
+    paths: ['a'],
+  };
+  expect(parseManagedRuntimeProviderOperation(prepare, session)).toEqual(
+    prepare,
+  );
   for (const operation of [
     {
       kind: 'raw-file-history',
@@ -947,7 +956,7 @@ it('validates raw file history ownership, paths and the closed operation shape',
     {
       kind: 'raw-file-history',
       action: 'prepare',
-      promptId: 'other',
+      promptId: '',
       paths: ['a'],
     },
     {

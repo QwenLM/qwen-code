@@ -2267,6 +2267,21 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('preserves a budget opened before prompt Hooks when the UserQuery starts', async () => {
+      turns.beginTurn({
+        promptId: 'p1',
+        sessionId: 'test-session-id',
+        budget: 5_000,
+        outputTokensAtTurnStart: 100,
+      });
+      sessionTokens.mockReturnValue(150);
+      await send([{ text: 'Hook rewritten prompt +10k' }], 'p1');
+      expect(turns.current('test-session-id')).toMatchObject({
+        budget: 5_000,
+        outputTokensAtTurnStart: 100,
+      });
+    });
+
     it('leaves the turn alone for a tool result and for a side question', async () => {
       await send([{ text: 'fan out +500k' }], 'p1');
       sessionTokens.mockReturnValue(9_999);

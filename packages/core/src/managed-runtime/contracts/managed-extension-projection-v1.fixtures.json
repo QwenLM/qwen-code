@@ -3,7 +3,9 @@
   "recordBodies": {
     "monitor_run": "monitor",
     "mcp_configuration": null,
-    "mcp_operation": null
+    "mcp_operation": null,
+    "hook_registration": null,
+    "hook_execution": null
   },
   "taskStates": [
     "pending",
