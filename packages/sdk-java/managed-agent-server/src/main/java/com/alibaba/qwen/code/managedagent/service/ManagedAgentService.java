@@ -222,7 +222,6 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
-        requireHarness();
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
@@ -237,7 +236,12 @@ public class ManagedAgentService {
             dispatch(tenantId, replay);
             return response(replay);
         }
+        // The admission gate stays ahead of the Harness gate, as it already
+        // does in cancelTurn and renameSession: a submitter the Workspace
+        // refuses is a 409 about that Workspace, not a 503 about how this
+        // deployment configures the Harness.
         requireSubmitter(tenantId, actorId, sessionId);
+        requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
         try {
@@ -316,20 +320,26 @@ public class ManagedAgentService {
             requireHarness();
             SessionRecord session = store.requireSession(tenantId, sessionId);
             HarnessConnector.Attachment attachment;
+            boolean attached = false;
             try {
                 attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null);
+                attached = true;
                 harness.rename(tenantId, sessionId, effectiveTitle);
             } catch (RuntimeException error) {
                 // A permanent failure must retire the command row it left
                 // PENDING: nothing else clears it, so every later rename
                 // with a fresh key would die in requireNoOpenOperation for
                 // the Session's life. Permanence cannot be read off the
-                // broker type alone: the connector's approval-mode
-                // IllegalStateException and a permanent (<500)
-                // DaemonHttpException wedge the row identically. Transient
-                // failures (retryable broker refusals, 5xx) keep the row so
-                // a same-key retry recovers through it.
+                // broker type alone, nor off IllegalStateException as such:
+                // attaching is where the connector confirms the Session
+                // approval mode and an IllegalStateException from it never
+                // clears on its own, whereas one thrown by rename is an
+                // unreachable Harness and must stay a 503 that keeps the row
+                // for a same-key retry to re-drive. A permanent (<500)
+                // DaemonHttpException wedges the row from either call.
+                // Transient failures (retryable broker refusals, 5xx) keep
+                // the row so a same-key retry recovers through it.
                 if (error instanceof RuntimeBrokerException refusal
                         && !refusal.isRetryable()) {
                     store.abandonSessionMutation(tenantId, RENAME,
@@ -340,7 +350,7 @@ public class ManagedAgentService {
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
                 }
-                if (error instanceof IllegalStateException
+                if ((!attached && error instanceof IllegalStateException)
                         || (error instanceof DaemonHttpException http
                                 && http.getStatusCode() < 500)) {
                     store.abandonSessionMutation(tenantId, RENAME,
