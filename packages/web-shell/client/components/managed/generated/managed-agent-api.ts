@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in; close, archive, delete, unarchive and cwd operations remain gated. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and rename the Session under the same opt-in with current read and create grants on the bound ACTIVE Workspace generation and storage. Cancellation of running work requires the creator’s read grant and the opt-in, even after create authority is revoked; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; cwd operations remain gated. The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -652,7 +652,7 @@ export interface components {
                  * @default false
                  */
                 workspaceContext: boolean;
-                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while lifecycle operations remain gated. */
+                /** @description Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Read/Write/Edit Turn at creation; the Session creator may submit and cancel later Turns under the same opt-in, while close follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close. */
                 workspaceBinding: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */

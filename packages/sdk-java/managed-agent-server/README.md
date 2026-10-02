@@ -190,9 +190,16 @@ never means that tools stopped. After the Hosted Harness restarts, its calls fai
 generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`, and a failed rename leaves a `PENDING` command that the
-same idempotency key can safely resume. One lifecycle change runs at a time. A
-retry with the same key from the same actor returns the original operation.
+`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
+while retaining its receipt and request digest. The same
+key retries the same content with the replay flag set; changed content or a
+different Session conflicts. A successful concurrent request can still complete
+the receipt, and a failing sibling cannot overwrite that completed outcome.
+Retries do not re-append the original `requested` event. If the command store
+is unavailable during cleanup, the original API failure is preserved and the
+same key can resume its receipt when storage returns. Only an in-flight
+lifecycle change blocks another one. A retry with the same key from the same
+actor returns the original operation once it has completed.
 
 Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
@@ -352,9 +359,10 @@ Later Turns may be submitted by the Session's creator under the
 same opt-in while they can still read and create in the Workspace (the
 per-caller `workspaceTurns` capability flag reflects the caller's current
 grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
-the Session's running Turns and rename the Session. Close, archive, delete,
-unarchive and cwd operations and broad Workspace capability advertisement
-remain gated. Shell and in-flight recovery are separate slices.
+the Session's running Turns and rename the Session. Workspace close follows
+its separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable Workspace
+close. Cwd operations and broad Workspace capability advertisement remain gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 
@@ -492,9 +500,10 @@ read the Workspace, even after their create grant is revoked, the Workspace
 starts draining or it is re-registered. Later Turns run
 under the creator's Workspace grants, so any other actor keeps the existing
 refusal: `workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. Public close, archive, delete and
-unarchive remain gated; the private Shell profile is not enabled through public
-creation.
+`session_not_found` when they cannot. Public close follows its separate close
+capability and lifecycle admission. Archive, delete and unarchive follow their
+separate retention capabilities after reliable Workspace close;
+the private Shell profile is not enabled through public creation.
 See the bilingual [execution design](../../../docs/design/2026-09-26-managed-workspace-execution.md)
 for the exact boundary.
 
@@ -575,8 +584,9 @@ history remain on their saved identities. The marker is a continuity check,
 not a backup or protection against a malicious same-UID writer. See the
 [W1 design](../../../docs/design/2026-09-29-managed-workspace-w1-recovery.md).
 Hosted Workspace cold-load validation is always enabled, independently of the Java mount-guard option. Omitted tool profile and Shell `captureBytes` use the saved definition; supplied values must match exactly. Saved approval settings remain pinned. Integrity checks run before new model work or Broker prepare/execute and cover retained private resources plus complete remote Shell output, including pages, segments and empty-stream seals. Preserve O2 recovery of original `results_ready`, consumed-final and `not_started` receipts. An incomplete receipt may produce a blocked ACK or original-history repair before load is refused, so refusal does not promise zero journal writes or ACKs. Restore validation uses a fixed committed cut, and continuation still requires current writer ownership and authorization. Missing old resources or unsupported recovery domains block loading. Passive Harness loading does not implement unknown-execution cleanup; use original Broker execution identities. Rollback to old binaries requires entry points to remain stopped because those binaries ignore the fence columns. Public
-Workspace resume/next-turn admission still requires product-route integration; this
-internal guard is not a public resume capability yet.
+Workspace next-turn admission for the Session's creator under the G0 opt-in
+described above has landed; public Workspace resume still requires product-route
+integration, and this internal guard is not a public resume capability yet.
 
 Build the container from the repository root:
 

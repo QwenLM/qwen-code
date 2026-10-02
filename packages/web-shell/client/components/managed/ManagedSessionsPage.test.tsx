@@ -825,7 +825,7 @@ describe('ManagedSessionsPage', () => {
     ).toContain('services/api');
     expect(
       container.querySelector('[data-managed-workspace-binding]')?.textContent,
-    ).toContain('Message execution is not available');
+    ).toContain('You cannot send messages in this Session');
     expect(container.querySelector('[data-managed-progress]')).toBeNull();
     expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain('Preparing environment');
@@ -850,7 +850,7 @@ describe('ManagedSessionsPage', () => {
     ).toContain('ws-a');
     expect(
       container.querySelector('[data-managed-workspace-binding]')?.textContent,
-    ).not.toContain('Message execution is not available');
+    ).not.toContain('You cannot send messages in this Session');
     expect(container.querySelector('textarea')).not.toBeNull();
     await input('Run it again');
     await click('Send');

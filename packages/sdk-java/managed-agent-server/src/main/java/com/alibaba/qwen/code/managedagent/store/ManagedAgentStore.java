@@ -512,6 +512,15 @@ public class ManagedAgentStore implements AgentStateStore {
                         "idempotency_conflict",
                         "The idempotency key was reused with different content.");
             }
+            if ("FAILED".equals(command.status())) {
+                requireNoOpenOperation(tenantId, sessionId);
+                validateMutationStatus(session, kind);
+                jdbc.update("UPDATE managed_agent_command SET command_status ="
+                                + " 'PENDING', updated_at = ? WHERE tenant_id = ?"
+                                + " AND operation = ? AND idempotency_key = ?",
+                        clock.millis(), tenantId, operation, idempotencyKey);
+                return new SessionMutationCommand(sessionId, "PENDING", true);
+            }
             return new SessionMutationCommand(sessionId, command.status(),
                     true);
         }
@@ -520,10 +529,15 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(), now);
-        appendEvent(tenantId, sessionId, null,
-                mutationEvent(kind, "requested"),
-                Map.of("sessionId", sessionId), false,
-                mutationSource(operation, idempotencyKey, "requested"), now);
+        // Older retired commands may have left their requested event behind.
+        String requestedSource = mutationSource(operation, idempotencyKey,
+                "requested");
+        if (!hasSourceEvent(tenantId, sessionId, requestedSource)) {
+            appendEvent(tenantId, sessionId, null,
+                    mutationEvent(kind, "requested"),
+                    Map.of("sessionId", sessionId), false,
+                    requestedSource, now);
+        }
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
@@ -547,7 +561,8 @@ public class ManagedAgentStore implements AgentStateStore {
         if ("COMPLETED".equals(command.status())) {
             return session;
         }
-        if (!"PENDING".equals(command.status())) {
+        if (!"PENDING".equals(command.status())
+                && !"FAILED".equals(command.status())) {
             throw new IllegalStateException(
                     "Session mutation command has an unknown status");
         }
@@ -587,12 +602,13 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
-        // Only a still-PENDING row is retired: a completed mutation is the
-        // recorded outcome and must stay replayable.
-        jdbc.update("DELETE FROM managed_agent_command WHERE tenant_id = ?"
+        // Keep the digest and receipt for replay and concurrent completion.
+        // A completed outcome must never be overwritten by a failing sibling.
+        jdbc.update("UPDATE managed_agent_command SET command_status = 'FAILED',"
+                        + " updated_at = ? WHERE tenant_id = ?"
                         + " AND operation = ? AND idempotency_key = ?"
                         + " AND session_id = ? AND command_status = 'PENDING'",
-                tenantId, operation, idempotencyKey, sessionId);
+                clock.millis(), tenantId, operation, idempotencyKey, sessionId);
     }
 
     @Override

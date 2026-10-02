@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.service;
 
-import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
@@ -57,6 +56,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -65,6 +66,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 
 @Service
 public class ManagedAgentService {
+    private static final Logger LOG = LoggerFactory.getLogger(ManagedAgentService.class);
     private static final String CREATE = "CREATE_SESSION";
     private static final String SUBMIT = "SUBMIT_TURN";
     private static final String CANCEL = "CANCEL_TURN";
@@ -222,6 +224,7 @@ public class ManagedAgentService {
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
+        requireReadableSession(tenantId, actorId, sessionId);
         List<Map<String, Object>> input = input(blocks, true);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "input", input));
@@ -315,49 +318,39 @@ public class ManagedAgentService {
                 RENAME, idempotencyKey, requestDigest, sessionId,
                 SessionMutationKind.RENAME);
         if (!"COMPLETED".equals(command.status())) {
-            requireHarness();
-            SessionRecord session = store.requireSession(tenantId, sessionId);
-            HarnessConnector.Attachment attachment;
             try {
-                attachment = harness.createOrLoad(tenantId, sessionId,
+                requireHarness();
+                SessionRecord session = store.requireSession(tenantId, sessionId);
+                HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
                         session.harnessBootId() != null);
                 harness.rename(tenantId, sessionId, effectiveTitle);
+                session = store.completeSessionMutation(tenantId, RENAME,
+                        idempotencyKey, sessionId, SessionMutationKind.RENAME,
+                        effectiveTitle, attachment.bootId());
+                return new SessionMutationResult<>(publicSession(session),
+                        command.replayed());
             } catch (RuntimeException error) {
-                // A permanent failure must retire the command row it left
-                // PENDING: nothing else clears it, so every later rename
-                // with a fresh key would die in requireNoOpenOperation for
-                // the Session's life. Permanence cannot be read off the
-                // broker type alone: the connector's approval-mode
-                // IllegalStateException and a permanent (<500)
-                // DaemonHttpException wedge the row identically. Transient
-                // failures (retryable broker refusals, 5xx) keep the row so
-                // a same-key retry recovers through it.
-                if (error instanceof RuntimeBrokerException refusal
-                        && !refusal.isRetryable()) {
+                try {
                     store.abandonSessionMutation(tenantId, RENAME,
                             idempotencyKey, sessionId);
+                } catch (RuntimeException cleanupError) {
+                    LOG.warn("Failed to retire rename tenant={} session={}",
+                            tenantId, sessionId, cleanupError);
+                }
+                if (error instanceof ApiException failure) {
+                    throw failure;
+                }
+                if (error instanceof RuntimeBrokerException refusal
+                        && !refusal.isRetryable()) {
                     HttpStatus status = HttpStatus.resolve(
                             refusal.getStatusCode());
                     throw new ApiException(
                             status == null ? HttpStatus.CONFLICT : status,
                             refusal.getCode(), refusal.getMessage());
                 }
-                if (error instanceof IllegalStateException
-                        || (error instanceof DaemonHttpException http
-                                && http.getStatusCode() < 500)) {
-                    store.abandonSessionMutation(tenantId, RENAME,
-                            idempotencyKey, sessionId);
-                    throw new ApiException(HttpStatus.CONFLICT,
-                            "session_mutation_refused", error.getMessage());
-                }
                 throw dependencyUnavailable("hosted_harness_unavailable",
                         "The Hosted Harness could not persist the Session title.");
             }
-            session = store.completeSessionMutation(tenantId, RENAME,
-                    idempotencyKey, sessionId, SessionMutationKind.RENAME,
-                    effectiveTitle, attachment.bootId());
-            return new SessionMutationResult<>(publicSession(session),
-                    command.replayed());
         }
         return new SessionMutationResult<>(getPublicSession(tenantId,
                 sessionId), true);

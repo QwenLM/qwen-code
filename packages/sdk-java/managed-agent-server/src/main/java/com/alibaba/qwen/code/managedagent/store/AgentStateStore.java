@@ -61,9 +61,10 @@ public interface AgentStateStore {
 
     /**
      * Retires the command row of a Session mutation the Harness refused
-     * before it could apply it, so the refusal does not leave the Session's
+     * before completion, so the refusal does not leave the Session's
      * later lifecycle changes blocked by a {@code PENDING} row nothing
-     * completes. The idempotency key stays free to re-attempt the mutation.
+     * completes. The receipt and digest survive for same-content retries
+     * and concurrent completion; completed outcomes remain replayable.
      */
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId);
