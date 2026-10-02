@@ -313,6 +313,7 @@ vi.mock('../hooks/index.js', () => {
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
+  HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
   return {
     HookSystem: HookSystemMock,
@@ -3642,6 +3643,53 @@ describe('Server Config (config.ts)', () => {
       expect(clearLoadedSkills).toHaveBeenCalledOnce();
     });
 
+    it.each([
+      {
+        title: 'clears reviewed deferred declarations at the session boundary',
+        nextSessionId: 'replacement-session',
+        survives: false,
+      },
+      {
+        title: 'keeps reviewed deferred declarations on a same-id restart',
+        nextSessionId: undefined,
+        survives: true,
+      },
+    ])('$title', async ({ nextSessionId, survives }) => {
+      const config = await initConfig({}, SKIP_ALL_INIT);
+      // The registry class is mocked in this file, so attach a stateful
+      // review-map trio: the production site calls them optionally and the
+      // assertion below observes the map, not the calls.
+      const registry = config.getToolRegistry()!;
+      const reviews = new Map<string, string>();
+      Object.assign(registry, {
+        recordReviewedDeclaration: (tool: {
+          schema: { name?: string };
+        }): void => {
+          reviews.set(tool.schema.name ?? '', 'fingerprint');
+        },
+        getReviewedDeclaration: (name: string) => reviews.get(name),
+        clearReviewedDeclarations: (): void => reviews.clear(),
+      });
+      registry.recordReviewedDeclaration({
+        schema: {
+          name: 'cron_list',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
+      } as never);
+      expect(registry.getReviewedDeclaration('cron_list')).toBeDefined();
+
+      config.startNewSession(
+        nextSessionId ?? config.getSessionId(),
+        nextSessionId === undefined ? emptyResume() : undefined,
+      );
+
+      if (survives) {
+        expect(registry.getReviewedDeclaration('cron_list')).toBeDefined();
+      } else {
+        expect(registry.getReviewedDeclaration('cron_list')).toBeUndefined();
+      }
+    });
+
     it("drops a skill's session allow rules at the session boundary", async () => {
       // `PermissionManager` outlives the swap, so without the purge a skill's
       // grant would keep auto-approving in a session that never loaded it.
@@ -5627,6 +5675,22 @@ describe('Server Config (config.ts)', () => {
       expect(SkillManager).not.toHaveBeenCalled();
       expect(config.getSkillManager()).toBeNull();
       expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('installs a managed dispatcher while ambient Hook discovery is disabled', async () => {
+      const config = new Config({ ...baseParams });
+      const dispatcher = {
+        hasHooksForEvent: () => false,
+        execute: vi.fn(),
+      };
+      await config.initialize({
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        managedHookDispatcher: dispatcher,
+      });
+      expect(HookSystem).toHaveBeenCalledWith(config, dispatcher);
+      expect(config.getHookSystem()).toBeDefined();
     });
 
     it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {

@@ -894,8 +894,8 @@ describe('assertVersionUnreleased', () => {
       return notFoundAnywhere(command);
     });
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    // The runner parses workflow commands from stdout only; ::error:: on
-    // stderr would never surface as an annotation in the Actions UI.
+    // The runner parses workflow commands from both streams; this CLI emits
+    // ::error:: on stdout.
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runAssertVersionCli('1.2.3')).toBe(3);
     expect(logSpy).toHaveBeenCalledWith(

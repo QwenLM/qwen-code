@@ -38,6 +38,10 @@ public final class ToolPublicationRetentionClockFixtureMain {
             }
             tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
                     new ManagedSessionStoreModels.AcquireWriterRequest("workspace-clock", "writer-clock", 60_000L)));
+            assertThat(jdbc.queryForObject("SELECT UNIX_TIMESTAMP(writer_lease_until) * 1000"
+                    + " - UNIX_TIMESTAMP(CURRENT_TIMESTAMP(6)) * 1000 FROM qwen_managed_session_journal_head"
+                    + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session))
+                    .isBetween(58_000L, 60_000L);
             assertThatThrownBy(() -> retire(jdbc, tx, tenant, session))
                     .isInstanceOfSatisfying(ApiException.class, error ->
                             assertThat(error.getCode()).isEqualTo("managed_session_writer_active"));

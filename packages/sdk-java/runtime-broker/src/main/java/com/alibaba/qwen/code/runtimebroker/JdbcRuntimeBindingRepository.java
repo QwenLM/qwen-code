@@ -694,7 +694,7 @@ public final class JdbcRuntimeBindingRepository
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT " + BINDING_COLUMNS + " FROM qwen_runtime_binding WHERE tenant_id = ? "
-                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED')")) {
+                        + "AND binding_state IN ('LOST', 'RECOVERY_BLOCKED', 'OPERATOR_RECOVERY', 'FAILED', 'DRAINING')")) {
             statement.setString(1, request.getScope().getTenantId());
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {

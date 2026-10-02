@@ -77,6 +77,10 @@ public class ManagedAgentStore implements AgentStateStore {
             "ACCEPTED", "RUNNING", "CANCELLING");
     private static final String TURN_SUMMARY_COLUMNS = "session_id,"
             + " turn_id, status, created_at, completed_at, error_code";
+    private static final String LATEST_TURN_ID =
+            "SELECT turn_id FROM managed_agent_event WHERE tenant_id = ?"
+                    + " AND session_id = ? AND event_type = 'turn.accepted'"
+                    + " ORDER BY sequence_id DESC LIMIT 1";
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -1049,9 +1053,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId) {
         List<TurnRecord> rows = jdbc.query(
                 "SELECT * FROM managed_agent_turn WHERE tenant_id = ? AND"
-                        + " session_id = ? ORDER BY created_at DESC,"
-                        + " turn_id DESC LIMIT 1",
-                turnMapper, tenantId, sessionId);
+                        + " session_id = ? AND turn_id = (" + LATEST_TURN_ID + ")",
+                turnMapper, tenantId, sessionId, tenantId, sessionId);
         return rows.stream().findFirst();
     }
 
@@ -1114,10 +1117,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " event.tenant_id = ? AND event.session_id = ? AND"
                         + " event.event_type IN ('environment.provisioning',"
                         + " 'environment.ready', 'environment.failed') AND"
-                        + " turn_record.turn_id = (SELECT turn_id FROM"
-                        + " managed_agent_turn WHERE tenant_id = ? AND"
-                        + " session_id = ? ORDER BY created_at DESC, turn_id"
-                        + " DESC LIMIT 1) ORDER BY event.sequence_id DESC"
+                        + " turn_record.turn_id = (" + LATEST_TURN_ID
+                        + ") ORDER BY event.sequence_id DESC"
                         + " LIMIT 1",
                 eventMapper, tenantId, sessionId, tenantId, sessionId)
                 .stream().findFirst();
@@ -2204,12 +2205,26 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         if ("ACTIVE".equals(status)
                 && (hasActiveTurn(session.tenantId(), session.sessionId())
-                        || session.workspace() != null && jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_action"
-                                + " WHERE tenant_id = ? AND session_id = ? AND state = 'requested'", Integer.class,
-                                session.tenantId(), session.sessionId()) > 0)) {
+                        || session.workspace() != null && hasDecidableAction(session))) {
             throw new ApiException(HttpStatus.CONFLICT, "turn_active",
                     "The Session has an active Turn.");
         }
+    }
+
+    private boolean hasDecidableAction(SessionRecord session) {
+        long now = lifecycleDatabaseTime();
+        for (String options : jdbc.queryForList("SELECT options_json FROM managed_agent_action"
+                + " WHERE tenant_id = ? AND session_id = ? AND state = 'requested'", String.class,
+                session.tenantId(), session.sessionId())) {
+            try {
+                if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {
+                    return true;
+                }
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException("Stored Action options are invalid", error);
+            }
+        }
+        return false;
     }
 
     // ARCHIVING remains only for an archive admitted before V17, which closes

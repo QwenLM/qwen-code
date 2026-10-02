@@ -4,22 +4,23 @@
 
 ## 1. Status and baseline
 
-Implemented locally, 2026-10-02, on `codex/workspace-session-l1-l2`. This document
+Implemented and synchronized with main, 2026-10-02, on `codex/workspace-session-l1-l2`. This document
 covers L1 and L2 of [#13164](https://github.com/QwenLM/qwen-code/issues/13164).
 Verification and remaining environment limits are recorded in section 8.
 
-The inspected baselines are:
+The integrated baselines are:
 
 - [Reliable Workspace close, #13135](https://github.com/QwenLM/qwen-code/pull/13135),
-  commit `63e840cedf87fa54cf80c826112b8cc77272cff4`.
+  merged commit `9478f28731f45ff6df66062e7e05d29e92906f19`.
 - [O4-1 Session retirement, #13084](https://github.com/QwenLM/qwen-code/pull/13084),
-  commit `9f5e66f2a37b1755164233d2d1c9d60e5c46dfbe`.
+  merged commit `e1167c1f9ca3d54747c8c0145c1d805259ab0226`.
 - The existing [D4 lifecycle design](https://github.com/QwenLM/qwen-code/blob/63e840cedf87fa54cf80c826112b8cc77272cff4/docs/design/2026-09-28-managed-agent-durable-lifecycle.md)
-  and [Workspace close design](https://github.com/QwenLM/qwen-code/blob/63e840cedf87fa54cf80c826112b8cc77272cff4/docs/design/workspace-session-reliable-close.md).
+  and [Workspace close design](https://github.com/QwenLM/qwen-code/blob/9478f28731f45ff6df66062e7e05d29e92906f19/docs/design/workspace-session-reliable-close.md).
 
-Both prerequisite PRs were open when inspected. L1 can be developed on #13135
-and lands after it. L2 lands after both #13135 and O4-1, with their locking and
-migrations reconciled. A retirement placeholder is insufficient for L2.
+Both prerequisite PRs are merged into main. This branch retains their final
+locking, close recovery and retirement implementations. L1 and L2 target main;
+L2 uses actual retirement, not a placeholder. The close migration's collision
+with the earlier recovery bundle V31 is resolved as described in section 7.
 
 ## 2. Problem and existing behavior
 
@@ -271,23 +272,18 @@ runs that collector nor promises physical erasure.
 
 ### 6.3 Reconcile the prerequisite lock order
 
-The two inspected heads cannot be composed mechanically:
-
-- #13135's writer acquisition locks the public Session before its journal head.
-- O4-1 deletion locks the retention tenant, journal head and publication rows
-  before the public Session and operation. Tool-result projection completion
-  also locks retention/journal/publication before the public Session.
-
-Preserve O4-1's existing order:
+Retain main's resolved ordering. Writer acquisition locks the retention tenant,
+then the public Session, then its journal head. O4-1 deletion and tool-result
+projection completion use:
 
 `retention tenant → journal head → publication rows (sorted for deletion) → public Session → operation/projection claim`.
 
-In the merged writer-acquisition path, take O4-1's `lockSession` and `requireLive`
-before #13135's public-Session `FOR UPDATE` and non-`ACTIVE` refusal. Then perform
-the writer head insert/update while retaining those locks. An absent head is
-still serialized by the retention tenant guard. Do not move the public lock in
-front of the retention guard: that would also invert the existing projection
-completion path.
+The shared retention tenant guard serializes writer acquisition against
+deletion/projection even though their later public/head lock orders differ.
+Retain the writer's non-`ACTIVE` and retired-state refusals before inserting or
+updating its head. An absent head is also serialized by the same tenant guard.
+Do not move the public lock before that guard or replace main's final writer
+ordering with the earlier prerequisite snapshot.
 
 L1/archive/unarchive and delete admission take only the public Session followed
 by their command/operation locks; they must not acquire retention or journal
@@ -319,13 +315,15 @@ Focused tests belong beside the existing lifecycle, operation-store, API,
 retention and Hosted/MySQL tests. Audit all new capability read sites and every
 adapter/service/store caller; do not leave declared flags or options unpopulated.
 
-L1/L2 add no table or column beyond the prerequisites. The local prerequisite
-integration retains close at Flyway `V27` and assigns undeployed O4-1 retention
-`V28`, resolving their version collision. Fresh schemas and upgrade from `V26`
-are tested. A deployment with either original `V27` already applied must reconcile
-its migration history explicitly; do not rename a deployed migration silently. Integration must
-preserve #13135's database-time expiry check, which is absent from the inspected
-O4-1 completion implementation. Review merged behavior, not just merge conflicts.
+L1/L2 add no table or column beyond the prerequisites. Main contains O4-1
+retention at Flyway `V30` and recovery bundles at `V31`. The just-merged close
+migration also claimed `V31`, preventing Flyway from resolving the combined
+schema. This branch moves only close to `V32`, preserving its SQL bytes and the
+earlier migrations. Fresh schemas and upgrade from `V31` are tested. A deployment
+that applied close under an earlier branch-only version must reconcile its
+migration history explicitly; do not silently rewrite an applied migration.
+Integration preserves #13135's database-time expiry check and uses a current
+locking read after the operation lock. Review merged behavior, not just merge conflicts.
 
 Deploy compatible binaries and reconciled schemas to all Managed Agent writers
 and lifecycle workers before admitting bound L2 operations. An old #13135
@@ -333,8 +331,8 @@ coordinator would attempt Runtime cleanup for them. Use a coordinated rollout
 or existing deployment traffic controls, without adding a speculative feature
 flag. Preserve older unbound keys, migration recovery and response shapes.
 
-L1 and L2 remain separate review scopes on the integrated local branch. L1 does
-not wait for Hooks or O4-1. L2 requires O4-1 but not #13129. The separate close→SessionDelete coupling
+L1 and L2 remain separate review scopes on the main-based branch. Their close
+and O4-1 prerequisites are now merged. The separate close→SessionDelete coupling
 between #13135 and H2 (#13129) still needs an independently owned fix or release
 ordering; these metadata-only operations do not resolve that existing coupling.
 Shell publication collection through a real Shell API delete remains L4's exit

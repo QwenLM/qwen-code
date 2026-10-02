@@ -208,6 +208,8 @@ public class ToolPublicationRetentionStoreTest {
                 + " WHERE tenant_id = ? AND session_id = ?", recovery, tenant, session);
         retire();
         assertThat(blocker()).isEqualTo("READY".equals(recovery) ? null : "recovery_protected");
+        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM qwen_managed_session_journal_head"
+                + " WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isFalse();
         assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM qwen_tool_publication WHERE scope_key = ?",
                 Long.class, scope)).isEqualTo(1000);
     }
@@ -282,6 +284,110 @@ public class ToolPublicationRetentionStoreTest {
                 Long.class, tenant)).isZero();
         assertThat(new ManagedAgentProperties().getToolPublication().isGcEnabled()).isFalse();
         assertThat(new ManagedAgentProperties().getToolPublication().getDeletionGrace()).isEqualTo(Duration.ofHours(24));
+    }
+
+    @Test
+    void quarantineAfterRetirementKeepsKnownCorruptOutputHeld() {
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
+                + " byte_length, sha256, object_key, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-1', 'segment:stdout:0', 'resource-1', 1, ?, 'object-1',"
+                + " 'VERIFIED', 'operation-1', CURRENT_TIMESTAMP(6))", scope, "a".repeat(64));
+        retire();
+        retention.quarantineResource(scope, "resource-1", "object-1");
+        assertThat(blocker()).isEqualTo("quarantined");
+        assertThat(jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object WHERE scope_key = ?",
+                String.class, scope)).isEqualTo("QUARANTINED");
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM qwen_tool_publication WHERE scope_key = ?",
+                Long.class, scope)).isEqualTo(1000);
+    }
+
+    @Test
+    void candidateCountsAllUsedSlotsAndKeepsOperationAndObjectBlockers() {
+        jdbc.update("UPDATE qwen_tool_publication SET producer_used_bytes = 456, admission_used_bytes = 789"
+                + " WHERE scope_key = ?", scope);
+        retire();
+        assertThat(retention.observe(Duration.ZERO)).singleElement()
+                .extracting(ToolPublicationRetentionStore.Candidate::bytes).isEqualTo(1368L);
+        jdbc.update("INSERT INTO qwen_tool_publication_operation (scope_key, publication_id, operation_id,"
+                + " request_digest, state, claim_epoch, deadline, created_at) VALUES (?, 'pub-1', 'op-1', ?,"
+                + " 'PENDING', 1, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", scope, "b".repeat(64));
+        assertThat(blocker()).isEqualTo("operation_unresolved");
+        jdbc.update("UPDATE qwen_tool_publication_operation SET state = 'SUCCEEDED' WHERE scope_key = ?", scope);
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key,"
+                + " byte_length, sha256, state, operation_id, created_at) VALUES (?, 'pub-1', 'segment:stdout:0',"
+                + " 1, ?, 'CANDIDATE', 'op-1', CURRENT_TIMESTAMP(6))", scope, "c".repeat(64));
+        assertThat(blocker()).isEqualTo("object_unverified");
+        jdbc.update("UPDATE qwen_tool_publication_object SET state = 'VERIFIED' WHERE scope_key = ?", scope);
+        assertThat(blocker()).isNull();
+    }
+
+    @Test
+    void retirementSuppressesOutstandingWorkOnlyInItsOwnResultScope() {
+        for (String state : java.util.List.of("LEASED", "READY")) {
+            jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id,"
+                    + " workspace_id, session_id, source_json, source_digest, work_state, claim_until)"
+                    + " VALUES (?, ?, ?, ?, 'workspace-1', ?, '{}', ?, ?, 9999999999999)",
+                    state, ManagedToolResultStore.scope(tenant, session), ToolPublicationRetentionStore.hash(state),
+                    tenant, session, "d".repeat(64), state);
+        }
+        jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id,"
+                + " workspace_id, session_id, source_json, source_digest, work_state, claim_until)"
+                + " VALUES ('other', ?, ?, ?, 'workspace-1', 'other', '{}', ?, 'LEASED', 9999999999999)",
+                ManagedToolResultStore.scope(tenant, "other"), "e".repeat(64), tenant, "f".repeat(64));
+        retire();
+        var leased = jdbc.queryForMap("SELECT work_state, claim_until, failure_code FROM managed_agent_tool_result"
+                + " WHERE result_id = 'LEASED'");
+        assertThat(leased.get("work_state")).isEqualTo("SUPPRESSED");
+        assertThat(leased.get("claim_until")).isNull();
+        assertThat(leased.get("failure_code")).isEqualTo("session_retired");
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result WHERE result_id = 'READY'",
+                String.class)).isEqualTo("READY");
+        assertThat(jdbc.queryForObject("SELECT work_state FROM managed_agent_tool_result WHERE result_id = 'other'",
+                String.class)).isEqualTo("LEASED");
+    }
+
+    @Test
+    void unauthorizedPrivateResourceReadDoesNotAdmitALease() {
+        var admissions = new java.util.concurrent.atomic.AtomicInteger();
+        var observed = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... arguments) {
+                if (sql.startsWith("INSERT INTO qwen_output_read_lease")) { admissions.incrementAndGet(); }
+                return super.update(sql, arguments);
+            }
+        };
+        var sessions = new ManagedSessionStore(observed);
+        tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, "a".repeat(32),
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
+        assertThatThrownBy(() -> sessions.readResource(tenant, "workspace-1", session, "resource-1", "b".repeat(32)))
+                .isInstanceOf(ApiException.class);
+        assertThat(admissions).hasValue(0);
+    }
+
+    @Test
+    void failedLeaseCleanupPreservesGuardAndStreamCloseFailures() throws Exception {
+        var failing = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... arguments) {
+                if (sql.startsWith("DELETE FROM qwen_output_read_lease")) {
+                    throw new org.springframework.dao.DataAccessResourceFailureException("cleanup failed");
+                }
+                return super.update(sql, arguments);
+            }
+        };
+        var store = new ToolPublicationRetentionStore(failing, manager);
+        var original = new IllegalArgumentException("original guard");
+        assertThatThrownBy(() -> store.open(scope, "pub-1", "object", new MemoryObjects(), () -> { throw original; }))
+                .isSameAs(original);
+        assertThat(original.getSuppressed()).singleElement().extracting(Throwable::getMessage).isEqualTo("cleanup failed");
+        var objects = new MemoryObjects() {
+            @Override public InputStream open(String objectKey) {
+                return new ByteArrayInputStream(new byte[] {1}) {
+                    @Override public void close() throws java.io.IOException { throw new java.io.IOException("original close"); }
+                };
+            }
+        };
+        var input = store.open(scope, "pub-1", "object", objects);
+        assertThatThrownBy(input::close).isInstanceOf(java.io.IOException.class).hasMessage("original close")
+                .satisfies(error -> assertThat(error.getSuppressed()).singleElement().extracting(Throwable::getMessage).isEqualTo("cleanup failed"));
     }
 
     protected static class MemoryObjects implements ToolPublicationObjectStore {

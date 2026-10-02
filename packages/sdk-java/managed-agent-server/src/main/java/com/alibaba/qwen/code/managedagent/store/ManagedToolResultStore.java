@@ -225,9 +225,9 @@ public class ManagedToolResultStore {
                 fail(claim, "SUPPRESSED", "session_retired");
                 return false;
             }
-            jdbc.queryForList("SELECT publication_id FROM qwen_tool_publication WHERE tenant_id = ?"
+            jdbc.queryForList("SELECT publication_id FROM qwen_tool_publication WHERE scope_key = ? AND tenant_id = ?"
                     + " AND session_id = ? AND publication_id = ? FOR UPDATE",
-                    source.tenantId(), source.sessionId(), projection.publicationId());
+                    ToolPublicationDataStore.scope(source.sessionKey()), source.tenantId(), source.sessionId(), projection.publicationId());
             var publicSessions = jdbc.queryForList("SELECT tenant_id, session_id, workspace_id, status, last_sequence FROM"
                             + " managed_agent_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                     source.tenantId(), source.sessionId());
@@ -359,7 +359,7 @@ public class ManagedToolResultStore {
         return prefix + "_" + ToolPublicationContract.sha256(digest.toByteArray());
     }
 
-    private static String scope(String tenant, String session) {
+    static String scope(String tenant, String session) {
         return identity("s", tenant, session).substring(2);
     }
 

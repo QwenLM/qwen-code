@@ -4,7 +4,7 @@
 
 ## 问题与基线
 
-O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V27 迁移，接在已有 V26 投影迁移之后。
+O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V30 迁移，接在当前 main 的 V29 hook admission backfill 迁移之后；已有 V26 投影迁移保持不变。
 
 ## 契约与范围
 
@@ -16,9 +16,9 @@ Session 是保留根。close、archive、Runtime 排空、ACK 和事件过期后
 
 新增独立生命周期 `PINNED → RETIRING → DELETING → COLLECTED`，不改写 execution、capture、delivery 和 producer phase。删除按 tenant → 私有 journal head → publication → 公共 Session 加锁，在同一事务复核 writer 并完成公共删除；即使从未建立私有 head，也保留永久 Session 墓碑。拒绝新 acquisition、恢复、publication 修改和投影。回填跳过退役 head，待处理投影被抑制。
 
-数据库读租约覆盖整个 Session 输出闭包，包括元数据解析。固定两分钟预算不能续期；每次读取和返回字节前检查数据库时间、租约身份和退役 generation。公共下载继续保留 O3 授权与总预算检查。私有资源及 projector 扫描使用相同保护。过期进程恢复后不能继续输出。
+每个 Artifact 下载请求只持有一个数据库读租约，覆盖元数据解析和对象分段；内层读取借用原租约，不延长预算。固定两分钟预算不能续期；每次读取和返回字节前检查数据库时间、租约身份和退役 generation。公共下载继续保留 O3 授权与总预算检查。每次租约检查在一条查询中读取身份、退役标记与数据库时间。退役后仍允许增加隔离保护标记，因此并发发现的损坏对象继续被保留。私有资源及 projector 扫描使用相同保护。过期进程恢复后不能继续输出。
 
-每次物理 PUT 在网络请求之前独立持久登记 attempt。确定成功只闭合该 attempt；异常或进程死亡保留 unknown/outstanding，直到外部处置前阻止自动清理。后续重试成功不能闭合前驱。禁用 OSS SDK 隐式重试，现有显式重试创建新 attempt。纯 inline publication 也有新协议证据，历史行默认缺失证据。
+每次物理 PUT 在网络请求之前独立持久登记 attempt。确定成功只闭合该 attempt；异常或进程死亡保留 unknown/outstanding，直到外部处置前阻止自动清理。后续重试成功不能闭合前驱。禁用 OSS SDK 隐式重试，现有显式写重试创建新 attempt。OSS adapter 仅重试明确的瞬时对象或桶元数据 GET 错误，最多三次，退避为 100/200/400 ms。每次受保护的读尝试在网络 I/O 前检查原租约，公共读取还复核当前授权；中断、守卫失败、永久错误和响应体失败均不重试。纯 inline publication 也有新协议证据，历史行默认缺失证据。
 
 ## 清理与配额
 
@@ -30,7 +30,7 @@ SQL 标记 `DELETING` 后，在事务外每页最多删除 100 个 catalog 精�
 
 ## 配置与上线
 
-只新增 `qwen.managed-agent.tool-publication.gc-enabled`（默认 false）及 `deletion-grace`（默认 24h）。启用 publication 后进行候选观察。启用 GC 前升级全部 Java writer；迁移将历史证据默认为 false。落地前按最新 main 重编号前向迁移。O4-3 的数据库、进程故障、隔离 OSS 和大闭包门禁全部通过后才允许部署启用 GC。
+只新增 `qwen.managed-agent.tool-publication.gc-enabled`（默认 false）及 `deletion-grace`（默认 24h）。启用 publication 后进行候选观察，不受 `gc-enabled` 影响；该开关保留给 O4-2 物理清理器，在 O4-1 中不生效。观察按固定 catalog 顺序最多采样前 100 个退役 publication，只是有界前缀样本，不能当作全量统计。基于游标的清理属于 O4-2。启用 GC 前升级全部 Java writer；迁移将历史证据默认为 false。落地前按最新 main 重编号前向迁移。O4-3 的数据库、进程故障、隔离 OSS 和大闭包门禁全部通过后才允许部署启用 GC。
 
 ## 涉及层与交付
 

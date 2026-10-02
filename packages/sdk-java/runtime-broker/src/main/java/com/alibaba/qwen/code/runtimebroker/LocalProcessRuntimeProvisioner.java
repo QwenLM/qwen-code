@@ -255,17 +255,21 @@ public final class LocalProcessRuntimeProvisioner
                 || binding.getProvisionSeed() == null) {
             return RuntimeProvisioner.super.stopDrained(binding);
         }
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
         return CompletableFuture.supplyAsync(() -> store.locked(binding.getRequest(),
-                binding.getProvisionSeed(), binding.getResourceHandle(), false, (resource, registration) -> {
-                if (!store.sameBoot(registration)
+                binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
+                boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
+                if (!originalBootStopped && (!store.sameBoot(registration)
                         || registration.state() == LocalRuntimeStore.State.LAUNCHING
                         || registration.pid() == 0 && registration.state() != LocalRuntimeStore.State.INTENT
-                                && registration.state() != LocalRuntimeStore.State.RETIRED) {
+                                && registration.state() != LocalRuntimeStore.State.RETIRED)) {
                     throw LocalRuntimeStore.blocked();
                 }
                 boolean neverStarted = registration.pid() == 0;
-                var worker = registration.process();
-                if (!neverStarted && worker == null && !registration.processAbsent()) {
+                var worker = originalBootStopped ? null : registration.process();
+                if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
                     throw LocalRuntimeStore.blocked();
                 }
                 resource.save(registration.withState(LocalRuntimeStore.State.RETIRED));
@@ -278,7 +282,7 @@ public final class LocalProcessRuntimeProvisioner
                         waitForStop(registration, 5);
                     }
                 }
-                if (!neverStarted && !registration.processAbsent()) {
+                if (!originalBootStopped && !neverStarted && !registration.processAbsent()) {
                     throw new RuntimeBrokerException(503, "workspace_close_stop_unconfirmed",
                             "Original worker has not stopped.", true);
                 }

@@ -232,26 +232,28 @@ public class ManagedArtifactService {
             long timeout = settings.getReadTimeout().toNanos();
             try (var lease = reader.lease(artifact)) {
                 Runnable guard = () -> {
-                    lease.check();
                     if (System.nanoTime() - started > timeout) {
                         throw unavailable();
                     }
                     requireContentAccess(tenant, artifact);
                 };
                 if (selection.partial()) {
-                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), guard);
+                    byte[] bytes = reader.readRange(artifact, selection.offset(), (int) selection.length(), lease, guard);
+                    lease.check();
                     guard.run();
                     headers(response, artifact, etag, selection, size);
                     response.getOutputStream().write(bytes);
                     sent = bytes.length;
                 } else {
-                    try (var input = reader.open(artifact, guard)) {
+                    try (var input = reader.open(artifact, lease, guard)) {
                         byte[] buffer = new byte[64 * 1024];
                         int count = input.read(buffer);
+                        lease.check();
                         guard.run();
                         headers(response, artifact, etag, selection, size);
                         response.flushBuffer();
                         while (count != -1) {
+                            lease.check();
                             guard.run();
                             response.getOutputStream().write(buffer, 0, count);
                             sent += count;

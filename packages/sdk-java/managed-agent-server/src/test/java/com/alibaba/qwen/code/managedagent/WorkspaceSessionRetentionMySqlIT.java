@@ -218,7 +218,8 @@ class WorkspaceSessionRetentionMySqlIT {
         jdbc.update("INSERT INTO managed_agent_tool_result (result_id, scope_key, execution_key, tenant_id, workspace_id,"
                 + " session_id, source_json, source_digest, work_state, claim_generation, claim_until)"
                 + " VALUES ('result-1', ?, ?, ?, 'workspace', ?, '{}', ?, 'LEASED', 1, ?)",
-                digest, digest, tenant, session, digest, System.currentTimeMillis() + 60_000);
+                ManagedToolResultStore.identity("s", tenant, session).substring(2), digest, tenant, session,
+                digest, System.currentTimeMillis() + 60_000);
         var projection = new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
         var claim = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source("result-1", tenant,
                 "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
@@ -314,7 +315,7 @@ class WorkspaceSessionRetentionMySqlIT {
 
     @Test
     void prerequisiteMigrationsPreserveExistingCloseEvidenceAndAllowRetirement() {
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").target("26").load().migrate();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").target("31").load().migrate();
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);

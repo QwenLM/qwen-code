@@ -4,22 +4,22 @@
 
 ## 1. 状态与基线
 
-本地实现完成，2026-10-02，分支 `codex/workspace-session-l1-l2`。本文覆盖
+实现完成并已同步 main，2026-10-02，分支 `codex/workspace-session-l1-l2`。本文覆盖
 [#13164](https://github.com/QwenLM/qwen-code/issues/13164) 的 L1、L2。
 验证结果与环境限制记录在第 8 节。
 
-本次核对的基线：
+本次集成的基线：
 
 - [Workspace 可靠关闭，#13135](https://github.com/QwenLM/qwen-code/pull/13135)，
-  提交 `63e840cedf87fa54cf80c826112b8cc77272cff4`。
+  合入提交 `9478f28731f45ff6df66062e7e05d29e92906f19`。
 - [O4-1 会话退役，#13084](https://github.com/QwenLM/qwen-code/pull/13084)，
-  提交 `9f5e66f2a37b1755164233d2d1c9d60e5c46dfbe`。
+  合入提交 `e1167c1f9ca3d54747c8c0145c1d805259ab0226`。
 - 既有 [D4 生命周期设计](https://github.com/QwenLM/qwen-code/blob/63e840cedf87fa54cf80c826112b8cc77272cff4/docs/design/2026-09-28-managed-agent-durable-lifecycle.md)
-  与 [Workspace 关闭设计](https://github.com/QwenLM/qwen-code/blob/63e840cedf87fa54cf80c826112b8cc77272cff4/docs/design/workspace-session-reliable-close.md)。
+  与 [Workspace 关闭设计](https://github.com/QwenLM/qwen-code/blob/9478f28731f45ff6df66062e7e05d29e92906f19/docs/design/workspace-session-reliable-close.md)。
 
-核对时两个前置 PR 均未合入。L1 可以基于 #13135 开发，在它之后合入。
-L2 必须在 #13135 与 O4-1 之后合入，并协调两者的锁顺序与数据库迁移。
-只留下退役占位步骤不足以交付 L2。
+两个前置 PR 均已合入 main，本分支保留其最终的锁顺序、close 恢复及退役实现。
+L1、L2 以 main 为目标；L2 使用实际退役而非占位步骤。
+close 迁移与此前 recovery bundle V31 的冲突按第 7 节解决。
 
 ## 2. 问题与现有行为
 
@@ -242,21 +242,15 @@ O4-2 随后决定回收资格；L2 不运行 collector，也不承诺物理擦�
 
 ### 6.3 协调前置改动的锁顺序
 
-本次检查的两个 head 不能机械合并：
-
-- #13135 的 writer acquisition 先锁公开 Session，再锁 journal head。
-- O4-1 删除先锁 retention tenant、journal head 和 publication 行，
-  再锁公开 Session 与 operation。tool-result 投影完成也先锁
-  retention/journal/publication，再锁公开 Session。
-
-保留 O4-1 已有顺序：
+保留 main 已协调的顺序。writer acquisition 先锁 retention tenant，再锁公开
+Session，最后锁 journal head。O4-1 删除与 tool-result 投影完成采用：
 
 `retention tenant → journal head → publication 行（删除时排序）→ 公开 Session → operation/projection claim`。
 
-合并后的 writer acquisition 先调用 O4-1 的 `lockSession` 与 `requireLive`，
-再执行 #13135 对公开 Session 的 `FOR UPDATE` 和非 `ACTIVE` 拒绝。
-保持这些锁后再插入或更新 writer head。head 不存在时仍由 retention tenant guard
-串行化。不能把公开 Session 锁移到 retention guard 前，否则会与既有投影完成路径逆序。
+共同的 retention tenant guard 让 writer acquisition 与删除/投影串行，
+即使后续 public/head 的加锁顺序不同。保留 writer 在插入或更新 head 前对
+非 `ACTIVE` 与已退役状态的拒绝。head 不存在时也由同一 tenant guard 串行化。
+不能将公开 Session 锁移到 guard 前，也不能以旧前置快照覆盖 main 的最终 writer 顺序。
 
 L1 archive/unarchive 与 delete 准入只按公开 Session、command/operation
 的顺序加锁，不能随后再获取 retention 或 journal 锁。
@@ -286,20 +280,20 @@ claim 续租和重试只操作 operation，不能随后再获取 Session/journal
 核对所有新 capability 的读取点，以及 adapter/service/store 的每个调用方；
 不能留下只有声明却没有赋值的 flag 或 option。
 
-L1/L2 除前置功能外不新增表或列。本地前置集成保留 close 的 Flyway `V27`，
-把尚未部署的 O4-1 retention 分配为 `V28`，解决编号冲突。
-测试覆盖新建 schema 与从 `V26` 升级。若某个原始 `V27` 已在部署环境应用，
-必须显式协调迁移历史，不能静默重命名已部署的迁移。
-集成时还必须保留 #13135 的数据库时间租约过期检查；
-本次核对的 O4-1 完成逻辑尚无这项检查。评审集成后的行为，不能只解决文本冲突。
+L1/L2 除前置功能外不新增表或列。main 的 O4-1 retention 为 Flyway `V30`，
+recovery bundle 为 `V31`；刚合入的 close 迁移也占用了 `V31`，导致 Flyway
+无法解析合并后的 schema。本分支只将 close 移到 `V32`，保留其 SQL 字节及此前迁移。
+测试覆盖新建 schema 与从 `V31` 升级。若部署环境曾应用前置分支的旧 close 编号，
+必须显式协调迁移历史，不能静默改写已应用的迁移。
+集成保留 #13135 的数据库时间租约过期检查，并在 operation 加锁后使用当前锁定读取。
+评审集成后的行为，不能只解决文本冲突。
 
 开放绑定 L2 准入前，先让所有 Managed Agent writer 与 lifecycle worker
 运行兼容二进制并完成迁移协调。旧 #13135 coordinator 会对 L2 尝试 Runtime 清理。
 采用协调发布或既有部署流量控制，不为此新增推测性的 feature flag。
 保留旧未绑定会话的 key、迁移恢复和响应形状。
 
-L1、L2 在集成后的本地分支上保留独立评审范围。
-L1 不等待 Hook 或 O4-1；L2 要求 O4-1，不依赖 #13129。
+L1、L2 在以 main 为基线的分支上保留独立评审范围，close 与 O4-1 前置均已合入。
 #13135 与 H2（#13129）之间 close→SessionDelete 的耦合仍需独立责任人修复或安排发布顺序；
 这两个元数据操作不能解决该既有耦合。
 通过真实 Shell API delete 触发 Shell publication 回收仍是 L4 的出口检查，

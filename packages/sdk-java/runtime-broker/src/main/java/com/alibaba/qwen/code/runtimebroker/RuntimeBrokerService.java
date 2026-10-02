@@ -218,7 +218,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 .withState(RuntimeBindingRecord.State.DRAINING,
                         claimed.getLease(), clock.instant()));
         if (draining == null) {
-            bindingRepository.releaseOperation(claimed.getBindingId(), brokerOwnerId, claimed.getOperationGeneration());
+            releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(unavailable("runtime_close_claim_pending", "Drain claim changed"));
         }
         var renewal = new BindingRenewal(draining);
@@ -243,10 +243,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 liveBindings.remove(draining.getBindingId());
             });
         });
-        return result.whenComplete((ignored, error) -> {
-            renewal.close();
-            bindingRepository.releaseOperation(draining.getBindingId(), brokerOwnerId, draining.getOperationGeneration());
-        });
+        return result.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
+                .whenComplete((ignored, error) -> {
+                    renewal.close();
+                    releaseOperationQuietly(draining.getBindingId(), draining.getOperationGeneration());
+                }).exceptionally(error -> {
+                    throw mapStepTimeout(error);
+                });
     }
 
     private CompletionStage<Void> drainSessions(RuntimeBindingRecord binding, String cursor) {
@@ -347,13 +350,16 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
-        if (!ManagedMcpProtocol.isOperation(immutable)) {
+        if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
         return requireReadySession(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
+                    }
+                    if (ManagedHookProtocol.isOperation(immutable)) {
+                        ManagedHookProtocol.validateSession(context.session(), immutable);
                     }
                     synchronized (context) {
                         requireReadySessionRecord(context);

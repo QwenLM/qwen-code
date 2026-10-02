@@ -14,6 +14,8 @@ ALTER TABLE qwen_tool_publication
     ADD COLUMN retention_state VARCHAR(32) NOT NULL DEFAULT 'PINNED';
 ALTER TABLE qwen_tool_publication ADD COLUMN write_evidence BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE qwen_tool_publication ADD COLUMN accepted_complete BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX idx_tool_publication_retention ON qwen_tool_publication (retention_state);
+CREATE INDEX idx_tool_publication_session ON qwen_tool_publication (tenant_id, session_id);
 
 CREATE TABLE qwen_output_read_lease (
     lease_id VARCHAR(36) NOT NULL PRIMARY KEY,

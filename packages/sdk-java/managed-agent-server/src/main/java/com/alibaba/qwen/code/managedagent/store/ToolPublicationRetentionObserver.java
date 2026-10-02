@@ -31,7 +31,7 @@ public final class ToolPublicationRetentionObserver {
             }
             LOG.info("tool_output_retention sample={} eligible_bytes={} reasons={}", sample.size(), eligibleBytes, blockers);
         } catch (RuntimeException error) {
-            LOG.warn("Tool output retention observation failed: {}", error.getClass().getSimpleName());
+            LOG.warn("Tool output retention observation failed", error);
         }
     }
 }
