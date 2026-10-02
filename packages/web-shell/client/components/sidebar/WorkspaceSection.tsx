@@ -859,6 +859,14 @@ export function WorkspaceSection({
               >
                 {workspaceLabel(workspace)}
               </span>
+              {workspace.isPinned && (
+                <span
+                  className={styles.pinBadge}
+                  title={t('sidebar.pinnedWorkspace')}
+                >
+                  📌
+                </span>
+              )}
             </span>
             {!workspace.trusted && (
               <span className={styles.badge}>{untrustedLabel}</span>
