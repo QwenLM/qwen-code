@@ -1022,9 +1022,13 @@ class ManagedAgentServerIntegrationTest {
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.reasoning.delta", Map.of("text", "thought"),
                 false, "thought");
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, session.sessionId(), turnId,
                 "item.output_text.delta", Map.of("text", "final"),
-                false, "final");
+                true, "final");
         store.materializeNextBatch(tenant, session.sessionId(), 100);
         assertThat(store.findSnapshot(tenant, session.sessionId()))
                 .get().satisfies(snapshot -> assertThat(snapshot.items())
