@@ -5,8 +5,9 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { execFileSync } from 'child_process';
 import { renderHook, act } from '@testing-library/react';
 import type React from 'react';
 import { useVim } from './vim.js';
@@ -2233,6 +2234,68 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('P')));
 
         expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 0, 'hello ');
+      });
+    });
+
+    describe('system clipboard paste on Windows', () => {
+      const realPlatform = process.platform;
+
+      beforeEach(() => {
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        (execFileSync as unknown as Mock).mockReset();
+      });
+
+      afterEach(() => {
+        Object.defineProperty(process, 'platform', { value: realPlatform });
+      });
+
+      it('pastes a single-line clipboard characterwise', () => {
+        // Get-Clipboard renders the clipboard with a trailing CRLF.
+        (execFileSync as unknown as Mock).mockReturnValue('hello\r\n');
+        const buffer = createMockBuffer('foo bar', [0, 3]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        // Trailing CRLF stripped: pasted after the cursor, not as a new line.
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 4, 0, 4, 'hello');
+        expect(buffer.vimMoveLeft).toHaveBeenCalledWith(1);
+      });
+
+      it('normalizes CRLF and pastes a multi-line clipboard linewise', () => {
+        (execFileSync as unknown as Mock).mockReturnValue('line1\r\nline2\r\n');
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          0,
+          3,
+          0,
+          3,
+          '\nline1\nline2',
+        );
+      });
+
+      it('reads the clipboard without the user profile and with a generous timeout', () => {
+        (execFileSync as unknown as Mock).mockReturnValue('');
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(execFileSync).toHaveBeenCalledWith(
+          'powershell',
+          ['-NoProfile', '-c', 'Get-Clipboard'],
+          expect.objectContaining({ timeout: 5000 }),
+        );
       });
     });
 

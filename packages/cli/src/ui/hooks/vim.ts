@@ -177,11 +177,17 @@ function readClipboard(): string {
       }).toString();
     }
     if (platform === 'win32') {
-      return execFileSync('powershell', ['-c', 'Get-Clipboard'], {
+      // PowerShell startup can exceed 200 ms, and its console output appends
+      // a trailing CRLF that breaks linewise detection and leaves stray \r in
+      // the pasted text, so read generously and normalize the result.
+      return execFileSync('powershell', ['-NoProfile', '-c', 'Get-Clipboard'], {
         encoding: 'utf-8',
-        timeout: 200,
+        timeout: 5000,
         stdio: ['pipe', 'pipe', 'ignore'],
-      }).toString();
+      })
+        .toString()
+        .replace(/\r\n/g, '\n')
+        .replace(/\n$/, '');
     }
     // Linux: probe once, then use cached tool
     if (linuxReadCmd === undefined) {
