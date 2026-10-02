@@ -24,6 +24,10 @@ including retained archived, closed and deleted rows; Hosted files and Shell
 profiles; accepted O2 results; and the actual backup bytes used by #13110.
 Unsupported profiles or unexplained references prevent a compatible recovery
 point for the entire storage. Unbound Sessions remain untouched.
+Plain Hosted model attempts include their original
+`managed-hosted-model-route` and `managed-hosted-model-usage` resources.
+Hosted Hooks and MCP Sessions remain unsupported and prevent capture of their
+entire shared storage.
 
 The first provider is `local-workspace-bundle/1`: an operator prepares a copy of
 the Workspace and retained worker backup directories outside all active roots.
@@ -340,5 +344,12 @@ revision remain pending; green CI and Ready status do not close these gates.
 #13110 has merged into main; this integration also preserves main's V26 tool
 result projection and V27 Hosted Hooks migrations, assigning only the unmerged
 W1b recovery metadata to V28. Existing migration bytes remain unchanged.
-H2 Hook domains and resources are outside W1b's supported closure and refuse
-capture; this integration does not certify or activate Hook recovery.
+The [round-3 deployment report](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5944274897)
+confirms V28 on `e50e2c37`, but identifies missing ordinary Hosted model route/usage
+support; its successful Linux runbook and interruption checks use that revision
+plus a candidate allowlist fix. This change includes those two resource kinds
+and tests journals written by the actual model activation producer, including
+missing/corrupt resources and unsettled work. The external candidate evidence
+does not certify later artifacts. H2 Hook domains, Hook-specific model resources
+and MCP profiles remain outside W1b's closure and refuse capture; this does not
+certify or activate Hook recovery.

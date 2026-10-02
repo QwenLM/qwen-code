@@ -171,6 +171,8 @@ const RESOURCE_KINDS = new Set([
   ...DOMAINS.map((domain) => `managed-${domain}`),
   ...Object.values(MANAGED_TOOL_RESULT_KINDS),
   'managed-tool-terminal',
+  'managed-hosted-model-route',
+  'managed-hosted-model-usage',
 ]);
 
 function requireValue(value: unknown, message: string): asserts value {

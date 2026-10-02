@@ -11,10 +11,15 @@ import {
   type StoredTransaction,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { createInitialHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { scanManagedSessionJournal } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  assertManagedSessionDurableRef,
   managedSessionEventsDigest,
   type ManagedSessionDurableRef,
   type ManagedSessionEvent,
@@ -89,7 +94,9 @@ function fixture() {
     },
   };
   function resource(kind: string, value: unknown): ManagedSessionDurableRef {
-    const bytes = Buffer.from(JSON.stringify(value));
+    return publish(kind, Buffer.from(JSON.stringify(value)));
+  }
+  function publish(kind: string, bytes: Buffer): ManagedSessionDurableRef {
     const ref = {
       resourceId: `resource-${resources.size}`,
       kind,
@@ -247,11 +254,115 @@ function fixture() {
     resources,
     transactions,
     resource,
+    publish,
     event,
     append,
     record,
     complete,
     refs,
+    tx,
+  };
+}
+
+async function hostedModelFixture(settled = true) {
+  const f = fixture();
+  f.transactions.length = 0;
+  const records: unknown[] = [];
+  const session = await openManagedSession({
+    runtimeBaseDir: '/unused',
+    transcriptPath: '/unused',
+    sessionId: SESSION,
+    sessionKey: KEY,
+    cwd: '/original/cwd',
+    version: 'hosted-harness/1',
+    workerId: 'worker',
+    activationLeaseDurationMs: 60_000,
+    create: {
+      definitionRef: f.resource('managed-definition', {
+        engine: 'managed',
+        sessionId: SESSION,
+        toolProfile: 'hosted-workspace-files/1',
+      }),
+      rootSnapshotRef: f.resource('managed-root', { cwd: '/original/cwd' }),
+      createdBy: 'hosted-harness',
+    },
+    resourceStore: {
+      read: f.io.read,
+      publish: async (kind, bytes) => f.publish(kind, bytes),
+    },
+    journalStore: {
+      open: async () => ({
+        sessionKey: KEY,
+        read: async () =>
+          scanManagedSessionJournal(
+            Buffer.from(records.map((r) => JSON.stringify(r) + '\n').join('')),
+            KEY,
+          ),
+        appendTransaction: async (batch) => {
+          f.tx([...batch]);
+          records.push(...batch);
+        },
+        seal: async () => {},
+        abort: async () => {},
+      }),
+    },
+  });
+  try {
+    await session.authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: 'prompt',
+        sessionKey: KEY,
+        contentDigest: 'a'.repeat(64),
+      },
+      {
+        inputId: 'prompt',
+        turnId: 'prompt',
+        source: 'hosted-harness',
+        contentRef: f.resource('managed-input', 'prompt'),
+        admissionRef: f.resource('managed-admission', { promptId: 'prompt' }),
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await createManagedHarnessHandle(session).run(async () => {
+      await new ManagedHookActivationController(session).runTurn(
+        'prompt',
+        async (scope) => {
+          const complete = await scope.beginMainAttempt('test-model');
+          await complete(true, [{ totalTokenCount: 7 }]);
+        },
+      );
+      if (settled)
+        await session.sink.write({
+          uuid: 'turn-result',
+          parentUuid: null,
+          sessionId: SESSION,
+          timestamp: '2026-10-02T00:00:00.000Z',
+          cwd: '/original/cwd',
+          version: 'hosted-harness/1',
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: { promptId: 'prompt', state: 'completed', endedAt: 1 },
+        });
+    });
+  } finally {
+    await session.close();
+  }
+  const attempts = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .filter((event) => event.kind === 'model.attempt');
+  return {
+    ...f,
+    attempts,
+    routeRef: assertManagedSessionDurableRef(
+      attempts[0].payload['routeRef'],
+      'routeRef',
+    ),
+    usageRef: assertManagedSessionDurableRef(
+      attempts[1].payload['usageRef'],
+      'usageRef',
+    ),
   };
 }
 
@@ -521,6 +632,50 @@ async function shellFixture(
 }
 
 describe('verifyRecoverySession', () => {
+  it('verifies route and usage resources written by an actual Hosted model turn without Hooks', async () => {
+    const f = await hostedModelFixture();
+    expect(f.attempts.map((event) => event.payload['state'])).toEqual([
+      'started',
+      'output_committed',
+    ]);
+    expect(f.routeRef.kind).toBe('managed-hosted-model-route');
+    expect(f.usageRef.kind).toBe('managed-hosted-model-usage');
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    for (const ref of [f.routeRef, f.usageRef]) {
+      expect(f.io.read).toHaveBeenCalledWith(ref);
+      expect(f.complete.has(ref.resourceId)).toBe(true);
+    }
+  });
+
+  it.each(['routeRef', 'usageRef'] as const)(
+    'refuses a missing or corrupted Hosted model %s',
+    async (field) => {
+      const missing = await hostedModelFixture();
+      missing.resources.delete(missing[field].resourceId);
+      await expect(
+        verifyRecoverySession(missing.source, missing.io),
+      ).rejects.toThrow('missing_resource');
+      const corrupt = await hostedModelFixture();
+      const bytes = Buffer.from(
+        corrupt.resources.get(corrupt[field].resourceId)!,
+      );
+      bytes[0] ^= 1;
+      corrupt.resources.set(corrupt[field].resourceId, bytes);
+      await expect(
+        verifyRecoverySession(corrupt.source, corrupt.io),
+      ).rejects.toThrow('resource bytes conflict');
+    },
+  );
+
+  it('still refuses an actual Hosted model turn without its settlement', async () => {
+    const f = await hostedModelFixture(false);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unfinished Harness work',
+    );
+  });
+
   it('distinguishes an absent head from a writer-created head without genesis', async () => {
     const f = fixture();
     f.transactions.length = 0;

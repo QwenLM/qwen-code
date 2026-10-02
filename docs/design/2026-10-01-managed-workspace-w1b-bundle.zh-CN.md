@@ -19,6 +19,9 @@ transcript、目录名称、已释放的 holder 或对象名列表均不足以�
 绑定 Session，包括保留的归档、关闭和删除记录；Hosted files 与 Shell profile；
 O2 已接受结果；以及 #13110 使用的实际备份字节。不支持的 profile 或无法解释的
 引用阻止整个 storage 获得兼容恢复点。无绑定 Session 保持原有行为。
+普通 Hosted 模型轮次包含其原始 `managed-hosted-model-route` 和
+`managed-hosted-model-usage` 资源。Hosted Hooks 和 MCP Session 仍不支持，
+会阻止所在共享 storage 的整体捕获。
 
 首个 provider 为 `local-workspace-bundle/1`。运维在全部活动根之外准备 Workspace
 和保留的 Worker 备份目录副本。维护流程对比已停写的源数据，导出私有权威资源，
@@ -255,4 +258,9 @@ Broker/Harness/Worker、真实阿里云 OSS、四个物理 kill 时点及 20,916
 验收仍待完成；CI 绿灯和 Ready 状态不能替代这些门槛。
 #13110 已合入主干；本次整合保留主干 V26 工具结果投影和 V27 Hosted Hooks 迁移，
 仅将尚未合入的 W1b 恢复元数据安排为 V28。既有迁移字节保持不变。
-H2 Hook domain 和资源不在 W1b 支持的闭包内，会拒绝 capture；本次整合不认证或激活 Hook 恢复。
+[第三轮部署报告](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5944274897)
+确认 `e50e2c37` 的 V28 有效，但发现普通 Hosted 模型 route/usage 支持缺失；
+其成功的 Linux runbook 和中断检查使用该版本加候选白名单修复。本次纳入这两种
+资源，并测试由实际模型 activation 生成的 journal，包括资源缺失/损坏及未结算工作。
+外部候选证据不认证后续制品。H2 Hook domain、Hook 专用模型资源及 MCP profile
+仍不在 W1b 支持的闭包内，会拒绝 capture；本次不认证或激活 Hook 恢复。
