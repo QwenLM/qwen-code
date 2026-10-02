@@ -271,15 +271,18 @@ export function getCustomSystemPrompt(
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
+  executionSandboxBackend?: 'bwrap' | 'landlock';
 }
 
 /**
  * Which tools each gated line of `## Using Your Tools` talks about. A line
  * survives only when every tool it names is declared: a line that named a
  * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. Lines absent from this table are policy
- * that holds regardless of the tool surface (tool fallback, parallel calls,
- * respecting denials) and are never dropped.
+ * the defect this gating exists to fix. A deferred tool is reachable but not
+ * declared, so its line drops too; its selection rule travels in the first
+ * description line the deferred-tool reminder shows instead (#12702). Lines
+ * absent from this table are policy that holds regardless of the tool surface
+ * (tool fallback, parallel calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;
@@ -400,17 +403,16 @@ function filterToolCallExamples(
  * guidance and tone stay in force under every style.
  */
 function getSoftwareEngineeringTasksSection(todoWriteEnabled: boolean): string {
+  // With todo_write on, the when/how rules live in '# Task Management'; the
+  // Plan bullet only names the tool and the skip rule.
   const planGuidance = todoWriteEnabled
-    ? `Use '${ToolNames.TODO_WRITE}' for complex, ambiguous, or multi-step work when visible progress tracking adds value. Keep the plan short and outcome-oriented; skip it for simple tasks unless the user explicitly requests a plan.`
+    ? `Track complex, ambiguous, or multi-step work with '${ToolNames.TODO_WRITE}'; skip it for simple tasks unless the user explicitly requests a plan.`
     : 'For complex, ambiguous, or multi-step work, form a concise, outcome-oriented approach and revise it as you learn. Skip formal planning for simple tasks unless the user explicitly requests a plan.';
-  const todoAdaptationGuidance = todoWriteEnabled
-    ? ' If a todo list exists, keep it current as the scope or approach changes.'
-    : '';
   return `## Software Engineering Tasks
 When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
 - **Plan:** ${planGuidance}
 - **Implement:** Begin implementing while gathering context as needed. Use available search and editing tools strategically, adhering to project conventions (see 'Core Mandates'). Do not add features, refactor code, or make "improvements" beyond what was asked. Don't add error handling, fallbacks, or validation for scenarios that can't happen—only validate at system boundaries (user input, external APIs). Don't create helpers, utilities, or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction. Prefer editing existing files over creating new ones.
-- **Adapt:** Refine your approach as you discover new information or encounter obstacles.${todoAdaptationGuidance} If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
+- **Adapt:** Refine your approach as you discover new information or encounter obstacles. If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
 - **Verify:** When your task involves a code or system change, verify it actually works before reporting it complete — run the project's own test, build, lint, and type-check commands, identified from 'README' files, build/package configuration (e.g., 'package.json'), or existing execution patterns. NEVER assume standard commands. Read-only or explanatory turns do not require verification.
 - **Report outcomes faithfully:** If a check fails, say so with the relevant output; if you did not run a verification step — including when you could not (no test exists, can't run the code) — say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress failing checks to manufacture a green result, and never characterize incomplete or broken work as done.
 
@@ -430,7 +432,7 @@ function getToolGuidanceSection(
   surface?: PromptToolSurface,
 ): string {
   const taskManagementToolGuidance = todoWriteEnabled
-    ? `- **Task Management:** Use '${ToolNames.TODO_WRITE}' only when explicit tracking adds value. Keep plans concise, outcome-oriented, and current; do not create a todo list for simple or single-step work unless the user explicitly requests one.\n`
+    ? `- **Task Management:** Use '${ToolNames.TODO_WRITE}' to keep user-visible progress on multi-step work; '# Task Management' governs its use.\n`
     : '';
   const directControls = todoWriteEnabled
     ? `'${ToolNames.TODO_WRITE}', '${ToolNames.AGENT}' and the other direct controls`
@@ -438,7 +440,8 @@ function getToolGuidanceSection(
   if (codeModeOnly) {
     return `
 ## Using Your Tools
-- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<name>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<jsName>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Tool Discovery:** If a needed tool's signature is absent from '${ToolNames.EXEC}', use the top-level '${ToolNames.TOOL_SEARCH}' when available. Read its returned schema and JavaScript name before calling that tool in a later '${ToolNames.EXEC}' program.
 - **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
   - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
   - To edit files use \`tools.${ToolNames.EDIT}\` instead of sed or awk
@@ -446,7 +449,7 @@ function getToolGuidanceSection(
   - To search for files use \`tools.${ToolNames.GLOB}\` instead of find or ls
   - To search the content of files, use \`tools.${ToolNames.GREP}\` instead of grep or rg
   - Reserve \`tools.${ToolNames.SHELL}\` for system commands and terminal operations that require shell execution.
-- **Batch Into One Program:** Put independent calls in a single '${ToolNames.EXEC}' program and await them together with \`Promise.all\`. Sequence calls only when a later one needs a value an earlier one produced. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. A denied or failed call aborts the whole program, so keep a call that may be refused out of a batch you would then have to repeat.
+- **Batch Into One Program:** Put independent searches and reads in a single '${ToolNames.EXEC}' program with \`await Promise.allSettled([...])\`. Inspect every result: print fulfilled outputs and rejected reasons with \`String(result.reason)\`. The runtime runs safe calls concurrently within its limit; one rejected promise leaves the other results available. Keep dependent actions, mutations, and approvals sequential. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. User cancellation still stops unfinished calls.
 - **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
 ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when referring to files with tools like \`tools.${ToolNames.READ_FILE}\` or \`tools.${ToolNames.WRITE_FILE}\`. Relative paths are not supported.
 - **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
@@ -458,7 +461,7 @@ ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when re
   }
   // CodeModeOnly is deliberately not gated above: there the declared surface is
   // `exec` plus a few direct controls, while the tools this section names are
-  // reached as `tools.<name>` inside `exec` and are not declarations at all.
+  // reached as `tools.<jsName>` inside `exec` and are not declarations at all.
   const directGuidance = `
 ## Using Your Tools
 - **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
@@ -535,7 +538,7 @@ ${coreIdentity}
 - **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Never assume file contents. Read relevant code, imports, tests, and configuration before making changes. Follow the project's formatting, naming, typing, structure, and architectural patterns.
 - **Libraries/Frameworks:** Verify a dependency's availability and established usage in project manifests, imports, or neighboring code before using it.
-- **Comments:** Default to none. Only add a comment when the _why_ cannot be conveyed through naming or code structure — a hidden constraint, a subtle invariant, or a workaround for a specific bug. Do not narrate what the code does. Do not edit comments that are separate from the code you are changing. *NEVER* talk to the user or describe your changes through comments.
+- **Comments:** Default to none. Add one only when the _why_ cannot be conveyed through naming or code structure — a hidden constraint, a subtle invariant, or a workaround for a specific bug. Do not edit comments that are separate from the code you are changing.
 - **Proactiveness:** Fulfill the user's request thoroughly. When the task involves code modifications, add tests to verify the change works. Consider all created files, especially tests, to be permanent artifacts unless the user says otherwise.
 - **Confirm Ambiguity/Expansion:** Do not take significant actions beyond the clear scope of the request without following the active interaction mode's question guidance. If asked *how* to do something, explain first, don't just do it.
 - **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
@@ -589,6 +592,13 @@ ${(function () {
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
   if (executionSandboxFilesystem) {
+    if (surface?.executionSandboxBackend === 'landlock') {
+      return `
+# Tool Execution Sandbox (Landlock, partial)
+Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
+A refused pathname write can fail with 'Permission denied' (EACCES), which can also come from ordinary file permissions. Treat EACCES as a possible sandbox refusal: report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
+`;
+    }
     return `
 # Tool Execution Sandbox (bwrap)
 Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and command network access follows the operator policy. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
@@ -1036,14 +1046,18 @@ model: [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.SHELL}
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
 model: I'll inspect the source, tests, and dependencies. Independent reads go in one program.
 [tool_call: ${ToolNames.EXEC} with source:
-const [tests, requirements, source] = await Promise.all([
+const results = await Promise.allSettled([
   tools.${ToolNames.GLOB}({ pattern: 'tests/test_auth.py' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/requirements.txt' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/src/auth.py' }),
 ]);
-text(tests.output);
-text(requirements.output);
-text(source.output);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
 ]
 (After finding /path/to/tests/test_auth.py)
 [tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/tests/test_auth.py' })).output);]
@@ -1062,19 +1076,22 @@ Refactored the auth logic; the linter and tests passed.
 <example>
 user: Write tests for someFile.ts
 model:
-I'll read the source and an existing test together to follow project conventions.
+I'll read the source and an existing test, and check whether the target test file exists.
 [tool_call: ${ToolNames.EXEC} with source:
-const [source, existing] = await Promise.all([
+const results = await Promise.allSettled([
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.ts' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/existingTest.test.ts' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' }),
 ]);
-text(source.output);
-text(existing.output);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
 ]
-(After reviewing both)
-Now I'll check whether the intended test file already exists. A failed call aborts the whole program, so this probe stays on its own.
-[tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' })).output);]
-(After ${ToolNames.READ_FILE} reports that /path/to/someFile.test.ts does not exist)
+(After reviewing the successful reads and confirming that /path/to/someFile.test.ts does not exist)
 [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.WRITE_FILE}({ file_path: '/path/to/someFile.test.ts', content: '(test code content)' });]
 (After confirming the project's test command)
 [tool_call: ${ToolNames.EXEC} with source:
@@ -1586,8 +1603,8 @@ Find something genuinely interesting or amusing from the session summaries.`,
    - Example: "To connect to GitHub, run \`qwen mcp add --header "Authorization: Bearer your_github_mcp_pat" --transport http github https://api.githubcopilot.com/mcp/\` and set the AUTHORIZATION header with your PAT. Then you can ask Qwen to query issues, PRs, or repos."
 
 2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.
-   - How to use: Create \`.qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
-   - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows
+   - How to use: Create \`.qwen/skills/wrapup/SKILL.md\` with instructions. Then type \`/wrapup\` to run it.
+   - Good for: repetitive workflows - /wrapup, /review, /test, /deploy, /pr, or complex multi-step workflows
    - SKILL.md format:
     \`\`\`
     ---

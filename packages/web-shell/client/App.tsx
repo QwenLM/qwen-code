@@ -203,10 +203,19 @@ import {
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
+import { LazyThreadsRoute } from './components/workspace-agents/LazyThreadsRoute';
+import {
+  conversationContext,
+  useAgentChatEntry,
+} from './components/workspace-agents/useAgentChatEntry';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
+import {
+  BranchSessionDialog,
+  type BranchSessionIsolation,
+} from './components/dialogs/BranchSessionDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import {
   DaemonConnectionsSettings,
@@ -324,7 +333,11 @@ import {
   type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
-import { workspaceLabel, workspaceLabelForCwd } from './utils/workspace';
+import {
+  isAgentCollaborationEnabledForWorkspace,
+  workspaceLabel,
+  workspaceLabelForCwd,
+} from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
 import {
   getLocalCommands,
@@ -379,6 +392,7 @@ import {
   decodeVisionModelForPicker,
   encodeVisionModelForSetting,
   extractBareModelId,
+  resolveFastModelForPicker,
 } from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
@@ -390,9 +404,9 @@ import {
 } from './components/messages/TasksStatusMessage';
 import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { buildSessionWorkflowProjection } from './components/workflow/session-workflow-model';
-import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import {
-  serializeStatsMessage,
+  createStatsMessageData,
   type StatsView,
 } from './components/messages/StatsMessage';
 import {
@@ -1903,7 +1917,8 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
-    >;
+    >
+  | Extract<ArtifactPanelTab, { kind: 'agent_activity' }>;
 
 function parsePersistedArtifactPanelTab(
   value: unknown,
@@ -2106,6 +2121,18 @@ function parsePersistedArtifactPanelTab(
         sessionId: tab['sessionId'],
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
+    case 'agent_activity':
+      if (
+        typeof tab['threadId'] !== 'string' ||
+        typeof tab['workspaceCwd'] !== 'string'
+      )
+        return;
+      return {
+        ...common,
+        kind: 'agent_activity',
+        threadId: tab['threadId'],
+        workspaceCwd: tab['workspaceCwd'],
+      };
     case 'workflow':
       return {
         ...common,
@@ -2271,6 +2298,16 @@ function serializeArtifactPanelTabs(
               },
             ]
           : [];
+      case 'agent_activity':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            threadId: tab.threadId,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'pending': {
@@ -2746,7 +2783,9 @@ function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
   const subagentName =
     typeof rawOutput?.['subagentName'] === 'string'
       ? rawOutput['subagentName']
-      : undefined;
+      : typeof tool.args?.name === 'string'
+        ? tool.args.name
+        : undefined;
   const subagentType =
     typeof tool.args?.subagent_type === 'string'
       ? tool.args.subagent_type
@@ -2830,7 +2869,9 @@ export function getEnvironmentAgentTasks(
         const subagentName =
           typeof rawOutput?.['subagentName'] === 'string'
             ? rawOutput['subagentName']
-            : undefined;
+            : typeof tool.args?.name === 'string'
+              ? tool.args.name
+              : undefined;
         const taskId = taskIdsByToolUseId.get(tool.callId);
         const derivedTaskId = derivedTaskIdForTool(tool);
         // Completed background agents can lose their toolUseId / derived-id
@@ -3141,7 +3182,8 @@ function isSameGitStatus(
     current.ahead === next.ahead &&
     current.behind === next.behind &&
     current.stashCount === next.stashCount &&
-    current.operation === next.operation
+    current.operation === next.operation &&
+    current.worktreeSupported === next.worktreeSupported
   );
 }
 
@@ -4208,7 +4250,17 @@ export function App({
     const status = connection.gitStatus;
     if (!status || sessionWorktree) return;
     if (status.workspaceCwd !== activeWorkspaceCwd) return;
-    setSelectedWorkspaceGitStatus(status);
+    setSelectedWorkspaceGitStatus((current) => {
+      const next =
+        status.worktreeSupported === undefined &&
+        current?.worktreeSupported !== undefined
+          ? {
+              ...status,
+              worktreeSupported: current.worktreeSupported,
+            }
+          : status;
+      return isSameGitStatus(current, next) ? current : next;
+    });
   }, [connection.gitStatus, activeWorkspaceCwd, sessionWorktree]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
@@ -4958,6 +5010,10 @@ export function App({
   const webPreviewAvailable =
     workspaceContextActive && rightPanelItems.includes('webPreview');
   const trajectoryAvailable = rightPanelItems.includes('trajectory');
+  const collaborationAvailable = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    legacyWorkspaceContextCwd,
+  );
   const webTerminalAvailable =
     workspaceContextActive &&
     rightPanelItems.includes('terminal') &&
@@ -4980,6 +5036,23 @@ export function App({
       setArtifactPanelOpen(false);
     }
   }, [activeArtifactPanelTabId, artifactPanelTabs, workspaceContextActive]);
+  useEffect(() => {
+    if (collaborationAvailable) return;
+    const activityIds = artifactPanelTabs
+      .filter((tab) => tab.kind === 'agent_activity')
+      .map((tab) => tab.id);
+    if (activityIds.length === 0) return;
+    setArtifactPanelTabs((tabs) =>
+      tabs.filter((tab) => tab.kind !== 'agent_activity'),
+    );
+    if (
+      activeArtifactPanelTabId &&
+      activityIds.includes(activeArtifactPanelTabId)
+    ) {
+      setActiveArtifactPanelTabId(null);
+      setArtifactPanelOpen(false);
+    }
+  }, [activeArtifactPanelTabId, artifactPanelTabs, collaborationAvailable]);
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -6612,6 +6685,8 @@ export function App({
                   const { taskId: _taskId, ...rest } = tab;
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
                 }
+                case 'agent_activity':
+                  return collaborationAvailable ? tab : undefined;
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
                 case 'terminal':
@@ -6759,6 +6834,7 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
+    collaborationAvailable,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
@@ -8747,8 +8823,20 @@ export function App({
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [gitDialog, setGitDialog] = useState<
-    { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
+    | {
+        workspaceCwd: string;
+        gitCwd?: string;
+        gitSessionId?: string;
+        view: GitDialogView;
+      }
+    | undefined
   >(undefined);
+  const [branchSessionDialog, setBranchSessionDialog] = useState<
+    { sourceSessionId: string; atRecordId?: string } | undefined
+  >(undefined);
+  const branchSessionDialogRef = useRef(branchSessionDialog);
+  branchSessionDialogRef.current = branchSessionDialog;
+  const [branchSessionDialogBusy, setBranchSessionDialogBusy] = useState(false);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -9106,6 +9194,59 @@ export function App({
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
 
   const activePanelRef = useRef(activePanel);
+  const [collaborationThread, setCollaborationThread] = useState<
+    { id: string; cwd: string; server: string } | undefined
+  >(() => {
+    try {
+      const saved = JSON.parse(
+        sessionStorage.getItem('qwen:team-conversation') ?? 'null',
+      );
+      return saved &&
+        typeof saved.id === 'string' &&
+        typeof saved.cwd === 'string' &&
+        typeof saved.server === 'string'
+        ? saved
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  const collaborationThreadId =
+    isAgentCollaborationEnabledForWorkspace(
+      workspace.capabilities,
+      collaborationThread?.cwd,
+    ) &&
+    collaborationThread !== undefined &&
+    collaborationThread.server === workspace.baseUrl
+      ? collaborationThread.id
+      : undefined;
+  const [collaborationTitle, setCollaborationTitle] = useState<{
+    id: string;
+    title: string;
+  }>();
+  const [collaborationHeaderActions, setCollaborationHeaderActions] =
+    useState<HTMLDivElement | null>(null);
+  const updateCollaborationTitle = useCallback((id: string, title: string) => {
+    setCollaborationTitle((current) =>
+      current?.id === id && current.title === title ? current : { id, title },
+    );
+  }, []);
+  const [agentsNav, setAgentsNav] = useState<{
+    view: 'agents' | 'tasks' | 'runtime' | 'new-agent';
+    request: number;
+  }>({ view: 'agents', request: 0 });
+  useEffect(() => {
+    try {
+      if (collaborationThread)
+        sessionStorage.setItem(
+          'qwen:team-conversation',
+          JSON.stringify(collaborationThread),
+        );
+      else sessionStorage.removeItem('qwen:team-conversation');
+    } catch {
+      /* Storage may be unavailable in embedded hosts. */
+    }
+  }, [collaborationThread]);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
   // closePanel — several paths call setActivePanel directly (approval
@@ -10170,6 +10311,11 @@ export function App({
     connection.sessionContext?.kind === 'standalone'
       ? (sessionStatusDisplayName ?? connection.displayName)
       : (connection.displayName ?? sessionStatusDisplayName);
+  const chatHeaderTitle = collaborationThreadId
+    ? collaborationTitle?.id === collaborationThreadId
+      ? collaborationTitle.title
+      : t('collab.chat.title')
+    : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({
       sessionId: connection.sessionId,
@@ -11001,6 +11147,17 @@ export function App({
       activeWorkspaceTrusted &&
       selectedWorkspaceGitStatus?.branch,
   );
+  const branchWorktreeEligible = Boolean(
+    connection.sessionId &&
+      workspace.capabilities?.features?.includes('session_branch_worktree') ===
+        true &&
+      workspaces.some(
+        (entry) =>
+          entry.cwd === connection.workspaceCwd &&
+          entry.primary &&
+          entry.trusted,
+      ),
+  );
   // An armed branch/worktree intent survives a transient status gap (a
   // failed poll round, a refetch still in flight); only a definitive answer
   // clears it. The chip stays hidden meanwhile because it keys on
@@ -11031,17 +11188,19 @@ export function App({
     setGitDialog({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
+      gitSessionId: sessionWorktree ? connection.sessionId : undefined,
       view: 'diff',
     });
-  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
   const handleOpenCommit = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
+      gitSessionId: sessionWorktree ? connection.sessionId : undefined,
       view: 'commit',
     });
-  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
   const handleOpenWorktrees = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     // The dialog's tab bar reaches Changes and History from here, and both
@@ -11058,9 +11217,10 @@ export function App({
     setGitDialog({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
+      gitSessionId: sessionWorktree ? connection.sessionId : undefined,
       view: 'log',
     });
-  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
   const dialogOpen =
     capacityRecovery !== undefined ||
     showResumeDialog ||
@@ -11071,6 +11231,7 @@ export function App({
     showThemeDialog ||
     showToolsDialog ||
     gitDialog !== undefined ||
+    branchSessionDialog !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -11808,8 +11969,15 @@ export function App({
   // block mid-stream, which would split the streaming answer and orphan its
   // usage frames.
   const dispatchReadOnlyStatus = useCallback(
-    (text: string) => {
-      store.dispatch([{ type: 'status', text, clearActiveText: false }]);
+    (text: string, data?: unknown) => {
+      store.dispatch([
+        {
+          type: 'status',
+          text,
+          ...(data !== undefined ? { data } : {}),
+          clearActiveText: false,
+        },
+      ]);
       resumeChatBottomFollow('smooth');
     },
     [store, resumeChatBottomFollow],
@@ -11852,7 +12020,8 @@ export function App({
     enabled: projectFeaturesAvailable,
   });
   const providersEnabled =
-    projectFeaturesAvailable && activePanel === 'settings';
+    projectFeaturesAvailable &&
+    (activePanel === 'settings' || modelDialogMode === 'fast');
   const providersState = useProviders({
     autoLoad: providersEnabled,
     enabled: providersEnabled,
@@ -12070,7 +12239,19 @@ export function App({
       modelSettingScope,
       'fastModel',
     );
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const models = providersState.providers.flatMap((provider) =>
+      provider.models.map((model) => ({
+        id: model.modelId,
+        baseModelId: model.baseModelId,
+        authType: provider.authType,
+        baseUrl: model.baseUrl,
+      })),
+    );
+    return resolveFastModelForPicker(
+      value.trim(),
+      models.length ? models : (connection.models ?? []),
+    );
   })();
   const currentAdvisorModel = readScopedModelSetting(
     workspaceSettings,
@@ -13266,7 +13447,10 @@ export function App({
         .getContextUsage({ detail })
         .then((result) => {
           if (!owner.isCurrent()) return;
-          dispatchReadOnlyStatus(serializeContextUsageMessage(result));
+          dispatchReadOnlyStatus(
+            t('contextUsage.title'),
+            createContextUsageMessageData(result),
+          );
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
@@ -13280,6 +13464,7 @@ export function App({
       sessionActions,
       sessionOwnerGuard,
       reportError,
+      t,
     ],
   );
   // Stable identity: ChatEditor is memoized and an inline closure would
@@ -13301,7 +13486,11 @@ export function App({
 
   const pendingBranchRequestsRef = useRef(new Map<string, Promise<void>>());
   const branchCurrentSession = useCallback(
-    (name?: string, atRecordId?: string) => {
+    (options: {
+      name?: string;
+      atRecordId?: string;
+      worktree?: { slug?: string };
+    }) => {
       if (!workspaceContextActive) {
         pushToast('info', t('session.workspaceActionUnavailable'));
         return;
@@ -13309,16 +13498,32 @@ export function App({
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
       const sourceSessionId = connectionRef.current.sessionId;
+      const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       const requestKey = JSON.stringify([
         sourceSessionId,
-        name ?? null,
-        atRecordId ?? null,
+        options.name ?? null,
+        options.atRecordId ?? null,
+        options.worktree !== undefined,
       ]);
       const pending = pendingBranchRequestsRef.current.get(requestKey);
       if (pending) return pending;
 
-      const request = sessionActions
-        .branchSession(name || undefined, atRecordId)
+      const branchRequest =
+        options.worktree !== undefined
+          ? sessionActions.branchSession({
+              name: options.name,
+              ...(options.atRecordId !== undefined
+                ? { atRecordId: options.atRecordId }
+                : {}),
+              worktree: options.worktree,
+            })
+          : options.atRecordId !== undefined
+            ? sessionActions.branchSession({
+                name: options.name,
+                atRecordId: options.atRecordId,
+              })
+            : sessionActions.branchSession({ name: options.name });
+      const request = branchRequest
         .then((result) => {
           if (!result.switchStarted) return;
           if (result.sourceWarnings?.length)
@@ -13368,6 +13573,27 @@ export function App({
             );
             return;
           }
+          if (error instanceof DaemonHttpError) {
+            const body =
+              typeof error.body === 'object' && error.body !== null
+                ? (error.body as Record<string, unknown>)
+                : undefined;
+            const code = body?.['code'];
+            if (
+              code === 'branch_worktree_activation_failed' ||
+              code === 'branch_worktree_outcome_unknown'
+            ) {
+              if (sourceWorkspaceCwd) {
+                sessionCatalogController.invalidateWorkspace(
+                  sourceWorkspaceCwd,
+                );
+              }
+            }
+            if (code === 'branch_worktree_activation_failed') {
+              pushToast('error', t('branch.worktreeActivationFailed'));
+              return;
+            }
+          }
           reportError(error, t('branch.failed'));
         })
         .finally(() => {
@@ -13384,6 +13610,7 @@ export function App({
       requireActiveSessionForLocalCommand,
       sessionWriteBlocked,
       sessionActions,
+      sessionCatalogController,
       store,
       t,
       transcriptReloadSupported,
@@ -13392,9 +13619,74 @@ export function App({
   );
   const handleBranchCurrentSession = useCallback(
     (atRecordId?: string) => {
-      return branchCurrentSession(undefined, atRecordId);
+      const sourceSessionId = connectionRef.current.sessionId;
+      const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
+      if (!branchWorktreeEligible || !sourceSessionId || !sourceWorkspaceCwd) {
+        return branchCurrentSession({ atRecordId });
+      }
+      return (async () => {
+        try {
+          const status = await workspace.client
+            .workspaceByCwd(sourceWorkspaceCwd)
+            .workspaceGit({
+              cwd: sessionWorktree?.path,
+              sessionId: sourceSessionId,
+            });
+          if (connectionRef.current.sessionId !== sourceSessionId) return;
+          setSelectedWorkspaceGitStatus(status);
+          if (status.worktreeSupported !== true) {
+            return branchCurrentSession({ atRecordId });
+          }
+        } catch {
+          if (connectionRef.current.sessionId !== sourceSessionId) return;
+          return branchCurrentSession({ atRecordId });
+        }
+        setBranchSessionDialog({ sourceSessionId, atRecordId });
+        setBranchSessionDialogBusy(false);
+      })();
     },
-    [branchCurrentSession],
+    [
+      branchCurrentSession,
+      branchWorktreeEligible,
+      sessionWorktree?.path,
+      workspace.client,
+    ],
+  );
+
+  useEffect(() => {
+    if (
+      branchSessionDialog &&
+      (connection.sessionId !== branchSessionDialog.sourceSessionId ||
+        !branchWorktreeEligible)
+    ) {
+      setBranchSessionDialog(undefined);
+      setBranchSessionDialogBusy(false);
+    }
+  }, [branchSessionDialog, branchWorktreeEligible, connection.sessionId]);
+
+  const confirmBranchSession = useCallback(
+    (isolation: BranchSessionIsolation) => {
+      if (!branchSessionDialog || branchSessionDialogBusy) return;
+      if (
+        connectionRef.current.sessionId !== branchSessionDialog.sourceSessionId
+      ) {
+        setBranchSessionDialog(undefined);
+        setBranchSessionDialogBusy(false);
+        return;
+      }
+      const confirmedDialog = branchSessionDialog;
+      setBranchSessionDialogBusy(true);
+      const result = branchCurrentSession({
+        atRecordId: confirmedDialog.atRecordId,
+        ...(isolation === 'worktree' ? { worktree: {} } : {}),
+      });
+      Promise.resolve(result).finally(() => {
+        if (branchSessionDialogRef.current !== confirmedDialog) return;
+        setBranchSessionDialogBusy(false);
+        setBranchSessionDialog(undefined);
+      });
+    },
+    [branchCurrentSession, branchSessionDialog, branchSessionDialogBusy],
   );
 
   const composerFocusRequestRef = useRef(0);
@@ -13438,6 +13730,7 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      setCollaborationThread(undefined);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -14448,6 +14741,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      setCollaborationThread(undefined);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -16109,6 +16403,7 @@ export function App({
             setGitDialog({
               workspaceCwd: gitDiffWorkspaceCwd,
               gitCwd: sessionWorktree?.path,
+              gitSessionId: sessionWorktree ? connection.sessionId : undefined,
               view: 'diff',
             });
             return true;
@@ -16121,6 +16416,7 @@ export function App({
             setGitDialog({
               workspaceCwd: gitDiffWorkspaceCwd,
               gitCwd: sessionWorktree?.path,
+              gitSessionId: sessionWorktree ? connection.sessionId : undefined,
               view: 'log',
             });
             return true;
@@ -16306,7 +16602,7 @@ export function App({
           if (cmd === 'branch') {
             if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
-            branchCurrentSession(branchName || undefined);
+            branchCurrentSession({ name: branchName || undefined });
             return true;
           }
           if (cmd === 'fork') {
@@ -16897,7 +17193,8 @@ export function App({
               .then((result) => {
                 if (!owner.isCurrent()) return;
                 dispatchReadOnlyStatus(
-                  serializeStatsMessage(result, statsView),
+                  t('stats.title'),
+                  createStatsMessageData(result, statsView),
                 );
               })
               .catch((error: unknown) => {
@@ -17142,6 +17439,7 @@ export function App({
       echoLocalCommandIfIdle,
       dispatchReadOnlyStatus,
       branchCurrentSession,
+      connection.sessionId,
       closeMobileDrawer,
       openPanel,
       openScheduledTasks,
@@ -17990,10 +18288,6 @@ export function App({
         blockCommand();
         return;
       }
-      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
-      // ACP format. The model picker strips the (authType) suffix before
-      // calling this handler.
-      //
       // Close the panel before sending: unlike the vision/voice pickers (silent
       // setWorkspaceSetting), `/model --fast` runs a real turn whose response
       // lands in the message list. With the panel open the chat is hidden, so
@@ -18388,6 +18682,50 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const handleCollaborationThreadOpen = useCallback(
+    (id: string, cwd: string) => {
+      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+      setMainView('chat');
+      closePanel();
+    },
+    [closePanel, workspace.baseUrl],
+  );
+  const handleCollaborationThreadError = useCallback(
+    (message: string) => pushToast('error', message),
+    [pushToast],
+  );
+  const displayMessagesRef = useRef(displayMessages);
+  displayMessagesRef.current = displayMessages;
+  const getMentionContext = useCallback(
+    () => conversationContext(displayMessagesRef.current),
+    [],
+  );
+  const agentChatEntry = useAgentChatEntry({
+    enabled: collaborationAvailable,
+    getContext: getMentionContext,
+    t,
+    cwd: legacyWorkspaceContextCwd,
+    baseUrl: workspace.baseUrl,
+    token: workspace.token,
+    onSubmit: handleEditorSubmit,
+    onOpen: handleCollaborationThreadOpen,
+    onError: handleCollaborationThreadError,
+    onCreateAgent: () => {
+      setAgentsNav((current) => ({
+        view: 'new-agent',
+        request: current.request + 1,
+      }));
+      setAgentsCreateScope(null);
+      openPanel('agents');
+    },
+  });
+  const composerAtProviders = useMemo(
+    () =>
+      collaborationAvailable
+        ? [...(atProviders ?? []), ...agentChatEntry.providers]
+        : atProviders,
+    [atProviders, collaborationAvailable, agentChatEntry.providers],
+  );
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
@@ -18462,15 +18800,17 @@ export function App({
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
+  const gitStatusTarget = activeWorkspaceCwd
+    ? `${connection.sessionId ?? ''}:${sessionWorktree?.path ?? activeWorkspaceCwd}`
+    : undefined;
   useEffect(() => {
     if (!activeWorkspaceCwd || isKnownLiveWorkspaceCwd(activeWorkspaceCwd)) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
-    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
-      gitStatusWorkspaceCwdRef.current = statusTarget;
+    if (gitStatusWorkspaceCwdRef.current !== gitStatusTarget) {
+      gitStatusWorkspaceCwdRef.current = gitStatusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
     if (!workspaceGitStatusEnabled) return;
@@ -18480,7 +18820,10 @@ export function App({
       // Fast path: last-known cache (branch-only on a cold start) paints the
       // chip immediately.
       void git
-        .workspaceGit({ cwd: sessionWorktree?.path })
+        .workspaceGit({
+          cwd: sessionWorktree?.path,
+          sessionId: connection.sessionId,
+        })
         .then((status) => {
           if (!cancelled) {
             setSelectedWorkspaceGitStatus((current) =>
@@ -18500,7 +18843,7 @@ export function App({
       // directly, so a second request would be a duplicate there.
       if (!sessionWorktree) {
         void git
-          .workspaceGit({ wait: true })
+          .workspaceGit({ wait: true, sessionId: connection.sessionId })
           .then((status) => {
             if (!cancelled) {
               setSelectedWorkspaceGitStatus((current) =>
@@ -18532,10 +18875,12 @@ export function App({
   }, [
     activeWorkspaceCwd,
     connection.gitBranch,
+    connection.sessionId,
     workspaceGitStatusEnabled,
     isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
+    gitStatusTarget,
   ]);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
@@ -18623,7 +18968,9 @@ export function App({
   const appClassName = [
     styles.app,
     styles.appChat,
-    isChatEmptyState ? styles.appChatEmpty : undefined,
+    isChatEmptyState && !collaborationThreadId
+      ? styles.appChatEmpty
+      : undefined,
     sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
@@ -18923,6 +19270,8 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
+    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) =>
+      void loadSidebarSession(sessionId, workspaceCwd),
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
@@ -19145,11 +19494,11 @@ export function App({
           )}
           {projectFeaturesAvailable && gitDialog && (
             <GitDialog
-              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
+              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.gitSessionId ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
-              sessionId={connection.sessionId}
+              sessionId={gitDialog.gitSessionId ?? connection.sessionId}
               resolveSessionForWorkspace={resolveSessionForWorkspace}
               onOpenSession={(sessionId) => {
                 const { workspaceCwd } = gitDialog;
@@ -19163,6 +19512,23 @@ export function App({
               }}
               onClose={() => setGitDialog(undefined)}
             />
+          )}
+          {branchSessionDialog && (
+            <DialogShell
+              title={t('branch.dialog.title')}
+              size="sm"
+              onClose={() => {
+                if (!branchSessionDialogBusy) {
+                  setBranchSessionDialog(undefined);
+                }
+              }}
+            >
+              <BranchSessionDialog
+                busy={branchSessionDialogBusy}
+                onCancel={() => setBranchSessionDialog(undefined)}
+                onConfirm={confirmBranchSession}
+              />
+            </DialogShell>
           )}
           {tasksDialogMessage && (
             <DialogShell
@@ -19506,6 +19872,13 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
+                  selectedCollaborationId={collaborationThreadId}
+                  onOpenCollaboration={(id, cwd) => {
+                    closeMobileDrawer();
+                    setCollaborationThread({ id, cwd, server: workspace.baseUrl });
+                    setMainView('chat');
+                    closePanel();
+                  }}
                   collapsed={
                     (sidebarCollapsed ||
                       (mainView === 'split' && !splitSidebarHasRoom)) &&
@@ -19516,6 +19889,19 @@ export function App({
                     closeMobileDrawer();
                     openPanel('settings');
                   }}
+                  onOpenAgents={
+                    collaborationAvailable
+                      ? (view = 'agents') => {
+                          setAgentsNav((current) => ({
+                            view,
+                            request: current.request + 1,
+                          }));
+                          closeMobileDrawer();
+                          setAgentsCreateScope(null);
+                          openPanel('agents');
+                        }
+                      : undefined
+                  }
                   onOpenPlugins={() => {
                     closeMobileDrawer();
                     openPanel('plugins');
@@ -19729,7 +20115,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                !isChatEmptyState &&
+                (!isChatEmptyState || Boolean(collaborationThreadId)) &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -19764,7 +20150,7 @@ export function App({
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
-                        sessionName: sessionDisplayName,
+                        sessionName: chatHeaderTitle,
                         workspaceCwd: workspaceContextActive
                           ? connection.workspaceCwd
                           : undefined,
@@ -19802,7 +20188,7 @@ export function App({
                     <ChatContextHeader
                       content={
                         titleHeaderItemVisible
-                          ? (sessionDisplayName ?? t('session.new'))
+                          ? (chatHeaderTitle ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
@@ -19850,6 +20236,7 @@ export function App({
                       }
                     />
                   )}
+                  {collaborationThreadId && <div ref={setCollaborationHeaderActions} className="flex shrink-0 items-center pr-3" />}
                   {sessionWorkflowEnabled &&
                     (sessionWorkflowTodos.length > 0 ||
                       mainView === 'cockpit') && (
@@ -19893,14 +20280,14 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || isChatEmptyState) &&
+                (!chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
                     className={[
                       styles.hamburgerButton,
-                      !chatHeaderEnabled || isChatEmptyState
+                      !chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)
                         ? styles.hamburgerButtonFloating
                         : undefined,
                     ]
@@ -20183,11 +20570,26 @@ export function App({
                       />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
+                        key={agentsNav.request}
+                        workspaceCwd={legacyWorkspaceContextCwd}
+                        initialAgentView={agentsNav.view}
+                        onOpenThreadChat={(threadId, cwd) => {
+                          setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });
+                          setMainView('chat');
+                          closePanel();
+                        }}
                         onClose={() => {
                           setAgentsCreateScope(null);
                           closePanel();
                         }}
                         initialCreateScope={agentsCreateScope}
+                        onOpenAgentSession={(sessionId) => {
+                          // An agent is its own session, so a run opens the
+                          // ordinary session view. `loadSidebarSession`
+                          // already closes this panel on its way there.
+                          setAgentsCreateScope(null);
+                          void loadSidebarSession(sessionId);
+                        }}
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
@@ -20633,7 +21035,22 @@ export function App({
                     : undefined
                 }
               >
-                {showMissingSessionState && (
+                {collaborationThreadId && (
+                  <LazyThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
+                    workspaceCwd={collaborationThread?.cwd}
+                    headerActionsContainer={collaborationHeaderActions}
+                    onTitleChange={updateCollaborationTitle}
+                    onOpenActivity={(threadId, workspaceCwd) => {
+                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: t('collab.team.title'), threadId, workspaceCwd };
+                      setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);
+                      setActiveArtifactPanelTabId(tab.id);
+                      setArtifactPanelWidth((width) => artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth());
+                      setArtifactPanelOpen(true);
+                    }}
+                    onOpenThreadChat={(id, cwd) => setCollaborationThread({ id, cwd, server: workspace.baseUrl })}
+                    onOpenAgentSession={(sessionId) => void loadSidebarSession(sessionId, collaborationThread?.cwd)} />
+                )}
+                {!collaborationThreadId && showMissingSessionState && (
                   <div className={styles.missingSessionState}>
                     <div className={styles.missingSessionMessage}>
                       {t('session.missing')}
@@ -20650,7 +21067,7 @@ export function App({
                 )}
                 <div
                   className={
-                    showMissingSessionState
+                    showMissingSessionState || collaborationThreadId
                       ? styles.chatSubtreeHidden
                       : styles.chatSubtree
                   }
@@ -21320,10 +21737,18 @@ export function App({
                         <ChatEditor
                           ref={setEditorHandle}
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={handleEditorSubmit}
+                          onSubmit={
+                            collaborationAvailable
+                              ? agentChatEntry.submit
+                              : handleEditorSubmit
+                          }
                           onInputTextChange={handleComposerTextChange}
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
+                          }
+                          btwEnabled={
+                            Boolean(connection.sessionId) &&
+                            !hiddenCommands.has('btw')
                           }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}
@@ -21341,6 +21766,7 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
+                            (collaborationAvailable && agentChatEntry.pending) ||
                             isDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
@@ -21379,7 +21805,7 @@ export function App({
                           builtinAtProviders={
                             workspaceContextActive ? builtinAtProviders : false
                           }
-                          atProviders={atProviders}
+                          atProviders={composerAtProviders}
                           composerTagIcons={composerTagIcons}
                           voiceTarget={
                             activePanel !== null || mainView !== 'chat'
@@ -21709,6 +22135,11 @@ export function App({
                 }
                 gitCwd={
                   workspaceContextActive ? sessionWorktree?.path : undefined
+                }
+                gitSessionId={
+                  workspaceContextActive && sessionWorktree
+                    ? connection.sessionId
+                    : undefined
                 }
                 branch={workspaceContextActive ? activeGitBranch : undefined}
                 gitStatus={

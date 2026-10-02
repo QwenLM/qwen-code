@@ -174,17 +174,29 @@ const server = createServer((request, response) => {
 server.listen(port, '127.0.0.1', () => {
   const address = server.address();
   const host = foreignUrl ? '172.16.1.234' : '127.0.0.1';
+  const ready = {
+    type: 'ready',
+    version: args.includes('--ready-v1') ? 1 : bootVersion,
+    ...(bootVersion === 2 ? { managedContext: MANAGED_CONTEXT } : {}),
+    runtimeInstanceId: boot.runtimeInstanceId,
+    runtimeIncarnation: boot.runtimeIncarnation,
+    leaseId: boot.leaseId,
+    epoch: boot.epoch,
+    url: `http://${host}:${address.port}`,
+  };
+  let encoded = JSON.stringify(ready);
+  // Splice in a raw number literal, including non-JSON ones such as 65537S.
+  for (const field of ['version', 'epoch']) {
+    const raw = args.find((arg) => arg.startsWith(`--ready-${field}=`));
+    if (raw) {
+      encoded = encoded.replace(
+        new RegExp(`"${field}":\\d+`),
+        `"${field}":${raw.slice(`--ready-${field}=`.length)}`,
+      );
+    }
+  }
   process.stdout.write(
-    `${JSON.stringify({
-      type: 'ready',
-      version: bootVersion,
-      ...(bootVersion === 2 ? { managedContext: MANAGED_CONTEXT } : {}),
-      runtimeInstanceId: boot.runtimeInstanceId,
-      runtimeIncarnation: boot.runtimeIncarnation,
-      leaseId: boot.leaseId,
-      epoch: boot.epoch,
-      url: `http://${host}:${address.port}`,
-    })}\n`,
+    `${args.includes('--ready-cr') ? encoded.replace('"runtimeInstanceId":"', '"runtimeInstanceId":"\r') : encoded}\n`,
   );
 });
 

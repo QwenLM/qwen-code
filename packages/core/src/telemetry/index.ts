@@ -29,6 +29,8 @@ export {
   resolveTelemetrySettings,
   parseBooleanEnvFlag,
   parseTelemetryTargetValue,
+  resolveUsageStatisticsEnabled,
+  resolveExtensionTelemetryProxy,
 } from './config.js';
 export {
   logStartSession,
@@ -67,6 +69,9 @@ export {
   logMemoryDream,
   logMemoryRecall,
   logMemoryRecallDelivery,
+  logMemorySearch,
+  logMemoryMigration,
+  logMemoryRecallModeTransition,
 } from './loggers.js';
 export type {
   SlashCommandEvent,
@@ -103,6 +108,9 @@ export {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
   RepeatedToolFailureGuardEvent,
 } from './types.js';
 export {

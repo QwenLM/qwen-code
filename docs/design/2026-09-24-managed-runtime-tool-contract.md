@@ -3,7 +3,8 @@
 [English](2026-09-24-managed-runtime-tool-contract.md) | [简体中文](2026-09-24-managed-runtime-tool-contract.zh-CN.md)
 
 Status: contract, worker handlers, and Java tool transport implemented;
-Broker transport wiring remains follow-up work
+Broker transport wired through `managed-runtime-provider/1` (see
+[2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md))
 
 Related: #12380 (Managed Agent staged delivery), the attestation contract in
 [2026-09-22-managed-runtime-attestation-contract.md](2026-09-22-managed-runtime-attestation-contract.md),
@@ -30,10 +31,14 @@ In scope: route manifest declarations, the shared schema and conformance
 fixtures, and the worker handlers with their raw HTTP gate admission.
 TypeScript contract tests and the Java fixture consumer share the contract;
 the worker tests exercise the mounted handlers. The Java `HttpRuntimeTransport`
-implements `execute`, `status`, and `cancel` against this contract.
+implements `execute`, `status`, and `cancel` against this contract. A
+seven-field prepared reference, the Session verbs and the provider controls
+use `managed-runtime-provider/1` instead: `acquire` answers Broker-local, and
+`release` and each control go through the provider control route (see
+[2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md)).
 
-Out of scope: wiring `HttpRuntimeTransport` into `RuntimeTransport`,
-Harness-side tool wiring, and a
+Out of scope: ~~wiring `HttpRuntimeTransport` into `RuntimeTransport`~~
+(landed through `managed-runtime-provider/1`), Harness-side tool wiring, and a
 `not_started_proven` outcome, which needs the durable receipt store.
 
 ## 3. Design
@@ -99,7 +104,10 @@ A settled `not_started` is the Runtime's explicit terminal answer; a missing
 record must still return `unknown` and never imply `not_started`.
 
 Failures keep the shared classification: 401 credentials, 400/413 protocol,
-409 identity, 404 incompatible. JSON errors retain the shared stable codes;
+409 identity, 404 incompatible. Under boot v2 of `managed-context/1`,
+`execute` can also answer 409 `managed_context_unavailable`, whose class is
+recovery; see [Managed Context Worker](2026-09-26-managed-context-worker.md).
+JSON errors retain the shared stable codes;
 the gate's incompatible 404 has an empty body. The attestation-named codes
 are shared across routes; each parser enforces its own route's body cap.
 
@@ -167,9 +175,15 @@ The worker handlers described below serve these routes.
 
 ## 5. Follow-up work
 
-- Complete the session verbs and wire `HttpRuntimeTransport` into
-  `RuntimeTransport`. Supply `toolName`/`input` separately from the stored
-  reference as described in §4.1, and cover real Broker dispatch end to end.
+- ~~Complete the session verbs and wire `HttpRuntimeTransport` into
+  `RuntimeTransport`.~~ Landed via the `managed-runtime-provider/1` protocol;
+  see
+  [2026-09-27-broker-provider-control.md](2026-09-27-broker-provider-control.md).
+  The remaining gap from §4.1: the immediate `POST /executions` route still
+  reads `toolName`/`input` from the stored reference, so its callers must
+  persist tool arguments in `reference_json`; use the deferred reserve/start
+  path or the provider protocol instead. Giving the immediate route the same
+  payload separation remains open.
 - The `UNKNOWN` execution reconciler shipped in #12655. Its transport must
   validate the status wire envelope, then project it to `{state, result}`
   (`result` only for `settled`). Strip `protocolVersion` and `lastSequence`;

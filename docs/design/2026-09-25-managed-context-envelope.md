@@ -110,6 +110,8 @@ One request installs one Session's context on a Runtime and returns a receipt. W
 | `binding`         | an object closed to the seven `ContextBinding` fields, each with its W0a rule, as W0a's wire strings       |
 | `contextDigest`   | a string matching `sha256:[0-9a-f]{64}`                                                                    |
 
+The Broker acquires only the narrower Runtime Session IDs that [Broker Provider Control](2026-09-27-broker-provider-control.md) admits.
+
 The worker checks the request in this order and stops at the first failure:
 
 1. A request that breaks the shape is 400 `managed_runtime_attestation_invalid`.
@@ -216,9 +218,10 @@ W0c-1 answered questions 1, 3 and 4 for the worker: it writes no refusal line, a
 
 ## Follow-up work
 
-| Slice | Scope                                                                                                                                                                                                                                                         |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W0c-1 | Done in [Managed Context Worker](2026-09-26-managed-context-worker.md): the worker accepts boot v2 and serves attestation v3 and installation; the fake worker for v2; the activation gate, which binds each Tool v2 call to its Session's installed context. |
-| W0c-2 | The provisioner writes boot v2; the v3 transport client; the Broker's identifier and Session ID checks tightened to these rules before it writes them; a test that the Broker's JSON writer leaves non-ASCII characters unescaped.                            |
-| W0c-3 | The storage resolver, and Session resolution in the control plane.                                                                                                                                                                                            |
-| W0e   | Capability advertisement (`workspace_context`) after the whole W0 chain passes.                                                                                                                                                                               |
+| Slice       | Scope                                                                                                                                                                                                                                                                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W0c-1       | Done in [Managed Context Worker](2026-09-26-managed-context-worker.md): the worker accepts boot v2 and serves attestation v3 and installation; the fake worker for v2; the activation gate, which binds each Tool v2 call to its Session's installed context.                                                                                           |
+| W0c-2       | The provisioner writes boot v2; the v3 transport client; no downgrade, and a retry bound for boot v2; handling `managed_context_unavailable` from installation and `execute`; the Broker's identifier and Session ID checks tightened to these rules before it writes them; a test that the Broker's JSON writer leaves non-ASCII characters unescaped. |
+| W0c-3       | The storage resolver, and Session resolution in the control plane.                                                                                                                                                                                                                                                                                      |
+| W0c (later) | The invocation wrapper that binds each Tool v2 call to the Runtime binding ID and generation and the Harness owner generation, as the W0a document describes.                                                                                                                                                                                           |
+| W0e         | Capability advertisement (`workspace_context`) after the whole W0 chain passes.                                                                                                                                                                                                                                                                         |

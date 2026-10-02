@@ -342,6 +342,13 @@ export interface ServeOptions {
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
+  /**
+   * Build every ordinary workspace runtime's Bridge with paired Legacy and
+   * Managed engines. No Managed engine exists for these hosts yet, so new
+   * sessions run on Legacy with a durable owner and Managed owners are
+   * refused on restore.
+   */
+  experimentalPairedEngines?: boolean;
   /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
   experimentalManagedAgents?: boolean;
   /** Expose the private authenticated Tool-only Runtime worker protocol. */
@@ -380,6 +387,8 @@ export interface ServeOptions {
    * integer. Default: 10000 (10 s).
    */
   initializeTimeoutMs?: number;
+  /** A remote Host executes assignments; it does not own local scheduling. */
+  agentHostWorker?: boolean;
   /**
    * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
    * to an explicitly set initialize timeout when that value is larger. An
@@ -503,6 +512,8 @@ export interface CapabilitiesEnvelope {
     ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
+    /** Whether persistent Agent collaboration is enabled for this workspace. */
+    agentCollaborationEnabled?: boolean;
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';

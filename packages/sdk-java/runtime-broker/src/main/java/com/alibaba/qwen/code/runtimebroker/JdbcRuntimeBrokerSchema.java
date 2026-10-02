@@ -28,9 +28,46 @@ public final class JdbcRuntimeBrokerSchema {
                     statement.execute(command);
                 }
             }
+            addColumn(statement, "qwen_runtime_binding_slot", "storage_id", "VARCHAR(256)");
+            addColumn(statement, "qwen_runtime_binding", "storage_id", "VARCHAR(256)");
+            addColumn(statement, "qwen_runtime_binding", "loss_evidence_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_binding", "stop_evidence_json", "LONGTEXT");
+            addColumn(statement, "qwen_runtime_binding", "drain_receipt_json", "LONGTEXT");
+            addColumn(statement, "qwen_tool_execution", "abandoned_at", "DATETIME(6)");
+            addColumn(statement, "qwen_tool_execution", "loss_evidence_id", "VARCHAR(512)");
         } catch (SQLException exception) {
             throw JdbcRepositorySupport.failure(exception);
         }
+    }
+
+    private static void addColumn(Statement statement, String table, String column, String definition)
+            throws SQLException {
+        if (hasColumn(statement, table, column)) {
+            return;
+        }
+        try {
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN " + column + " " + definition);
+        } catch (SQLException failure) {
+            // Another instance may have added it since the check.
+            if (!hasColumn(statement, table, column)) {
+                throw failure;
+            }
+        }
+    }
+
+    private static boolean hasColumn(Statement statement, String table, String column)
+            throws SQLException {
+        try (java.sql.ResultSet result = statement.executeQuery(
+                "SELECT * FROM " + table + " WHERE 1 = 0")) {
+            java.sql.ResultSetMetaData columns = result.getMetaData();
+            for (int index = 1; index <= columns.getColumnCount(); index++) {
+                if (column.equalsIgnoreCase(columns.getColumnName(index))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static String readSchema() {

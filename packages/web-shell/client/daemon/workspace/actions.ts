@@ -618,10 +618,10 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async loadMemoryStatus() {
+    async loadMemoryStatus(options) {
       const client = requireClient(getClient, 'Load memory failed');
       return withActionTimeout(
-        client.workspaceMemory(),
+        client.workspaceMemory(options),
         'Load memory timed out',
       );
     },

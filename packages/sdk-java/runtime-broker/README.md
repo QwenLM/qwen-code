@@ -42,7 +42,7 @@ mvn checkstyle:check
 
 `JdbcRuntimeBrokerSchema.initialize(DataSource)` installs the four private
 Broker tables. The JDBC implementations use `javax.sql.DataSource` for
-database access and fastjson2 (2.0.60) as the `reference_json`/`result_json`
+database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
 (`AesGcmSecretProtector` is included): the provision seed of a durable binding
@@ -58,6 +58,23 @@ arguments.
 This module intentionally does not wire a Spring service or dispatch Tool
 calls.
 
+Before upgrading an installation that already used the Broker, stop new
+admission and check for historical seeded failures:
+
+```sql
+SELECT tenant_id, COUNT(*) AS failed_bindings
+FROM qwen_runtime_binding
+WHERE binding_state = 'FAILED' AND provision_seed_ciphertext IS NOT NULL
+GROUP BY tenant_id;
+```
+
+The new placement guard blocks affected tenants, including when a later
+generation is `READY`. Do not resume their traffic until the original writer
+domain is physically stopped and an evidence-preserving operator migration is
+available. This module does not ship that migration; deleting old rows or
+fabricating stop evidence would lose the safety fence. A nonempty result is a
+rollout blocker for this database.
+
 Run the optional real-MySQL contract with:
 
 ```bash
@@ -72,6 +89,42 @@ Durable rows alone do not make a stopped local Runtime process recoverable.
 For a binding without durable identity the embedding service must reconcile a
 persisted lease before reuse and own the process adoption or reprovisioning
 policy; a durable binding is reconciled and adopted by the Broker itself.
+
+## Trusted local recovery
+
+Durable local provisioning and trusted reboot recovery are separate opt-ins;
+see the [adoption design](../../../docs/design/2026-09-27-local-runtime-adoption.md)
+and [reboot cleanup design](../../../docs/design/2026-09-28-local-reboot-recovery.md).
+`recoverBinding(bindingId, expectedGeneration)` observes and cleans only the
+saved generation. It does not resolve current product authorization or create
+replacement workers. Managed Workspace embeddings must implement
+`RuntimeProvisioner.recoverResources` to clear their original physical holder;
+the default refuses managed cleanup. Only then may `finishLostRecovery` retire
+the saved binding. Custom binding repository implementations must implement the
+new bounded candidate query and cleanup finalization contract. There is no new
+public HTTP recovery endpoint or database migration in this slice.
+
+## Fault gates
+
+The Stage F fault gates run the service in real Broker JVMs against the real
+bundled worker, with a fault-injecting HTTP proxy between them and a
+file-backed H2 database behind a relay that can be cut. They drop, reset,
+delay or hold Runtime answers, kill workers and Broker JVMs, freeze a Broker
+past its lease, and take the database away, then check that no tool call
+runs twice or settles without the Runtime's evidence. The FG5 gates do the
+same around W0c context installation on managed-context/1: no tool runs
+before the context is installed and activated, and none runs outside the
+Session's directory; see
+[Runtime Broker Fault Gates](../../../docs/design/2026-09-26-runtime-broker-fault-gates.md).
+They need the bundle, Node.js and POSIX signals, and fail when any is
+missing. The default `mvn test` excludes them. From the repository root, run
+`npm run build && npm run bundle`, then in this module:
+
+```bash
+mvn -Pfault-gates test
+```
+
+`-Dqwen.cli.entry=/path/to/dist/cli.js` points them at another bundle.
 
 ## Workspace binding
 

@@ -179,6 +179,22 @@ describe('Managed Runtime attestation worker', () => {
     ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
   });
 
+  it('still reads a boot v1 document whose bytes are not all UTF-8', async () => {
+    const [before, after] = JSON.stringify({
+      ...boot,
+      workspaceCwd: '/workspace/X',
+    }).split('X');
+    const document = Buffer.concat([
+      Buffer.from(before!),
+      Buffer.from([0xff]),
+      Buffer.from(after!),
+    ]);
+
+    await expect(
+      readManagedRuntimeWorkerBoot(Readable.from([document])),
+    ).resolves.toMatchObject({ workspaceCwd: '/workspace/\ufffd' });
+  });
+
   it('rejects boot input that is not closed within the startup deadline', async () => {
     vi.useFakeTimers();
     onTestFinished(() => {

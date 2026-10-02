@@ -20,7 +20,7 @@ const PACKAGE_NAME = '@qwen-code/qwen-code';
 const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
 const execFileAsync = promisify(execFile);
 
-interface ManagedNpmUpdate {
+export interface ManagedNpmUpdate {
   stagingDir: string;
   versionDir: string;
   launcherRoot: string;
@@ -296,6 +296,27 @@ export async function installManagedNpmUpdate(
     path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
   spawnFn: typeof spawn = spawn,
 ): Promise<void> {
+  const update = await stageManagedNpmUpdate(
+    version,
+    bootstrapPath,
+    updateRoot,
+    spawnFn,
+  );
+  try {
+    await activateManagedNpmUpdate(update, version, bootstrapPath);
+  } catch (error) {
+    await cleanupManagedNpmUpdate(update);
+    throw error;
+  }
+}
+
+export async function stageManagedNpmUpdate(
+  version: string,
+  bootstrapPath = process.env['QWEN_CODE_CLI'],
+  updateRoot = process.env['QWEN_CODE_MANAGED_NPM_ROOT'] ??
+    path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
+  spawnFn: typeof spawn = spawn,
+): Promise<ManagedNpmUpdate> {
   const update = prepareManagedNpmUpdate(version, bootstrapPath, updateRoot);
   const env = { ...process.env };
   for (const key of ['NPM_CONFIG_USERCONFIG', 'npm_config_userconfig']) {
@@ -324,7 +345,8 @@ export async function installManagedNpmUpdate(
         else reject(new Error(`npm install exited with code ${code}`));
       });
     });
-    await activateManagedNpmUpdate(update, version, bootstrapPath);
+    await validateInstallation(update.stagingDir, version);
+    return update;
   } catch (error) {
     await cleanupManagedNpmUpdate(update);
     throw error;

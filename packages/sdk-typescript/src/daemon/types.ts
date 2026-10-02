@@ -179,6 +179,8 @@ export interface DaemonWorkspaceCapability {
   ssh?: { host: string; port?: number; directory: string };
   primary: boolean;
   trusted: boolean;
+  /** Whether persistent Agent collaboration is enabled for this workspace. */
+  agentCollaborationEnabled?: boolean;
   /** Whether new sessions in this workspace can use Workflow. */
   workflowsEnabled?: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
@@ -226,9 +228,20 @@ export interface DaemonRuntimeStopSession {
   hasRunningBackgroundTasks?: boolean;
 }
 
-export interface DaemonRuntimeStopResult {
+/** One live ACP channel addressed by a workspace runtime stop. */
+export interface DaemonRuntimeStopChannel {
   channelId: string;
   runtimeEpoch: number;
+  executionEngine?: 'legacy' | 'managed';
+}
+
+export interface DaemonRuntimeStopResult {
+  /** The first stopped channel. */
+  channelId: string;
+  /** The newest epoch among the stopped channels. */
+  runtimeEpoch: number;
+  /** Every stopped channel; absent from daemons that predate it. */
+  channels?: DaemonRuntimeStopChannel[];
   stopToken: string;
   state: 'stopping' | 'stopped' | 'incomplete' | 'failed';
   stopped: boolean;
@@ -241,9 +254,17 @@ export interface DaemonRuntimeStopResult {
   error?: string;
 }
 
+/**
+ * Echo `stopToken`, `channelId`, `runtimeEpoch` and the exact session IDs to
+ * confirm a stop. A channel started after the preview stales it.
+ */
 export interface DaemonRuntimeStopSnapshot {
+  /** The first listed channel. */
   channelId?: string;
+  /** The newest epoch among the listed channels. */
   runtimeEpoch: number;
+  /** Every live channel; absent from daemons that predate it. */
+  channels?: DaemonRuntimeStopChannel[];
   stopToken: string;
   blockedReasons: string[];
   sessions: DaemonRuntimeStopSession[];
@@ -325,6 +346,8 @@ export interface DaemonWorkspaceGitStatus {
   operation?: DaemonGitOperation;
   /** v2: epoch ms when the enriched fields were computed. */
   computedAt?: number;
+  /** The active session can branch into a managed worktree. */
+  worktreeSupported?: boolean;
 }
 
 /** One changed file in the working-tree-vs-HEAD diff file list. */
@@ -802,6 +825,23 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
     );
   }
   return caps.workspaceCwd;
+}
+
+/** Process-global update state from `GET /daemon/update`. */
+export interface DaemonUpdateStatus {
+  state:
+    | 'available'
+    | 'up-to-date'
+    | 'installing'
+    | 'ready'
+    | 'restarting'
+    | 'unavailable'
+    | 'error';
+  currentVersion?: string;
+  latestVersion?: string;
+  canInstall: boolean;
+  instructions?: string[];
+  message?: string;
 }
 
 /** Detail level accepted by `GET /daemon/status?detail=`. */
@@ -1554,9 +1594,15 @@ export interface HistoricalBranchSessionRequest extends BranchSessionRequest {
   atRecordId: string;
 }
 
+export interface WorktreeBranchSessionRequest extends BranchSessionRequest {
+  atRecordId?: string;
+  worktree: { slug?: string };
+}
+
 export type DaemonBranchSessionRequest =
   | BranchSessionRequest
-  | HistoricalBranchSessionRequest;
+  | HistoricalBranchSessionRequest
+  | WorktreeBranchSessionRequest;
 
 export interface DaemonBranchPoint {
   assistantRecordUuid: string;
@@ -2583,6 +2629,20 @@ export interface DaemonWorkspaceMemoryFile {
   path: string;
   scope: DaemonContextFileScope;
   bytes: number;
+  /**
+   * Present only for `workspaceMemory({ includeContent: true })` when the
+   * read succeeded and the on-disk bytes are valid BOM-free UTF-8 — only
+   * then may a client treat it as the file's full text for a replace
+   * write. Absent for non-UTF-8/BOM'd files and for reads that raced a
+   * write.
+   */
+  content?: string;
+  /**
+   * True when the served text is not the file's full content: `content`
+   * stopped at the daemon's read cap, or the read raced a concurrent
+   * write (byte count differed from `bytes`; `content` omitted).
+   */
+  truncated?: boolean;
 }
 
 export interface DaemonWorkspaceMemoryStatus {
@@ -4909,6 +4969,8 @@ export interface MCPServerConfigShape {
   readonly timeout?: number;
   readonly discoveryTimeoutMs?: number;
   readonly versionNegotiation?: 'auto' | 'legacy';
+  readonly appResourceMaxBytes?: number;
+  readonly appResourceTimeoutMs?: number;
   readonly trust?: boolean;
   readonly description?: string;
   readonly oauth?: Record<string, unknown>;
@@ -5686,4 +5748,24 @@ export interface ExtensionUpdateCheckResponse {
 export interface ExtensionRefreshResponse {
   refreshed: number;
   failed: number;
+}
+
+export interface DaemonMcpAppToolCall {
+  serverName: string;
+  resourceUri: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface DaemonMcpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
 }

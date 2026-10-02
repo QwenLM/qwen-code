@@ -41,6 +41,7 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  agentCollaborationEnabledFor?: (workspaceCwd: string) => boolean;
   hostedHarness?: HostedHarnessCapabilities;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
 }
@@ -180,6 +181,15 @@ export function registerCapabilitiesRoutes(
           primary: entry.primary,
           trusted:
             entry.state === 'active' && entry.current?.runtime.trusted === true,
+          ...(features.includes('agent_collaboration_v1')
+            ? {
+                agentCollaborationEnabled:
+                  entry.state === 'active' &&
+                  entry.current?.runtime.trusted === true &&
+                  deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
+                    true,
+              }
+            : {}),
           workflowsEnabled: workflowsEnabledForRuntime(
             entry.state === 'active' ? entry.current?.runtime : undefined,
             deps.daemonEnv,

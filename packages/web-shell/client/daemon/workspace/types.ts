@@ -561,7 +561,9 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
-  loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
+  loadMemoryStatus(options?: {
+    includeContent?: boolean;
+  }): Promise<DaemonWorkspaceMemoryStatus>;
   /**
    * `opts.maxBytes` is how a caller accepts partial content: without a window
    * argument the daemon refuses any file above its own read cap instead of
