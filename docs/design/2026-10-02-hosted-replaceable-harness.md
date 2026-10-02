@@ -201,11 +201,11 @@ unchanged and stays retriable.
 ### D7 — Q2 gate: the freeze variant (test-only unless it finds a defect)
 
 A continuation-scenario arm in `scripts/run-managed-agent-server-e2e.ts`:
-SIGSTOP the original Spring and Harness process groups instead of SIGKILL
-(the runner's `signalProcessTree` already takes any signal, lines 325-335),
-keep both homes (skip both `rmSync`s), let the leases lapse (the existing
-SQL waits work unchanged against frozen owners), let the replacement finish
-the Turn, then SIGCONT the originals and assert:
+SIGSTOP the original Harness (the journal writer) and SIGKILL the original
+Spring JVM (`crashProcess`, exactly as the continuation mode kills it), keep
+the Harness home, let the leases lapse (the existing SQL waits work
+unchanged against a frozen writer), let the replacement finish the Turn,
+then SIGCONT the frozen Harness and assert:
 
 - the journal head shows no transaction from the old writer generation after
   the takeover (writer generation, revision and committed sequence belong to
@@ -214,11 +214,18 @@ the Turn, then SIGCONT the originals and assert:
   terminal event,
 - `managed_agent_session.harness_boot_id` is still the replacement's.
 
-The frozen Broker side of a surviving former owner belongs to the #12964
-tests and the Broker fault gates, not this arm. Teardown SIGCONTs before
-`stopChild` so a pending SIGTERM does not burn 10 s per child. The same PR
+Why the Spring must actually die (a refinement discovered by the first CI
+run of this arm): reclaiming a workspace binding requires death evidence
+from `/proc` liveness via the trusted host identity, and a SIGSTOPped JVM
+still reads as alive there — so with a merely-stopped Spring the
+replacement's reconcile times out (`runtime_broker_reconcile_timeout`) and
+the Turn never completes. Resource-level (Broker/worker) takeover of a
+surviving owner is therefore structurally out of reach today, exactly the
+"two live owner pairs" this issue excludes; the arm fences at the journal
+writer level instead, which is what G3's exit check words. Teardown needs
+no special signal ordering (the Harness is already continued). The same PR
 also wires `npm run test:e2e:managed-session-failover` into the
-`hosted-harness-mysql` CI job, where it is currently absent by omission.
+`hosted-harness-mysql` CI job, where it was previously absent by omission.
 
 ### D8 — E2E: the Harness-only restart arm
 

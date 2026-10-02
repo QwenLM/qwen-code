@@ -179,22 +179,29 @@ load 保持 409。这关闭了 2026-09-30 设计记录的丢回复 follow-up；
 ### D7 —— Q2 门禁：冻结变体（纯测试，除非测出缺陷）
 
 `scripts/run-managed-agent-server-e2e.ts` 里 continuation
-场景的一个支路：对原 Spring 与 Harness 进程组发 SIGSTOP 而不是 SIGKILL
-（runner 的 `signalProcessTree` 本来就接受任意信号，325-335 行），保留
-两个 home（跳过两个 `rmSync`），等 lease 过期（现有 SQL 等待对冻结的
-owner 照常工作），让 replacement 把 Turn 续完，再对原进程发 SIGCONT
-并断言：
+场景的一个支路：对原 Harness（journal writer）发 SIGSTOP、对原
+Spring JVM 按 continuation 模式同款方式 SIGKILL（`crashProcess`），保留
+Harness 的 home，等 lease 过期（现有 SQL 等待对冻结的 writer 照常
+工作），让 replacement 把 Turn 续完，再对被冻结的 Harness 发
+SIGCONT 并断言：
 
 - journal head 显示接管后没有来自旧 writer 代数的新事务（writer
   代数、revision 与 committed sequence 都属于 replacement）；
 - 公开 transcript 仍然只有 replacement 的回答和一个终态事件；
 - `managed_agent_session.harness_boot_id` 仍是 replacement 的。
 
-被冻结的前 owner 在 Broker 一侧的行为归 #12964 的测试与 Broker fault
-gates，不在本支路。teardown 在 `stopChild` 前先 SIGCONT，避免挂起的
-SIGTERM 每个子进程白等 10 秒。同一个 PR 把
+Spring 为什么必须真死（本支路首轮 CI 暴露后修正的点）：回收
+workspace 绑定时需要通过可信宿主身份从 `/proc` 存活取证，而
+SIGSTOP 的 JVM 在那里仍然读作活着——所以只冻结 Spring 时 replacement
+的 reconcile 会超时（`runtime_broker_reconcile_timeout`），Turn 永远
+完不成。也就是说，资源级（Broker/worker）的「前 owner 还活着」
+接管今天在结构上不可达——这正是本 issue 排除的「两对 owner 同时
+在线」；
+本支路因此在 journal writer 层面做 fencing 断言，与 G3
+退出检查的措辞一致。teardown 不需要额外信号顺序（Harness 已经被
+SIGCONT 过）。同一个 PR 把
 `npm run test:e2e:managed-session-failover` 接进 `hosted-harness-mysql`
-CI 任务——它目前是遗漏而非刻意缺席。
+CI 任务——它此前是遗漏而非刻意缺席。
 
 ### D8 —— E2E：只重启 Harness 的支路
 

@@ -1150,12 +1150,13 @@ try {
     }
 
     if (freeze) {
-      // SIGSTOP the original owners instead of killing them: the takeover
-      // fences must hold against a former owner that is very much alive.
-      await Promise.all([
-        signalProcessTree(harness.child, 'SIGSTOP'),
-        signalProcessTree(spring.child, 'SIGSTOP'),
-      ]);
+      // Freeze the writer side only: stopping the original Harness (the
+      // lease holder) fences it against mutation on wake. The original
+      // Spring must actually die — reclaiming its workspace binding
+      // requires death evidence from /proc liveness, and a SIGSTOPped JVM
+      // still reads as alive there.
+      await signalProcessTree(harness.child, 'SIGSTOP');
+      await crashProcess(spring.child, 'Spring Managed Agent Server A');
     } else if (harnessOnly) {
       // Kill only the Harness: a live control plane must adopt the next
       // generation instead of failing every bound Session (G3).
@@ -1173,13 +1174,12 @@ try {
     await heldStartProxy?.close();
     heldStartProxy = undefined;
     if (!freeze) {
-      // Frozen owners keep their homes so they can wake none the wiser.
+      // The frozen Harness keeps its home; the killed Spring's disk is
+      // scrapped like any dead owner's.
       rmSync(harnessHome, { recursive: true, force: true });
-      if (!harnessOnly) {
-        // The live Spring still runs out of runtimeHome; only a replaced
-        // owner's disk is scrapped.
-        rmSync(runtimeHome, { recursive: true, force: true });
-      }
+    }
+    if (!harnessOnly) {
+      rmSync(runtimeHome, { recursive: true, force: true });
     }
     await waitUntil(
       'Managed Session writer lease expiry',
@@ -1548,22 +1548,18 @@ try {
       );
 
       if (freeze) {
-        // Wake the frozen owners only after the replacement finished: the
-        // fences the takeover installed must hold against a very alive
-        // former owner. The Turn is terminal by now, so nothing but a
-        // fencing defect could mutate the binding or the journal.
+        // Wake the frozen Harness only after the replacement finished: the
+        // journal writer fence the takeover installed must hold against a
+        // very alive former writer. The Turn is terminal by now, so nothing
+        // but a fencing defect could mutate the binding or the journal.
         const headBeforeWake = runMysql(
           mysqlPort,
           `SELECT writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter}`,
         );
-        signalProcessTree(spring.child, 'SIGCONT');
         signalProcessTree(harness.child, 'SIGCONT');
-        if (
-          !processTreeExists(spring.child) ||
-          !processTreeExists(harness.child)
-        ) {
+        if (!processTreeExists(harness.child)) {
           throw new Error(
-            'Frozen owners did not survive the freeze: the fencing proof below would be vacuous',
+            'Frozen Harness did not survive the freeze: the fencing proof below would be vacuous',
           );
         }
         await new Promise((resolve) => setTimeout(resolve, 5_000));
@@ -1596,7 +1592,7 @@ try {
           awakeTerminalCount !== terminalCount
         ) {
           throw new Error(
-            `Frozen former owner mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
+            `Frozen former Harness mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
           );
         }
         console.log(
