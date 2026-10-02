@@ -113,13 +113,25 @@ const PATH_TARGET_SAFE = /[A-Za-z0-9._~-]/;
 // encoding it would expand one CJK char to nine — a few ordinary non-ASCII
 // paths would then spend the whole `MAX_INDEX_BYTES` budget and evict every
 // other entry. Still encoded: whitespace (a destination may not contain any,
-// and `\s` covers the non-ASCII spaces a filename may legally hold), ASCII
-// punctuation, the zero-width/bidi ranges (they hide or reorder text) and lone
-// surrogates (they do not survive the write). An astral char arrives as a pair,
-// so it stays encoded too.
+// and `\s` covers the non-ASCII spaces a filename may legally hold), C0/C1
+// controls, ASCII punctuation, EVERY invisible format character — the
+// zero-width, bidi, soft-hyphen, variation-selector, Mongolian vowel-separator
+// and Hangul-filler ranges below, i.e. Unicode's `Cf` ∪
+// `Default_Ignorable_Code_Point` ∪ `Bidi_Control` in the BMP — because they
+// hide or reorder text that lands verbatim in every collaborator's system
+// prompt, and lone surrogates (they do not survive the write). An astral char
+// arrives as a pair, so it stays encoded too.
+//
+// This has to stay a per-code-unit DENYLIST rather than an allowlist built from
+// `\p{…}` classes: those need the `u` flag, under which an astral character is
+// one code point instead of a surrogate pair, so `\ud800-\udfff` stops firing
+// for well-formed pairs and the tag-steganography range U+E0020-U+E007F would
+// pass through raw.
 const PATH_TARGET_RAW_NON_ASCII =
-  // eslint-disable-next-line no-control-regex
-  /[^\s\u0000-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\ud800-\udfff]/;
+  // The class matches per code unit on purpose (see above), so the combining
+  // marks it excludes are listed as bare code points, not as sequences.
+  // eslint-disable-next-line no-control-regex, no-misleading-character-class
+  /[^\s\u0000-\u009f\u00ad\u034f\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u2069\u206a-\u206f\u3164\ufeff\ufe00-\ufe0f\uffa0\ufff0-\ufffb\ud800-\udfff]/;
 const utf8Encoder = new TextEncoder();
 
 /**
@@ -216,10 +228,25 @@ function assembleIndex(lines: string[]): string {
     : raw;
 
   if (truncated.length > MAX_INDEX_BYTES) {
-    const cutAt = truncated.lastIndexOf('\n', MAX_INDEX_BYTES);
     // Cut on an entry boundary only: slicing mid-line would emit a half-written
-    // `](path)` link. An entry longer than the whole budget is dropped.
-    truncated = cutAt > 0 ? truncated.slice(0, cutAt) : '';
+    // `](path)` link. Drop each entry that does not fit the REMAINING budget
+    // whole and keep measuring the ones after it — the same rule `docIndexLine`
+    // already applies to "(also: …)" siblings — so one pathological entry costs
+    // only itself instead of every entry sorted behind it. Emptying the buffer
+    // here (what `lastIndexOf('\n', MAX_INDEX_BYTES)` returning -1 used to do
+    // when the FIRST entry alone exceeded the budget) discarded the whole index
+    // while the warning below still claimed "only part of it was written".
+    const kept: string[] = [];
+    let size = 0;
+    for (const line of truncated.split('\n')) {
+      const next = kept.length === 0 ? line.length : size + 1 + line.length;
+      if (next > MAX_INDEX_BYTES) {
+        continue;
+      }
+      size = next;
+      kept.push(line);
+    }
+    truncated = kept.join('\n');
   }
 
   if (!wasLineTruncated && truncated.length === raw.length) {

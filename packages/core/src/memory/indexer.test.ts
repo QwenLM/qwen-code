@@ -402,22 +402,27 @@ describe('managed auto-memory indexer', () => {
   it('never cuts inside a link when one entry exceeds the size budget', () => {
     // The byte trim used to slice at the budget, emitting a half-written
     // `](path)` target. It now cuts on an entry boundary only.
-    const relativePath = `reference/${'p'.repeat(25_003)}.md`;
+    const doc = (relativePath: string, title: string, description: string) => ({
+      scope: 'project' as const,
+      type: 'feedback' as const,
+      filePath: `/tmp/${relativePath}`,
+      relativePath,
+      filename: path.basename(relativePath),
+      title,
+      description,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
+      body: '',
+      mtimeMs: 0,
+    });
     const content = buildManagedAutoMemoryIndex([
-      {
-        scope: 'project',
-        type: 'feedback',
-        filePath: `/tmp/${relativePath}`,
-        relativePath,
-        filename: path.basename(relativePath),
-        title: 'Huge',
-        description: 'hook',
-        category: 'uncategorized',
-        keywords: [],
-        usageScenarios: [],
-        body: '',
-        mtimeMs: 0,
-      },
+      doc(`reference/${'p'.repeat(25_003)}.md`, 'Huge', 'hook'),
+      // The oversized entry comes FIRST, so `lastIndexOf('\n', MAX_INDEX_BYTES)`
+      // found no newline below the cap and the old `: ''` fallback emptied the
+      // whole buffer: the warning claimed "only part of it was written" when no
+      // part was. One over-budget entry must cost only itself.
+      doc('zzz/keep-me.md', 'Keep', 'a short entry sorted after the huge one'),
     ]);
 
     const body = content.split('\n\n> WARNING')[0];
@@ -427,6 +432,65 @@ describe('managed auto-memory indexer', () => {
       }
     }
     expect(content).toContain('WARNING: MEMORY.md is too large');
+    // The huge entry is dropped whole; the short one still reaches the index.
+    expect(body).not.toContain('Huge');
+    expect(body).toContain('- [Keep](zzz/keep-me.md)');
+    expect(body.length).toBeLessThanOrEqual(25_000);
+  });
+
+  it('keeps short entries sorted after a run of merely-long ones', () => {
+    // A run of filesystem-legal but very long paths exhausts the aggregate
+    // budget between them, and cutting the TAIL at the budget silently dropped
+    // every entry sorted after them from the committed index. Dropping each
+    // entry that does not fit the REMAINING budget — and keeping on measuring —
+    // brings them back. No single entry here is over budget, so this is the
+    // shape a "skip only the one oversized entry" rule cannot fix.
+    const doc = (relativePath: string, title: string, description: string) => ({
+      scope: 'team' as const,
+      type: 'feedback' as const,
+      filePath: `/tmp/${relativePath}`,
+      relativePath,
+      filename: path.basename(relativePath),
+      title,
+      description,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
+      body: '',
+      mtimeMs: 0,
+    });
+    // ~2 KB of plain `[a-z/.-]` each: legal, resolving, and 13 of them together
+    // past MAX_INDEX_BYTES. `aaa-` keeps them sorted ahead of `zzz/`.
+    const longPath = (seed: number) =>
+      `aaa-long/${seed}/${'x'.repeat(1_980)}/note-${seed}.md`;
+    const shortPaths = [1, 2, 3, 4, 5].map(
+      (n) => `zzz/feedback/real-fact-${n}.md`,
+    );
+    const content = buildTeamAutoMemoryIndex([
+      ...Array.from({ length: 13 }, (_, i) => i + 1).map((s) =>
+        doc(longPath(s), `long ${s}`, `shared long fact ${s}`),
+      ),
+      // Distinct descriptions: identical ones would be collapsed into a single
+      // grouped entry, which is the dedup this builder is for, not what this
+      // case measures.
+      ...shortPaths.map((p, i) =>
+        doc(p, `real fact ${i + 1}`, `distinct fact ${i + 1} worth keeping`),
+      ),
+    ]);
+
+    // Every legitimate short pointer still reaches the committed index…
+    for (const p of shortPaths) {
+      expect(content).toContain(`](${p})`);
+    }
+    // …and each surviving line is still one whole, resolving link.
+    const body = content.split('\n\n> WARNING')[0];
+    const entryLines = body.split('\n').filter((l) => l.startsWith('- ['));
+    expect(entryLines.length).toBeGreaterThan(0);
+    for (const line of entryLines) {
+      const target = linkTarget(line);
+      expect(decodeURIComponent(target)).toBe(target);
+    }
+    expect(body.length).toBeLessThanOrEqual(25_000);
   });
 
   it('does not let a few long non-ASCII paths evict the rest of the index', () => {
@@ -626,6 +690,100 @@ describe('managed auto-memory indexer', () => {
     const target = linkTarget(content);
     expect(target).not.toMatch(/\s/);
     expect(decodeURIComponent(target)).toBe(relativePath);
+  });
+
+  it('percent-encodes every invisible format character that may reach a path', () => {
+    // `PATH_TARGET_RAW_NON_ASCII` is a DENYLIST: printable non-ASCII stays raw
+    // (the CJK cases above) while every character that hides or reorders text
+    // is percent-encoded, because MEMORY.md is committed, pushed and loaded
+    // verbatim into every collaborator's system prompt. Each row below is the
+    // only probe for its range in the whole suite, so deleting any single range
+    // from the class reddens this case — a regex rewrite by a formatter or a
+    // lint autofix can no longer drop one silently.
+    const invisible: Array<[string, string]> = [
+      ['U+00AD SOFT HYPHEN', '\u00ad'],
+      ['U+034F COMBINING GRAPHEME JOINER', '\u034f'],
+      ['U+0600 ARABIC NUMBER SIGN', '\u0600'],
+      ['U+061C ARABIC LETTER MARK (Bidi_Control)', '\u061c'],
+      ['U+06DD ARABIC END OF AYAH', '\u06dd'],
+      ['U+070F SYRIAC ABBREVIATION MARK', '\u070f'],
+      ['U+0890 ARABIC POUND MARK ABOVE', '\u0890'],
+      ['U+08E2 ARABIC DISPUTED END OF AYAH', '\u08e2'],
+      ['U+115F HANGUL CHOSEONG FILLER', '\u115f'],
+      ['U+1160 HANGUL JUNGSEONG FILLER', '\u1160'],
+      ['U+17B4 KHMER VOWEL INHERENT AQ', '\u17b4'],
+      ['U+180B MONGOLIAN FREE VARIATION SELECTOR ONE', '\u180b'],
+      ['U+180E MONGOLIAN VOWEL SEPARATOR', '\u180e'],
+      ['U+200B ZERO WIDTH SPACE', '\u200b'],
+      ['U+200F RIGHT-TO-LEFT MARK', '\u200f'],
+      ['U+202E RIGHT-TO-LEFT OVERRIDE', '\u202e'],
+      ['U+2060 WORD JOINER', '\u2060'],
+      ['U+2068 FIRST STRONG ISOLATE', '\u2068'],
+      ['U+206A INHIBIT SYMMETRIC SWAPPING', '\u206a'],
+      ['U+3164 HANGUL FILLER', '\u3164'],
+      ['U+FE00 VARIATION SELECTOR-1', '\ufe00'],
+      ['U+FEFF ZERO WIDTH NO-BREAK SPACE', '\ufeff'],
+      ['U+FFA0 HALFWIDTH HANGUL FILLER', '\uffa0'],
+      ['U+FFF0 reserved', '\ufff0'],
+    ];
+    // Lone surrogates share the excluded `\ud800-\udfff` range, but TextEncoder
+    // replaces an unpaired unit with U+FFFD, so the target decodes to the
+    // replacement char rather than back to the original unit.
+    const surrogates: Array<[string, string]> = [
+      ['lone HIGH surrogate U+D835', '\ud835'],
+      ['lone LOW surrogate U+DC00', '\udc00'],
+    ];
+    const build = (relativePath: string) =>
+      buildManagedAutoMemoryIndex([
+        {
+          scope: 'project',
+          type: 'feedback',
+          filePath: `/tmp/${relativePath}`,
+          relativePath,
+          filename: path.basename(relativePath),
+          title: 'Probe',
+          description: 'desc',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body: '',
+          mtimeMs: 0,
+        },
+      ]);
+
+    // Collect violations rather than asserting inside the loop, so a failure
+    // names every character whose range stopped being excluded.
+    const violations = (
+      rows: Array<[string, string]>,
+      resolvesTo: (ch: string) => string,
+    ) =>
+      rows.flatMap(([label, ch]) => {
+        const target = linkTarget(build(`feedback/a${ch}b.md`));
+        const bad: string[] = [];
+        // Nothing non-ASCII may survive raw in a committed link target…
+        if (!/^[A-Za-z0-9._~%/-]*$/.test(target)) {
+          bad.push(
+            `${label}: raw non-ASCII survived (${JSON.stringify(target)})`,
+          );
+        }
+        // …and the target must still resolve to the real file.
+        if (decodeURIComponent(target) !== resolvesTo(ch)) {
+          bad.push(`${label}: target no longer resolves to the real path`);
+        }
+        return bad;
+      });
+
+    expect(violations(invisible, (ch) => `feedback/a${ch}b.md`)).toEqual([]);
+    // Lone surrogates share the excluded `\ud800-\udfff` range, but TextEncoder
+    // replaces an unpaired unit with U+FFFD, so the target decodes to the
+    // replacement char rather than back to the original unit.
+    expect(violations(surrogates, () => 'feedback/a\ufffdb.md')).toEqual([]);
+
+    // Positive control: printable non-ASCII stays RAW, so this case cannot be
+    // satisfied by encoding all of it — that is the 9× expansion which evicted
+    // the rest of the index and which this PR exists to remove.
+    const cjkPath = 'feedback/团队记忆.md';
+    expect(linkTarget(build(cjkPath))).toBe(cjkPath);
   });
 
   it('drops an "(also: …)" entry whole instead of cutting its target', () => {
@@ -950,5 +1108,62 @@ describe('managed auto-memory indexer', () => {
     const [loneLine, pairLine] = content.split('\n');
     expect(Buffer.from(loneLine, 'utf8').toString('utf8')).toBe(loneLine);
     expect(pairLine).toContain('\u{1d54f} kept whole');
+  });
+
+  it('strips a lone LOW surrogate arriving through a real YAML escape', async () => {
+    // `sanitizeIndexField`'s surrogate strip has two alternatives and only the
+    // lone-HIGH one was pinned, so deleting
+    // `|(?<![\ud800-\udbff])[\udc00-\udfff]` shipped the whole memory suite
+    // green. The low half is reachable through the real frontmatter route:
+    // yaml.parse('description: "a\\uDC00b"') yields the code units 61 dc00 62,
+    // and the scan feeds that straight into the description. A lone surrogate
+    // does not survive the write to MEMORY.md (the file carries U+FFFD), so the
+    // index stops round-tripping and the team rebuild's unchanged-content skip
+    // can never fire again.
+    const write = async (rel: string, description: string) => {
+      const file = getAutoMemoryFilePath(
+        projectRoot,
+        path.join('project', rel),
+      );
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(
+        file,
+        [
+          '---',
+          'type: project',
+          `name: ${rel}`,
+          `description: ${description}`,
+          '---',
+          '',
+          'body',
+        ].join('\n'),
+        'utf-8',
+      );
+    };
+    await write('lone-low.md', '"a\\uDC00b"');
+    // Discriminator: a WELL-FORMED pair arrives as two escapes and must be kept
+    // verbatim, so the strip may not widen to every surrogate unit.
+    await write('pair-kept.md', '"a\\uD835\\uDD4Fb"');
+
+    const index = await rebuildManagedAutoMemoryIndex(projectRoot);
+
+    const loneLine = index
+      .split('\n')
+      .find((l) => l.includes('(project/lone-low.md)'));
+    const pairLine = index
+      .split('\n')
+      .find((l) => l.includes('(project/pair-kept.md)'));
+    expect(loneLine).toBeDefined();
+    expect(pairLine).toBeDefined();
+    // No unpaired surrogate unit survives, and the line UTF-8 round-trips — the
+    // property the unchanged-content skip depends on.
+    expect(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(
+        index,
+      ),
+    ).toBe(false);
+    expect(Buffer.from(index, 'utf8').toString('utf8')).toBe(index);
+    expect(loneLine).toMatch(/— ab$/);
+    expect(pairLine).toContain('a\u{1d54f}b');
   });
 });
