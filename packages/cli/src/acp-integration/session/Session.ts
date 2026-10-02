@@ -9040,13 +9040,13 @@ export class Session implements SessionContext {
     );
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
-      sourceStream = await chat.sendMessageStream(
-        model,
-        request,
-        promptId,
-        goalPermit,
-        markHistoryPrompt ? { promptId } : undefined,
-      );
+      sourceStream = markHistoryPrompt
+        ? await chat.sendMessageStream(model, request, promptId, goalPermit, {
+            promptId,
+          })
+        : goalPermit
+          ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+          : await chat.sendMessageStream(model, request, promptId);
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       throw error;

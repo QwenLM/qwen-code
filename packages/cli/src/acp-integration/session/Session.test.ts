@@ -14634,6 +14634,12 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
+        undefined,
+        {
+          promptId: expect.stringMatching(
+            /^test-session-id########notification[\w-]+$/,
+          ),
+        },
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -17175,6 +17181,12 @@ describe('Session', () => {
           config: { abortSignal: expect.any(AbortSignal) },
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
+        undefined,
+        {
+          promptId: expect.stringMatching(
+            /^test-session-id########notification[\w-]+$/,
+          ),
+        },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -18098,6 +18110,8 @@ describe('Session', () => {
         'vision-agent\0https://vision.example.com/v1\0',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        { promptId: 'test-session-id########1' },
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -18126,6 +18140,8 @@ describe('Session', () => {
         'qwen3-code-plus',
         expect.any(Object),
         expect.any(String),
+        undefined,
+        { promptId: 'test-session-id########2' },
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -21790,6 +21806,8 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -21908,6 +21926,8 @@ describe('Session', () => {
             config: { abortSignal: expect.any(AbortSignal) },
           },
           'test-session-id########1',
+          undefined,
+          { promptId: 'test-session-id########1' },
         );
       });
 
@@ -22242,6 +22262,8 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
+          undefined,
+          { promptId: expect.any(String) },
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -22356,6 +22378,8 @@ describe('Session', () => {
           'vision-agent\0https://vision.example.com/v1\0',
           expect.any(Object),
           expect.any(String),
+          undefined,
+          { promptId: expect.any(String) },
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -30608,6 +30632,7 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
+          { promptId: expect.any(String) },
         );
         expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
           'goal-runtime:turn-1',
@@ -32553,6 +32578,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
+          { promptId: expect.any(String) },
         );
       });
 
@@ -32669,6 +32695,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
+          { promptId: expect.any(String) },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
@@ -32783,6 +32810,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
+          { promptId: expect.any(String) },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -33034,6 +33062,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
+          { promptId: expect.any(String) },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });
