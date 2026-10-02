@@ -45,7 +45,7 @@ public class ToolPublicationConfiguration {
         required(settings.getServiceBaseUrl(), "publication service URL");
         var client = new ClientBuilderConfiguration();
         client.setSignatureVersion(SignVersion.V4);
-        client.setMaxErrorRetry(0);
+        AliyunToolPublicationObjectStore.configureClientRetries(client);
         return OSSClientBuilder.create().endpoint(endpoint.toString())
                 .region(region)
                 .credentialsProvider(CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider())

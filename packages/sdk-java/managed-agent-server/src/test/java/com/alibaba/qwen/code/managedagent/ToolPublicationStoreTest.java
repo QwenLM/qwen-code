@@ -1656,12 +1656,20 @@ class ToolPublicationStoreTest {
     }
 
     static ApiFixture largeApiFixture(int total, javax.sql.DataSource source) throws Exception {
+        return largeApiFixture(total, source, Integer.MAX_VALUE);
+    }
+
+    static ApiFixture largeApiFixture(int total, javax.sql.DataSource source, int maxRead) throws Exception {
         var fixture = new ToolPublicationStoreTest();
         fixture.initialize(source);
-        return largeApiFixture(total, fixture);
+        return largeApiFixture(total, fixture, maxRead);
     }
 
     private static ApiFixture largeApiFixture(int total, ToolPublicationStoreTest fixture) throws Exception {
+        return largeApiFixture(total, fixture, Integer.MAX_VALUE);
+    }
+
+    private static ApiFixture largeApiFixture(int total, ToolPublicationStoreTest fixture, int maxRead) throws Exception {
         var jdbc = fixture.jdbc;
         var manager = fixture.manager;
         var sessions = fixture.sessions;
@@ -1697,7 +1705,12 @@ class ToolPublicationStoreTest {
 
                     @Override
                     public InputStream open(String key) {
-                        return new ByteArrayInputStream(objects.get(key));
+                        return new java.io.FilterInputStream(new ByteArrayInputStream(objects.get(key))) {
+                            @Override
+                            public int read(byte[] bytes, int offset, int length) throws java.io.IOException {
+                                return in.read(bytes, offset, Math.min(length, maxRead));
+                            }
+                        };
                     }
 
                     @Override

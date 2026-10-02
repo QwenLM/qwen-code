@@ -54,6 +54,112 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = 0, gc_claim_until = 0 WHERE scope_key = ?", scope);
     }
 
+    private String addPublication(String publication, String sessionId) {
+        String publicationScope = ToolPublicationRetentionStore.hash(tenant + sessionId);
+        jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+                        + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+                        + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                        + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
+                        + " SELECT ?, tenant_key, tenant_id, workspace_id, ?, ?, ?, ?, binding_json, binding_digest,"
+                        + " token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
+                        + " write_evidence, accepted_complete, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
+                        + " capture_used_bytes FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = 'pub-1'",
+                publicationScope, sessionId, publication, ToolPublicationRetentionStore.hash(publicationScope + publication),
+                "capture-" + publication, scope);
+        return publicationScope;
+    }
+
+    @Test
+    void graceCandidatesYieldToAnEligiblePublicationAndWaitUntilTheirDeadline() {
+        String heldSession = "held-session";
+        for (int index = 0; index < 150; index++) { addPublication("held-" + index, heldSession); }
+        addObject("one", "eligible/one", null);
+        retire();
+        Duration grace = Duration.ofHours(24);
+        jdbc.update("UPDATE qwen_output_session_retirement SET retired_at = ? WHERE tenant_id = ? AND session_id = ?",
+                ToolPublicationRetentionStore.now(jdbc) - grace.toMillis() - 1000, tenant, session);
+        tx.executeWithoutResult(status -> {
+            ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, heldSession);
+            ToolPublicationRetentionStore.retire(jdbc, tenant, heldSession, "delete-held");
+        });
+        long deadline = jdbc.queryForObject("SELECT retired_at FROM qwen_output_session_retirement"
+                + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, heldSession) + grace.toMillis();
+        jdbc.update("UPDATE qwen_tool_publication SET gc_next_at = 1 WHERE scope_key = ?", scope);
+        var properties = new ManagedAgentProperties();
+        properties.getToolPublication().setGcEnabled(true);
+        properties.getToolPublication().setDeletionGrace(grace);
+        var objects = new DeletingObjects();
+        var gc = new ToolPublicationCollector(jdbc, manager, retention, objects, properties);
+        gc.runOnce();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication WHERE session_id = ?"
+                + " AND gc_blocker IS NOT NULL", Long.class, heldSession)).isBetween(2L, 32L);
+        for (int tick = 1; tick < 5 && !"COLLECTED".equals(state()); tick++) { gc.runOnce(); }
+        assertThat(state()).isEqualTo("COLLECTED");
+        assertThat(objects.deleted).containsExactly("eligible/one");
+        assertThat(held()).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication WHERE session_id = ?"
+                        + " AND retention_state = 'RETIRING' AND gc_blocker = 'grace_period' AND gc_next_at = ?"
+                        + " AND capture_held_bytes + producer_held_bytes + admission_held_bytes = 3000",
+                Long.class, heldSession, deadline)).isEqualTo(150);
+    }
+
+    @Test
+    void inlinePublicationReleasesQuotaWhenTheObjectStoreIsUnavailable() {
+        addObject("inline", null, new byte[] {4});
+        retire();
+        var objects = new DeletingObjects() {
+            @Override public void requireUnversioned() {
+                throw new IllegalStateException("OSS versioning unavailable");
+            }
+        };
+        assertThat(collector(objects).runOnce()).isTrue();
+        assertThat(state()).isEqualTo("COLLECTED");
+        assertThat(held()).isZero();
+        assertThat(objects.deleted).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object WHERE scope_key = ?",
+                byte[].class, scope)).isNull();
+    }
+
+    @Test
+    void collectionPreservesOtherPublicationsMessagesAndCheckpoints() {
+        addObject("target-result", null, new byte[] {2});
+        addPublication("pub-2", session);
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key, resource_id,"
+                        + " resource_kind, byte_length, sha256, inline_bytes, state, operation_id, created_at)"
+                        + " VALUES (?, 'pub-2', 'sibling-result', 'sibling-result', 'managed-tool-result-content',"
+                        + " 1, ?, ?, 'VERIFIED', 'op', CURRENT_TIMESTAMP(6))", scope, scope, new byte[] {2});
+        for (String resource : List.of("target-result", "sibling-result", "message-1", "checkpoint-1")) {
+            String kind = resource.equals("message-1") ? "managed-message"
+                    : resource.equals("checkpoint-1") ? "managed-checkpoint" : "managed-tool-result-content";
+            jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+                            + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes,"
+                            + " publish_command_id, state, created_at) VALUES (?, ?, 'workspace-1', ?, ?, ?,"
+                            + " 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', CURRENT_TIMESTAMP(6))",
+                    ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, resource, kind, scope, new byte[] {2});
+        }
+        long used = jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
+                + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = 'pub-1'", Long.class, scope);
+        retire();
+        assertThat(collector(new DeletingObjects()).runOnce()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+                + " WHERE resource_id = 'target-result'", byte[].class)).isNull();
+        for (String resource : List.of("sibling-result", "message-1", "checkpoint-1")) {
+            assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+                    + " WHERE resource_id = ?", byte[].class, resource)).containsExactly(2);
+        }
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object"
+                + " WHERE publication_id = 'pub-2'", byte[].class)).containsExactly(2);
+        assertThat(jdbc.queryForObject("SELECT retention_state FROM qwen_tool_publication"
+                + " WHERE publication_id = 'pub-2'", String.class)).isEqualTo("RETIRING");
+        assertThat(jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
+                + " FROM qwen_tool_publication WHERE publication_id = 'pub-2'", Long.class)).isEqualTo(used);
+        assertThat(used).isPositive();
+        assertThat(jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
+                + " FROM qwen_tool_publication WHERE publication_id = 'pub-1'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT collected_bytes FROM qwen_tool_publication"
+                + " WHERE publication_id = 'pub-1'", Long.class)).isEqualTo(used);
+    }
+
     @Test
     void aFailingPublicationDoesNotStarveTheNextPublication() {
         jdbc.update("INSERT INTO qwen_tool_publication (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
@@ -234,6 +340,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(objects.deleted).containsExactly("exact/a");
         assertThat(state()).isEqualTo("DELETING");
         assertThat(held()).isEqualTo(3000);
+        assertThat(jdbc.queryForObject("SELECT gc_blocker FROM qwen_tool_publication WHERE scope_key = ?",
+                String.class, scope)).isEqualTo("collection_retry");
+        assertThat(collector(objects).runOnce()).isFalse();
+        assertThat(objects.deleted).containsExactly("exact/a");
+        retryNow();
         assertThat(collector(objects).runOnce()).isTrue();
         assertThat(objects.deleted).containsExactly("exact/a", "exact/a", "exact/b");
         assertThat(held()).isZero();
