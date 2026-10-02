@@ -741,7 +741,7 @@ describe('auto-memory extraction', () => {
         parts: [{ text: 'Correction: prefer npm.' }],
       };
       history[0] = changedFact;
-      history.push({ role: 'user', parts: [{ text: 'Continue.' }] });
+      expect(history).toHaveLength(80);
       await runAutoMemoryExtract({ ...params(), history });
       expect(
         vi.mocked(runAutoMemoryExtractionByAgent).mock.lastCall?.[2],
