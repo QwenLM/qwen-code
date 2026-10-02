@@ -30,6 +30,13 @@ public interface RuntimeBindingRepository {
     RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected);
 
+    void requestHarnessDrain(String tenantId, String harnessSessionId);
+
+    boolean isHarnessDraining(String tenantId, String harnessSessionId);
+
+    List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
+            String afterBindingId, int limit);
+
     RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request);
 
     RuntimeBindingRecord findActive(RuntimeProvisionRequest request);

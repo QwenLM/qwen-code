@@ -43,6 +43,7 @@ const reports = config.sessions.map((session) => ({
   signals: [] as unknown[],
   prefix: undefined as { resourceId: string; digest: string } | undefined,
   target: undefined as Transaction | undefined,
+  targetDigest: '',
   receipt: undefined as Record<string, unknown> | undefined,
   restoreTransactions: [] as Transaction[],
 }));
@@ -145,10 +146,19 @@ const proxy = createServer(async (req, res) => {
       events(fields).some((event) => event.kind === 'tool.receipt');
     if (target) {
       assert(current.fault.startsWith('receipt-'));
-      assert.equal(current.injections++, 0);
+      assert(
+        current.injections < 3,
+        'Harness exceeded the commit retry budget',
+      );
+      current.injections++;
       assert.equal(fields.operation, 'recordToolResult');
       assert.equal(fields.commandId, current.executionCallId);
-      current.target = fields;
+      const digest = createHash('sha256').update(body).digest('hex');
+      if (current.target) assert.equal(digest, current.targetDigest);
+      else {
+        current.target = fields;
+        current.targetDigest = digest;
+      }
     }
     const upstream = await fetch(url, {
       method: req.method,
@@ -165,7 +175,10 @@ const proxy = createServer(async (req, res) => {
     if (target && current.fault === 'receipt-failure') {
       assert.equal(upstream.status, 500, bytes.toString());
     } else if (!store && upstream.status === 409) {
-      assert.equal(current.injections, 1);
+      assert.equal(
+        current.injections,
+        current.fault.startsWith('receipt-') ? 3 : 1,
+      );
       assert(['status', 'cancel'].includes(operation));
       assert(
         [
@@ -214,8 +227,11 @@ const proxy = createServer(async (req, res) => {
       }
     }
     if (target && current.fault === 'receipt-reply') {
-      assert.equal(json.replayed, false);
-      current.receipt = json;
+      assert.equal(json.replayed, current.injections > 1);
+      if (current.receipt)
+        assert.deepEqual(json, { ...current.receipt, replayed: true });
+      else current.receipt = json;
+      // Lose every bounded retry's reply to retain the unknown-write probe.
       res.destroy();
       return;
     }
@@ -338,7 +354,7 @@ try {
     await json(route + '/prompt', input, 202);
     await waitUntil(() => {
       if (proxyFailure) throw proxyFailure;
-      return current.injections === 1;
+      return current.injections > 0;
     });
     if (current.fault === 'publisher-kill') {
       await waitUntil(() => cli.child!.signalCode === 'SIGKILL');
@@ -365,6 +381,10 @@ try {
     );
     await control('finished');
     await assertEffect();
+    assert.equal(
+      current.injections,
+      current.fault.startsWith('receipt-') ? 3 : 1,
+    );
     assert.equal(current.modelCalls, 1);
     assert(current.prefix);
     for (const operation of ['acquire', 'publisher', 'prepare', 'start'])

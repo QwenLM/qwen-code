@@ -67,7 +67,7 @@ final class ProviderRuntimeProtocol {
                     }
                     case "prepare" -> {
                         required = Set.of("kind", "action", "promptId", "paths");
-                        if (!sessionId.equals(string(operation, "promptId"))
+                        if (string(operation, "promptId").length() > 128
                                 || !(operation.get("paths") instanceof List<?> paths)
                                 || paths.isEmpty() || paths.stream().anyMatch(value -> !(value instanceof String))) {
                             throw invalid();
