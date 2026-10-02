@@ -174,7 +174,7 @@ CLI worker, local provider and Session validator. The only shared production
 changes are pure Session Store parser exports and a typed read-only W1a guard
 query, plus exact private-flag dispatch in the npm entry and bundled CLI bootstrap
 before normal CLI/model or inherited update startup. Existing HTTP Session readers, writers, Hosted turn routes and Runtime
-worker dispatch remain on their established paths. The additive V28 work queue
+worker dispatch remain on their established paths. The additive V30 work queue
 indexes support asset-key paging and Session/state reference selection.
 
 Session pages and reference queues are persisted and bounded. Read one journal
@@ -341,9 +341,10 @@ fixes, five physical interruption windows and real OSS refusal controls.
 It covers that revision, not the subsequent main integration. Maintainer
 architecture signoff and supported-platform validation of the integrated
 revision remain pending; green CI and Ready status do not close these gates.
-#13110 has merged into main; this integration also preserves main's V26 tool
-result projection and V27 Hosted Hooks migrations, assigning only the unmerged
-W1b recovery metadata to V28. Existing migration bytes remain unchanged.
+#13110 has merged into main. This integration includes main `47463b79`, preserving
+its V26 tool-result projection, V27 Hosted Hooks records, V28 admission indexes
+and V29 admission backfill. Only unmerged W1b recovery metadata moves to V30,
+with its SQL bytes unchanged. Main's migration history is not rewritten.
 The [round-3 deployment report](https://github.com/QwenLM/qwen-code/pull/13138#issuecomment-5944274897)
 confirms V28 on `e50e2c37`, but identifies missing ordinary Hosted model route/usage
 support; its successful Linux runbook and interruption checks use that revision
@@ -353,3 +354,13 @@ missing/corrupt resources and unsettled work. The external candidate evidence
 does not certify later artifacts. H2 Hook domains, Hook-specific model resources
 and MCP profiles remain outside W1b's closure and refuse capture; this does not
 certify or activate Hook recovery.
+
+After the ordinary model-resource fix `258c57ed`, merge CI against the newer
+main refused duplicate V28 migrations. An independent packaged Flyway/H2 probe
+reproduced this collision before editing. V30 removes the numbering collision;
+fresh databases and upgrading a main-V29 database require new artifact checks.
+Pre-release databases that applied branch-only W1b V27 or V28 are not a supported
+main upgrade path: the versions belong to different main migrations and validation
+must refuse mismatching history. No automatic history repair, rollback or database
+recreation is performed. Earlier Linux/OSS evidence remains attributed to its
+original commits, not this subsequent integration.
