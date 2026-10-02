@@ -4703,15 +4703,19 @@ export class LlmClient {
             break;
           }
           if (response.name === ToolNames.TOOL_CALL && response.id) {
-            // A refused or cancelled bridge call carries `error` (the
-            // refusal/cancellation prefixes; `convertToFunctionErrorResponse`
-            // moves `output` into `error`) — nothing was delegated on that
-            // turn, so it must not force the reminder, mirroring the
-            // refused/cancelled exclusion in the sibling seeding pass.
+            // Only a refusal or cancellation means nothing was delegated —
+            // both carry the bridge's prefix in `error`. A bridged Agent
+            // that ran and then failed carries a generic error string: real
+            // work advanced, so the reminder must still force, exactly like
+            // the direct-Agent branch above and the sibling seeding pass
+            // (which excludes only the two prefixes).
+            const errorText = (
+              response.response as Record<string, unknown> | undefined
+            )?.['error'];
             if (
-              (response.response as Record<string, unknown> | undefined)?.[
-                'error'
-              ] !== undefined
+              typeof errorText === 'string' &&
+              (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
+                errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
             ) {
               continue;
             }

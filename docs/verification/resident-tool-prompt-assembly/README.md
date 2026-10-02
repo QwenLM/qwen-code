@@ -35,14 +35,14 @@
 
 被门控的只有两段：`## Using Your Tools` 的部分条目，以及 `# Examples` 中的示例块。以下是第二轮精简（PR #12546）后、**Todo 关闭**（未设 `tools.todoWrite.enabled`）时的 direct 模式口径；文件七件套指 read_file / write_file / edit / glob / grep_search / run_shell_command / skill，加上豁免工具：
 
-| 对比基线 → 文件七件套白名单                   | 节省字符 | 节省 UTF-8 字节 | 移除内容                                                     |
-| --------------------------------------------- | -------: | --------------: | ------------------------------------------------------------ |
-| 无声明快照（假定全部工具可用）                |    1,135 |           1,139 | Subagent Delegation、Codebase Search、Monitor Processes 三条 |
-| 基线已不声明 monitor，且白名单侧 Agent 不可达 |      818 |             822 | Subagent Delegation、Codebase Search 两条                    |
+| 对比基线 → 文件七件套白名单                                                                  | 节省字符 | 节省 UTF-8 字节 | 移除内容                                                     |
+| -------------------------------------------------------------------------------------------- | -------: | --------------: | ------------------------------------------------------------ |
+| 无声明快照（假定全部工具可用）                                                               |    1,135 |           1,139 | Subagent Delegation、Codebase Search、Monitor Processes 三条 |
+| 基线已不声明 monitor，且白名单侧 Agent 被 `tools.disabled: ["agent"]` 整体移除（桥保持完整） |      818 |             822 | Subagent Delegation、Codebase Search 两条                    |
 
 字符采用 JavaScript `string.length` 口径，字节采用 UTF-8 口径；`wc -c` 量的是字节，不能直接与字符数比较。两种对比都保留全部示例，因为示例只调用文件类工具和 shell。若继续移除 `edit`、`write_file`、`glob` 或 shell，示例也会被裁剪，必须按当前模型模板重新测量，不能沿用旧版范围。若 A/B 两边都开启 Todo，B 还会少 `- **Task Management:**` 一条（228 字符——该条按 `todo_write` 是否被**声明**门控，见 `prompts.ts` 的 `TOOL_GUIDANCE_LINE_GATES`，而 `todo_write` 不在文件七件套内）：无快照行差值变为 1,364 字符 / 1,368 字节，monitor 未声明行变为 1,047 字符 / 1,051 字节。
 
-上表的白名单侧未启用 Agent 桥接可达性例外。#13033 保留可通过桥接调用的 Agent 指引，因此不能把这些静态数值作为当前默认配置与文件白名单的固定差值。
+上表第 2 行的白名单侧须额外在 settings 里设 `tools.disabled: ["agent"]` 才能让 Agent 真正不可达——`tools.eager` 名单做不到这一点（桥接两件套免于白名单降级，Agent 始终可通过桥接调用，可达性例外因此总是生效）。该行数字描述的是这一配置下的差值。
 
 这些数字不是 token 计费数据，也不是所有真实 CLI 配置的固定收益。默认延迟加载的 `monitor` 若在 A/B 两边均未声明，就不能把它的 317 字符算入 A/B 差值。
 
@@ -70,7 +70,7 @@ wc -c /tmp/prompt-default.md /tmp/prompt-eager.md
 diff /tmp/prompt-default.md /tmp/prompt-eager.md
 ```
 
-**预期：** A/B 必须使用同一构建、模型、output style、Todo 状态及其他配置，并记录实际声明集合与 Agent 可达性。默认配置与文件七件套都保留完整桥接，且 `agent` 已注册并列在延迟摘要中时，即使 B 不直接声明 Agent，也会保留 Subagent Delegation 和 Codebase Search 两条（设计 §4.6）。Todo 关闭且 `monitor` 在两边均未声明时，两份提示词可以完全相同，预期差值为 **0 字节**。只有 B 的 Agent 确实不可达时，才适用 §1 的历史 818 字符 / 822 字节差值。Todo 或更窄白名单造成的其他差异须按实际声明与 diff 逐项归因，不使用历史总量作通过阈值。
+**预期：** A/B 必须使用同一构建、模型、output style、Todo 状态及其他配置，并记录实际声明集合与 Agent 可达性。默认配置与文件七件套都保留完整桥接，且 `agent` 已注册并列在延迟摘要中时，即使 B 不直接声明 Agent，也会保留 Subagent Delegation 和 Codebase Search 两条（设计 §4.6）。Todo 关闭且 `monitor` 在两边均未声明时，两份提示词可以完全相同，预期差值为 **0 字节**。只有 B 侧把 Agent 整体移除（`tools.disabled: ["agent"]`，桥保持完整）时，才适用 §1 第 2 行的 818 字符 / 822 字节差值。Todo 或更窄白名单造成的其他差异须按实际声明与 diff 逐项归因，不使用历史总量作通过阈值。
 
 **如果 B 和 A 一样大**，先用 `/tools` 及首个真实请求的 schema 确认设置是否被读取、白名单外工具是否按需加载，再核对 Agent 是否桥接可达。提示词相等本身不能证明 `tools.eager` 未被接受：声明裁剪仍可能生效，而 Agent 指引因可达性例外被保留。
 

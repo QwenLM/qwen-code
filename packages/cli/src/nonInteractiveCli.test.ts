@@ -4235,8 +4235,20 @@ describe('runNonInteractive', () => {
       const gate = new Promise<void>((resolve) => {
         openGate = resolve;
       });
+      // R4-6: capture what production actually hands to executeToolCall —
+      // the envelope must survive partitioning (a refactor forwarding the
+      // computed unwrapped request would run the hidden target under its
+      // own name and desync the provider's function-call/response names).
+      const executedRequests: Array<{
+        name: string;
+        args: Record<string, unknown>;
+      }> = [];
       mockCoreExecuteToolCall.mockImplementation(
         async (_config, request, _signal, options) => {
+          executedRequests.push({
+            name: request.name,
+            args: request.args as Record<string, unknown>,
+          });
           started += 1;
           if (started === total) openGate();
           await gate;
@@ -4295,6 +4307,11 @@ describe('runNonInteractive', () => {
       );
 
       expect(started).toBe(total);
+      expect(executedRequests).toHaveLength(2);
+      for (const req of executedRequests) {
+        expect(req.name).toBe(ToolNames.TOOL_CALL);
+        expect(req.args['name']).toBe(targetName);
+      }
       expect(bridgeEvents[0].value).toMatchObject({
         args: {
           arguments:
@@ -4311,6 +4328,71 @@ describe('runNonInteractive', () => {
         targetName,
         { path: 'bridge-2' },
       );
+    });
+
+    it('degrades a malformed string-arguments envelope without throwing', async () => {
+      // A truncated model output leaves `arguments` as unparseable text; the
+      // partition predicate must pass the envelope through untouched (the
+      // bridge's own refusal downstream) rather than throw synchronously and
+      // abort the headless turn.
+      setupMetricsMock();
+      const targetName = 'mcp__docs__read';
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name: string) => name === targetName,
+      );
+
+      const executedNames: string[] = [];
+      mockCoreExecuteToolCall.mockImplementation(async (_config, request) => {
+        executedNames.push(request.name);
+        return {
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        };
+      });
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'bridge-bad',
+                name: ToolNames.TOOL_CALL,
+                args: { name: targetName, arguments: '{"path":' },
+                isClientInitiated: false,
+                prompt_id: 'p-bridge-malformed',
+              },
+            },
+          ] as ServerLlmStreamEvent[]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'read',
+          'p-bridge-malformed',
+        ),
+      ).resolves.not.toThrow();
+      // The envelope survived to execution untouched (not unwrapped, not
+      // thrown on): the bridge itself produces the graceful refusal.
+      expect(executedNames).toEqual([ToolNames.TOOL_CALL]);
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {

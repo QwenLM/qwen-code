@@ -12882,7 +12882,10 @@ export class Session implements SessionContext {
       // where `task` is a live alias of the agent tool; concurrent batches
       // are therefore agent-only.
       let executionToolName = canonicalToolName(fc.name ?? '');
-      if (executionToolName === ToolNames.TOOL_CALL) {
+      // Skip the awaited bridge resolution once the turn is cancelled: the
+      // execution path bails on the same signal before resolving, so work
+      // spent here would be discarded anyway.
+      if (executionToolName === ToolNames.TOOL_CALL && !abortSignal.aborted) {
         const pm = this.config.getPermissionManager?.();
         const bridgeEnabled =
           !pm ||

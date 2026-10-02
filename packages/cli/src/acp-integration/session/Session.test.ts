@@ -3773,6 +3773,11 @@ describe('Session', () => {
         kind: core.Kind.Execute,
         displayName: 'Agent',
         description: 'Delegates work to a subagent',
+        // The schema-review gate fingerprints name + parametersJsonSchema.
+        schema: {
+          name: 'Agent',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        },
         build: vi.fn().mockReturnValue({
           params: {},
           execute,
@@ -3802,6 +3807,15 @@ describe('Session', () => {
           findTool(name),
         );
         mockToolRegistry.isDeferredAndHidden.mockReturnValue(true);
+        // The production registry always defines the schema-review gate;
+        // wire it so this arm exercises the gate instead of resolving
+        // unconditionally — the recorded review matches the live tool.
+        mockToolRegistry.getReviewedDeclaration = vi.fn((name: string) => {
+          const tool = findTool(name);
+          return tool && 'build' in tool
+            ? core.deferredDeclarationFingerprint(tool as never)
+            : undefined;
+        });
       }
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
@@ -37810,6 +37824,11 @@ describe('Session', () => {
         const goal = {
           name: core.ToolNames.GET_GOAL,
           kind: core.Kind.Other,
+          // The schema-review gate fingerprints name + parametersJsonSchema.
+          schema: {
+            name: 'GetGoal',
+            parametersJsonSchema: { type: 'object', properties: {} },
+          },
           build: vi.fn((params: Record<string, unknown>) => ({
             params,
             getDefaultPermission: async () => 'allow',
@@ -37837,6 +37856,14 @@ describe('Session', () => {
           findTool(name),
         );
         mockToolRegistry.isDeferredAndHidden.mockReturnValue(true);
+        // Exercise the production schema-review gate: the recorded review
+        // matches the live target's fingerprint.
+        mockToolRegistry.getReviewedDeclaration = vi.fn((name: string) => {
+          const tool = findTool(name);
+          return tool && 'build' in tool
+            ? core.deferredDeclarationFingerprint(tool as never)
+            : undefined;
+        });
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
         mockChat.sendMessageStream = vi
@@ -37865,6 +37892,170 @@ describe('Session', () => {
           'test-session-id########1',
           true,
         );
+      });
+
+      it('refuses a bridged call whose recorded review no longer matches', async () => {
+        // The schema-review gate the other bridge cases now exercise: a
+        // stale recorded fingerprint (the tool changed since tool_search
+        // returned it) must refuse the call rather than run arguments
+        // written against a schema the model no longer has.
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
+        const bridge = new ToolCallTool();
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'agent done',
+          returnDisplay: 'agent done',
+        });
+        const agentTool = {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          schema: {
+            name: 'Agent',
+            parametersJsonSchema: { type: 'object', properties: {} },
+          },
+          build: vi.fn().mockReturnValue({
+            params: {},
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: () => 'Agent',
+            toolLocations: () => [],
+          }),
+        };
+        const findTool = (name: string) =>
+          name === core.ToolNames.TOOL_CALL
+            ? bridge
+            : name === core.ToolNames.TOOL_SEARCH
+              ? { name }
+              : name === core.ToolNames.AGENT
+                ? agentTool
+                : undefined;
+        mockToolRegistry.getTool.mockImplementation(findTool);
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+          findTool(name),
+        );
+        mockToolRegistry.isDeferredAndHidden.mockReturnValue(true);
+        mockToolRegistry.getReviewedDeclaration = vi.fn(
+          () => 'stale-fingerprint-from-an-older-schema',
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-stale',
+                      name: core.ToolNames.TOOL_CALL,
+                      args: { name: core.ToolNames.AGENT, arguments: {} },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'delegate' }],
+        });
+
+        expect(execute).not.toHaveBeenCalled();
+        const followUp = vi
+          .mocked(mockChat.sendMessageStream)
+          .mock.calls.at(-1)?.[1] as { message: Part[] };
+        const response = followUp.message.find(
+          (part) => part.functionResponse?.id === 'call-stale',
+        )?.functionResponse?.response;
+        expect(JSON.stringify(response)).toContain(
+          'changed since tool_search last returned it',
+        );
+      });
+
+      it('stops bridge classification for the rest of the batch once the turn is cancelled', async () => {
+        // The partition loop resolves each bridged envelope through awaited
+        // registry work; once the turn is cancelled the remaining envelopes
+        // must not pay that for a batch the execution path will discard.
+        // Driver: the first resolution's ensureTool aborts the turn, so a
+        // batch of two bridged delegations resolves exactly one with the
+        // gate and both without it.
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
+        const bridge = new ToolCallTool();
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'agent done',
+          returnDisplay: 'agent done',
+        });
+        const agentTool = {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          build: vi.fn().mockReturnValue({
+            params: {},
+            execute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: () => 'Agent',
+            toolLocations: () => [],
+          }),
+        };
+        const findTool = (name: string) =>
+          name === core.ToolNames.TOOL_CALL
+            ? bridge
+            : name === core.ToolNames.TOOL_SEARCH
+              ? { name }
+              : name === core.ToolNames.AGENT
+                ? agentTool
+                : undefined;
+        mockToolRegistry.getTool.mockImplementation(findTool);
+        const cancellation = new AbortController();
+        let firstResolution = true;
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) => {
+          if (firstResolution) {
+            firstResolution = false;
+            // The cancel lands mid-partition, after the first envelope's
+            // resolution has started.
+            cancellation.abort();
+          }
+          return findTool(name);
+        });
+        mockToolRegistry.isDeferredAndHidden.mockReturnValue(true);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: ['a', 'b'].map((id) => ({
+                  id,
+                  name: core.ToolNames.TOOL_CALL,
+                  args: { name: core.ToolNames.AGENT, arguments: {} },
+                })),
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'delegate twice' }],
+          },
+          undefined,
+          cancellation.signal,
+        );
+
+        const ensuredAgent = mockToolRegistry.ensureTool.mock.calls.filter(
+          (call) => call[0] === core.ToolNames.AGENT,
+        ).length;
+        expect(ensuredAgent).toBe(1);
+        expect(execute).not.toHaveBeenCalled();
       });
 
       it('runs multiple Agent tool calls concurrently (issue #2516)', async () => {
@@ -38024,6 +38215,12 @@ describe('Session', () => {
             const agentTool = {
               name: core.ToolNames.AGENT,
               kind: core.Kind.Think,
+              // The schema-review gate fingerprints name +
+              // parametersJsonSchema.
+              schema: {
+                name: 'Agent',
+                parametersJsonSchema: { type: 'object', properties: {} },
+              },
               build: vi
                 .fn()
                 .mockImplementation((args: Record<string, unknown>) => {
@@ -38063,6 +38260,16 @@ describe('Session', () => {
                 async (name: string) => findTool(name),
               );
               mockToolRegistry.isDeferredAndHidden.mockReturnValue(true);
+              // Exercise the production schema-review gate: the recorded
+              // review matches the live target's fingerprint.
+              mockToolRegistry.getReviewedDeclaration = vi.fn(
+                (name: string) => {
+                  const tool = findTool(name);
+                  return tool && 'build' in tool
+                    ? core.deferredDeclarationFingerprint(tool as never)
+                    : undefined;
+                },
+              );
             }
             mockConfig.getApprovalMode = vi
               .fn()
@@ -38149,6 +38356,121 @@ describe('Session', () => {
           }
         },
       );
+
+      it('fans bridged envelopes out when a live permission manager allows the bridge', async () => {
+        // The batcher consults pm.isToolEnabled(tool_call) before resolving
+        // the envelope; every production session has a non-null PM. The
+        // deny arm is pinned elsewhere — this pins the allow arm: resolution
+        // must still happen and the bridged delegations must fan out.
+        const { ToolCallTool } = await import(
+          '@qwen-code/qwen-code-core/tools/tool-call.js'
+        );
+        const bridge = new ToolCallTool();
+        const isToolEnabled = vi.fn().mockResolvedValue(true);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled,
+          findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+          hasRelevantRules: vi.fn().mockReturnValue(false),
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: vi.fn().mockReturnValue(false),
+        });
+        type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void };
+        const makeDeferred = <T>(): Deferred<T> => {
+          let resolve!: (v: T) => void;
+          const promise = new Promise<T>((r) => {
+            resolve = r;
+          });
+          return { promise, resolve };
+        };
+        const called: Record<string, Deferred<void>> = {
+          'call-a': makeDeferred<void>(),
+          'call-b': makeDeferred<void>(),
+        };
+        const result: Record<string, Deferred<core.ToolResult>> = {
+          'call-a': makeDeferred<core.ToolResult>(),
+          'call-b': makeDeferred<core.ToolResult>(),
+        };
+        const agentTool = {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          schema: {
+            name: 'Agent',
+            parametersJsonSchema: { type: 'object', properties: {} },
+          },
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const id = args['_test_id'] as string;
+            return {
+              params: args,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockImplementation(() => {
+                called[id].resolve();
+                return result[id].promise;
+              }),
+            };
+          }),
+        };
+        const findTool = (name: string) =>
+          name === core.ToolNames.TOOL_CALL
+            ? bridge
+            : name === core.ToolNames.TOOL_SEARCH
+              ? { name }
+              : name === core.ToolNames.AGENT
+                ? agentTool
+                : undefined;
+        mockToolRegistry.getTool.mockImplementation(findTool);
+        mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+          findTool(name),
+        );
+        mockToolRegistry.isDeferredAndHidden.mockReturnValue(true);
+        mockToolRegistry.getReviewedDeclaration = vi.fn((name: string) => {
+          const tool = findTool(name);
+          return tool && 'build' in tool
+            ? core.deferredDeclarationFingerprint(tool as never)
+            : undefined;
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+        const runPromise = (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-bridged-allow',
+          ['call-a', 'call-b'].map((id) => ({
+            id,
+            name: core.ToolNames.TOOL_CALL,
+            args: {
+              name: core.ToolNames.AGENT,
+              arguments: { _test_id: id, subagent_type: 'explore' },
+            },
+          })),
+          toolLoopState,
+        );
+
+        // Serial classification would start call-b only after call-a's
+        // execute resolves — the race below deadlocks in that shape.
+        await Promise.all([called['call-a'].promise, called['call-b'].promise]);
+        result['call-a'].resolve({ llmContent: 'A', returnDisplay: 'A' });
+        result['call-b'].resolve({ llmContent: 'B', returnDisplay: 'B' });
+        await runPromise;
+
+        expect(isToolEnabled).toHaveBeenCalledWith(core.ToolNames.TOOL_CALL);
+      });
 
       it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
         const previousMaxConcurrency =
