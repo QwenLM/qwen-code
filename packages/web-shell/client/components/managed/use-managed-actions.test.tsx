@@ -340,6 +340,56 @@ describe('useManagedActions', () => {
     // follow the selection.
     hook.rerender({ sessionId: 'session-2' });
     expect(hook.latest?.respondForbidden).toBe(false);
+
+    // Coming back does not re-admit the 403 either: the refusal is remembered
+    // for the Session, not for one uninterrupted visit to it.
+    hook.rerender({ sessionId: 'session-1' });
+    expect(hook.latest?.respondForbidden).toBe(true);
+  });
+
+  it('latches a creator-only refusal that lands after the Action left the list', async () => {
+    let rejectAnswer!: (failure: Error) => void;
+    const respond = vi.fn().mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectAnswer = reject;
+        }),
+    );
+    const next = { ...pending, actionId: 'tool_approval_2' };
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([pending])
+      .mockResolvedValue([next]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+    expect(hook.latest?.respondForbidden).toBe(false);
+
+    let oldAnswer!: Promise<unknown>;
+    await act(async () => {
+      oldAnswer = hook
+        .latest!.respond(pending.actionId, 'allow')
+        .catch((failure: unknown) => failure);
+    });
+
+    // The refused Action leaves the pending list while its answer is in flight.
+    // The service checks the creator before it checks that the Action still
+    // exists, so the refusal arrives anyway and still has to latch: the next
+    // approval of this Session is refused identically.
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
+    await act(async () => {
+      rejectAnswer(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+      await oldAnswer;
+    });
+    expect(hook.latest?.respondForbidden).toBe(true);
+    // The warning is still scoped to the Action that failed, and that Action is
+    // gone, so the latch is what carries the reason from here on.
+    expect(hook.latest?.answerError).toBeUndefined();
   });
 
   it('restores the retry budget when the reader is withdrawn and back', async () => {
