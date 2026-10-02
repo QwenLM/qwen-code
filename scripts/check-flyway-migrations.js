@@ -19,6 +19,24 @@ import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { escapeWorkflowCommand } from './release-script-utils.js';
 
+// A `::error::` command's data is runner-DECODED when the downloadable log
+// is rendered, so escaping only CR/LF/% is not enough: the decode restores
+// them exactly where the main-red consumer parses, and a directory or file
+// name can carry a whole forged `::error::` line — a second flyway identity
+// — or the `: N migrations claim version M: ` phrase that suppresses the
+// genuine one from the same line. Nothing outside a migration path's real
+// alphabet may reach the command data: every other byte becomes %XX first,
+// with the shared helper's escape on top, so no decode pass can turn the
+// text back into control bytes or pattern-shaped phrases.
+const boundWorkflowPath = (text) =>
+  escapeWorkflowCommand(
+    String(text).replace(
+      /[^A-Za-z0-9._/-]/g,
+      (char) =>
+        `%${char.codePointAt(0).toString(16).toUpperCase().padStart(2, '0')}`,
+    ),
+  );
+
 // Both locations resolve into Flyway's classpath:db/migration, so their
 // versions share one namespace. Flyway scans each location AND its
 // subdirectories, and nowhere else — a versioned-migration file anywhere
@@ -127,7 +145,7 @@ for (const module of modules) {
   if (!existsSync(module)) {
     failed = true;
     console.error(
-      `::error::${escapeWorkflowCommand(module)}: no such Maven module directory`,
+      `::error::${boundWorkflowPath(module)}: no such Maven module directory`,
     );
     continue;
   }
@@ -150,9 +168,9 @@ for (const module of modules) {
       failed = true;
       errored = true;
       console.error(
-        `::error::${escapeWorkflowCommand(module)}: found migration files outside ` +
+        `::error::${boundWorkflowPath(module)}: found migration files outside ` +
           `${location.dir.join('/')}: ` +
-          `${misplaced.map(escapeWorkflowCommand).join(', ')}`,
+          `${misplaced.map(boundWorkflowPath).join(', ')}`,
       );
     } else if (
       misplaced.length > 0 ||
@@ -166,11 +184,11 @@ for (const module of modules) {
       failed = true;
       errored = true;
       console.error(
-        `::error::${escapeWorkflowCommand(module)}: found no migration under ` +
+        `::error::${boundWorkflowPath(module)}: found no migration under ` +
           `${location.dir.join('/')}; if it moved, point this check at the ` +
           `new location${
             misplaced.length > 0
-              ? `: ${misplaced.map(escapeWorkflowCommand).join(', ')}`
+              ? `: ${misplaced.map(boundWorkflowPath).join(', ')}`
               : ''
           }`,
       );
@@ -194,8 +212,8 @@ for (const [version, group] of claimants) {
   if (group.length < 2) continue;
   failed = true;
   console.error(
-    `::error::${escapeWorkflowCommand(group[0].module)}: ${group.length} migrations claim version ` +
-      `${escapeWorkflowCommand(version)}: ${group.map(({ file }) => escapeWorkflowCommand(file)).join(', ')}`,
+    `::error::${boundWorkflowPath(group[0].module)}: ${group.length} migrations claim version ` +
+      `${escapeWorkflowCommand(version)}: ${group.map(({ file }) => boundWorkflowPath(file)).join(', ')}`,
   );
   for (const { module } of group) collided.add(module);
 }

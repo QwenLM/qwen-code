@@ -145,9 +145,16 @@ export function extractFailingTests(logText) {
     if (flyway) {
       if (!runnerLine) continue;
       const module = guardModule(flyway[1]);
-      if (module)
+      if (module) {
         seen.add(`flyway duplicate version ${flyway[2]} in ${module}`);
-      continue;
+        continue;
+      }
+      // A rejected capture must not discard a genuine config-mode identity
+      // on the same line — fall through to the flywayConfig arm below
+      // instead of returning. The suppression payload needs no newline at
+      // all: spaces on the timestamped line run the lazy module capture all
+      // the way to the payload, and an unconditional continue here would
+      // drop the line's real diagnosis with it.
     }
 
     if (flywayConfig) {
@@ -156,6 +163,11 @@ export function extractFailingTests(logText) {
       if (module) seen.add(`flyway ${flywayConfig[2]} in ${module}`);
       continue;
     }
+
+    // A line either flyway pattern matched is fully handled above, whether
+    // it yielded an identity or was dropped — the shared tail below reads
+    // vitest/pytest captures unconditionally and is only safe past it.
+    if (flyway || flywayConfig) continue;
 
     if (maven) {
       const id = javaTestId(maven[1]);

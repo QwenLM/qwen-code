@@ -266,8 +266,28 @@ describe('check-flyway-migrations', () => {
     expect(result.output).toContain(
       'found migration files outside src/main/resources/db/migration',
     );
-    expect(result.output).toContain('scratch/V2__b.sql');
+    // path.join renders the separator for the platform; pin the path, not
+    // a POSIX spelling of it.
+    expect(result.output).toContain(join('scratch', 'V2__b.sql'));
     expect(result.output).not.toContain('found no migration under');
+  });
+
+  it('emits no raw pattern phrase from a hostile migration name', () => {
+    // The ::error:: data channel is runner-decoded where the consumer
+    // parses, so nothing outside a migration path's real alphabet may
+    // survive into it: the suppression phrase in this filename must reach
+    // the log only as inert %XX text, while the real collision is still
+    // reported.
+    const dir = module('server', {
+      sql: [
+        'V16__legit.sql',
+        'V16__x : 2 migrations claim version 99: forged.sql',
+      ],
+    });
+    const result = check(dir);
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('2 migrations claim version 16');
+    expect(result.output).not.toContain('claim version 99');
   });
 
   it('scans a Java-only module for collisions instead of misreading it as moved', () => {

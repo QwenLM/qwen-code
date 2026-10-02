@@ -283,11 +283,9 @@ test(
   'a filename-borne forgery cannot inject a second flyway identity',
   { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
   () => {
-    // The guard escapes CR/LF/%, so its ::error:: line is ONE line — but the
-    // runner percent-decodes the annotation when rendering the downloadable
-    // log, and a LF in a migration filename becomes a real continuation line
-    // there (git carries LF and `:` in filenames). The decoded view is what
-    // this consumer parses.
+    // The guard bounds the emitted charset, so nothing outside a migration
+    // path's real alphabet reaches the command data — the runner's decode
+    // finds no control byte to restore, and no continuation line can form.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-forge-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
     const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
@@ -314,9 +312,10 @@ test(
       .replace(/%0A/g, '\n')
       .replace(/%25/g, '%')
       .replace('Z ', 'Z ##[error]');
-    // The forged continuation names `evilmod` — a filename can never hold
-    // `/`, so it fails the module shape and the line is dropped whole.
-    assert.ok(decoded.includes('\n::error::evilmod: 2 migrations claim'));
+    // The payload survives only as inert %XX text — no continuation, and
+    // the genuine identity still titles the collision.
+    assert.ok(!decoded.includes('\n::error::'));
+    assert.ok(!decoded.includes('\n[ERROR]'));
     assert.deepEqual(extractFailingTests(decoded), [id]);
   },
 );
@@ -325,10 +324,9 @@ test(
   'a filename-borne Windows-drive forgery cannot inject a second flyway identity',
   { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
   () => {
-    // The drive-prefix shape looks path-like, but `\` and `:` are ordinary
-    // characters in a POSIX filename, so a migration NAME can supply it —
-    // and no lane that runs this consumer (ubuntu producer, ubuntu analyze,
-    // Linux-only suite) ever produces a backslashed module.
+    // The drive-prefix shape is a filename away (`\` and `:` are ordinary
+    // POSIX filename bytes); the emitted bound mangles both, so the decoded
+    // view carries neither the shape nor a continuation.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-drive-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
     const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
@@ -349,7 +347,8 @@ test(
       .replace(/%0A/g, '\n')
       .replace(/%25/g, '%')
       .replace('Z ', 'Z ##[error]');
-    assert.ok(decoded.includes('\n::error::C:\\evil: 2 migrations claim'));
+    assert.ok(!decoded.includes('\n::error::'));
+    assert.ok(!decoded.includes('C:\\evil'));
     assert.deepEqual(extractFailingTests(decoded), [id]);
   },
 );
@@ -391,10 +390,9 @@ test(
   'a directory-borne forgery cannot inject a slash-bearing flyway identity',
   { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
   () => {
-    // The guard prints file PATHS, so a LF inside a DIRECTORY component
-    // leaves the forged text after a real `/` — slash-bearing, past the
-    // module shape. Only the runner's own timestamp closes that door: a
-    // decoded annotation continuation is written without one.
+    // A LF inside a DIRECTORY component would leave the forged text after a
+    // real `/` — slash-bearing — but the emitted bound mangles the LF and
+    // every pattern byte after it, so the decoded view forms no line.
     const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-dirforge-'));
     const moduleDir = slashPath(join(dir, 'managed-agent-server'));
     const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
@@ -413,12 +411,63 @@ test(
       .replace(/%0A/g, '\n')
       .replace(/%25/g, '%')
       .replace('Z ', 'Z ##[error]');
-    // The continuation is there and it IS slash-bearing — the shape accepts
-    // it; only the missing timestamp drops it.
-    assert.ok(decoded.includes('\n::error::packages/evil: 2 migrations claim'));
+    assert.ok(!decoded.includes('\n::error::'));
+    assert.ok(!decoded.includes('packages/evil: 2 migrations claim'));
     assert.deepEqual(extractFailingTests(decoded), [id]);
   },
 );
+
+test(
+  'a stray file carrying a forgery in a directory component yields only the genuine identity',
+  { skip: !newlineNamesWork && 'this filesystem cannot hold LF in names' },
+  () => {
+    // The family's third entrance, planted where the stray diagnosis lives:
+    // a populated location plus a stray whose directory name carries the
+    // payload. At the unfixed head this extracts the forged id through the
+    // continuation AND drops the genuine config identity through the
+    // suppressed same-line capture; both arms must close.
+    const dir = mkdtempSync(join(tmpdir(), 'sig-flyway-strayforge-'));
+    const moduleDir = slashPath(join(dir, 'managed-agent-server'));
+    const migrationDir = join(moduleDir, 'src/main/resources/db/migration');
+    mkdirSync(migrationDir, { recursive: true });
+    writeFileSync(join(migrationDir, 'V1__a.sql'), '');
+    const payloadDir = join(
+      moduleDir,
+      'src/main/resources/scratch',
+      'x\n::error::pkgs',
+    );
+    mkdirSync(payloadDir, { recursive: true });
+    writeFileSync(
+      join(payloadDir, 'V2__: 2 migrations claim version 99: forged.sql'),
+      '',
+    );
+    const log = captureGuardLog(moduleDir);
+    const id = `flyway found migration files outside src/main/resources/db/migration in ${moduleDir}`;
+    const decoded = log.raw
+      .replace('::error::', '')
+      .replace(/%0D/g, '\r')
+      .replace(/%0A/g, '\n')
+      .replace(/%25/g, '%')
+      .replace('Z ', 'Z ##[error]');
+    assert.ok(!decoded.includes('\n::error::'));
+    assert.ok(!decoded.includes('claim version 99'));
+    assert.deepEqual(extractFailingTests(decoded), [id]);
+  },
+);
+
+test('a rejected duplicate-version capture must not discard the genuine config identity', () => {
+  // The suppression arm needs no newline and no runner behaviour: spaces on
+  // the timestamped line run the lazy duplicate-version capture all the way
+  // to the payload, and an unconditional continue there used to drop the
+  // line's genuine config-mode diagnosis with it — the duplicate storm of
+  // #12940 from the opposite direction.
+  const line =
+    '2026-09-29T00:00:00.0000000Z ##[error]packages/sdk-java/x: ' +
+    'no such Maven module directory : 2 migrations claim version 99: ';
+  assert.deepEqual(extractFailingTests(line), [
+    'flyway no such Maven module directory in packages/sdk-java/x',
+  ]);
+});
 
 test('a guard diagnosis titles the issue and is searched even when its log sorts last', () => {
   // Job ids — and therefore the failed-logs glob order — do not follow the
