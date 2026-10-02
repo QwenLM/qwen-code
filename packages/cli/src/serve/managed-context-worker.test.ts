@@ -215,6 +215,38 @@ function installation(
   };
 }
 
+/** `installation` carrying the workspace contextConfigRef, for the digest-gated boot. */
+function workspaceInstallation(
+  sessionId: string,
+  cwdRelative: string,
+  operationId = `op-${sessionId}`,
+) {
+  const request = installation(sessionId, cwdRelative, operationId);
+  const binding = {
+    ...request.binding,
+    contextConfigRef: WORKSPACE_CONTEXT_CONFIG_REF,
+  };
+  return {
+    ...request,
+    binding,
+    contextDigest: computeManagedContextDigest(binding),
+  };
+}
+
+/** Activation request for a workspaceInstallation-installed Session. */
+function workspaceActivation(
+  request: ReturnType<typeof workspaceInstallation>,
+) {
+  return {
+    protocolVersion: 1,
+    operation: 'activate',
+    sessionId: request.sessionId,
+    contextDigest: request.contextDigest,
+    contextConfigRef: request.binding.contextConfigRef,
+    profile: WORKSPACE_EXECUTION_PROFILE,
+  };
+}
+
 function shell(sessionId: string, callId: string, command: string) {
   return {
     protocolVersion: 2,
@@ -985,9 +1017,23 @@ describe('Managed context tool gate', () => {
     fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), '');
     fs.writeFileSync(path.join(root, 'services/api/package.json'), '{}');
     fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
-    const origin = await startWorker({ ...BOOT, mountRoot: root });
-    await post(origin, CONTEXT, installation('session-1', 'services/api'));
-    await post(origin, CONTEXT, installation('session-2', 'services/web'));
+    // Boot with the workspace capability so includeDirectories spans the
+    // whole mount: the executor's Session pinning is load-bearing in this
+    // configuration (legacy boots root the tool set at the Session itself,
+    // where the sibling-isolation assertions cannot fail).
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
     const glob = (callId: string, input: Record<string, unknown>) => ({
       ...shell('session-1', callId, ''),
       toolName: 'glob',
@@ -1021,7 +1067,7 @@ describe('Managed context tool gate', () => {
     expect(JSON.stringify(sub)).toContain('index.ts');
     expect(outside.result.executionStatus).toBe('error');
     expect(JSON.stringify(outside)).toContain(
-      'not within the Workspace directory',
+      'not within the Session working directory',
     );
   });
 
@@ -1063,6 +1109,166 @@ describe('Managed context tool gate', () => {
     ).json();
     expect(plain.result.executionStatus).toBe('success');
     expect(JSON.stringify(plain)).toContain('in-bounds-rules');
+  });
+
+  it('allows a pattern segment that merely starts with `..`', async () => {
+    // The containment guard matches `..` by segment equality, so `a/..b/*.ts`
+    // is legitimate; nothing else pinned that before a hardening edit could
+    // broaden the check to a substring match and silently refuse it.
+    const root = workspace(['services/api/src']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), '');
+    const origin = await startWorker({ ...BOOT, mountRoot: root });
+    await post(origin, CONTEXT, installation('session-1', 'services/api'));
+
+    const allowed = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-1', 'call-allow', ''),
+        toolName: 'glob',
+        input: { pattern: 'a/..b/*.ts' },
+      })
+    ).json();
+
+    expect(JSON.stringify(allowed)).not.toContain(
+      'must stay within the Session working directory',
+    );
+    expect(allowed.result.executionStatus).not.toBe('error');
+  });
+
+  it('refuses a glob that would search or report outside the Session directory', async () => {
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), '');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    // Same workspace-capability boot as the sibling test: the refusal cases
+    // must hold when the registered directories span the whole mount.
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    await post(
+      origin,
+      CONTEXT,
+      workspaceInstallation('session-2', 'services/web'),
+    );
+    const glob = async (callId: string, input: Record<string, unknown>) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'glob',
+          input,
+        })
+      ).json();
+
+    // `pattern` is a search root of its own: glob resolves `..` against the
+    // filesystem and treats an absolute pattern as absolute.
+    const dotdot = await glob('call-1', { pattern: '../**/*' });
+    const absolute = await glob('call-2', { pattern: '/etc/host*' });
+    // A failed search still reaches the model and the durable record.
+    const missing = await glob('call-3', { pattern: '**/*', path: 'nope' });
+    // A link inside the Session context that points at a sibling Session.
+    const linked = await glob('call-4', { pattern: '*', path: 'peek' });
+    // Brace expansion happens after the input-side segment check, so the
+    // `..` alternative never appears as a literal segment; containment is
+    // enforced on glob's output instead.
+    const braced = await glob('call-5', { pattern: '{.,..}/**/*' });
+    // A symlink named as a literal pattern segment is resolved by the
+    // filesystem: `follow: false` governs links met during a globstar walk,
+    // not this one.
+    const literalLink = await glob('call-6', { pattern: 'peek/**/*' });
+
+    expect(dotdot.result.executionStatus).toBe('error');
+    expect(absolute.result.executionStatus).toBe('error');
+    expect(missing.result.executionStatus).toBe('error');
+    expect(linked.result.executionStatus).toBe('error');
+    expect(braced.result.executionStatus).toBe('error');
+    expect(literalLink.result.executionStatus).toBe('error');
+    for (const response of [
+      dotdot,
+      absolute,
+      missing,
+      linked,
+      braced,
+      literalLink,
+    ]) {
+      const text = JSON.stringify(response);
+      expect(text).not.toContain('secret.txt');
+      expect(text).not.toContain(realDirectory(root, 'services/api'));
+      expect(text).not.toContain('/etc/');
+    }
+  });
+
+  it('refuses read_file through an in-context symlink that leaves the Session', async () => {
+    // The glob admission makes the link enumerable; reading through it must
+    // not hand a sibling Session's content to a files-only Session.
+    const root = workspace(['services/api/src', 'services/web']);
+    fs.writeFileSync(path.join(root, 'services/api/src/index.ts'), 'mine');
+    fs.writeFileSync(path.join(root, 'services/web/secret.txt'), 'sibling');
+    fs.symlinkSync(
+      path.join('..', 'web'),
+      path.join(root, 'services/api/peek'),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const install1 = workspaceInstallation('session-1', 'services/api');
+    await post(origin, CONTEXT, install1);
+    await post(origin, ACTIVATION, workspaceActivation(install1));
+    const read = async (callId: string, filePath: string) =>
+      (
+        await post(origin, EXECUTE, {
+          ...shell('session-1', callId, ''),
+          toolName: 'read_file',
+          input: { file_path: filePath },
+        })
+      ).json();
+
+    const through = await read('call-1', 'peek/secret.txt');
+    expect(through.result.executionStatus).toBe('error');
+    expect(JSON.stringify(through)).not.toContain('sibling');
+    expect(JSON.stringify(through)).not.toContain(
+      realDirectory(root, 'services/api'),
+    );
+    expect(JSON.stringify(through)).toContain(
+      "Path 'peek/secret.txt' is not within the Session working directory.",
+    );
+    // A nonexistent path keeps the tool's own not-found answer, not a
+    // traversal accusation (realpathIfPresent's ENOENT fallback).
+    const missing = await read('call-2', 'src/nope.txt');
+    expect(JSON.stringify(missing)).not.toContain(
+      'not within the Session working directory',
+    );
+    // Control: an ordinary in-Session read still works.
+    const own = await read('call-3', 'src/index.ts');
+    expect(own.result.executionStatus).toBe('success');
+    expect(JSON.stringify(own)).toContain('mine');
+  });
+
+  it('keeps the echoed pattern verbatim for a Session at the filesystem root', async () => {
+    // Degenerate root: '/' is both the boundary and every path's prefix, so
+    // the rewrite must stand down rather than eat the pattern's separators.
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: path.parse(process.cwd()).root,
+    });
+    await post(origin, CONTEXT, installation('session-root', '.'));
+    const answer = await (
+      await post(origin, EXECUTE, {
+        ...shell('session-root', 'call-1', ''),
+        toolName: 'glob',
+        input: { pattern: 'etc*/host*' },
+      })
+    ).json();
+    expect(answer.result.executionStatus).toBe('success');
+    expect(JSON.stringify(answer)).toContain('etc*/host*');
   });
 
   it('refuses new calls once the directory is gone, and still answers settled ones', async () => {

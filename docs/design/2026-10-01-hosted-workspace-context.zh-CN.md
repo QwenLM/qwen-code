@@ -14,17 +14,18 @@ safe mode 是一个不可分割的捆绑（hooks、extensions、skills、MCP、�
 保护。
 
 本切片交付这条路径：Hosted Workspace 回合第一次获取 Runtime 时，Harness
-经 `workspace-context` Runtime 控制操作读取根目录的说明文件（`QWEN.md`、
-`AGENTS.md`），并把拼装好的文本保存在已接入的 Session 上。每个模型请求都
-在请求组装时经 `Config.getUserMemory()` 读取系统提示所需内容，因此
-Harness 通过 `Config.setUserMemory` 注入取回的文本——Session 已持有上下文
+经 `workspace-context` Runtime 控制操作读取 Session 工作目录的说明文件（`QWEN.md`、
+`AGENTS.md`），并把拼装好的文本保存在已接入的 Session 上。Harness 通过 `Config.setUserMemory` 注入取回的文本，并在下一个模型请求前
+调用 `refreshSystemInstruction` 刷新缓存的系统指令——Session 已持有上下文
 时在 `initialize()` 之后注入，首个请求即可带上；回合进行中取回时，在两个
 模型轮次之间注入。
 
 不在范围内：项目 settings、skills、rules 目录（safe mode 有意保持关闭）；
-Workspace 根目录之外的嵌套或层级发现；已取回上下文的持久记录。持久化需要
+Session 工作目录之外的嵌套或层级发现；已取回上下文的持久记录。持久化需要
 新增 Session 域，而这是一个跨语言的契约变更（Java 存储侧镜像了封闭的域名
-空间），因此延后：冷加载的 Session 在下一个工具回合重新读取。
+空间），因此延后：冷加载的 Session 在下一个普通工具回合重新读取。恢复已运行中的工具回合
+不重新读取；仍接入的 Session 会保留已有文本。本切片覆盖原生 files/shell
+profile；MCP 回合跳过此读取。
 
 ## 时机与 Stage A 不变量
 
@@ -34,7 +35,7 @@ Workspace 根目录之外的嵌套或层级发现；已取回上下文的持久�
 变化。
 
 由此带来的明确取舍：Session 的第一个回合在第一个请求时没有项目说明。读取
-在该回合的第一次工具派发之前完成，因此同一回合的后续请求以及之后的所有
+在该回合的第一次工具派发之前完成，成功读取后，同一回合的后续请求以及该 attachment 上之后的
 回合都有项目说明。
 
 ## 失败语义
@@ -46,15 +47,14 @@ Workspace 根目录之外的嵌套或层级发现；已取回上下文的持久�
 并把每个文件截断到 64 Ki 字符，使回复保持在 1 MiB 控制上限之内。
 
 读取是 best-effort 的。文件不存在、传输失败或 Broker 拒绝都会让 Session 保持
-无上下文状态，回合不受影响；失败记录在 Harness 的 stderr。被中止的回合从不
-锁定 slot。
+无上下文状态，回合不受影响；失败记录在 Harness 的 stderr。取消会立即停止等待读取，也不会锁定 slot，即使底层请求稍后才完成。
 slot 会记录一次已完成的读取——包括「Workspace 没有说明文件」——因此每个
 已接入的 Session 最多读取一次。
 
 ## 拼装
 
 每个读回非空内容的文件贡献一节，格式与本地层级记忆一致：
-`--- Context from: <name> ---`、去掉首尾空白的文件正文与结束标记。节与节之间空一行。文件名保持 Workspace 相对形式；Runtime 宿主的物理
+`--- Context from: <name> ---`、去掉首尾空白的文件正文与结束标记。节与节之间空一行。文件名保持 Session 工作目录的相对形式；Runtime 宿主的物理
 路径从不出现。
 
 ## 实现边界

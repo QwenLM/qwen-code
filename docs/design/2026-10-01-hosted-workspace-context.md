@@ -14,20 +14,21 @@ own bound workspace, which the design forbids the model from depending on.
 Instructions therefore need a Workspace-sourced path, not a lifted guard.
 
 This slice delivers one: the first time a Hosted Workspace turn acquires the
-Runtime, the Harness reads the root instruction files (`QWEN.md`, `AGENTS.md`)
+Runtime, the Harness reads the Session working directory’s instruction files (`QWEN.md`, `AGENTS.md`)
 through a `workspace-context` Runtime control and keeps the assembled text
-on the attached Session. Every model request assembles its system prompt from
-`Config.getUserMemory()` at request time, so the Harness injects the fetched
-text through `Config.setUserMemory` — after `initialize()` for the first
+on the attached Session. The Harness injects the fetched
+text through `Config.setUserMemory` and refreshes the cached system instruction
+with `refreshSystemInstruction` before the next model request — after `initialize()` for the first
 request when the Session already holds it, and between model rounds when a
 fetch landed mid-turn.
 
 Out of scope: project settings, skills, and rules directories (safe mode keeps
-them off deliberately); nested or hierarchical discovery beyond the Workspace
-root; a durable record of the fetched context. Durability needs a new Session
+them off deliberately); nested or hierarchical discovery outside the Session working directory; a durable record of the fetched context. Durability needs a new Session
 domain, which is a cross-language contract change (the Java store mirrors the
 closed domain namespace), so it is deferred: a cold-loaded Session refetches on
-its next tool turn.
+its next ordinary tool turn. Recovery of an already-running tool turn does not
+refetch context; an attached Session retains any text it already has. This
+slice covers the native files/shell profiles; MCP turns skip this read.
 
 ## Timing and the Stage A invariant
 
@@ -39,8 +40,8 @@ nothing on the first request's path changed.
 
 The consequence is explicit: a Session's very first turn answers its first
 request without project instructions. The fetch lands before that turn's first
-tool dispatch, so the same turn's follow-up requests and every later turn have
-them.
+tool dispatch, so the same turn's follow-up requests and later turns on that attachment have
+them after a successful fetch.
 
 ## Failure semantics
 
@@ -54,8 +55,8 @@ each at 64 Ki characters so the reply stays under the 1 MiB control limit.
 
 The read is best-effort. A missing file, a transport failure, or a Broker
 refusal leaves the Session without context and the turn unaffected; the
-failure is logged on the Harness's stderr. An aborted turn never latches the
-slot. The slot records a completed
+failure is logged on the Harness's stderr. Cancellation stops waiting for the read immediately and never latches the
+slot, even if the underlying request finishes later. The slot records a completed
 fetch — including "the Workspace has no instruction files" — so the read
 happens at most once per attached Session.
 
@@ -64,7 +65,7 @@ happens at most once per attached Session.
 Each file that reads back non-blank contributes one section in the same shape
 the local hierarchical memory uses: `--- Context from: <name> ---`, the
 file's trimmed content, and the closing marker. Sections join with
-a blank line. Names stay Workspace-relative; the Runtime host's physical paths
+a blank line. Names stay relative to the Session working directory; the Runtime host's physical paths
 never appear.
 
 ## Implementation boundaries

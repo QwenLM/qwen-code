@@ -6,6 +6,7 @@
 
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
@@ -853,34 +854,23 @@ export class ManagedToolExecutor {
           directory,
           params['file_path'].trim(),
         );
-      }
-      if (
-        entry.toolName === ReadFileTool.Name &&
-        typeof params['file_path'] === 'string' &&
-        (tools.workspaceRoot ?? tools.directory) !== undefined
-      ) {
-        // The mount realpaths the Session directory; the file half needs the
-        // same check or a symlink planted in the Workspace (git preserves
-        // them) turns a read into a host-path one. A file that does not
-        // exist yet falls through to the tool's own not-found report.
-        let real: string | undefined;
-        try {
-          real = await fs.realpath(params['file_path']);
-        } catch {
-          real = undefined;
-        }
-        if (real !== undefined) {
-          const boundary = tools.workspaceRoot ?? tools.directory!;
-          const rel = path.relative(boundary, real);
-          if (
-            rel === '..' ||
-            rel.startsWith(`..${path.sep}`) ||
-            path.isAbsolute(rel)
-          ) {
-            throw new Error(
-              `Path '${params['file_path']}' is not within the Workspace directory.`,
-            );
-          }
+        // The glob admission makes an in-context symlink enumerable, so the
+        // lexical resolve is no longer sufficient: realpath the result and
+        // refuse anything that lands outside the Session directory. The
+        // ENOENT fallback keeps a nonexistent file reported by the tool
+        // itself rather than accused as traversal.
+        const relative = path.relative(
+          await realpathIfPresent(directory),
+          await realpathIfPresent(params['file_path'] as string),
+        );
+        if (
+          relative === '..' ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          throw new Error(
+            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
+          );
         }
       }
       if (entry.toolName === GlobTool.Name) {
@@ -894,21 +884,33 @@ export class ManagedToolExecutor {
           );
         const requested =
           typeof params['path'] === 'string' ? params['path'].trim() : '';
+        // `pattern` is a second search root: glob resolves `..` segments and
+        // treats an absolute pattern as absolute, so it is contained too, by
+        // segment so a literal `a/..b/*.ts` stays usable.
+        const pattern =
+          typeof params['pattern'] === 'string' ? params['pattern'] : '';
+        if (path.isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..')) {
+          throw new Error(
+            'Glob pattern must stay within the Session working directory.',
+          );
+        }
         const resolved =
           requested === '' || requested === '.'
             ? root
             : path.resolve(root, requested);
-        const relative = path.relative(root, resolved);
-        // A boundary test, not a prefix one: `..data` is a directory INSIDE
-        // the Session (`path.relative` yields `..data`), while `..` and
-        // `../x` are escapes.
+        // Containment compares realpaths: a lexical compare cannot see a
+        // symlink inside the Session context that leaves it.
+        const relative = path.relative(
+          await realpathIfPresent(root),
+          await realpathIfPresent(resolved),
+        );
         if (
           relative === '..' ||
           relative.startsWith(`..${path.sep}`) ||
           path.isAbsolute(relative)
         ) {
           throw new Error(
-            `Path '${requested}' is not within the Workspace directory.`,
+            `Path '${requested}' is not within the Session working directory.`,
           );
         }
         params['path'] = resolved;
@@ -971,24 +973,55 @@ export class ManagedToolExecutor {
       } else {
         result = await invoke();
       }
-      if (entry.toolName === GlobTool.Name && tools.directory !== undefined) {
-        result = relativizeGlobResult(result, tools.directory);
+      if (entry.toolName === GlobTool.Name) {
+        const root = tools.directory;
+        if (root === undefined)
+          throw new ManagedToolUnavailableError(
+            'Managed context directory is unavailable.',
+          );
+        // Contain the OUTPUT, not the pattern's grammar: brace expansion
+        // (`{.,..}/**/*`) and a symlink named as a literal pattern segment
+        // both resolve after every input-side check, so each hit is compared
+        // against the Session root's realpath and any escape refuses the
+        // result rather than certifying a sibling Session's files as local.
+        const resultPaths = (result as { resultFilePaths?: unknown })
+          .resultFilePaths;
+        if (Array.isArray(resultPaths)) {
+          const realRoot = await realpathIfPresent(root);
+          for (const hit of resultPaths) {
+            if (typeof hit !== 'string') continue;
+            const relative = path.relative(
+              realRoot,
+              await realpathIfPresent(hit),
+            );
+            if (
+              relative === '..' ||
+              relative.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(relative)
+            ) {
+              throw new Error(
+                'Glob results must stay within the Session working directory.',
+              );
+            }
+          }
+        }
+        result = relativizeGlobResult(result, root);
       }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       payload = {
         executionStatus: ManagedToolExecutor.isCancelRequested(entry)
           ? 'cancelled'
           : 'error',
         responseParts: [],
         error: {
-          // A thrown tool error (e.g. glob's validatePath on a missing
-          // directory) carries the Runtime host's absolute Session path —
-          // strip it the same way the glob result rewrite does.
-          message: stripSessionRoot(
-            error instanceof Error ? error.message : String(error),
-            tools.directory,
-          ),
+          // A refused or failed glob reaches the model and the durable record
+          // the same way its results do, so it is rewritten the same way.
+          message:
+            entry.toolName === GlobTool.Name && tools.directory !== undefined
+              ? relativizeGlobText(message, tools.directory)
+              : message,
         },
       };
     }
@@ -1223,32 +1256,59 @@ function sameInvocation(
  * Runtime host's physical layout: every path under the Session's installed
  * context becomes Workspace-relative, and the root itself becomes ".".
  */
-function relativizeGlobResult(result: ToolResult, directory: string) {
-  if (typeof result.llmContent !== 'string') return result;
-  return {
-    ...result,
-    llmContent: stripSessionRoot(result.llmContent, directory),
-  };
+export function relativizeGlobText(text: string, directory: string): string {
+  const root = path.resolve(directory);
+  // A Session installed at the filesystem root is its own boundary: every
+  // absolute path legitimately starts with it, so there is nothing to strip
+  // and a one-character prefix would only eat separators (the echoed pattern
+  // included).
+  if (root === path.sep) return text;
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  const escape = (value: string) =>
+    value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // ponytail: strip the root only where it begins a path token. An unanchored
+  // split/join also ate the separators of a nested directory whose name
+  // repeats the root, fusing two real paths into one that does not exist.
+  const tokenPrefix = new RegExp(`(?<![\\w./\\\\-])${escape(prefix)}`, 'g');
+  // The bare-root rewrite needs the same leading boundary: without it a hit
+  // whose text merely ends with the root string is truncated mid-token.
+  const bareRoot = new RegExp(
+    `(?<![\\w./\\-])${escape(root)}(?![/\\w.-])`,
+    'g',
+  );
+  return text.replace(tokenPrefix, '').replace(bareRoot, '.');
+}
+
+/** Both of glob's model-facing channels carry paths, so both are rewritten. */
+function relativizeGlobResult(
+  result: ToolResult,
+  directory: string,
+): ToolResult {
+  const next: ToolResult = { ...result };
+  if (typeof next.llmContent === 'string') {
+    next.llmContent = relativizeGlobText(next.llmContent, directory);
+  }
+  if (typeof next.error?.message === 'string') {
+    next.error = {
+      ...next.error,
+      message: relativizeGlobText(next.error.message, directory),
+    };
+  }
+  return next;
 }
 
 /**
- * Removes the Runtime host's absolute Session directory from model-visible
- * text. The replacement is boundary-anchored: an occurrence of the root only
- * rewrites at a path boundary (start of text, or after a character that
- * cannot be part of a path segment), so a nested directory that repeats the
- * root's tail (`<root>/sub/<root-tail>/notes.md`) is never collapsed into a
- * wrong relative path.
+ * A path that does not exist has nothing to escape through, so containment
+ * falls back to the lexical value and lets the tool report it; any other
+ * failure to resolve is not something containment may assume away.
  */
-function stripSessionRoot(text: string, directory: string | undefined): string {
-  if (directory === undefined) return text;
-  const root = path.resolve(directory);
-  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const boundaryPrefix = new RegExp(
-    `(?<![/\\w.-])${escape(root + path.sep)}`,
-    'g',
-  );
-  const bareRoot = new RegExp(`(?<![/\\w.-])${escape(root)}(?![/\\w.-])`, 'g');
-  return text.replace(boundaryPrefix, '').replace(bareRoot, '.');
+async function realpathIfPresent(candidate: string): Promise<string> {
+  try {
+    return await realpath(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return candidate;
+    throw error;
+  }
 }
 
 function toPayload(

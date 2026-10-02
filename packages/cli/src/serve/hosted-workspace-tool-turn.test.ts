@@ -979,6 +979,8 @@ it.each([
   { pattern: '' },
   { pattern: '   ' },
   { pattern: 7 },
+  { pattern: '/**/*.ts' },
+  { pattern: '../**/*' },
   { pattern: '**/*.ts', path: '/private/secret-host-path' },
   { pattern: '**/*.ts', path: '../escape' },
   { pattern: '**/*.ts', path: 'a\\b' },
@@ -1016,12 +1018,12 @@ it.each([
   },
 );
 
-it('normalizes a glob path before dispatch', async () => {
+it('normalizes a glob pattern and path before dispatch', async () => {
   turn = createSearchTurn();
   const call = {
     ...calls[0],
     name: 'glob',
-    args: { pattern: '**/*.ts', path: ' ./src//nested ' },
+    args: { pattern: ' **/*.ts ', path: ' ./src//nested ' },
   };
   await turn.execute(
     [call],
@@ -1037,6 +1039,30 @@ it('normalizes a glob path before dispatch', async () => {
   await turn.consumeResults();
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
+});
+
+it('treats a blank glob path as omitted and still dispatches', async () => {
+  // The declaration marks `path` optional; an explicit blank must not read
+  // as a traversal refusal (which would also poison every valid sibling
+  // call in the batch).
+  turn = createSearchTurn();
+  const call = {
+    ...calls[0],
+    name: 'glob',
+    args: { pattern: '**/*.ts', path: '' },
+  };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
+  expect(broker.execute).toHaveBeenCalledOnce();
+  const payload = JSON.parse(broker.execute.mock.calls[0][1]);
+  expect(payload.input).toEqual({ pattern: '**/*.ts' });
+  await turn.consumeResults();
+  await turn.finish();
 });
 
 it('truncates an oversized glob result to a fitting prefix with a narrowing hint', async () => {
@@ -1215,6 +1241,34 @@ it('does not latch the context slot when the turn is aborted during the read', a
   await turn.finish().catch(() => undefined);
   expect(broker.workspaceContext).toHaveBeenCalledOnce();
   expect(slot.read()).toBeUndefined();
+});
+
+it('cancels a turn without waiting for a stalled Workspace context read', async () => {
+  const slot = contextSlot();
+  const write = vi.spyOn(slot, 'write');
+  const controller = new AbortController();
+  const reason = new Error('cancelled during Workspace context read');
+  broker.workspaceContext.mockImplementation(() => new Promise(() => {}));
+  turn = turnWithContext(slot);
+  const settled = vi.fn();
+  const outcome = turn
+    .execute([calls[0]], [parts[0]], 'model', controller.signal)
+    .catch((cause: unknown) => cause);
+  void outcome.then(settled);
+  await vi.waitFor(() =>
+    expect(broker.workspaceContext).toHaveBeenCalledOnce(),
+  );
+  controller.abort(reason);
+  await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce(), {
+    timeout: 1_000,
+  });
+  expect(await outcome).toBe(reason);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect(write).not.toHaveBeenCalled();
+  expect(slot.read()).toBeUndefined();
+  await turn.finish();
+  expect(broker.release).toHaveBeenCalledOnce();
 });
 
 it('never blocks a turn when the Workspace context read fails', async () => {

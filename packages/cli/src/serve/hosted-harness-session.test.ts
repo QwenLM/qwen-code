@@ -2939,12 +2939,14 @@ describe('Hosted Harness no-tool session', () => {
       body,
     );
     expect(created.status).toBe(200);
+    let createDeclarations: string[] | undefined;
     state.model.mockImplementationOnce(async ({ toolTurn }) => {
-      expect(
-        (await toolTurn!.declarations(new AbortController().signal)).map(
-          (tool) => tool.name,
-        ),
-      ).toEqual(['read_file', 'write_file', 'edit', 'glob']);
+      // Capture, don't assert: an AssertionError inside this callback is
+      // swallowed by executeHostedTurn's catch, so only an assertion after
+      // the turn settles can fail the test.
+      createDeclarations = (
+        await toolTurn!.declarations(new AbortController().signal)
+      ).map((tool) => tool.name!);
       return { text: 'text without side effects', model: 'test-model' };
     });
     const prompt = [{ type: 'text', text: 'hello' }];
@@ -2966,6 +2968,12 @@ describe('Hosted Harness no-tool session', () => {
       ).set('X-Qwen-Client-Id', clientId);
       expect(status.body.hasActivePrompt).toBe(false);
     });
+    expect(createDeclarations).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      'glob',
+    ]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       clientId,
@@ -6554,7 +6562,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
    * execute hangs until the owner is "crashed" via cancel, leaving the turn
    * unsettled in the journal.
    */
-  async function parkToolTurn() {
+  async function parkToolTurn(toolProfile = FILE_PROFILE) {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     acquireSpy = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
@@ -6582,7 +6590,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       sessionId: SESSION_ID,
       sessionScope: 'thread',
       managedSessionStore: store(),
-      toolProfile: FILE_PROFILE,
+      toolProfile,
     });
     expect(created.status).toBe(200);
     state.model.mockImplementationOnce(
@@ -6636,13 +6644,13 @@ describe('Hosted Harness Runtime turn takeover', () => {
     acquireSpy.mockClear();
   }
 
-  async function loadReplacement(passive = false) {
+  async function loadReplacement(passive = false, toolProfile = FILE_PROFILE) {
     const server = replacementApp();
     const loaded = await replacementHeaders(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({
       managedSessionStore: storeFor(BOOT_ID_2),
-      toolProfile: FILE_PROFILE,
+      toolProfile,
       // Only the coordinator's takeover may drive or report a parked Turn.
       [passive ? 'passiveManagedRuntimeRecovery' : 'driveRuntimeRecovery']:
         true,
@@ -6768,94 +6776,117 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(acquireSpy).not.toHaveBeenCalled();
   });
 
-  it('settles the parked execution on load and continues the turn', async () => {
-    await parkToolTurn();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
-      executionStatus: 'success',
-      responseParts: [{ text: 'written' }],
-    } as never);
-    const release = vi
-      .spyOn(HostedWorkspaceBroker.prototype, 'release')
-      .mockResolvedValue();
-    const { server, loaded } = await loadReplacement();
-    expect(loaded.status).toBe(200);
-    // The takeover holds the lease until the continued Turn settles.
-    expect(release).not.toHaveBeenCalled();
-    const recovery = loaded.body._meta?.[
-      'qwen.daemon.managedRuntimeRecovery'
-    ] as {
-      phase: string;
-      checkpointId: string;
-      activationId: string;
-      executions: Array<Record<string, unknown>>;
-    };
-    expect(recovery.phase).toBe('results_ready');
-    expect(recovery.executions).toEqual([
-      expect.objectContaining({
-        executionCallId: '66666666-6666-4666-8666-666666666666',
-        outcome: 'known',
-        status: { state: 'settled' },
-      }),
-    ]);
-    const clientId = loaded.body.clientId as string;
-    const continued = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        promptId: PROMPT_ID,
-        checkpointId: recovery.checkpointId,
-        activationId: recovery.activationId,
+  it.each([FILE_PROFILE, 'hosted-workspace-files/2'])(
+    'settles the parked execution on load and continues the turn (%s)',
+    async (toolProfile) => {
+      await parkToolTurn(toolProfile);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const { server, loaded } = await loadReplacement(false, toolProfile);
+      expect(loaded.status).toBe(200);
+      // The takeover holds the lease until the continued Turn settles.
+      expect(release).not.toHaveBeenCalled();
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as {
+        phase: string;
+        checkpointId: string;
+        activationId: string;
+        executions: Array<Record<string, unknown>>;
+      };
+      expect(recovery.phase).toBe('results_ready');
+      expect(recovery.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: '66666666-6666-4666-8666-666666666666',
+          outcome: 'known',
+          status: { state: 'settled' },
+        }),
+      ]);
+      let declarations: string[] | undefined;
+      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+        declarations = (await toolTurn!.declarations(signal)).map(
+          (tool) => tool.name!,
+        );
+        return { text: 'continued', model: 'test-model' };
       });
-    expect(continued.status).toBe(200);
-    expect(continued.body.accepted).toBe(true);
-    await vi.waitFor(
-      async () => {
-        const status = await replacementHeaders(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', clientId);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: 10_000 },
-    );
-    const transcript = await replacementHeaders(
-      supertest(server).get(`/session/${SESSION_ID}/transcript`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expect(transcript.body.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: 'turn_complete', promptId: PROMPT_ID }),
-      ]),
-    );
-    expect(
-      state.model.mock.calls.some(
-        (call) =>
-          (call[0] as { resumeFromToolResults?: unknown[] })
-            .resumeFromToolResults?.length === 1,
-      ),
-    ).toBe(true);
-    // The recovered turn's Runtime Session is released once it settles — one
-    // release for the tool turn's own reconciliation acquire, one for the
-    // recovered lease.
-    expect(release).toHaveBeenCalledTimes(2);
-    // A replayed continuation for the settled Turn replays the receipt
-    // without driving the model again.
-    const modelCallsBeforeReplay = state.model.mock.calls.length;
-    const replayed = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
-    )
-      .set('X-Qwen-Client-Id', clientId)
-      .send({
-        promptId: PROMPT_ID,
-        checkpointId: recovery.checkpointId,
-        activationId: recovery.activationId,
-      });
-    expect(replayed.status).toBe(200);
-    expect(replayed.body.accepted).toBe(true);
-    expect(state.model.mock.calls.length).toBe(modelCallsBeforeReplay);
-    await replacementHeaders(
-      supertest(server).delete(`/session/${SESSION_ID}`),
-    );
-  });
+      const clientId = loaded.body.clientId as string;
+      const continued = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      expect(continued.body.accepted).toBe(true);
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: 10_000 },
+      );
+      expect(declarations).toEqual([
+        'read_file',
+        'write_file',
+        'edit',
+        ...(toolProfile.endsWith('/2') ? ['glob'] : []),
+      ]);
+      const transcript = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+          }),
+        ]),
+      );
+      expect(
+        state.model.mock.calls.some(
+          (call) =>
+            (call[0] as { resumeFromToolResults?: unknown[] })
+              .resumeFromToolResults?.length === 1,
+        ),
+      ).toBe(true);
+      // The recovered turn's Runtime Session is released once it settles — one
+      // release for the tool turn's own reconciliation acquire, one for the
+      // recovered lease.
+      expect(release).toHaveBeenCalledTimes(2);
+      // A replayed continuation for the settled Turn replays the receipt
+      // without driving the model again.
+      const modelCallsBeforeReplay = state.model.mock.calls.length;
+      const replayed = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(replayed.status).toBe(200);
+      expect(replayed.body.accepted).toBe(true);
+      expect(state.model.mock.calls.length).toBe(modelCallsBeforeReplay);
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    },
+  );
 
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();

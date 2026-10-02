@@ -13,6 +13,7 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import path from 'node:path';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -546,7 +547,7 @@ export class HostedWorkspaceToolTurn {
     const slot = this.context;
     if (!slot) return;
     try {
-      const files = await this.broker.workspaceContext();
+      const files = await waitForTurn(this.broker.workspaceContext(), signal);
       // `''` means "the Workspace has none", so an aborted turn must not
       // latch it: the slot stays undefined and a later turn retries.
       if (signal.aborted) return;
@@ -902,11 +903,32 @@ export class HostedWorkspaceToolTurn {
             'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
           const pattern = call.args['pattern'];
           const directory = call.args['path'];
-          if (typeof pattern !== 'string' || !pattern.trim()) {
+          if (
+            typeof pattern !== 'string' ||
+            !pattern.trim() ||
+            // A pattern is a second search root: refuse the absolute/`..`
+            // shapes here, pre-acquisition, with the identical segment
+            // equality rule the worker applies after dispatch — a refusal
+            // before acquisition stays model-correctable and costs no
+            // durable Runtime work (#13030).
+            path.isAbsolute(pattern) ||
+            pattern.split(/[\\/]/).includes('..')
+          ) {
             validationError = globError;
-          } else if (directory !== undefined) {
+          } else {
+            // Dispatch what was validated: glob treats an untrimmed pattern as a
+            // literal, so it matches nothing and the false negative is persisted.
+            input['pattern'] = pattern.trim();
+          }
+          if (!validationError && directory !== undefined) {
             if (typeof directory !== 'string') {
               validationError = globError;
+            } else if (directory.trim() === '') {
+              // A blank path is the omitted case: the declaration marks it
+              // optional, and the executor maps a missing key to the Session
+              // root — refusing it as traversal would also poison every valid
+              // sibling call in the batch.
+              delete input['path'];
             } else {
               try {
                 input['path'] = normalizeWorkspaceRelativePath(
@@ -1005,6 +1027,10 @@ export class HostedWorkspaceToolTurn {
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
       await this.acquire(false, signal);
+    }
+    if (signal.aborted) {
+      this.uncertain = false;
+      signal.throwIfAborted();
     }
     const shellBindings = new Map<
       string,
