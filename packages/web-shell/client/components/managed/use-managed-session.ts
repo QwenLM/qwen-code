@@ -4,7 +4,10 @@ import type {
   ManagedAgentSessionEvent,
   ManagedAgentSessionSummary,
 } from './managed-agent-provider';
-import { isNonRetryableClientError } from './managed-request-error';
+import {
+  isAuthFailure,
+  isNonRetryableClientError,
+} from './managed-request-error';
 import { mergeManagedEvents } from './managed-session-messages';
 
 const BASE_RETRY_DELAY_MS = 3_000;
@@ -103,7 +106,8 @@ export function useManagedSession(
     // retryable-in-principle retry that must outlive the classification.
     const failed = (error: unknown): boolean => {
       fail(error);
-      if (!isNonRetryableClientError(error)) return false;
+      if (isAuthFailure(error) || !isNonRetryableClientError(error))
+        return false;
       stop(error);
       return true;
     };

@@ -167,6 +167,45 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('retries an expired credential instead of going terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { lastEventId?: number; signal?: AbortSignal },
+        ) {
+          calls++;
+          if (calls === 1) {
+            yield event(1);
+            throw Object.assign(new Error('Unauthorized'), { status: 401 });
+          }
+          yield event(2);
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      expect(calls).toBe(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(calls).toBe(2);
+      expect(latest?.stoppedReason).toBeUndefined();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resubscribes an unchanged cursor after a retryable stream failure', async () => {
     vi.useFakeTimers();
     try {

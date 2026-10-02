@@ -1055,7 +1055,7 @@ describe('ManagedSessionsPage', () => {
         _id: string,
         opts: { signal: AbortSignal },
       ) {
-        yield event(3, 'still streaming');
+        yield event(4, 'resumed after the stop');
         await new Promise<void>((resolve) => {
           if (opts.signal.aborted) resolve();
           else
@@ -1081,7 +1081,37 @@ describe('ManagedSessionsPage', () => {
     );
     expect(
       container.querySelector('[data-testid="messages"]')?.textContent,
-    ).toContain('still streaming');
+    ).toContain('resumed after the stop');
+  });
+
+  it('shows a fresh action error alongside a sticky terminal stop', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(409, 'turn_active', 'Turn already active'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    await act(async () => {
+      await flush();
+    });
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found', 'Turn already active']);
   });
 
   it('deduplicates replay and replaces a gapped stream with a durable snapshot', async () => {
