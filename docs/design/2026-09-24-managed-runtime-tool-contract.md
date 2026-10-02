@@ -54,7 +54,8 @@ Every operation answers at most 1 MiB. After authorization, every answer also
 names the worker's incarnation in `X-Qwen-Managed-Runtime-Incarnation`. No
 request carries the incarnation, so a client can tell its worker's answers from
 those of a process that took the port after the worker exited; the
-ordinary-host Managed engine refuses an answer without it.
+ordinary-host Managed engine reads no result or state from an answer without
+it.
 Larger tool outputs travel through the artifact delivery track, never through
 these envelopes; its contract is the
 [Managed Tool Result Contract](2026-09-26-managed-tool-result-contract.md),

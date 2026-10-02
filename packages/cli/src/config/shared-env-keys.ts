@@ -442,6 +442,14 @@ export function isLoaderEnvKey(key: string): boolean {
 }
 
 /**
+ * Whether `key` names NODE_OPTIONS, in any spelling that the predicate above
+ * accepts.
+ */
+export function isNodeOptionsEnvKey(key: string): boolean {
+  return canonicalLoaderKey(key) === 'node-options';
+}
+
+/**
  * The loader vars this process booted with, kept when its own boot scrub
  * removed them. A qwen process it starts for itself, such as a Managed
  * session's Runtime worker, boots the same way and scrubs them in turn.

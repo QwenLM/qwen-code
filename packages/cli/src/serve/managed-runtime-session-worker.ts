@@ -27,7 +27,10 @@ import type { Part } from '@google/genai';
 import type { ToolResult } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ToolErrorType } from '@qwen-code/qwen-code-core/tools/tool-error.js';
 import { promptIdContext } from '@qwen-code/qwen-code-core/utils/promptIdContext.js';
-import { processBootLoaderEnv } from '../config/shared-env-keys.js';
+import {
+  isNodeOptionsEnvKey,
+  processBootLoaderEnv,
+} from '../config/shared-env-keys.js';
 import type {
   ManagedRuntimeWorkerBoot,
   ManagedRuntimeWorkerReady,
@@ -125,12 +128,14 @@ export function currentCliWorkerLaunch(): ManagedRuntimeWorkerLaunch {
     ...Object.fromEntries(processBootLoaderEnv),
   };
   // Node reads inspector flags from NODE_OPTIONS too, where execArgv does not
-  // show them.
-  const nodeOptions = env['NODE_OPTIONS']?.split(/\s+/u).filter(Boolean);
-  if (nodeOptions?.some((option) => INSPECT_FLAG.test(option))) {
+  // show them, and on Windows under any spelling of its name.
+  for (const key of Object.keys(env)) {
+    if (!isNodeOptionsEnvKey(key)) continue;
+    const nodeOptions = env[key]?.split(/\s+/u).filter(Boolean);
+    if (!nodeOptions?.some((option) => INSPECT_FLAG.test(option))) continue;
     const kept = withoutInspectFlags(nodeOptions);
-    if (kept.length > 0) env['NODE_OPTIONS'] = kept.join(' ');
-    else delete env['NODE_OPTIONS'];
+    if (kept.length > 0) env[key] = kept.join(' ');
+    else delete env[key];
   }
   return {
     command: process.execPath,
@@ -522,8 +527,11 @@ export class ManagedSessionRuntimeWorker {
         (response) => {
           // Attestation proved who listens on the port; from then on only
           // the worker can name its incarnation, which no request carries.
+          // An answer read as a result or a state must name it. A refusal
+          // needs not: whoever sent it, the request did not run.
           if (
             route !== 'attest' &&
+            response.statusCode === 200 &&
             response.headers[worker.incarnationHeader] !==
               worker.boot.runtimeIncarnation
           ) {

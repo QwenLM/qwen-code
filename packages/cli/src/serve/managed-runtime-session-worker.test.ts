@@ -52,7 +52,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(status, { 'content-type': 'application/json', ...incarnation });
     res.end(JSON.stringify(value));
   };
-  if (req.headers.authorization !== 'Bearer ' + boot.token) return send(401, {});
+  // As the real worker's guards, which answer before the incarnation is named.
+  const guard = (status, value) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(value));
+  };
+  if (req.headers.authorization !== 'Bearer ' + boot.token) return guard(401, {});
   const route = req.url.split('/').pop();
   log({ route, request });
   if (route === 'attest') {
@@ -78,6 +83,7 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (mode === 'refuse') return send(409, { code: 'managed_runtime_identity_conflict', error: 'Refused before it ran.' });
+    if (mode === 'guard-refuses') return guard(409, { code: 'managed_runtime_identity_conflict', error: 'Refused before it ran.' });
     if (mode === 'never-settles' || mode === 'settles-late') return;
     if (mode === 'cancels-on-stop') {
       // Stopping cancels the call and answers it before the worker exits.
@@ -296,18 +302,26 @@ describe.skipIf(process.platform === 'win32')(
       ).rejects.toBeInstanceOf(ManagedRuntimeOutcomeUnknownError);
     });
 
-    it('reports a call the worker refused as not started', async () => {
-      const result = await worker('refuse').execute(
-        'run_shell_command',
-        { command: 'true' },
-        new AbortController().signal,
-      );
-      expect(result).toEqual({
-        executionStatus: 'not_started',
-        responseParts: [],
-        error: { message: 'Refused before it ran.' },
-      });
-    });
+    it.each([
+      ['its handler', 'refuse'],
+      // A refusal names no incarnation, and needs none: whoever sent it, the
+      // call did not run.
+      ['a guard', 'guard-refuses'],
+    ])(
+      'reports a call that %s of the worker refused as not started',
+      async (_label, mode) => {
+        const result = await worker(mode).execute(
+          'run_shell_command',
+          { command: 'true' },
+          new AbortController().signal,
+        );
+        expect(result).toEqual({
+          executionStatus: 'not_started',
+          responseParts: [],
+          error: { message: 'Refused before it ran.' },
+        });
+      },
+    );
 
     it('gives up on a cancelled call that does not settle', async () => {
       const controller = new AbortController();
@@ -1017,6 +1031,17 @@ describe('currentCliWorkerLaunch', () => {
     (options, expected) => {
       processBootLoaderEnv.set('NODE_OPTIONS', options);
       expect(currentCliWorkerLaunch().env?.['NODE_OPTIONS']).toBe(expected);
+    },
+  );
+
+  it.each([
+    ['--inspect-brk --import tsx/esm', '--import tsx/esm'],
+    ['--inspect-brk', undefined],
+  ])(
+    'opens no debugger in the worker from Node_Options %j, as Windows reads it',
+    (options, expected) => {
+      processBootLoaderEnv.set('Node_Options', options);
+      expect(currentCliWorkerLaunch().env?.['Node_Options']).toBe(expected);
     },
   );
 

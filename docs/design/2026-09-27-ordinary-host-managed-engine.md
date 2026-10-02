@@ -862,8 +862,9 @@ parts, in this order, each with its own exit check:
   still finished; M5c keeps the engine quarantined on it. Once the worker
   exited, the host sends nothing to the port it held, which any process may
   take: a call in flight then has an unknown outcome. Since the exit is seen
-  only after the port is free, the host also takes no answer that does not
-  name the worker's incarnation, which no request carries. A worker that exited
+  only after the port is free, the host also reads no result or state from an
+  answer that does not name the worker's incarnation, which no request
+  carries; a refusal needs no name, since the request it refuses did not run. A worker that exited
   between calls is replaced at the next call, and after the close the session
   has no environment, so a registry made later has no Runtime-backed tools.
 
