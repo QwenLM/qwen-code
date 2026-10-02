@@ -299,6 +299,20 @@ class Issue13183AdversarialTest {
                     "budgeted drain must make progress without finishing: "
                             + remaining);
         }
+
+        // The next reclaim resumes where the budgeted one stopped.
+        try (RuntimeBrokerService service = service(new ReclaimProvisioner(),
+                bindings, sessions, executions, "broker-three")) {
+            RuntimeBindingRecord reclaimed = service.warm("harness")
+                    .toCompletableFuture().get(60, TimeUnit.SECONDS);
+            assertEquals(RuntimeBindingRecord.State.READY,
+                    reclaimed.getState());
+            assertEquals(first.getGeneration() + 1, reclaimed.getGeneration());
+            assertEquals(0, sessions.countActiveByBinding(
+                    first.getBindingId(), first.getGeneration()));
+            assertEquals(RuntimeBindingRecord.State.RELEASED,
+                    bindings.findById(first.getBindingId()).getState());
+        }
     }
 
     /**

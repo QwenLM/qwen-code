@@ -1165,10 +1165,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     // a settled execution as unknown.
                     return CompletableFuture.completedFuture(cached);
                 }
-                // The caller's record is fresher than the cached one (e.g. a
-                // cancel flag); the cached worker answer is reused as is.
+                // Both records are UNKNOWN here; serve the fresher of the
+                // caller's snapshot and the lookup's own re-read (a cancel
+                // can land between them), with the cached worker answer.
+                ToolExecutionRecord freshest =
+                        cached.getRecord().getVersion() > unknown.getVersion()
+                                ? cached.getRecord() : unknown;
                 return CompletableFuture.completedFuture(
-                        new ExecutionReconciliation(unknown,
+                        new ExecutionReconciliation(freshest,
                                 cached.getOutcome(),
                                 cached.getRuntimeState()));
             }

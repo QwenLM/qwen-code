@@ -37,7 +37,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 import javax.sql.DataSource;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -521,6 +520,54 @@ class Issue13183RegressionTest {
         }
     }
 
+    /**
+     * While the cached record is still UNKNOWN, the replay serves the
+     * fresher of the caller's snapshot and the lookup's own re-read — a
+     * cancel landing between them must stay visible.
+     */
+    @Test
+    void cooledObservationServesTheFresherUnknownRecord() throws Exception {
+        InMemoryToolExecutionRepository real =
+                new InMemoryToolExecutionRepository(Clock.systemUTC());
+        StaleReadExecutions executions = new StaleReadExecutions(real);
+        try (UnknownObservationHarness harness =
+                new UnknownObservationHarness(executions)) {
+            String executionId = harness.prepared.getExecutionCallId();
+            // B's snapshot predates the cancel.
+            ToolExecutionRecord preCancel =
+                    real.findByExecutionCallId(executionId);
+            assertTrue(!preCancel.isCancelRequested());
+            ToolExecutionRecord cancelled = real.requestCancel(executionId,
+                    preCancel.getVersion());
+            assertNotNull(cancelled);
+            assertTrue(cancelled.isCancelRequested());
+
+            // A observes; the lookup's re-read carries the cancel.
+            ExecutionReconciliation first = harness.service
+                    .observeExecution("harness", harness.runtime, executionId)
+                    .toCompletableFuture().join();
+            assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED,
+                    first.getOutcome());
+            assertTrue(first.getRecord().isCancelRequested());
+
+            // B arrives inside the cooldown holding the pre-cancel snapshot.
+            ExecutionReconciliation second;
+            executions.stale = preCancel;
+            try {
+                second = harness.service
+                        .observeExecution("harness", harness.runtime,
+                                executionId)
+                        .toCompletableFuture().join();
+            } finally {
+                executions.stale = null;
+            }
+            assertTrue(second.getRecord().isCancelRequested(),
+                    "the fresher of the two UNKNOWN records must be served");
+            assertEquals(cancelled.getVersion(),
+                    second.getRecord().getVersion());
+        }
+    }
+
     /** Serves one pre-settlement snapshot to the next reader. */
     private static final class StaleReadExecutions
             extends DelegatingToolExecutionRepository {
@@ -761,9 +808,9 @@ class Issue13183RegressionTest {
     }
 
     /**
-     * A provision racing close() is either snapshotted into the teardown
-     * (its worker dies with the others) or refused by the terminated guard;
-     * it can never produce an orphan.
+     * A provision racing close() is refused by the terminated guard (or,
+     * if it won the lock first, its worker dies with the teardown); it can
+     * never produce an orphan.
      */
     @Test
     void provisionDuringCloseNeverOrphansAWorker() throws Exception {
@@ -792,17 +839,23 @@ class Issue13183RegressionTest {
         RuntimeBrokerException refused = null;
         Instant giveUp = Instant.now().plusSeconds(10);
         int attempt = 0;
-        while (refused == null && Instant.now().isBefore(giveUp)) {
+        while (refused == null && closer.isAlive()
+                && Instant.now().isBefore(giveUp)) {
             try {
                 provisioner.provision(plain, RuntimeProvisionSeed
                         .create("racing-" + attempt++, 1))
                         .toCompletableFuture().join();
             } catch (CompletionException failure) {
+                // Match the guard's exact message; a worker killed
+                // mid-handshake reports "closed before ready".
                 if (failure.getCause() instanceof RuntimeBrokerException broker
-                        && broker.getMessage() != null
-                        && broker.getMessage().contains("closed")) {
+                        && "Managed Runtime provisioner is closed."
+                                .equals(broker.getMessage())) {
                     refused = broker;
                 }
+            } catch (java.util.concurrent.RejectedExecutionException
+                    poolShutDown) {
+                break;
             }
             Thread.sleep(20);
         }

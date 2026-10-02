@@ -508,6 +508,51 @@ class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void startResponsesNeverServeTheCooldownCache() throws Exception {
+        String runtime = "550e8400-e29b-41d4-a716-446655440305";
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", runtime, "bootstrap")
+                    .toCompletableFuture().join();
+            Map<String, Object> reference = Map.of("sessionId", runtime,
+                    "promptId", "turn", "callId", "worker-call",
+                    "capabilityDigest", "a".repeat(64), "policyRevision",
+                    "policy", "invocationId", "invocation", "argsDigest",
+                    "b".repeat(64));
+            String id = fixture.service.prepareExecution("harness", runtime,
+                    "provider", reference).toCompletableFuture().join()
+                    .getExecutionCallId();
+            Map<String, Object> start = Map.of("protocolVersion", 1,
+                    "requestId", "start", "harnessSessionId", "harness",
+                    "runtimeSessionId", runtime);
+            // The worker ran the call, but its execute answer is lost.
+            fixture.transport.runtimeStatus = Map.of("state", "executing");
+            assertEquals(200, fixture.post("/executions/" + id + ":start",
+                    start).statusCode());
+            // A cooled GET stamps the "executing" answer.
+            HttpRequest read = HttpRequest.newBuilder(fixture.uri(
+                    "/executions/" + id
+                            + "?requestId=read&harnessSessionId=harness&runtimeSessionId="
+                            + runtime))
+                    .header("Authorization", "Bearer secret").GET().build();
+            HttpResponse<String> executing = fixture.client.send(read,
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, executing.statusCode(), executing.body());
+            assertEquals("executing", JSON.parseObject(executing.body())
+                    .getJSONObject("status").getString("state"));
+            // The worker finishes inside the cooldown window; a :start
+            // retry must answer from the Runtime, not the cache.
+            fixture.transport.runtimeStatus = Map.of("state", "settled",
+                    "result", Map.of("executionStatus", "success"));
+            HttpResponse<String> retried = fixture.post("/executions/" + id
+                    + ":start", start);
+            assertEquals(200, retried.statusCode(), retried.body());
+            assertEquals("settled", JSON.parseObject(retried.body())
+                    .getJSONObject("status").getString("state"),
+                    "a mutation response must describe post-mutation truth");
+        }
+    }
+
+    @Test
     void providerCancelsTheOriginalExecutionAfterResponseLoss() throws Exception {
         // Provider references carry a UUID Runtime Session id.
         String runtime = "550e8400-e29b-41d4-a716-446655440303";
