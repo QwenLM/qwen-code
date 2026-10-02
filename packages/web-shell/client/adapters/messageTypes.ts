@@ -62,6 +62,8 @@ export interface DaemonMessageToolCall {
   backgroundResultPending?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
+  /** The producer's own call ID when `callId` is keyed by something else. */
+  toolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
