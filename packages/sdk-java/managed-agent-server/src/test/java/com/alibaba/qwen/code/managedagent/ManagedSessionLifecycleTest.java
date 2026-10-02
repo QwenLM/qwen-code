@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.Acquir
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
@@ -411,6 +412,40 @@ class ManagedSessionLifecycleTest {
             harness.setAvailable(true);
         }
         awaitCompleted(tenant, sessionId, closeId);
+    }
+
+    /**
+     * The command half of {@code requireNoOpenOperation}: one still-PENDING
+     * mutation command and no open operation row is enough to refuse the next
+     * lifecycle change. Built through the store because an answered rename
+     * failure now retires its own row, so no route leaves one behind.
+     */
+    @Test
+    void aPendingCommandRowAloneBlocksTheNextLifecycleChange() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        store.beginSessionMutation(tenant, "RENAME_SESSION", "pending-command",
+                "digest", sessionId, SessionMutationKind.RENAME);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_command WHERE tenant_id = ? AND session_id ="
+                + " ? AND command_status = 'PENDING'", Integer.class, tenant,
+                sessionId)).isEqualTo(1);
+        // Without this the refusals below could be read as the operation
+        // conjunct firing instead of the command one.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_operation WHERE tenant_id = ? AND session_id"
+                + " = ? AND state IN ('PENDING', 'RUNNING')", Integer.class,
+                tenant, sessionId)).isZero();
+        lifecycle(post("/v1/agents/sessions/{id}/close", sessionId), tenant,
+                "close")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_operation_active"));
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                "delete")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_operation_active"));
     }
 
     @Test
