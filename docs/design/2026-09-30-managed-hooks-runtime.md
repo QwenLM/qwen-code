@@ -95,13 +95,15 @@ IDs remain recoverable through execution records; an old random owner with no
 durable execution record requires operator recovery.
 Only load activations name owners. Each lifecycle Hook operation installs a
 `hook_operation` activation, and when it finishes it installs a restore
-activation whose ID is derived from the `hook_operation` activation's ID.
-Neither constructs a Hook session, so release skips both and its cost does not
-grow with the number of Hook operations. A load always installs a random
-activation ID, so it remains an owner even after a Hook operation that failed
-or was never restored. Parallel Hook executions share one acquisition, so each
-earlier owner is released once. A restore recorded before restore IDs were
-derived is released like a load, and the Broker answers that release with 404.
+activation whose ID is derived from the activation the operation replaced. The
+log always holds that activation, so the restore is recognized even when the
+`hook_operation` activation failed to install. Neither constructs a Hook
+session, so release skips both and its cost does not grow with the number of
+Hook operations. A load always installs a random activation ID, so it remains
+an owner even after a Hook operation that failed or was never restored.
+Parallel Hook executions share one acquisition, so each earlier owner is
+released once. A restore recorded before restore IDs were derived is released
+like a load, and the Broker answers that release with 404.
 Before a replacement Hook owner acquires the Workspace, it releases earlier
 owners whose Hook records are all terminal, including owners reconciled through
 status. Tool-result continuation uses the same acquisition path. Broker checks

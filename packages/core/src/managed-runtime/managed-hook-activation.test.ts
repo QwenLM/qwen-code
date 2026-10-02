@@ -181,11 +181,10 @@ describe('Managed Hook model activation', () => {
   it('owns a new epoch, preserves its subject on renewal and survives cold restore without a turn', async () => {
     const { session, controller, options } = await fixture();
     const initialEpoch = session.activation.epoch;
+    const replaced = session.activation.activationId;
     let expired: ManagedHookModelScope | undefined;
-    let hookActivationId: string | undefined;
     await controller.runHookOperation(operation, async (scope) => {
       expired = scope;
-      hookActivationId = session.activation.activationId;
       expect(session.activation.epoch).toBe(initialEpoch + 1);
       expect(session.authority.currentActivationSubject).toEqual({
         type: 'hook_operation',
@@ -205,7 +204,7 @@ describe('Managed Hook model activation', () => {
     });
     expect(session.activation.epoch).toBe(initialEpoch + 2);
     expect(session.activation.activationId).toBe(
-      managedHookRestoreActivationId(hookActivationId!),
+      managedHookRestoreActivationId(replaced),
     );
     expect(() => expired!.evaluate(evaluation, async () => result)).toThrow(
       'active Session model slot',
@@ -263,6 +262,7 @@ describe('Managed Hook model activation', () => {
 
   it('restores a turn activation when installing a Hook activation fails', async () => {
     const { session, controller } = await fixture();
+    const replaced = session.activation.activationId;
     const failure = new Error('install resource failed');
     vi.spyOn(session.authority, 'installActivation').mockRejectedValueOnce(
       failure,
@@ -280,6 +280,9 @@ describe('Managed Hook model activation', () => {
     });
     expect(session.authority.currentActivationSubject?.type).not.toBe(
       'hook_operation',
+    );
+    expect(session.activation.activationId).toBe(
+      managedHookRestoreActivationId(replaced),
     );
     await expect(
       controller.runTurn('next-turn', async () => 'accepted'),

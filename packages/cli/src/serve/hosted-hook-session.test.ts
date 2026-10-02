@@ -1209,6 +1209,15 @@ it.each([true, false])(
   },
 );
 
+it('skips the restore after a Hook operation activation fails to install', async () => {
+  vi.spyOn(session.authority, 'installActivation').mockRejectedValueOnce(
+    new Error('install resource failed'),
+  );
+  await expect(operate(hooks, 'a')).rejects.toThrow('install resource failed');
+  await hooks.close();
+  expect(released()).toEqual([hooks.broker.runtimeSessionId]);
+});
+
 it.each([
   ['after its install', false],
   ['after the Hook operation activation it renews is released', true],

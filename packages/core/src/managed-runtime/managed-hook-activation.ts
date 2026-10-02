@@ -28,8 +28,10 @@ export interface ManagedHookModelOperation {
 
 /**
  * Names the activation a Hook operation restores when it finishes. The ID is
- * derived from the `hook_operation` activation's, so a reader can tell the
- * restore from a load, which always installs a random one.
+ * derived from the activation the operation replaced, which the log always
+ * holds. A reader can therefore tell the restore from a load, which always
+ * installs a random ID, even when the operation's own activation never
+ * installed.
  */
 export function managedHookRestoreActivationId(activationId: string): string {
   const bytes = createHash('sha1')
@@ -312,7 +314,6 @@ export class ManagedHookActivationController {
       () => modelOwners.get(this.session.authority) === scope,
     );
     modelOwners.set(this.session.authority, scope);
-    let restoreActivation = false;
     let restoreActivationId: string | undefined;
     try {
       if (operation) {
@@ -328,15 +329,16 @@ export class ManagedHookActivationController {
             'Prompt Hook cannot bypass pending Harness recovery.',
           );
         }
-        restoreActivation = true;
-        const { activationId } = await this.session.replaceActivation({
+        // Hosted Hook release finds the restore by this ID: neither it nor
+        // the Hook operation's activation owns a Runtime.
+        restoreActivationId = managedHookRestoreActivationId(
+          this.session.activation.activationId,
+        );
+        await this.session.replaceActivation({
           type: 'hook_operation',
           operationId: operation.operationId,
           occurrenceId: operation.occurrenceId,
         });
-        // Hosted Hook release finds the restore by this ID: neither it nor
-        // the Hook operation's activation owns a Runtime.
-        restoreActivationId = managedHookRestoreActivationId(activationId);
       }
       const activation = this.session.authority.currentActivation;
       if (
@@ -352,7 +354,7 @@ export class ManagedHookActivationController {
     } finally {
       await scope.close();
       try {
-        if (restoreActivation)
+        if (restoreActivationId !== undefined)
           await this.session.replaceActivation(undefined, restoreActivationId);
       } finally {
         modelOwners.delete(this.session.authority);

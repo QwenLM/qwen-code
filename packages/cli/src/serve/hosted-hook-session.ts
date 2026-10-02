@@ -310,14 +310,13 @@ export class HostedHookSession {
       // Only a load constructs a Hook owner. A Hook operation's activation,
       // and the one it restores on finishing, never acquire.
       const activationId = event.payload['activationId'] as string;
+      restores.add(managedHookRestoreActivationId(activationId));
       if (
+        restores.has(activationId) ||
         (event.payload['subject'] as ManagedSessionSubject).type ===
-        'hook_operation'
-      ) {
-        restores.add(managedHookRestoreActivationId(activationId));
+          'hook_operation'
+      )
         continue;
-      }
-      if (restores.has(activationId)) continue;
       const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
       if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
         owners.set(id, true);
