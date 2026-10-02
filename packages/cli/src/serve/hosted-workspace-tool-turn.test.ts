@@ -3171,28 +3171,52 @@ it('validates Hook-modified arguments before dispatch', async () => {
   ]);
 });
 
-it('does not execute a denied tool or emit a physical post-tool event', async () => {
-  const fire = vi
-    .fn<HostedHookSession['fire']>()
-    .mockImplementation(async (event) =>
-      event === HookEventName.PreToolUse
-        ? { decision: 'block', reason: 'policy' }
-        : undefined,
+it.each([
+  [{ decision: 'block', reason: 'policy' }, 'policy'],
+  [
+    {
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'policy',
+      },
+    },
+    'policy',
+  ],
+  [
+    {
+      continue: false,
+      stopReason: 'halt',
+      hookSpecificOutput: {
+        hookEventName: HookEventName.PreToolUse,
+        permissionDecisionReason: 'needs approval',
+      },
+    },
+    'halt',
+  ],
+] as const)(
+  'does not execute a denied tool or emit a physical post-tool event (%j)',
+  async (output, error) => {
+    const fire = vi
+      .fn<HostedHookSession['fire']>()
+      .mockImplementation(async (event) =>
+        event === HookEventName.PreToolUse ? output : undefined,
+      );
+    turn = createTurn(false, { mode: 'yolo' }, hookSession(fire));
+    const responses = await turn.execute(
+      [calls[0]],
+      [parts[0]],
+      'model',
+      new AbortController().signal,
     );
-  turn = createTurn(false, { mode: 'yolo' }, hookSession(fire));
-  const responses = await turn.execute(
-    [calls[0]],
-    [parts[0]],
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['error']).toBe('policy');
-  expect(broker.prepare).not.toHaveBeenCalled();
-  expect(fire.mock.calls.map(([event]) => event)).toEqual([
-    HookEventName.PreToolUse,
-    HookEventName.PostToolBatch,
-  ]);
-});
+    expect(responses[0].functionResponse?.response?.['error']).toBe(error);
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(fire.mock.calls.map(([event]) => event)).toEqual([
+      HookEventName.PreToolUse,
+      HookEventName.PostToolBatch,
+    ]);
+  },
+);
 
 it('recovers a failed after Hook from the committed physical receipt without executing the tool again', async () => {
   let fail = true;

@@ -57,6 +57,7 @@ import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import {
   HostedHookSession,
+  HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
@@ -1859,7 +1860,9 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/prompt', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (session.mcpBusy || session.mcpRecovering || session.hooksBusy)
+    if (session.hooksBusy)
+      return error(res, 409, 'hosted_hook_operation_active');
+    if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
     const body = object(req.body);
     const promptId = body?.['promptId'];
@@ -2119,7 +2122,16 @@ export function registerHostedHarnessSessionRoutes(
     void runHostedLifecycleHook(session, event, operationId, input)
       .then(
         (output) => res.json({ operationId, output: output ?? null }),
-        () => error(res, 503, 'hosted_hook_operation_failed'),
+        (cause) => {
+          if (cause instanceof HostedHookInputConflictError)
+            return error(res, 409, 'hosted_hook_operation_conflict');
+          writeStderrLineSafe(
+            cause instanceof HostedHookRecoveryRequiredError
+              ? `qwen serve: Hosted Hook operation ${operationId} is recovery blocked: ${String(cause)}`
+              : `qwen serve: Hosted Hook operation ${operationId} failed: ${String(cause)}`,
+          );
+          error(res, 503, 'hosted_hook_operation_failed');
+        },
       )
       .finally(() => {
         session.hooksBusy = false;
@@ -3188,20 +3200,25 @@ export function registerHostedHarnessSessionRoutes(
     session.mcpBusy = true;
     session.mcpClosing = true;
     try {
-      if (req.method === 'DELETE') {
-        await session.hooks?.drain();
-        await runHostedLifecycleHook(
-          session,
-          HookEventName.SessionEnd,
-          `session-end:${req.params['id']}`,
-          { reason: 'other' },
-        );
-        await runHostedLifecycleHook(
-          session,
-          HookEventName.SessionDelete,
-          `session-delete:${req.params['id']}`,
-          { deleted_session_id: req.params['id'] },
-        );
+      if (req.method === 'DELETE' && session.hooks) {
+        session.hooksBusy = true;
+        try {
+          await session.hooks.drain();
+          await runHostedLifecycleHook(
+            session,
+            HookEventName.SessionEnd,
+            `session-end:${req.params['id']}`,
+            { reason: 'other' },
+          );
+          await runHostedLifecycleHook(
+            session,
+            HookEventName.SessionDelete,
+            `session-delete:${req.params['id']}`,
+            { deleted_session_id: req.params['id'] },
+          );
+        } finally {
+          session.hooksBusy = false;
+        }
       }
       await session.hooks?.close();
       // A lease a recovery load acquired must go back with the Session, or
@@ -3212,7 +3229,10 @@ export function registerHostedHarnessSessionRoutes(
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
       res.sendStatus(204);
-    } catch {
+    } catch (cause) {
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${req.params['id']} close failed: ${String(cause)}`,
+      );
       error(res, 503, 'managed_session_close_failed');
     } finally {
       session.mcpClosing = false;
