@@ -828,7 +828,10 @@ class ToolPublicationStoreTest {
             }
         })).hasMessage("revoked mid-range");
         // Restore the lease only for the existing private-reader corruption checks.
-        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2099-01-01 00:00:00'");
+        // Keep the sentinel before 2038-01-19: databaseEpochMillis reads it back
+        // through UNIX_TIMESTAMP, which wraps on H2 and yields NULL on MariaDB past
+        // that bound, so a far-future literal here is engine-dependent.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2037-01-01 00:00:00'");
         if (keepApiFixture) {
             apiPublications = data;
             apiReader = publicReader;
