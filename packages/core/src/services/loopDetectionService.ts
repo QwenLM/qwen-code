@@ -791,7 +791,16 @@ export class LoopDetectionService {
     if (!error.startsWith(MCP_TOOL_ERROR_PREFIX)) return null;
     const callMarker = error.indexOf(MCP_TOOL_ERROR_CALL_MARKER);
     if (callMarker === -1) return null;
-    const responseMarker = error.lastIndexOf(MCP_TOOL_ERROR_RESPONSE_MARKER);
+    // The payload is untrusted server text and can quote the separator
+    // verbatim — a mid-string marker must not be honored (see the stub-marker
+    // rule above, issue #9450). Bound the search to after the producer's own
+    // call marker so the split lands on the producer's separator, not one
+    // embedded in the payload (lastIndexOf would pick an inner occurrence
+    // and collapse distinct payloads that share a tail onto one signature).
+    const responseMarker = error.indexOf(
+      MCP_TOOL_ERROR_RESPONSE_MARKER,
+      callMarker + MCP_TOOL_ERROR_CALL_MARKER.length,
+    );
     if (responseMarker <= callMarker) return null;
     const serverToolName = error.slice(
       MCP_TOOL_ERROR_PREFIX.length,
@@ -2015,6 +2024,17 @@ export class LoopDetectionService {
     this.statefulConsecutiveResults.clear();
     this.toolErrorStreakCounts.clear();
     this.requestByCallId.clear();
+  }
+
+  /**
+   * Clears only the repeated-tool-error streaks. The agent runtime's
+   * reasoning loop outlives one prompt — an external message continues the
+   * same `while` loop — so that runtime's new-prompt boundary calls this
+   * instead of `reset()`: a full reset would also drop the per-turn
+   * tool-call cap and the other per-turn accounting it relies on.
+   */
+  clearToolErrorStreaks(): void {
+    this.toolErrorStreakCounts.clear();
   }
 
   private resetToolCallCount(): void {

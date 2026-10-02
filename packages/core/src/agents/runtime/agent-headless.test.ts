@@ -1674,6 +1674,63 @@ describe('subagent.ts', () => {
         expect(finishEvents[0].loopType).toBe('repeated_tool_error');
       });
 
+      it('bounds the error streak to the prompt when an external message starts a new one (issue #10887)', async () => {
+        // The reasoning loop outlives a prompt while external messages keep
+        // it alive: two failures in an early task plus one much later must
+        // NOT trip repeated_tool_error — the streak clears at the new-prompt
+        // boundary, the way the chat runtime resets per interaction.
+        // Removing the boundary clear (agent-core.ts) turns this red; the
+        // three-in-one-prompt halt above must stay green.
+        const failing = vi.fn().mockResolvedValue({
+          llmContent: 'fatal: not a git repository',
+          returnDisplay: 'fatal: not a git repository',
+          error: {
+            message: 'fatal: not a git repository',
+            type: ToolErrorType.SHELL_EXECUTE_ERROR,
+          },
+        });
+        const { config, inv, toolConfig } = await setupReadTool(
+          decl('run_shell_command', 'Runs a shell command'),
+          invocation({ command: 'git status' }, 'Run shell', failing),
+          'Shell',
+          'Runs shell commands',
+        );
+        respond(
+          [call('run_shell_command', { command: 'git status' }, 'err_1')],
+          [call('run_shell_command', { command: 'git status -s' }, 'err_2')],
+          // No tool call this round: the loop goes idle and waits.
+          'stop',
+          [call('run_shell_command', { command: 'git -C r status' }, 'err_3')],
+          'stop',
+        );
+        type Wake = Array<ReturnType<typeof notification>>;
+        let resolveWait: ((inputs: Wake) => void) | undefined;
+        const waitForExternalMessages = vi.fn(
+          (_signal: AbortSignal) =>
+            new Promise<Wake>((resolve) => {
+              resolveWait = resolve;
+            }),
+        );
+        let shouldWait = true;
+        const scope = await createAgent(config, { tools: toolConfig });
+        idleWaiter(waitForExternalMessages, () => shouldWait)(scope);
+
+        const executePromise = scope.execute(new ContextState());
+        await vi.waitFor(() =>
+          expect(waitForExternalMessages).toHaveBeenCalled(),
+        );
+        // The new prompt begins here.
+        shouldWait = false;
+        resolveWait?.([notification('follow-up task')]);
+        await executePromise;
+
+        expect(inv.execute).toHaveBeenCalledTimes(3);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {
         // Identical task_list arguments do not imply an identical result:
         // teammates mutate the shared board between calls. The agent must

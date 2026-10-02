@@ -1377,6 +1377,12 @@ export class AgentCore {
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
           if (immediateExternalInputs.length > 0) {
+            // A new external-input prompt begins here, while this detector
+            // instance outlives it: bound the error-repetition streak to the
+            // prompt the way the chat runtime's per-interaction reset does.
+            // Streak-only — a full reset() would also drop the per-turn
+            // tool-call cap the agent runtime relies on.
+            loopDetector.clearToolErrorStreaks();
             currentMessages = this.externalInputsToContent(
               immediateExternalInputs,
             );
@@ -1401,6 +1407,8 @@ export class AgentCore {
               break;
             }
             if (waitResult.inputs.length > 0) {
+              // Same new-prompt boundary as the immediate-input branch above.
+              loopDetector.clearToolErrorStreaks();
               currentMessages = this.externalInputsToContent(waitResult.inputs);
               this.emitExternalInputEvents(waitResult.inputs);
               continue;

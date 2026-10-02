@@ -2943,6 +2943,29 @@ ${tail}`;
       expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
 
+    it('does not collapse MCP errors whose untrusted payloads quote the separator', () => {
+      // A gateway-style MCP server echoes the upstream exchange in its error
+      // text, so the payload itself contains ` with response: `. The split
+      // must land on the producer's own separator, not the last occurrence
+      // anywhere in the message: with lastIndexOf all three DISTINCT upstream
+      // failures keep only the shared tail ('502 Bad Gateway'), share one
+      // fingerprint, and halt the turn (R11-1).
+      const mcpError = (target: string) =>
+        `MCP tool 'gw_fetch' reported tool error for function call: ${JSON.stringify(
+          { name: 'gw_fetch', args: { url: target } },
+        )} with response: upstream GET ${target} failed with response: 502 Bad Gateway`;
+      expect(
+        service.recordToolErrorBatch(errorResult(mcpError('/orders'), 'c1')),
+      ).toBe(false);
+      expect(
+        service.recordToolErrorBatch(errorResult(mcpError('/inventory'), 'c2')),
+      ).toBe(false);
+      expect(
+        service.recordToolErrorBatch(errorResult(mcpError('/checkout'), 'c3')),
+      ).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
     it('keeps the streak alive across a fully successful round', () => {
       // Successful results neither advance nor reset the streak — and that
       // must hold across rounds too, not only within a batch: a session
