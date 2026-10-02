@@ -80,12 +80,12 @@ request digest also covers the operation and, for an update, the agent ID.
   including a create key reused for an update, answers
   `409 idempotency_conflict`.
 - **Concurrency.** Revision rows and the command commit in one transaction.
-  An update reads the head revision under a row lock, so concurrent updates of
-  one definition serialize and each stores its own revision, and the digest
-  comparison sees the committed head rather than a stale snapshot. When a
-  concurrent request commits first, the losing write rolls back and reads the
-  command committed under its key: the same request replays that result, and a
-  different request under the same key answers `409 idempotency_conflict`.
+  When a concurrent request commits first, the losing write rolls back and
+  reads the command committed under its key: the same request replays that
+  result. Otherwise a concurrent update that took the revision number answers
+  `409 agent_revision_conflict` without recording the command, so its key can
+  be retried, and a different request under the same key answers
+  `409 idempotency_conflict`.
 - **Get** reads the latest revision, or the one named by `revision` (a decimal
   number from `1`). Anything else answers `404 agent_not_found`.
 - The response carries `id`, `object: "agent"`, `revision`, `digest`,

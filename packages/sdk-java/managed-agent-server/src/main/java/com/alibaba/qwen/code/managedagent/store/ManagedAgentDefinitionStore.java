@@ -79,7 +79,7 @@ public class ManagedAgentDefinitionStore {
         if (replay.isPresent()) {
             return replay.get();
         }
-        DefinitionRevision latest = latestForUpdate(tenantId, agentId)
+        DefinitionRevision latest = latest(tenantId, agentId)
                 .orElseThrow(ManagedAgentDefinitionStore::notFound);
         DefinitionRevision result = latest;
         if (!latest.digest().equals(digest)) {
@@ -104,22 +104,6 @@ public class ManagedAgentDefinitionStore {
                 + " definition_json, created_at FROM managed_agent_definition"
                 + " WHERE tenant_id = ? AND agent_id = ?"
                 + " ORDER BY revision DESC LIMIT 1",
-                ManagedAgentDefinitionStore::row, tenantId, agentId));
-    }
-
-    /**
-     * The head read of {@link #update}, under a row lock. The digest
-     * comparison must see the committed head, not this transaction's
-     * snapshot: on a plain read a concurrent update can commit in between,
-     * so content that matches the stale head stores nothing and still
-     * answers 202 with a revision that is no longer the head.
-     */
-    private Optional<DefinitionRevision> latestForUpdate(String tenantId,
-            String agentId) {
-        return first(jdbc.query("SELECT agent_id, revision, digest,"
-                + " definition_json, created_at FROM managed_agent_definition"
-                + " WHERE tenant_id = ? AND agent_id = ?"
-                + " ORDER BY revision DESC LIMIT 1 FOR UPDATE",
                 ManagedAgentDefinitionStore::row, tenantId, agentId));
     }
 

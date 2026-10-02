@@ -128,7 +128,7 @@
       "post": {
         "tags": ["Public Resources"],
         "operationId": "updateAgent",
-        "description": "Stores the next immutable revision. Content whose digest equals the latest revision stores nothing and answers with that revision. Concurrent updates of one definition serialize on its head revision, so each stores its own revision. An identical concurrent request replays the committed result; the same Idempotency-Key with a different request answers 409 idempotency_conflict.",
+        "description": "Stores the next immutable revision. Content whose digest equals the latest revision stores nothing and answers with that revision. An identical concurrent request replays the committed result; a different concurrent update answers 409 agent_revision_conflict, and its Idempotency-Key can be retried.",
         "x-qwen-implementation-status": "implemented",
         "parameters": [
           {
