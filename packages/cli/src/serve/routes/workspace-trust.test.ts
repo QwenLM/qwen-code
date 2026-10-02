@@ -8,6 +8,7 @@ import express, { type RequestHandler } from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { FatalConfigError } from '@qwen-code/qwen-code-core';
+import { WorkspaceTrustGrantIneffectiveError } from '../workspace-service/types.js';
 import type { WorkspaceRuntimeProvenance } from '../managed-scratch-workspace.js';
 import {
   createWorkspaceRegistry,
@@ -162,6 +163,25 @@ describe('workspace trust grant', () => {
       error: 'Folder trust is disabled for this workspace',
     });
     expect(primary.workspaceService.grantWorkspaceTrust).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 trust_grant_ineffective when the grant does not take', async () => {
+    const primary = runtime('existing', true);
+    vi.mocked(
+      primary.workspaceService.getWorkspaceTrustStatus,
+    ).mockResolvedValue({ folderTrustEnabled: true } as never);
+    vi.mocked(primary.workspaceService.grantWorkspaceTrust).mockRejectedValue(
+      new WorkspaceTrustGrantIneffectiveError('untrusted', 'file'),
+    );
+
+    const response = await request(primaryApp(primary)).post(
+      '/workspace/trust/grant',
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: 'trust_grant_ineffective',
+    });
   });
 
   it('reports an unreadable trust file instead of granting', async () => {

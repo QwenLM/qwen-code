@@ -74,6 +74,7 @@ trusted-loopback 模式下来自主监听器（primary listener）的请求。�
 | 工作区拥有进行中的会话（live conversation） | 409 `live_conversation_trust_fixed` |
 | 运行时未激活                                | 503 `workspace_runtime_unavailable` |
 | 信任文件格式错误、不可读或不是普通文件      | 500 `trusted_folders_invalid`       |
+| 授权已记录但更高优先级的规则仍然胜出        | 409 `trust_grant_ineffective`       |
 | 请求过程中世代被关闭                        | 与其他路由一致的世代关闭响应        |
 | 已经是受信任状态且运行时激活                | 200，幂等                           |
 

@@ -364,6 +364,28 @@ export class WorkspacePermissionRulesSessionRequiredError extends Error {
   }
 }
 
+/**
+ * A trust grant wrote its rule but the decision did not change: an
+ * equal-depth DO_NOT_TRUST rule under an alias spelling of the same
+ * directory, a settings error, or an IDE distrust of the daemon's own cwd
+ * wins over the new entry. The write is durably recorded; the failure is
+ * about the grant not taking effect, not about persistence.
+ */
+export class WorkspaceTrustGrantIneffectiveError extends Error {
+  readonly state: string;
+  readonly source: string;
+
+  constructor(state: string, source: string) {
+    super(
+      `Workspace trust grant did not take effect (state: ${state}, source: ${source}). ` +
+        'A pre-existing rule with higher precedence still wins — resolve or remove it first.',
+    );
+    this.name = 'WorkspaceTrustGrantIneffectiveError';
+    this.state = state;
+    this.source = source;
+  }
+}
+
 export interface WorkspaceVoiceSettingsUpdate {
   enabled?: boolean;
   mode?: VoiceMode;

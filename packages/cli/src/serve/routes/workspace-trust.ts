@@ -7,6 +7,7 @@
 import type { Application, Request, Response } from 'express';
 import { FatalConfigError } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import { WorkspaceTrustGrantIneffectiveError } from '../workspace-service/types.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -101,6 +102,13 @@ function sendTrustError(res: Response, route: string, err: unknown): void {
       err instanceof Error ? err.message : String(err)
     }`,
   );
+  if (err instanceof WorkspaceTrustGrantIneffectiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'trust_grant_ineffective',
+    });
+    return;
+  }
   if (err instanceof FatalConfigError) {
     res.status(500).json({
       error: 'Failed to load trusted folders',

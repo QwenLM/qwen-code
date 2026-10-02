@@ -127,6 +127,7 @@ import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSettingsPartialPersistError,
+  WorkspaceTrustGrantIneffectiveError,
 } from '../types.js';
 import type {
   DaemonWorkspaceServiceDeps,
@@ -648,6 +649,37 @@ describe('createDaemonWorkspaceService', () => {
             explicitTrustLevel: TrustLevel.TRUST_FOLDER,
           },
         );
+      });
+    });
+
+    it('grantWorkspaceTrust refuses when an alias-spelled DO_NOT_TRUST still wins', async () => {
+      // The grant writes its key but the evaluator resolves the same
+      // directory through the symlink alias and the equal-depth untrusted
+      // rule wins — answering success here would spin the panel to its
+      // deadline on a workspace that stays untrusted.
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const alias = path.join(home, 'ws-alias');
+        await fs.symlink(workspace, alias);
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [alias]: TrustLevel.DO_NOT_TRUST,
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+          WorkspaceTrustGrantIneffectiveError,
+        );
+        // The written key is durably recorded; the refusal is about the
+        // grant not taking effect, and the effective view stays untrusted.
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'untrusted' },
+        });
       });
     });
 

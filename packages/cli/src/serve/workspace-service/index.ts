@@ -50,6 +50,10 @@ import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeout
 
 import { loadSettings } from '../../config/settings.js';
 import {
+  evaluateDaemonWorkspaceTrust,
+  readDaemonTrustPolicySnapshot,
+} from '../../config/daemon-trust-policy.js';
+import {
   getWorkspaceTrustStatus,
   loadTrustedFolders,
   TrustLevel,
@@ -77,6 +81,7 @@ import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
+  WorkspaceTrustGrantIneffectiveError,
 } from './types.js';
 import type {
   DaemonWorkspaceService,
@@ -702,6 +707,31 @@ export function createDaemonWorkspaceService(
     async grantWorkspaceTrust(_ctx: WorkspaceRequestContext) {
       assertActiveGeneration();
       loadTrustedFolders().setValue(boundWorkspace, TrustLevel.TRUST_FOLDER);
+      // The write succeeding is not the grant taking effect: an equal-depth
+      // DO_NOT_TRUST rule under an alias spelling of the same directory, a
+      // settings error, or an IDE distrust of the daemon's own cwd all win
+      // over the new entry. Re-evaluate with the same evaluator the
+      // reconciler drives and fail loudly when the grant did not take, or
+      // the caller would report success for a workspace that stays
+      // untrusted and the panel spins to its deadline and reverts.
+      const snapshot = await readDaemonTrustPolicySnapshot();
+      const decision = evaluateDaemonWorkspaceTrust(
+        {
+          ...snapshot,
+          // The post-write rule set: setValue already committed it to the
+          // loaded config (and to disk with the real atomic writer), so the
+          // evaluation reads what the reconciler will read, without a disk
+          // round-trip.
+          trustedFolders: { ...loadTrustedFolders().user.config },
+        },
+        boundWorkspace,
+      );
+      if (!decision.targetTrusted) {
+        throw new WorkspaceTrustGrantIneffectiveError(
+          decision.state,
+          decision.source,
+        );
+      }
       return getWorkspaceTrustStatus(
         loadBoundSettings(true).merged,
         boundWorkspace,

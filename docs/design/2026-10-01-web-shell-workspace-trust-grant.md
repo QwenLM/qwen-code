@@ -81,6 +81,7 @@ daemon evaluates.
 | Workspace owns a live conversation                      | 409 `live_conversation_trust_fixed`      |
 | Runtime not active                                      | 503 `workspace_runtime_unavailable`      |
 | Trust file malformed, unreadable, or not a regular file | 500 `trusted_folders_invalid`            |
+| Grant recorded but a higher-precedence rule still wins  | 409 `trust_grant_ineffective`            |
 | Generation closed mid-request                           | generation-closed response, as elsewhere |
 | Already trusted, runtime active                         | 200, idempotent                          |
 
