@@ -1110,8 +1110,12 @@ class ManagedAgentServerIntegrationTest {
                     "item.output_text.delta", Map.of("text", text), false,
                     "single:" + text);
         }
+        // The trailing event is terminal so the explicit drain below always
+        // rewrites the snapshot: the 10ms materializer may otherwise create
+        // the snapshot mid-sequence, and a non-terminal catch-up inside the
+        // 5s floor would legally leave the snapshot behind.
         store.appendPublicEventIfAbsent(tenant, sessionId, "turn-single",
-                "item.reasoning.delta", Map.of("text", "c"), false,
+                "item.reasoning.delta", Map.of("text", "c"), true,
                 "single:c");
         store.materializeNextBatch(tenant, sessionId, 100);
 
