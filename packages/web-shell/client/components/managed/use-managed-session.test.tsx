@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 import { act } from 'react';
-import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanupReact, flushReact, mountReact } from '../../test/reactHarness';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
@@ -32,12 +32,18 @@ function transcript(lastEventId: number): ManagedAgentSessionTranscript {
 }
 
 describe('useManagedSession', () => {
-  let root: Root | undefined;
+  afterEach(() => cleanupReact());
 
-  afterEach(() => {
-    act(() => root?.unmount());
-    root = undefined;
-  });
+  let latest: ReturnType<typeof useManagedSession> | undefined;
+  function Probe({ provider }: { provider: ManagedAgentProvider }) {
+    latest = useManagedSession(provider, 'client-1', 'session-1');
+    return null;
+  }
+
+  function deterministicBackoff(): () => void {
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    return () => random.mockRestore();
+  }
 
   it('reloads the transcript after a stream gap and resumes after it', async () => {
     const cursors: Array<number | undefined> = [];
@@ -64,15 +70,8 @@ describe('useManagedSession', () => {
         );
       },
     } as unknown as ManagedAgentProvider;
-    let latest: ReturnType<typeof useManagedSession> | undefined;
-    function Probe() {
-      latest = useManagedSession(provider, 'client-1', 'session-1');
-      return null;
-    }
 
-    const container = document.createElement('div');
-    root = createRoot(container);
-    act(() => root!.render(<Probe />));
+    mountReact(<Probe provider={provider} />);
 
     await vi.waitFor(() => expect(cursors).toEqual([2, 9]));
     await vi.waitFor(() =>
@@ -107,7 +106,7 @@ describe('useManagedSession', () => {
 
   it('resets the stream backoff after every delivered event', async () => {
     vi.useFakeTimers();
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    const restoreBackoff = deterministicBackoff();
     try {
       let calls = 0;
       const subscribeEvents = vi.fn(async function* (
@@ -129,13 +128,8 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       for (let step = 0; step < 3; step++)
         await act(async () => {
           await vi.advanceTimersByTimeAsync(3_000);
@@ -144,7 +138,7 @@ describe('useManagedSession', () => {
         subscribeEvents.mock.calls.map(([, options]) => options.lastEventId),
       ).toEqual([1, 1, 2, 3]);
     } finally {
-      random.mockRestore();
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
@@ -161,13 +155,8 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(subscribeEvents).toHaveBeenCalledTimes(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(120_000);
@@ -199,13 +188,8 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(subscribeEvents).toHaveBeenCalledTimes(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
@@ -233,14 +217,8 @@ describe('useManagedSession', () => {
         getTranscript,
         subscribeEvents: vi.fn(),
       } as unknown as ManagedAgentProvider;
-      let latest: ReturnType<typeof useManagedSession> | undefined;
-      function Probe() {
-        latest = useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(getSession).toHaveBeenCalledTimes(1);
       expect(latest?.error).toBe('session gone');
       await act(async () => {
@@ -276,13 +254,8 @@ describe('useManagedSession', () => {
         getTranscript,
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(getTranscript).toHaveBeenCalledTimes(1);
       for (let step = 0; step < 6; step++)
         await act(async () => {
@@ -318,13 +291,8 @@ describe('useManagedSession', () => {
           );
         },
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(getSession).toHaveBeenCalledTimes(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_100);
@@ -341,7 +309,7 @@ describe('useManagedSession', () => {
 
   it('resets the stream backoff when only replayed duplicates arrive then the connection dies', async () => {
     vi.useFakeTimers();
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    const restoreBackoff = deterministicBackoff();
     try {
       let calls = 0;
       const subscribeEvents = vi.fn(async function* (
@@ -363,27 +331,22 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       for (let step = 0; step < 3; step++)
         await act(async () => {
           await vi.advanceTimersByTimeAsync(3_000);
         });
       expect(subscribeEvents).toHaveBeenCalledTimes(4);
     } finally {
-      random.mockRestore();
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
 
   it('resets the stream backoff for a long-lived connection that delivered nothing', async () => {
     vi.useFakeTimers();
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    const restoreBackoff = deterministicBackoff();
     try {
       const subscribeEvents = vi.fn(
         (
@@ -416,26 +379,21 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(15_000);
       });
       expect(subscribeEvents).toHaveBeenCalledTimes(3);
     } finally {
-      random.mockRestore();
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
 
   it('backs off the failing gap snapshot on its own ladder while the stream keeps delivering', async () => {
     vi.useFakeTimers();
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    const restoreBackoff = deterministicBackoff();
     try {
       const provider = {
         getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
@@ -450,13 +408,8 @@ describe('useManagedSession', () => {
           yield { ...event(2), type: 'stream_gap' };
         }),
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
       });
@@ -470,14 +423,14 @@ describe('useManagedSession', () => {
       });
       expect(provider.subscribeEvents).toHaveBeenCalledTimes(4);
     } finally {
-      random.mockRestore();
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
 
   it('re-enters the stream loop at rung zero after a transient bootstrap failure', async () => {
     vi.useFakeTimers();
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    const restoreBackoff = deterministicBackoff();
     try {
       const subscribeEvents = vi.fn(
         (
@@ -502,13 +455,8 @@ describe('useManagedSession', () => {
           .mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(subscribeEvents).toHaveBeenCalledTimes(0);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
@@ -519,7 +467,7 @@ describe('useManagedSession', () => {
       });
       expect(subscribeEvents).toHaveBeenCalledTimes(2);
     } finally {
-      random.mockRestore();
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
@@ -546,13 +494,8 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(subscribeEvents).toHaveBeenCalledTimes(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_999);
@@ -569,7 +512,7 @@ describe('useManagedSession', () => {
 
   it('returns the summary poll to its healthy cadence after one transient failure', async () => {
     vi.useFakeTimers();
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+    const restoreBackoff = deterministicBackoff();
     try {
       const getSession = vi
         .fn()
@@ -600,13 +543,8 @@ describe('useManagedSession', () => {
         getTranscript: vi.fn().mockResolvedValue(transcript(1)),
         subscribeEvents,
       } as unknown as ManagedAgentProvider;
-      function Probe() {
-        useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       expect(getSession).toHaveBeenCalledTimes(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
@@ -621,7 +559,7 @@ describe('useManagedSession', () => {
       });
       expect(getSession).toHaveBeenCalledTimes(4);
     } finally {
-      random.mockRestore();
+      restoreBackoff();
       vi.useRealTimers();
     }
   });
@@ -650,14 +588,8 @@ describe('useManagedSession', () => {
           );
         },
       } as unknown as ManagedAgentProvider;
-      let latest: ReturnType<typeof useManagedSession> | undefined;
-      function Probe() {
-        latest = useManagedSession(provider, 'client-1', 'session-1');
-        return null;
-      }
-      root = createRoot(document.createElement('div'));
-      act(() => root!.render(<Probe />));
-      await act(async () => {});
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(4_000);
       });
@@ -665,6 +597,223 @@ describe('useManagedSession', () => {
       expect(latest?.error).toBeUndefined();
       expect(latest?.stoppedReason).toBe('session gone');
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires the terminal stop reason after a later authoritative read succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const getSession = vi
+        .fn()
+        .mockResolvedValueOnce({ sessionId: 'session-1' })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('session gone'), { status: 404 }),
+        )
+        .mockResolvedValue({ sessionId: 'session-1' });
+      const provider = {
+        getSession,
+        getTranscript: vi
+          .fn()
+          .mockResolvedValueOnce(transcript(1))
+          .mockResolvedValue(transcript(2)),
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { lastEventId?: number; signal?: AbortSignal },
+        ) {
+          yield event(2);
+          await new Promise((resolve) => setTimeout(resolve, 4_000));
+          yield { ...event(2), type: 'stream_gap' };
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_400);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(getSession).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('climbs the reconnect ladder across consecutive undelivered stream failures', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const subscribeEvents = vi.fn(
+        (
+          _sessionId: string,
+          _request: { lastEventId?: number; signal?: AbortSignal },
+        ) => ({
+          [Symbol.asyncIterator]: () => ({
+            next: () =>
+              Promise.reject(
+                Object.assign(new Error('server busy'), { status: 500 }),
+              ),
+          }),
+        }),
+      );
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      expect(subscribeEvents).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(subscribeEvents).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(subscribeEvents).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_999);
+      });
+      expect(subscribeEvents).toHaveBeenCalledTimes(3);
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('backs the bootstrap retry off across consecutive rejections', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi
+          .fn()
+          .mockRejectedValueOnce(
+            Object.assign(new Error('server busy'), { status: 500 }),
+          )
+          .mockRejectedValueOnce(
+            Object.assign(new Error('server busy'), { status: 500 }),
+          )
+          .mockResolvedValue(transcript(1)),
+        async *subscribeEvents(
+          _sessionId: string,
+          request: { lastEventId?: number; signal?: AbortSignal },
+        ) {
+          yield event(1);
+          await new Promise((resolve) =>
+            request.signal?.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      expect(provider.getTranscript).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_001);
+      });
+      expect(provider.getTranscript).toHaveBeenCalledTimes(3);
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('records a definite gap-snapshot answer but keeps streaming behind its ladder', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi
+          .fn()
+          .mockResolvedValueOnce(transcript(1))
+          .mockRejectedValue(
+            Object.assign(new Error('history pruned'), { status: 404 }),
+          ),
+        subscribeEvents: vi.fn(async function* () {
+          yield event(2);
+          yield { ...event(2), type: 'stream_gap' };
+        }),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(1);
+      expect(latest?.stoppedReason).toBe('history pruned');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_999);
+      });
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(3);
+      expect(latest?.events.map((item) => item.id)).toEqual([1, 2]);
+      expect(latest?.stoppedReason).toBe('history pruned');
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets the gap-snapshot ladder after a healed outage', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi
+          .fn()
+          .mockResolvedValueOnce(transcript(1))
+          .mockRejectedValueOnce(
+            Object.assign(new Error('server busy'), { status: 500 }),
+          )
+          .mockRejectedValueOnce(
+            Object.assign(new Error('server busy'), { status: 500 }),
+          )
+          .mockResolvedValueOnce(transcript(2))
+          .mockRejectedValue(
+            Object.assign(new Error('server busy'), { status: 500 }),
+          ),
+        subscribeEvents: vi.fn(async function* () {
+          yield event(2);
+          yield { ...event(2), type: 'stream_gap' };
+        }),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_999);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(4);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(provider.subscribeEvents).toHaveBeenCalledTimes(5);
+    } finally {
+      restoreBackoff();
       vi.useRealTimers();
     }
   });

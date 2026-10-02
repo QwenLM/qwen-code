@@ -90,6 +90,7 @@ export function useManagedSession(
         olderCursor: transcript.olderCursor,
         loading: false,
         error: undefined,
+        stoppedReason: undefined,
       });
       return transcript.lastEventId;
     };
@@ -97,6 +98,15 @@ export function useManagedSession(
       update({
         stoppedReason: error instanceof Error ? error.message : String(error),
       });
+    // A terminal (definite 4xx) answer: surface it transiently and stickily.
+    // Callers return from their loop when this holds, unless they own a
+    // retryable-in-principle retry that must outlive the classification.
+    const failed = (error: unknown): boolean => {
+      fail(error);
+      if (!isNonRetryableClientError(error)) return false;
+      stop(error);
+      return true;
+    };
     void (async () => {
       let lastEventId: number | undefined;
       let failures = 0;
@@ -105,11 +115,7 @@ export function useManagedSession(
           lastEventId = await snapshot();
           failures = 0;
         } catch (error) {
-          fail(error);
-          if (isNonRetryableClientError(error)) {
-            stop(error);
-            return;
-          }
+          if (failed(error)) return;
           await pause(abort.signal, failureRetryDelayMs(failures++));
         }
       }
@@ -147,26 +153,22 @@ export function useManagedSession(
               lastEventId = await snapshot();
               snapshotFailures = 0;
             } catch (error) {
-              fail(error);
-              if (isNonRetryableClientError(error)) {
-                stop(error);
-                return;
-              }
+              // A definite-4xx snapshot is recorded but must not kill a
+              // live stream: the gap simply re-detects and the read climbs
+              // its own ladder.
+              failed(error);
               delayMs = failureRetryDelayMs(snapshotFailures++);
             }
           } else if (!abort.signal.aborted) {
             update({
               summary: await provider.getSession(sessionId, opts),
+              stoppedReason: undefined,
             });
             delayMs = BASE_RETRY_DELAY_MS;
           }
           failures = 0;
         } catch (error) {
-          fail(error);
-          if (isNonRetryableClientError(error)) {
-            stop(error);
-            return;
-          }
+          if (failed(error)) return;
           // Any delivered frame, or a connection that simply lived long
           // enough, proves the path healthy; only back-to-back failures
           // with nothing delivered should stretch the ladder.
@@ -186,11 +188,7 @@ export function useManagedSession(
           update({ summary: await provider.getSession(sessionId, opts) });
           failures = 0;
         } catch (error) {
-          fail(error);
-          if (isNonRetryableClientError(error)) {
-            stop(error);
-            return;
-          }
+          if (failed(error)) return;
           failures++;
         }
       }
