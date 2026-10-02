@@ -1427,6 +1427,18 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void expiredWriterLeaseAloneFencesDispatch() {
+        reserve();
+        var execution = executions.findByExecutionCallId("execution-1");
+        assertThat(store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN)).isNotNull();
+        // Expire the head lease only. acquireWriter would also rewrite writer identity and
+        // reinstate a live lease, so the fence would trip on identity, never on writer_live.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        assertThatThrownBy(() -> store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN))
+                .hasMessageContaining("Original Session owner is fenced");
+    }
+
+    @Test
     void fencesUnusedCapacityAndRequiresDurableNoStartForFullRelease() {
         reserve();
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null).path("state").asText()).isEqualTo("FENCED");
