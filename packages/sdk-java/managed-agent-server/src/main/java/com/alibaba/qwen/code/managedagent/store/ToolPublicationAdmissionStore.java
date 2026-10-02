@@ -34,6 +34,39 @@ public final class ToolPublicationAdmissionStore {
         this.data = Objects.requireNonNull(data);
     }
 
+    public JsonNode verifyReceipt(JsonNode key, String writerToken, JsonNode request) {
+        sessions.restore(text(key, "tenantId"), text(key, "workspaceId"),
+                text(key, "sessionId"), writerToken);
+        JsonNode expected = request.path("toolOutcomeRef");
+        var rows = jdbc.queryForList("SELECT publication_id, admission_resource_id,"
+                + " receipt_sequence, receipt_revision FROM qwen_tool_publication"
+                + " WHERE scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
+                + " AND admission_resource_id = ? AND producer_phase = 'REFERENCED'",
+                scope(key), text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"),
+                text(expected, "resourceId"));
+        require(rows.size() == 1, "Original committed publication is missing or ambiguous");
+        var publication = rows.get(0);
+        String publicationId = (String) publication.get("publication_id");
+        JsonNode finished = data.verifyFinished(key, publicationId, writerToken);
+        byte[] bytes = data.readResource(key, publicationId, text(expected, "resourceId"));
+        JsonNode ref = JSON.createObjectNode().put("resourceId", text(expected, "resourceId"))
+                .put("kind", "managed-tool-outcome").put("schemaVersion", 1)
+                .put("byteLength", bytes.length).put("digest", ToolPublicationContract.sha256(bytes));
+        JsonNode outcome = ToolPublicationContract.readJson(bytes);
+        JsonNode binding = finished.path("binding");
+        require(ref.equals(expected)
+                && text(binding, "executionCallId").equals(text(request, "executionCallId"))
+                && outcome.path("envelope").equals(finished.path("result"))
+                && outcome.path("manifestRef").equals(request.path("manifestRef")),
+                "Original publication receipt conflicts");
+        JsonNode receipt = replay(key, binding, outcome, ref, publication);
+        JsonNode sequence = request.path("historyRevision");
+        require(sequence.isIntegralNumber() && sequence.canConvertToLong()
+                && receipt.path("historyRevision").longValue() == sequence.longValue(),
+                "Original publication receipt sequence conflicts");
+        return receipt;
+    }
+
     public JsonNode commitReceipt(JsonNode key, String publicationId, String writerToken,
             CommitTransactionRequest request) {
         require(request != null && text(key, "workspaceId").equals(request.workspaceId()),
@@ -123,8 +156,11 @@ public final class ToolPublicationAdmissionStore {
                     writerToken, request);
             jdbc.update("UPDATE qwen_tool_publication SET producer_phase = 'REFERENCED',"
                             + " admission_held_bytes = admission_used_bytes, receipt_sequence = ?,"
-                            + " receipt_revision = ? WHERE scope_key = ? AND publication_id = ?",
-                    request.lastSequence(), receipt.journalRevision(), scope, publicationId);
+                            + " receipt_revision = ?, accepted_complete = ? WHERE scope_key = ? AND publication_id = ?",
+                    request.lastSequence(), receipt.journalRevision(),
+                    "committed".equals(outcome.path("decision").asText())
+                            && "complete".equals(outcome.path("envelope").path("capture").path("captureStatus").asText()),
+                    scope, publicationId);
             return response(outcome, outcomeRef, request.lastSequence(), receipt.journalRevision());
         });
     }

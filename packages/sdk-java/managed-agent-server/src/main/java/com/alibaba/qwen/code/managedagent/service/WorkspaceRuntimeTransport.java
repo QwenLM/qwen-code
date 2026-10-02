@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ManagedMcpProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -277,18 +278,29 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
-        if (ManagedMcpProtocol.isOperation(operation)) {
+        if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            ManagedMcpProtocol.validateSession(session, operation);
-            boolean recovery = ManagedMcpProtocol.isRecovery(operation);
+            if (ManagedHookProtocol.isOperation(operation)) {
+                ManagedHookProtocol.validateSession(session, operation);
+            } else {
+                ManagedMcpProtocol.validateSession(session, operation);
+            }
+            boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery);
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            ownership.assertHeld(context.binding(), context.session());
+            if (recovery) {
+                if (!ownership.isHeld(context.binding(), context.session())) {
+                    throw new RuntimeBrokerException(409, "workspace_busy",
+                            "Workspace storage is held by another tool turn.", true);
+                }
+            } else {
+                ownership.assertHeld(context.binding(), context.session());
+            }
         } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             ownership.assertHeld(context.binding(), context.session());
@@ -304,6 +316,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         Context context = context(lease, session, false);
         // RELEASING fences later claims; an absent holder needs no physical release.
         if (context.session().getState() == RuntimeSessionRecord.State.RELEASING
+                && !context.runtime().isDrainRequested()
                 && !ownership.isHeld(context.binding(), context.session())) {
             return CompletableFuture.completedFuture(true);
         }

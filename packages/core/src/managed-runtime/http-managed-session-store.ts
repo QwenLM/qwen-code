@@ -95,6 +95,8 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
   }
 }
 
+class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
+
 export function createHttpManagedSessionStores(
   options: HttpManagedSessionStoreOptions,
 ): HttpManagedSessionStores {
@@ -278,6 +280,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         } else if (EXTENSION_RECORD_KINDS.has(ref.kind)) {
           // A Stage H record commits the resources its closed body names.
           pending.push(...collectRefs([JSON.parse(staged.bytes.toString())]));
+        } else if (ref.kind === 'managed-hook-plan') {
+          const plan = JSON.parse(staged.bytes.toString()) as {
+            messagesRef?: ManagedSessionDurableRef;
+          };
+          pending.push(...collectRefs([plan.messagesRef]));
+        } else if (ref.kind === 'managed-hook-message-chunks') {
+          const manifest = JSON.parse(staged.bytes.toString()) as {
+            parts: ManagedSessionDurableRef[];
+          };
+          pending.push(...collectRefs(manifest.parts));
         }
       }
     }
@@ -566,26 +578,26 @@ class ManagedSessionStoreHttpClient {
       resources: commitResources,
     };
     let committed: unknown;
-    if (publicationId === undefined) {
-      committed = await this.json('/transactions:commit', 'POST', commitBody);
-    } else {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          committed = await this.publicationRequest(
-            `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
-            commitBody,
-          );
-          break;
-        } catch (error) {
-          const uncertain =
-            (error instanceof ManagedSessionStoreHttpError &&
-              (error.status === 429 || error.status >= 500)) ||
-            error instanceof TypeError ||
-            (error instanceof DOMException &&
-              ['AbortError', 'TimeoutError'].includes(error.name));
-          if (!uncertain || attempt === 2) throw error;
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        committed =
+          publicationId === undefined
+            ? await this.json('/transactions:commit', 'POST', commitBody)
+            : await this.publicationRequest(
+                `/publications/${encodeURIComponent(publicationId)}/receipts/commit`,
+                commitBody,
+              );
+        break;
+      } catch (error) {
+        const uncertain =
+          (error instanceof ManagedSessionStoreHttpError &&
+            (error.status === 429 || error.status >= 500)) ||
+          error instanceof ManagedSessionStoreTransportError ||
+          error instanceof TypeError ||
+          (error instanceof DOMException &&
+            ['AbortError', 'TimeoutError'].includes(error.name));
+        if (!uncertain || attempt === 2) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
     const receipt = asRecord(committed, 'commit receipt');
@@ -666,7 +678,7 @@ class ManagedSessionStoreHttpClient {
   ): Promise<unknown> {
     await this.ensureWriter();
     if (
-      !/^\/(?:grants|publications\/[a-z0-9_-]{1,128}\/(?:finished|admissions\/prepare|receipts\/commit))$/u.test(
+      !/^\/(?:grants|receipts\/verify|publications\/[a-z0-9_-]{1,128}\/(?:finished|admissions\/prepare|receipts\/commit))$/u.test(
         path,
       )
     )
@@ -937,6 +949,15 @@ class ManagedSessionStoreHttpClient {
     try {
       return (await response.json()) as unknown;
     } catch (error) {
+      if (
+        error instanceof TypeError ||
+        (error instanceof DOMException &&
+          ['AbortError', 'TimeoutError'].includes(error.name))
+      ) {
+        throw new ManagedSessionStoreTransportError(
+          `Managed Session Store response failed: ${error.message}.`,
+        );
+      }
       throw corrupt(
         `Managed Session Store returned invalid JSON: ${error instanceof Error ? error.message : String(error)}.`,
       );
@@ -966,7 +987,7 @@ class ManagedSessionStoreHttpClient {
         signal: AbortSignal.timeout(this.requestTimeoutMs),
       });
     } catch (error) {
-      throw new ManagedSessionRecordError(
+      throw new ManagedSessionStoreTransportError(
         `Managed Session Store request failed: ${error instanceof Error ? error.message : String(error)}.`,
       );
     }
@@ -991,7 +1012,7 @@ class ManagedSessionStoreHttpClient {
   }
 }
 
-function describeTransaction(
+export function describeTransaction(
   records: readonly unknown[],
   bytes: Buffer,
   currentActivationEpoch: number,
@@ -1177,7 +1198,7 @@ function envelope(value: unknown, label: string): Record<string, unknown> {
   return asRecord(parsed, label);
 }
 
-interface StoredTransaction {
+export interface StoredTransaction {
   readonly journalRevision: number;
   readonly transactionId: string;
   readonly operation: string;
@@ -1196,7 +1217,7 @@ interface StoredTransaction {
   readonly recordDigest: string;
 }
 
-function parseStoredTransaction(value: unknown): StoredTransaction {
+export function parseStoredTransaction(value: unknown): StoredTransaction {
   const record = asRecord(value, 'stored transaction');
   if (string(record['recordEncoding'], 'recordEncoding') !== 'identity') {
     throw corrupt('stored transaction encoding is not supported.');
@@ -1227,7 +1248,7 @@ function parseStoredTransaction(value: unknown): StoredTransaction {
   };
 }
 
-function requireStoredTransactionMatches(
+export function requireStoredTransactionMatches(
   stored: StoredTransaction,
   descriptor: TransactionDescriptor,
 ): void {

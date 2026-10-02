@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.OpenApiContract.Operation;
@@ -82,9 +83,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpMethod;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
@@ -103,7 +106,8 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
 })
-@AutoConfigureMockMvc
+// SSE responses are still being written when MockMvc runs its result printer.
+@AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
@@ -124,6 +128,12 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellActionGetRequest.class, List.of("WebShellActionGetRequest")),
                     entry(ApiModels.WebShellActionRespondRequest.class, List.of("WebShellActionRespondRequest")),
                     entry(ApiModels.PublicActionList.class, List.of("PublicActionList")),
+                    entry(ApiModels.ArtifactAccess.class, List.of("ArtifactAccess")),
+                    entry(ApiModels.ArtifactResponse.class, List.of("ArtifactResponse")),
+                    entry(ApiModels.ToolResultResponse.class, List.of("ToolResultResponse")),
+                    entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
+                    entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
+                    entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(InputBlock.class, List.of("InputBlock")),
                     entry(CreateSessionRequest.class,
                             List.of("CreateSessionRequest")),
@@ -143,7 +153,7 @@ class ManagedAgentApiContractTest {
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",
                             "PublicEventList", "PublicTaskList",
-                            "PublicTurnList")),
+                            "PublicTurnList", "PublicArtifactList")),
                     entry(PublicEvent.class, List.of("PublicEvent")),
                     entry(SessionResyncRequired.class,
                             List.of("SessionResyncRequired")),
@@ -178,7 +188,7 @@ class ManagedAgentApiContractTest {
                     entry(WebShellSessionCapabilities.class,
                             List.of("WebShellSessionCapabilities")),
                     entry(WebShellPage.class, List.of("WebShellSessionPage",
-                            "WebShellTaskPage", "WebShellActionPage")),
+                            "WebShellTaskPage", "WebShellActionPage", "WebShellArtifactPage")),
                     entry(PublicTask.class, List.of("PublicTask")),
                     entry(WebShellTask.class, List.of("WebShellTask")),
                     entry(WebShellTaskQueryRequest.class,
@@ -217,6 +227,32 @@ class ManagedAgentApiContractTest {
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    @Test
+    void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
+        Map<String, String> drift = new TreeMap<>();
+        for (Operation operation : CONTRACT.operations()) {
+            if (!operation.path().startsWith("/v1/agents/")
+                    && !operation.path().startsWith(WEB_SHELL + "/")) {
+                continue;
+            }
+            assertThat(operation.node().path("responses").path("403").path("$ref").asText())
+                    .as("%s declares the tenant filter refusal", operation.operationId())
+                    .isEqualTo("#/components/responses/Forbidden");
+            if ("planned".equals(operation.status())) {
+                continue;
+            }
+            String path = operation.path().replaceAll("\\{[^}]+}", "scope-probe");
+            MockHttpServletRequestBuilder request = request(
+                    HttpMethod.valueOf(operation.method()), path)
+                    .header(TENANT, "contract-tenant").principal(actor("other-tenant"));
+            exchange(drift, operation.operationId(), 403, request, null);
+        }
+        assertThat(drift)
+                .as("Actor-scope drift is not deferrable; fix it instead of recording a gap in %s",
+                        KNOWN_GAPS)
+                .isEmpty();
+    }
 
     @Test
     void mappedRoutesMatchTheSpec() {
@@ -305,6 +341,27 @@ class ManagedAgentApiContractTest {
                 {"agent_id":"qwen-code","metadata":{"title":"contract"},
                  "input":[{"type":"input_text","text":"hello"}]}
                 """)).get("id").asText();
+        exchange(drift, "listArtifacts", 401,
+                get("/v1/agents/sessions/%s/artifacts".formatted(sessionId))
+                        .header(TENANT, tenant), null);
+        exchange(drift, "getArtifactContent", 401,
+                get("/v1/agents/sessions/%s/artifacts/artifact_missing/content".formatted(sessionId))
+                        .header(TENANT, tenant), null);
+        exchange(drift, "getWebShellToolResult", 401,
+                post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
+        exchange(drift, "getWebShellArtifact", 401,
+                post("/api/agent/web-shell/v1/artifacts/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"artifactId\":\"artifact_missing\"}".formatted(sessionId));
+        exchange(drift, "queryWebShellArtifacts", 401,
+                post("/api/agent/web-shell/v1/artifacts/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "getToolResult", 401,
+                get("/v1/agents/sessions/%s/items/item_missing/tool-result".formatted(sessionId))
+                        .header(TENANT, tenant), null);
+        exchange(drift, "getArtifact", 401,
+                get("/v1/agents/sessions/%s/artifacts/artifact_missing".formatted(sessionId))
+                        .header(TENANT, tenant), null);
         MockHttpServletResponse publicStream = stream(drift,
                 "getSessionEvents",
                 get("/v1/agents/sessions/{id}/events", sessionId)
@@ -888,6 +945,21 @@ class ManagedAgentApiContractTest {
                         .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
         exchange(drift, "getSessionMcpCatalog", 400,
                 get("/v1/agents/sessions/{id}/mcp-catalog", publicBoundId), null);
+        String hookCatalog = exchange(drift, "getSessionHookCatalog", 200,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        assertThat(json(hookCatalog).path("catalogs")).isEmpty();
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "getSessionHookCatalog", 404,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getSessionHookCatalog", 403,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor(otherTenant)), null);
+        exchange(drift, "getSessionHookCatalog", 400,
+                get("/v1/agents/sessions/{id}/hook-catalog", publicBoundId), null);
         exchangeTurns(drift, tenant, otherTenant);
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
@@ -1194,7 +1266,7 @@ class ManagedAgentApiContractTest {
             assertThat(session.get("agent_revision").asText()).isEqualTo("1");
             assertThat(session.get("capabilities")).isEqualTo(json("""
                     {"items":true,"snapshots":true,"artifacts":false,
-                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false}
+                     "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true}
                     """));
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
             assertThat(session.get("snapshot_through_sequence").asLong())
@@ -1210,7 +1282,7 @@ class ManagedAgentApiContractTest {
                         .isPositive()
                         .isEqualTo(session.get("last_event_id").asLong());
                 assertThat(other.get("capabilities"))
-                        .isEqualTo(json("{\"tasks\":true,\"actions\":false}"));
+                        .isEqualTo(json("{\"tasks\":true,\"artifacts\":false,\"actions\":false,\"sessionClose\":true}"));
             }
         }
 
@@ -1331,6 +1403,14 @@ class ManagedAgentApiContractTest {
                     operationId, expectedStatus, status, errorCode(content)),
                     content);
         }
+        if (status == 403 && expectedStatus == 403) {
+            String code = content.isEmpty() ? ""
+                    : json(content).path("error").path("code").asText();
+            if (!"actor_scope_mismatch".equals(code)) {
+                drift.put("code %s: expected actor_scope_mismatch, got %s"
+                        .formatted(operationId, code), content);
+            }
+        }
         String label = "response " + operationId + " " + status;
         checkRequestId(drift, label, body, content, response);
         String declared = CONTRACT.responsePointer(operation, status);
@@ -1339,8 +1419,12 @@ class ManagedAgentApiContractTest {
         }
         String schema = declared + "/content/application~1json/schema";
         if (!CONTRACT.node(schema).isMissingNode()) {
-            collect(drift, label, CONTRACT.validate(schema,
-                    objectMapper.readTree(content)));
+            if (content.isEmpty()) {
+                drift.put(label + ": empty response body", "");
+            } else {
+                collect(drift, label, CONTRACT.validate(schema,
+                        objectMapper.readTree(content)));
+            }
         }
         CONTRACT.node(declared).path("headers").fieldNames()
                 .forEachRemaining(header -> {
@@ -1604,8 +1688,8 @@ class ManagedAgentApiContractTest {
         }
         fail("""
                 The Managed Agent API drifted from %s.
-                Fix new drift. Record a line in %s only for a gap that a \
-                later slice closes.
+                Fix new drift. Actor-scope code drift is not deferrable.
+                Record eligible gaps in %s only if a later slice closes them.
                 %s
                 Remove resolved gaps from %s:
                 %s""".formatted(OpenApiContract.RESOURCE, KNOWN_GAPS,
@@ -1614,6 +1698,9 @@ class ManagedAgentApiContractTest {
     }
 
     private static List<String> knownGaps() {
+        assertThat(GAP_CATEGORIES)
+                .as("actor-scope code drift must stay unwaivable")
+                .doesNotContain("code");
         try (InputStream input = ManagedAgentApiContractTest.class
                 .getClassLoader().getResourceAsStream(KNOWN_GAPS)) {
             List<String> gaps = new String(input.readAllBytes(),

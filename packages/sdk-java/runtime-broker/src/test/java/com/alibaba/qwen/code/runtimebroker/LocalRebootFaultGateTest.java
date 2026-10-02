@@ -36,10 +36,13 @@ class LocalRebootFaultGateTest {
             worker.onExit().get(5, TimeUnit.SECONDS);
             rig.killBroker(first);
             var restored = rig.broker("restored", rig.proxy(), FaultGateRig.Provisioner.TRUSTED_LOCAL_PROCESS);
-            assertEquals("runtime_broker_runtime_lost", FaultGateRig.await(
+            var warm = FaultGateRig.await(
                     () -> restored.warm(FaultGateRig.HARNESS),
-                    reply -> !"runtime_provision_fenced".equals(reply.code()),
-                    "original worker loss after recovery fencing").code());
+                    reply -> !"runtime_provision_fenced".equals(reply.code())
+                            && !"runtime_broker_reconcile_timeout".equals(reply.code()),
+                    "original worker loss after recovery fencing");
+            assertEquals("runtime_broker_runtime_lost", warm.code(),
+                    () -> warm.message() + rig.logs());
             assertEquals(ToolExecutionRecord.State.ABANDONED, rig.execution(call).getState());
             assertNull(rig.activeBinding().getStopEvidence());
             assertTrue(restored.workers().isEmpty());

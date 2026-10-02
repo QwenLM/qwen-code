@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -17,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceOperatorRecoveryStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
@@ -280,6 +282,20 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void authorizationRefusesAnUnverifiedPhysicalMount() {
+        SessionRecord session = createSession("storage", ".");
+        WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
+        var checked = new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                new DataSourceTransactionManager(dataSource), guard);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        assertUnavailable(() -> checked.authorize(session));
+        checked.authorizePassiveAttachment(session);
+        verify(guard).verify(session.workspace());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        assertUnavailable(() -> checked.authorizePassiveAttachment(session));
+    }
+
+    @Test
     void rejectsMissingReplacedSymlinkAndOverlappingMounts() throws Exception {
         SessionRecord session = createSession("storage", ".");
         Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
@@ -524,6 +540,35 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void mcpRecoveryKeepsExactOwnershipWhenTheVerifiedMountIsUnavailable() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
+        var checked = new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                new DataSourceTransactionManager(dataSource), guard);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(guard).verify(session.workspace());
+        var transport = new WorkspaceRuntimeTransport(fixture.http(), resolver(session, temp.toRealPath()),
+                checked, fixture.bindings(), new JdbcRuntimeSessionRepository(dataSource));
+        assertUnavailable(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
+        verify(fixture.http(), never()).control(any(), any(), any());
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        String storageKey = digest(session.tenantId() + "\0" + session.workspace().getStorageId())
+                .substring("sha256:".length());
+        var originalHolder = jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey);
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
+        for (String kind : List.of("mcp-status", "mcp-cancel", "mcp-release")) {
+            Map<String, Object> operation = mcpControl(session, kind);
+            transport.control(fixture.lease(), runtimeSession, operation).toCompletableFuture().join();
+            verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
+        }
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease WHERE storage_key = ?", storageKey)).isEqualTo(originalHolder);
+        jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = 'another-owner' WHERE storage_key = ?", storageKey);
+        assertBusy(() -> transport.control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-status")));
+    }
+
+    @Test
     void mcpLookupCannotUseAReplacedLeaseOrLostRuntime() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
@@ -538,6 +583,53 @@ class WorkspaceRuntimeTest {
         assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, lookup));
         verify(fixture.http(), never()).control(any(), any(), any());
         authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    @Test
+    void hookAdmissionRequiresOwnershipAndRecoveryUsesTheOriginalOwnerAfterRevocation() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        Map<String, Object> configure = hookControl(session, "hook-execute");
+        assertBusy(() -> fixture.transport().control(fixture.lease(), runtimeSession, configure));
+        verify(fixture.http(), never()).control(any(), any(), any());
+        authority.claim(session.workspace(), fixture.record());
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of("state", "running")));
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, configure).toCompletableFuture().join())
+                .isEqualTo(Map.of("state", "running"));
+        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        for (String kind : List.of("hook-execute", "hook-catalog")) {
+            assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, kind)));
+        }
+        for (String kind : List.of("hook-status", "hook-cancel")) {
+            Map<String, Object> operation = hookControl(session, kind);
+            fixture.transport().control(fixture.lease(), runtimeSession, operation).toCompletableFuture().join();
+            verify(fixture.http()).control(fixture.lease(), runtimeSession, operation);
+        }
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    @Test
+    void hookLookupCannotUseAReplacedLeaseOrLostRuntime() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> lookup = hookControl(session, "hook-status");
+        RuntimeLease changed = new RuntimeLease("replacement", fixture.lease().getEndpoint(), fixture.lease().getToken(),
+                fixture.lease().getLeaseId(), fixture.lease().getEpoch() + 1);
+        assertUnavailable(() -> fixture.transport().control(changed, runtimeSession, lookup));
+        assertThat(fixture.bindings().compareAndSet(fixture.runtime(),
+                fixture.runtime().withState(RuntimeBindingRecord.State.LOST, fixture.lease(), Instant.now()))).isNotNull();
+        assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, lookup));
+        verify(fixture.http(), never()).control(any(), any(), any());
+        authority.assertHeld(session.workspace(), fixture.record());
+    }
+
+    private static Map<String, Object> hookControl(SessionRecord session, String kind) {
+        return Map.of("kind", kind, "operationId", kind,
+                "sessionKey", Map.of("tenantId", session.tenantId(),
+                        "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()));
     }
 
     private static Map<String, Object> mcpControl(SessionRecord session, String kind) {
@@ -622,6 +714,34 @@ class WorkspaceRuntimeTest {
         assertThatThrownBy(releasing::join).hasRootCauseInstanceOf(RuntimeBrokerException.class);
         authority.assertHeld(session.workspace(), fixture.record());
         assertBusy(() -> authority.claim(session.workspace(), rival));
+    }
+
+    @Test
+    void closingReleasePreservesTheNewSharedHolderWithoutCurrentAuthorization() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        authority.claim(session.workspace(), fixture.record());
+        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "rival-create",
+                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
+                new WorkspaceSelection("workspace", "."));
+        var rival = holder(sessions.requireSession(session.tenantId(), created.sessionId()), "rival");
+        authority.release(session.workspace(), fixture.record());
+        authority.claim(session.workspace(), rival);
+        assertThat(fixture.bindings().compareAndSet(fixture.runtime(), fixture.runtime()
+                .withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, fixture.lease(), Instant.now()))).isNotNull();
+        assertThat(new JdbcRuntimeSessionRepository(dataSource).compareAndSet(fixture.record(), fixture.record()
+                .withState(RuntimeSessionRecord.State.RELEASING, Instant.now()))).isNotNull();
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSING' WHERE tenant_id = ? AND session_id = ?",
+                session.tenantId(), session.sessionId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
+        when(fixture.http().activateWorkspace(any(), any(), any(), eq(false)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        fixture.transport().release(fixture.lease(), fixture.record().getSession()).toCompletableFuture().join();
+        assertThat(authority.isHeld(session.workspace(), rival)).isTrue();
+        assertThat(authority.hasHolder(fixture.runtime())).isFalse();
+        verify(fixture.http()).release(any(), any());
+        verify(fixture.http()).activateWorkspace(any(), any(), any(), eq(false));
     }
 
     private TransportFixture transport(SessionRecord session) throws Exception {

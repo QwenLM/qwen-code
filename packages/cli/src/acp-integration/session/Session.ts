@@ -10420,18 +10420,30 @@ export class Session implements SessionContext {
                     nextMessage.parts ?? [],
                     ac.signal,
                   );
-                if (!sendResult.responseStream) {
+                const responseStream = sendResult.responseStream;
+                const preserveFullMessage =
+                  !responseStream && sendResult.stopReason === 'cancelled';
+                if (!responseStream) {
                   this.todoStopGuard.suspend();
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
-                    sendResult.stopReason === 'cancelled',
+                    preserveFullMessage,
                   );
                   if (sendResult.stopReason === 'max_tokens') {
                     this.#stopCronAfterTokenLimit();
                   }
-                  return;
                 }
-                const responseStream = sendResult.responseStream;
+                // Keep transcript replay aligned with model history: persist
+                // only if the prompt reached the model or was preserved in full.
+                if (
+                  turnCount === 1 &&
+                  (responseStream || preserveFullMessage)
+                ) {
+                  this.config
+                    .getChatRecordingService()
+                    ?.recordCronPrompt([{ text: modelText }], echoText);
+                }
+                if (!responseStream) return;
                 const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
@@ -14198,7 +14210,7 @@ export class Session implements SessionContext {
               toolParams,
               this.config.getCwd(),
             );
-            const { denialState, fallback } = prepareAutoModeFallback(
+            const { fallback } = prepareAutoModeFallback(
               this.config,
               actionFingerprint,
             );
@@ -14233,6 +14245,8 @@ export class Session implements SessionContext {
             // the CLI / ACP paths share one source of truth for the
             // switch + denial-tracking state updates + exhaustiveness
             // guard.
+            // Concurrent calls may update denial state during classification.
+            const denialState = this.config.getAutoModeDenialState();
             const outcome = applyAutoModeDecision(
               decision,
               this.config,
@@ -15360,7 +15374,12 @@ export class Session implements SessionContext {
                       .getToolRegistry()
                       .getTool(nestedName)?.kind;
                     const safe =
-                      isToolCallConcurrencySafe(nestedName, kind, nestedArgs) &&
+                      isToolCallConcurrencySafe(
+                        nestedName,
+                        kind,
+                        nestedArgs,
+                        'code_mode',
+                      ) &&
                       !(
                         kind === Kind.Execute &&
                         !this.config.getDisableAllHooks?.() &&
