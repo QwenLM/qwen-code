@@ -214,7 +214,7 @@ New configuration `qwen.managed-agent.internal-server`:
 
 ### 4.4 Durable Session ownership for approvals (G4)
 
-- Flyway `V28__managed_session_creator.sql`:
+- Flyway `V31__managed_session_creator.sql`:
   `ALTER TABLE managed_agent_session ADD COLUMN creator_actor_key
 VARBINARY(2048) NULL;` (same type as
   `managed_workspace_create_command.actor_id`).
@@ -276,7 +276,7 @@ for loopback deployments without a binding key.
 - Rolling out `signed` mode on the public surface requires a proxy or
   sidecar that holds the signing key in front of browser traffic; the
   signature recipe is the three-header form pinned in §4.1.
-- Existing databases migrate with V28; pre-migration Sessions keep working
+- Existing databases migrate with V31; pre-migration Sessions keep working
   through the legacy ownership fallback.
 
 ## 6. Risks and mitigations
