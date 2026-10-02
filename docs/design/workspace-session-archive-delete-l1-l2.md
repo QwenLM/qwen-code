@@ -19,8 +19,9 @@ The integrated baselines are:
 
 Both prerequisite PRs are merged into main. This branch retains their final
 locking, close recovery and retirement implementations. L1 and L2 target main;
-L2 uses actual retirement, not a placeholder. The close migration's collision
-with the earlier recovery bundle V31 is resolved as described in section 7.
+L2 uses actual retirement, not a placeholder. Main's follow-up
+[#13223](https://github.com/QwenLM/qwen-code/pull/13223) resolved the close
+migration's collision with recovery bundle V31; that fix is retained here.
 
 ## 2. Problem and existing behavior
 
@@ -316,10 +317,10 @@ retention and Hosted/MySQL tests. Audit all new capability read sites and every
 adapter/service/store caller; do not leave declared flags or options unpopulated.
 
 L1/L2 add no table or column beyond the prerequisites. Main contains O4-1
-retention at Flyway `V30` and recovery bundles at `V31`. The just-merged close
-migration also claimed `V31`, preventing Flyway from resolving the combined
-schema. This branch moves only close to `V32`, preserving its SQL bytes and the
-earlier migrations. Fresh schemas and upgrade from `V31` are tested. A deployment
+retention at Flyway `V30`, recovery bundles at `V31` and close at `V32` after
+#13223 resolved their earlier version collision. This branch retains that fix,
+including the unchanged close SQL and earlier migrations.
+Fresh schemas and upgrade from `V31` are tested. A deployment
 that applied close under an earlier branch-only version must reconcile its
 migration history explicitly; do not silently rewrite an applied migration.
 Integration preserves #13135's database-time expiry check and uses a current

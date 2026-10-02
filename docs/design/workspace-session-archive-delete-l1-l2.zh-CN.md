@@ -19,7 +19,8 @@
 
 两个前置 PR 均已合入 main，本分支保留其最终的锁顺序、close 恢复及退役实现。
 L1、L2 以 main 为目标；L2 使用实际退役而非占位步骤。
-close 迁移与此前 recovery bundle V31 的冲突按第 7 节解决。
+main 的后续 [#13223](https://github.com/QwenLM/qwen-code/pull/13223) 已解决
+close 迁移与 recovery bundle V31 的冲突，本分支保留该修复。
 
 ## 2. 问题与现有行为
 
@@ -281,8 +282,8 @@ claim 续租和重试只操作 operation，不能随后再获取 Session/journal
 不能留下只有声明却没有赋值的 flag 或 option。
 
 L1/L2 除前置功能外不新增表或列。main 的 O4-1 retention 为 Flyway `V30`，
-recovery bundle 为 `V31`；刚合入的 close 迁移也占用了 `V31`，导致 Flyway
-无法解析合并后的 schema。本分支只将 close 移到 `V32`，保留其 SQL 字节及此前迁移。
+recovery bundle 为 `V31`，close 为 `V32`；#13223 已解决此前编号冲突。
+本分支保留该修复，包括不变的 close SQL 字节及此前迁移。
 测试覆盖新建 schema 与从 `V31` 升级。若部署环境曾应用前置分支的旧 close 编号，
 必须显式协调迁移历史，不能静默改写已应用的迁移。
 集成保留 #13135 的数据库时间租约过期检查，并在 operation 加锁后使用当前锁定读取。

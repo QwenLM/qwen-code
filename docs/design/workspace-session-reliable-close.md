@@ -38,7 +38,7 @@ Before binding retirement, require no active logical Session, no unsettled execu
 
 ## Implementation areas
 
-Managed Agent lifecycle service/store/coordinator, capabilities and canonical OpenAPI/generated WebShell types; Runtime Broker repositories/service/provider and schema; Hosted Harness admission; collocated tests. The close migration is V32, following main's V28 Hook admission index, V29 backfill, V30 tool-output retention, and V31 recovery-bundle migrations. Its SQL bytes are unchanged. Public and WebShell capabilities retain both upstream Artifact reads and optional close support. No new lifecycle orchestrator or broad core refactor is introduced. Align lifecycle contracts with [#12867](https://github.com/QwenLM/qwen-code/issues/12867) and Harness recovery with [#12740](https://github.com/QwenLM/qwen-code/issues/12740).
+Managed Agent lifecycle service/store/coordinator, capabilities and canonical OpenAPI/generated WebShell types; Runtime Broker repositories/service/provider and schema; Hosted Harness admission; collocated tests. The close migration is V32, following main's V28 Hook admission index, V29 backfill, V30 tool-output retention, and V31 workspace recovery bundle migrations. Its SQL bytes are unchanged. Public and WebShell capabilities retain both upstream Artifact reads and optional close support. No new lifecycle orchestrator or broad core refactor is introduced. Align lifecycle contracts with [#12867](https://github.com/QwenLM/qwen-code/issues/12867) and Harness recovery with [#12740](https://github.com/QwenLM/qwen-code/issues/12740).
 
 ## Validation and acceptance
 
