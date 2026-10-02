@@ -1650,6 +1650,10 @@ describe('InputPrompt', () => {
 
   describe('clipboard image paste', () => {
     const isWindows = process.platform === 'win32';
+    // Which clipboard-unavailable message is shown depends on process.platform
+    // at call time, so every case that asserts the copy pins the platform
+    // instead of letting the host CI lane decide the expectation.
+    let platformSpy: ReturnType<typeof vi.spyOn> | undefined;
 
     beforeEach(() => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
@@ -1657,6 +1661,11 @@ describe('InputPrompt', () => {
       vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
         undefined,
       );
+    });
+
+    afterEach(() => {
+      platformSpy?.mockRestore();
+      platformSpy = undefined;
     });
 
     // Windows uses Alt+V (\x1Bv), non-Windows uses Ctrl+V (\x16)
@@ -1776,6 +1785,9 @@ describe('InputPrompt', () => {
           return false;
         },
       );
+      platformSpy = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('darwin');
 
       const first = renderWithProviders(
         <InputPrompt
@@ -1811,6 +1823,42 @@ describe('InputPrompt', () => {
         expect.any(Number),
       );
       second.unmount();
+    });
+
+    it('should show the Linux-specific clipboard error on Linux', async () => {
+      const addItem = vi.fn();
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+        async (onUnavailable) => {
+          onUnavailable?.();
+          return false;
+        },
+      );
+      platformSpy = vi
+        .spyOn(process, 'platform', 'get')
+        .mockReturnValue('linux');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Clipboard image paste is unavailable on Linux because no clipboard tool (wl-clipboard or xclip) was found. Install one (e.g. `sudo apt install wl-clipboard`) or export DISPLAY/WAYLAND_DISPLAY.',
+        },
+        expect.any(Number),
+      );
+      unmount();
     });
 
     it('should handle image save failure gracefully', async () => {
