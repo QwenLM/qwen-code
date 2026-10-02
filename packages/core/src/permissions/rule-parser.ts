@@ -1808,24 +1808,45 @@ export function matchesMcpPattern(
         .map((spelling) => `mcp__${spelling}__`)
         .find((serverPrefix) => prefix.startsWith(serverPrefix));
       if (boundary === undefined) {
-        // A prefix that closes a server segment names a different server, so
-        // it must not reach this tool (R4-2). One that never closes a segment
-        // (`mcp__*`, `mcp__git*`) is coarser than any boundary the producer
-        // can speak to, and keeps matching on the advertised spellings.
-        return segments.length > 2 ? false : matchesPrefixLiterally(prefix);
+        // Coarse or precise is decided by the producer's own renderings, not
+        // by counting segments of the flattened rule (a trailing `_` the
+        // separator absorbs would fragment the key, and a key containing
+        // `__` would over-count). A prefix that overruns this key's boundary
+        // (`mcp__foo_*` for key `foo`) names no server segment of this key
+        // and must not match; a coarse prefix the key's own rendering still
+        // starts with (`mcp__*`, `mcp__git*`, or a `__`-carrying key's own
+        // name) keeps matching on the advertised spellings.
+        const namesThisKey = serverSpellings.some((spelling) =>
+          `mcp__${spelling}`.startsWith(prefix),
+        );
+        return namesThisKey ? matchesPrefixLiterally(prefix) : false;
       }
       const toolPrefix = prefix.slice(boundary.length);
       // A prefix of pure underscores is separator continuation, not a tool
-      // filter — otherwise a sibling server's whole-server spelling leaks in.
-      // It reads as this server's own tool only when the rule's own server
-      // segment is this key.
+      // filter — it reads as this server's own tool only when the rule's own
+      // server segment is this key AND the tool's name actually starts with
+      // that many underscores (otherwise `mcp__foo___*` — server `foo_`'s
+      // whole-server spelling — would reach server `foo`'s `deploy`).
       if (toolPrefix !== '' && !/[^_]/.test(toolPrefix)) {
-        return serverSpellings.includes(segments[1] ?? '');
+        return (
+          serverSpellings.includes(segments[1] ?? '') &&
+          mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
+            spelling.startsWith(toolPrefix),
+          )
+        );
       }
       // The rule's tool side is written in a rendering too, so compare against
-      // the producer's own renderings of its tool name.
+      // the producer's own renderings of its tool name. The registered name's
+      // own tool segment is read off the boundary-matched name — never
+      // recompute a hash — so a prefix reaching into the hash suffix or past
+      // a truncation cut still matches, the way the unthreaded path does.
+      const registeredToolSegment = toolName.startsWith(boundary)
+        ? toolName.slice(boundary.length)
+        : undefined;
       return (
         toolPrefix === '' ||
+        (registeredToolSegment !== undefined &&
+          registeredToolSegment.startsWith(toolPrefix)) ||
         mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
           spelling.startsWith(toolPrefix),
         )

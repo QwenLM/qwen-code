@@ -1937,3 +1937,121 @@ describe('the producer-carried identity channel (R4-2)', () => {
     ).toBe('default');
   });
 });
+
+// The three wildcard-arm refinements from the round-17 review: the tool side
+// of a boundary-matched prefix also reads the registered name's own tool
+// segment (R13-1), the separator-continuation guard requires the tool name to
+// actually start with those underscores (R17-1), and coarse-vs-foreign is
+// decided by the producer's own renderings instead of a segment count of the
+// flattened rule (R17-2).
+describe('wildcard arms read the producer identity, not a re-split (R13-1/R17-1/R17-2)', () => {
+  it('matches a tool prefix that reaches into the registered name hash suffix (R13-1)', async () => {
+    // `search.repositories` registers as `mcp__github__search_repositories_<hash>`;
+    // a rule copied from `/tools` as a literal prefix of that spelling must
+    // keep matching — the producer renderings alone stop one character short.
+    const tool = prodTool('github', 'search.repositories');
+    const identity = {
+      serverName: tool.serverName,
+      serverToolName: tool.serverToolName,
+    };
+    expect(
+      matchesToolPattern(
+        'mcp__github__search_repositories_*',
+        tool.name,
+        tool.permissionAliases,
+        identity,
+      ),
+    ).toBe(true);
+
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['mcp__github__search_repositories_*'],
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: tool.name,
+        toolAliases: tool.permissionAliases,
+        mcpIdentity: identity,
+      }),
+    ).toBe('deny');
+  });
+
+  it('refuses a sibling-key whole-server spelling that lands as separator continuation (R17-1)', async () => {
+    // `mcp__foo___*` is server `foo_`'s whole-server wildcard spelling; the
+    // rule's own segment reads `foo` once the separator absorbs the trailing
+    // underscore, so the guard must also require the tool name to start with
+    // the underscores — server `foo`'s `deploy` does not.
+    const tool = prodTool('foo', 'deploy');
+    expect(tool.name).toBe('mcp__foo__deploy');
+    expect(
+      matchesMcpPattern('mcp__foo___*', tool.name, undefined, undefined, {
+        serverName: 'foo',
+        serverToolName: 'deploy',
+      }),
+    ).toBe(false);
+
+    const pm = new PermissionManager(
+      makeConfig({ permissionsAllow: ['mcp__foo___*'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: tool.name,
+        toolAliases: tool.permissionAliases,
+        mcpIdentity: { serverName: 'foo', serverToolName: 'deploy' },
+      }),
+    ).toBe('default');
+  });
+
+  it('decides coarse-vs-foreign from the producer renderings, not a segment count (R17-2)', async () => {
+    // `mcp__foo_*` overruns key `foo`'s boundary: it reads as server `foo_`'s
+    // prefix, so it must not reach server `foo`'s own tools (the separator's
+    // first underscore would otherwise supply the rule's trailing one).
+    const fooOwnsUnderscoreTool = prodTool('foo', '_internal');
+    expect(fooOwnsUnderscoreTool.name).toBe('mcp__foo___internal');
+    expect(
+      matchesMcpPattern(
+        'mcp__foo_*',
+        fooOwnsUnderscoreTool.name,
+        undefined,
+        [],
+        { serverName: 'foo', serverToolName: '_internal' },
+      ),
+    ).toBe(false);
+    // The refusal this branch exists for stays: server `foo_`'s tool must
+    // not answer server `foo`'s whole-server rule.
+    const fooUnderscoreTool = prodTool('foo_', '_internal');
+    expect(
+      matchesMcpPattern('mcp__foo__*', fooUnderscoreTool.name, undefined, [], {
+        serverName: 'foo_',
+        serverToolName: '_internal',
+      }),
+    ).toBe(false);
+    // A key containing `__` is named by a prefix that stops short of its own
+    // closing separator — that is not an overrun.
+    const doubleUnderscoreKey = prodTool('my__svc', 'deploy');
+    expect(
+      matchesMcpPattern(
+        'mcp__my__svc*',
+        doubleUnderscoreKey.name,
+        undefined,
+        [],
+        { serverName: 'my__svc', serverToolName: 'deploy' },
+      ),
+    ).toBe(true);
+
+    const pm = new PermissionManager(
+      makeConfig({ permissionsDeny: ['mcp__my__svc*'] }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: doubleUnderscoreKey.name,
+        toolAliases: doubleUnderscoreKey.permissionAliases,
+        mcpIdentity: { serverName: 'my__svc', serverToolName: 'deploy' },
+      }),
+    ).toBe('deny');
+  });
+});
