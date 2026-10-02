@@ -612,6 +612,9 @@ describe('Session', () => {
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
+    // Unset by default so the bridge gate stays off; tests that exercise it
+    // assign a review lookup.
+    getReviewedDeclaration?: ReturnType<typeof vi.fn>;
   };
   let mockWorkflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
