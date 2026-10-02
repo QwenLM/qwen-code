@@ -134,7 +134,9 @@ public class ManagedSessionStore {
         this.toolResults = toolResults;
     }
 
-    @Autowired(required = false)
+    // The policy bean is unconditional, so required injection fails closed
+    // in a Spring context; direct constructor use keeps the unbound default.
+    @Autowired
     public void setCredentials(WriterCredentialPolicy credentials) {
         this.credentials = credentials;
     }

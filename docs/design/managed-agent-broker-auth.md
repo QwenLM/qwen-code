@@ -107,10 +107,17 @@ Mode resolution at startup:
   `allowed-drift`), and `X-Qwen-Signature`, computed as:
 
   ```
-  X-Qwen-Signature: v1=<hex HMAC-SHA256>(
+  X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256>(
       "qwen-broker-auth-v1\n" + METHOD + "\n" + requestURI + "\n"
-      + tenantId + "\n" + actorId + "\n" + timestamp)
+      + queryString + "\n" + tenantId + "\n" + actorId + "\n" + timestamp
+      + "\n" + lowercase hex SHA-256(raw body) + "\n" + idempotencyKey)
   ```
+
+  `requestURI` is the undecoded path without the query string;
+  `queryString` is the raw query (empty when absent); `idempotencyKey` is
+  the `Idempotency-Key` header value (empty when absent). Signing the body
+  and idempotency key means a captured signature authorizes exactly one
+  request, not any same-path request inside the drift window.
 
   On success the filter installs the `AuthenticatedTenantActor` principal
   (tenant and actor from the now-authenticated headers); on failure it
@@ -133,6 +140,11 @@ Startup guards (all fail fast with a named property):
   principal behind the signature filter).
 - a non-empty `server.servlet.context-path` (the path-prefix filters
   assume a root mount and would be silently bypassed).
+- an `allowed-drift` below one second (truncates to a zero window).
+- with `internal-server.port` set, a loopback `session-store.base-url`
+  naming a different port (the harness's store calls would 404).
+- `harness.enabled` with a plaintext non-loopback `harness.base-url` (the
+  attach payload carries the provisioned writer credential).
 
 The OpenAPI contract gains a `qwenSignature` apiKey scheme
 (`X-Qwen-Signature`) whose description pins the canonical string and the
@@ -226,9 +238,10 @@ VARBINARY(2048) NULL;` (same type as
 - `ManagedActionStore.requireOwner` resolves ownership in order:
   1. `creator_actor_key` on the Session row — must match the caller's
      actor key when present;
-  2. the legacy `managed_workspace_create_command` row (pre-migration
-     Sessions and double-check for workspace Sessions);
-  3. neither recorded (anonymous open-mode creation) — allow, matching the
+  2. the legacy `managed_workspace_create_command` row (the fallback for
+     pre-migration Sessions, whose creator column is NULL);
+  3. neither recorded (anonymous open-mode creation, or a pre-migration
+     hosted Session) — allow any caller in the tenant, matching the
      tenant-scoped read semantics non-workspace Sessions already have.
 
   This makes hosted approval answers work over HTTP and ties workspace
@@ -281,10 +294,12 @@ for loopback deployments without a binding key.
 
 ## 6. Risks and mitigations
 
-- **Replay within the timestamp window.** HMAC covers method, path,
-  tenant, actor and timestamp; window is 5 minutes. Internal mutations are
-  additionally idempotency-keyed. Accepted for a gateway-free deployment;
-  a nonce cache is listed as future work.
+- **Replay within the timestamp window.** The HMAC covers method, path,
+  query string, tenant, actor, timestamp, a body digest and the
+  idempotency key — a captured signature authorizes exactly that one
+  request; the residual risk is verbatim replay inside the 5-minute
+  window. Internal mutations are additionally idempotency-keyed. Accepted
+  for a gateway-free deployment; a nonce cache is listed as future work.
 - **Binding credential is static per Session.** Compromise of one token
   affects one Session only; rotation = rotate `binding-key` (flag day).
   Per-Session random secrets stored at creation are the listed alternative
@@ -306,7 +321,10 @@ for loopback deployments without a binding key.
   folding rejection under `signed`.
 - TypeScript tests: loopback classification table, refusal without opt-in,
   acceptance with opt-in, bridge payload round-trip with `writerToken`.
-- OpenAPI contract test updated for the new scheme and error codes.
+- The OpenAPI contract records the new `qwenSignature` scheme and the 401
+  codes in prose (scheme + shared `Unauthorized` descriptions); the
+  web-shell generated client is regenerated against it, and its sync test
+  (`managed-agent-api.test.ts`) fails on drift.
 - E2E: existing dev topology (`qwen` CLI + Web Shell on loopback) works
   with zero new configuration; a signed-mode smoke run against a
   non-loopback address.
@@ -323,8 +341,10 @@ for loopback deployments without a binding key.
    public port; with a non-loopback public address and open mode the
    broker refuses to start.
 4. A hosted Session's approval can be answered over HTTP by its creator
-   and by no other actor; pre-migration workspace Sessions keep their
-   current behavior.
+   and by no other actor; a Session with no recorded creator (anonymous
+   open-mode creation, or created before V31) answers to any caller in its
+   tenant, matching its read ACL; pre-migration workspace Sessions keep
+   their current behavior.
 5. `createHttpManagedSessionStores({ baseUrl: 'http://<non-loopback>' })`
    throws unless `allowInsecureHttp: true`.
 

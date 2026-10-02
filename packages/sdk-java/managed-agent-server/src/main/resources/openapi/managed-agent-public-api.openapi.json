@@ -17,6 +17,7 @@
     },
     {
       "trustedTenant": [],
+      "trustedActor": [],
       "qwenSignature": []
     }
   ],
@@ -3099,21 +3100,21 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Qwen-Tenant-Id",
-        "description": "Injected by the trusted authenticated gateway, never trusted from browser input."
+        "description": "The tenant scope of the request. In the gateway topology it is injected by the trusted authenticated gateway and never trusted from browser input; in signed mode (qwenSignature) the broker authenticates it as part of the signed header set."
       },
       "trustedActor": {
         "type": "apiKey",
         "in": "header",
         "name": "X-Qwen-Actor-Id",
         "x-qwen-implementation-status": "planned",
-        "description": "Verified actor injected by the authenticated gateway together with tenant; browser-supplied headers are stripped. Resource ACLs and Action responder eligibility are mandatory. This header is not a browser credential. Signed mode (qwenSignature) authenticates the same header pair without a gateway."
+        "description": "Verified actor identity. In the gateway topology it is injected by the authenticated gateway together with tenant and browser-supplied headers are stripped. In signed mode (qwenSignature) the broker authenticates it as part of the signed header set. Resource ACLs and Action responder eligibility are mandatory in either mode. This header is not a browser credential."
       },
       "qwenSignature": {
         "type": "apiKey",
         "in": "header",
         "name": "X-Qwen-Signature",
         "x-qwen-implementation-status": "implemented",
-        "description": "Gateway-free authentication. The caller sends X-Qwen-Tenant-Id, X-Qwen-Actor-Id, X-Qwen-Signature-Timestamp (epoch seconds, within the server drift window) and X-Qwen-Signature: v1=<hex HMAC-SHA256> over \"qwen-broker-auth-v1\\n\" + METHOD + \"\\n\" + request path + \"\\n\" + tenant + \"\\n\" + actor + \"\\n\" + timestamp, keyed by the server signing key. Missing headers answer 401 authentication_required; a stale timestamp or wrong signature answers 401 invalid_signature."
+        "description": "Gateway-free authentication. The caller sends X-Qwen-Tenant-Id, X-Qwen-Actor-Id, X-Qwen-Signature-Timestamp (epoch seconds, within the server drift window) and X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256> over \"qwen-broker-auth-v1\\n\" + METHOD + \"\\n\" + request path (undecoded, without the query string) + \"\\n\" + raw query string (empty when absent) + \"\\n\" + tenant + \"\\n\" + actor + \"\\n\" + timestamp + \"\\n\" + lowercase hex SHA-256 of the raw request body + \"\\n\" + the Idempotency-Key header value (empty when absent), keyed by the server signing key. A missing actor, signature or timestamp header answers 401 authentication_required (a missing tenant header answers 400 invalid_tenant from the tenant filter); a stale timestamp or wrong signature answers 401 invalid_signature. Applies to every covered public and WebShell route."
       }
     },
     "parameters": {
@@ -3257,7 +3258,7 @@
         }
       },
       "Unauthorized": {
-        "description": "A trusted actor is required for this request but none was supplied (actor_required). In signed authentication mode (qwenSignature) every public and WebShell route additionally answers 401 authentication_required when the signature, timestamp or actor headers are missing, and 401 invalid_signature when the signature is wrong or stale.",
+        "description": "A trusted actor is required for this request but none was supplied (actor_required). In signed authentication mode (qwenSignature) every covered public and WebShell route additionally answers 401 authentication_required when the signature, timestamp or actor headers are missing, and 401 invalid_signature when the signature is wrong or stale.",
         "content": {
           "application/json": {
             "schema": {

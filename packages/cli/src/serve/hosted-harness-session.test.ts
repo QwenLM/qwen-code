@@ -3184,8 +3184,16 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(created.status).toBe(200);
     expect(state.storeOptions.at(-1)).toMatchObject({
+      baseUrl: store().baseUrl,
+      writerId: BOOT_ID,
+      leaseDurationMs: 60_000,
       writerToken,
       allowInsecureHttp: true,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
     });
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
@@ -3202,6 +3210,7 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(created.status).toBe(400);
     expect(created.body.error).toBe('invalid_managed_session_store');
+    expect(created.body.message).toContain('plaintext HTTP');
   });
 
   it('refuses a workspace cold load before another input when a committed resource is missing', async () => {

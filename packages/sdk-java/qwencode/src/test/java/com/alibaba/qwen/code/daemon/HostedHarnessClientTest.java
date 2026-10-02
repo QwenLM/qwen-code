@@ -151,6 +151,19 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void connectionOmitsUnsetOptionalCredentials() {
+        Map<String, Object> json = ManagedSessionStoreConnection.builder()
+                .baseUri(URI.create("https://store.example"))
+                .tenantId("tenant-a")
+                .workspaceId("workspace-a")
+                .writerId(BOOT_ID)
+                .build()
+                .toJson();
+        assertFalse(json.containsKey("writerToken"));
+        assertFalse(json.containsKey("allowInsecureHttp"));
+    }
+
+    @Test
     void rejectsCapabilityMismatchBeforeAnySessionMutation() {
         AtomicInteger sessions = new AtomicInteger();
         server.createContext("/session", exchange -> {

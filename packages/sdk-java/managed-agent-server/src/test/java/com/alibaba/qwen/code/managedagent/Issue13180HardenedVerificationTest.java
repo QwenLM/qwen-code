@@ -99,8 +99,9 @@ class Issue13180HardenedVerificationTest {
         String timestamp = now();
         HttpResponse<String> wrongKey = signed(publicPort, "GET",
                 "/v1/agents/sessions", tenant, "attacker", timestamp,
-                signWith(WRONG_KEY, "GET", "/v1/agents/sessions", tenant,
-                        "attacker", timestamp), null, null);
+                sign(WRONG_KEY, "GET", "/v1/agents/sessions", tenant,
+                        "attacker", timestamp, new byte[0], null),
+                null, null);
         assertThat(wrongKey.statusCode()).as(wrongKey.body()).isEqualTo(401);
         assertThat(wrongKey.body()).contains("invalid_signature");
 
@@ -161,6 +162,7 @@ class Issue13180HardenedVerificationTest {
                 otherSession, token, "writer-attacker", 60_000);
         assertThat(crossSession.statusCode()).as(crossSession.body())
                 .isEqualTo(403);
+        assertThat(crossSession.body()).contains("writer_credential_invalid");
 
         // Control: the legitimate harness re-acquires after the lapse.
         HttpResponse<String> reacquire = acquire(internalPort, tenant,
@@ -243,19 +245,23 @@ class Issue13180HardenedVerificationTest {
 
         // Original attack: a different, guessable actor identity.
         String intruderTimestamp = now();
+        String intruderKey = "intruder-" + UUID.randomUUID();
         HttpResponse<String> intruder = signed(publicPort, "POST", path,
                 tenant, "intruder", intruderTimestamp,
-                sign("POST", path, tenant, "intruder", intruderTimestamp),
-                "intruder-" + UUID.randomUUID(), body);
+                sign("POST", path, tenant, "intruder", intruderTimestamp,
+                        body, intruderKey),
+                intruderKey, body);
         assertThat(intruder.statusCode()).as(intruder.body()).isEqualTo(403);
         assertThat(intruder.body()).contains("action_forbidden");
 
         // Fixed behavior: the recorded creator's answer is accepted.
         String ownerTimestamp = now();
+        String ownerKey = "owner-" + UUID.randomUUID();
         HttpResponse<String> owner = signed(publicPort, "POST", path, tenant,
                 "owner", ownerTimestamp,
-                sign("POST", path, tenant, "owner", ownerTimestamp),
-                "owner-" + UUID.randomUUID(), body);
+                sign("POST", path, tenant, "owner", ownerTimestamp, body,
+                        ownerKey),
+                ownerKey, body);
         assertThat(owner.statusCode()).as(owner.body()).isEqualTo(202);
         JsonNode operation = JSON.readTree(owner.body());
         assertThat(operation.path("id").asText()).startsWith("op_");
@@ -264,11 +270,13 @@ class Issue13180HardenedVerificationTest {
     private String createSession(String tenant, String actor)
             throws Exception {
         String timestamp = now();
+        String idempotencyKey = UUID.randomUUID().toString();
+        String createBody = "{\"agent_id\":\"qwen-code\",\"input\":[]}";
         HttpResponse<String> created = signed(publicPort, "POST",
                 "/v1/agents/sessions", tenant, actor, timestamp,
-                sign("POST", "/v1/agents/sessions", tenant, actor, timestamp),
-                UUID.randomUUID().toString(),
-                "{\"agent_id\":\"qwen-code\",\"input\":[]}");
+                sign("POST", "/v1/agents/sessions", tenant, actor, timestamp,
+                        createBody, idempotencyKey),
+                idempotencyKey, createBody);
         assertThat(created.statusCode()).as(created.body()).isEqualTo(202);
         return JSON.readTree(created.body()).path("id").asText();
     }
@@ -372,18 +380,40 @@ class Issue13180HardenedVerificationTest {
 
     private static String sign(String method, String uri, String tenant,
             String actor, String timestamp) throws Exception {
-        return signWith(SIGNING_KEY, method, uri, tenant, actor, timestamp);
+        return sign(SIGNING_KEY, method, uri, tenant, actor, timestamp,
+                new byte[0], null);
     }
 
-    private static String signWith(String key, String method, String uri,
-            String tenant, String actor, String timestamp) throws Exception {
+    private static String sign(String method, String uri, String tenant,
+            String actor, String timestamp, String body,
+            String idempotencyKey) throws Exception {
+        return sign(SIGNING_KEY, method, uri, tenant, actor, timestamp,
+                body == null ? new byte[0]
+                        : body.getBytes(StandardCharsets.UTF_8),
+                idempotencyKey);
+    }
+
+    private static String sign(String key, String method, String uri,
+            String tenant, String actor, String timestamp, byte[] body,
+            String idempotencyKey) throws Exception {
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + tenant + "\n" + actor + "\n" + timestamp;
+                + "\n" + "" + "\n" + tenant + "\n" + actor + "\n" + timestamp
+                + "\n" + sha256(body) + "\n"
+                + (idempotencyKey == null ? "" : idempotencyKey);
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8),
                 "HmacSHA256"));
         return "v1=" + HexFormat.of().formatHex(
                 mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String sha256(byte[] value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance(
+                    "SHA-256").digest(value));
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static String sha256(String value) {

@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -65,10 +66,10 @@ public class ManagedActionStore {
             throw new ApiException(HttpStatus.FORBIDDEN,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        byte[] creator = jdbc.queryForObject(
+        byte[] creator = DataAccessUtils.nullableSingleResult(jdbc.query(
                 "SELECT creator_actor_key FROM managed_agent_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
-                byte[].class, tenantId, sessionId);
+                (result, row) -> result.getBytes(1), tenantId, sessionId));
         if (creator != null) {
             if (key != null && Arrays.equals(creator, key)) {
                 return;

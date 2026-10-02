@@ -143,8 +143,55 @@ class BrokerSecurityTest {
         assertThatThrownBy(() -> new BrokerSecurity(properties, server))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("internal-server.port");
+        // An unset server.port is the Spring Boot default 8080.
+        server.setPort(null);
+        assertThatThrownBy(() -> new BrokerSecurity(properties, server))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("internal-server.port");
         properties.getInternalServer().setPort(8081);
         assertThatCode(() -> new BrokerSecurity(properties, server))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void refusesASubSecondSignatureDrift() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setAllowedDrift(
+                java.time.Duration.ofMillis(500));
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("allowed-drift");
+    }
+
+    @Test
+    void refusesALoopbackStoreUrlMissingTheInternalPort() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getSessionStore().setEnabled(true);
+        properties.getSessionStore().setBaseUrl("http://127.0.0.1:8080");
+        properties.getInternalServer().setPort(4183);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base-url");
+        properties.getSessionStore()
+                .setBaseUrl("http://127.0.0.1:4183");
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void refusesAPlaintextNonLoopbackHarnessUrl() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setBaseUrl("http://10.0.0.9:4170");
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("harness.base-url");
+        properties.getHarness().setBaseUrl("https://harness.internal:4170");
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+        properties.getHarness().setBaseUrl("http://10.0.0.9:4170");
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
                 .doesNotThrowAnyException();
     }
 
@@ -170,9 +217,11 @@ class BrokerSecurityTest {
                 "0:0:0:0:0:0:0:1"}) {
             assertThat(BrokerSecurity.isLoopback(loopback)).isTrue();
         }
+        // Only resolver-independent negatives: a hostname lookup answers
+        // whatever the runner's resolver says (a catch-all resolver maps
+        // anything to loopback, which is then genuinely loopback).
         for (String remote : new String[] {"0.0.0.0", "10.0.0.8",
-                "192.168.1.1", "127.example.com", "example.invalid", "",
-                " "}) {
+                "192.168.1.1", "", " "}) {
             assertThat(BrokerSecurity.isLoopback(remote)).isFalse();
         }
         assertThat(BrokerSecurity.isLoopback(null)).isFalse();

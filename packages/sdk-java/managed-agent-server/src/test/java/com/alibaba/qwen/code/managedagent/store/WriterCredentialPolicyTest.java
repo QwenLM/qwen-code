@@ -64,6 +64,8 @@ class WriterCredentialPolicyTest {
                 });
         assertThatThrownBy(() -> policy.require("tenant", "workspace",
                 "other", token)).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> policy.require("tenant", "other-workspace",
+                "session", token)).isInstanceOf(ApiException.class);
         assertThatThrownBy(() -> policy.require("other", "workspace",
                 "session", token)).isInstanceOf(ApiException.class);
         assertThatThrownBy(() -> policy.require("tenant", "workspace",

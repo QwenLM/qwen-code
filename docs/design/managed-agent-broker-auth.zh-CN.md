@@ -99,10 +99,16 @@ harness。
   计算方式为：
 
   ```
-  X-Qwen-Signature: v1=<hex HMAC-SHA256>(
+  X-Qwen-Signature: v1=<小写 hex HMAC-SHA256>(
       "qwen-broker-auth-v1\n" + METHOD + "\n" + requestURI + "\n"
-      + tenantId + "\n" + actorId + "\n" + timestamp)
+      + queryString + "\n" + tenantId + "\n" + actorId + "\n" + timestamp
+      + "\n" + 原始请求体的 SHA-256（小写 hex）+ "\n" + idempotencyKey)
   ```
+
+  `requestURI` 是未解码的路径，不含查询串；`queryString` 是原始查询串
+  （缺省为空）；`idempotencyKey` 是 `Idempotency-Key` 头的值（缺省为
+  空）。对请求体和幂等键签名意味着捕获的签名只对这一个请求有效，
+  而非漂移窗口内同路径的任意请求。
 
   验证成功后过滤器安装 `AuthenticatedTenantActor` principal
   （租户与 actor 来自现已认证的头）；失败则以标准错误信封应答
@@ -124,6 +130,11 @@ harness。
   头替身不得能在签名过滤器之后注入 principal）。
 - 配置了非空的 `server.servlet.context-path`（路径前缀过滤器假设
   根挂载，否则会被静默绕过）。
+- `allowed-drift` 低于 1 秒（会被截断为零窗口）。
+- 设置了 `internal-server.port` 时，回环的 `session-store.base-url`
+  指向其他端口（harness 的 store 调用会全部 404）。
+- `harness.enabled` 且 `harness.base-url` 为非回环明文 http（attach
+  载荷携带下发的 writer 凭证）。
 
 OpenAPI 契约新增 `qwenSignature` apiKey 方案（`X-Qwen-Signature`），
 其描述固定规范串与 `401` 错误码；`trustedActor` 方案对外部网关
@@ -211,10 +222,11 @@ VARBINARY(2048) NULL;`（与
 - `ManagedActionStore.requireOwner` 按序解析属主：
   1. 会话行的 `creator_actor_key`——存在时必须与调用方的 actor
      key 相等；
-  2. 遗留的 `managed_workspace_create_command` 行（覆盖迁移前的
-     会话，并作为 workspace 会话的双重校验）；
-  3. 两者都没有（open 模式下的匿名创建）——放行，与非 workspace
-     会话现有的租户级读语义一致。
+  2. 遗留的 `managed_workspace_create_command` 行（迁移前会话的
+     回退，其 creator 列为 NULL）；
+  3. 两者都没有（open 模式下的匿名创建，或迁移前的 hosted 会话）——
+     放行租户内任意调用方，与非 workspace 会话现有的租户级读语义
+     一致。
 
   这使 hosted 审批应答能通过 HTTP 走通，并把 workspace 审批绑定到
   已认证 actor（G1）而非自证头身份，堵住“可猜测 actor”缺口。
@@ -258,9 +270,10 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
 
 ## 6. 风险与缓解
 
-- **时间戳窗口内的重放。** HMAC 覆盖方法、路径、租户、actor 与
-  时间戳；窗口为 5 分钟。内部写操作另有幂等键。对无网关部署而言
-  可接受；nonce 缓存列为后续工作。
+- **时间戳窗口内的重放。** HMAC 覆盖方法、路径、查询串、租户、
+  actor、时间戳、请求体摘要与幂等键——捕获的签名只对原请求有效；
+  残余风险是窗口（5 分钟）内的原样重放。内部写操作另有幂等键。
+  对无网关部署而言可接受；nonce 缓存列为后续工作。
 - **绑定凭证对每个会话是静态的。** 单个 token 泄露只影响单个会话；
   轮换方式 = 轮换 `binding-key`（一次性切换）。创建时存储每会话
   随机密钥是被否决的替代方案，原因是额外的表和恢复复杂度。
@@ -279,7 +292,9 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
   拒绝匿名折叠。
 - TypeScript 测试：回环地址分类表、未 opt-in 时拒绝、opt-in 后
   接受、桥载荷携带 `writerToken` 的往返。
-- OpenAPI 契约测试更新，覆盖新方案与新错误码。
+- OpenAPI 契约以散文形式（方案 + 共享 `Unauthorized` 组件描述）记录
+  新的 `qwenSignature` 方案与 401 错误码；web-shell 生成客户端按契约
+  重新生成，其一致性测试（`managed-agent-api.test.ts`）对漂移失败。
 - E2E：现有 dev 拓扑（`qwen` CLI + 回环 Web Shell）零新配置可用；
   针对非回环地址做一次 signed 模式冒烟。
 
@@ -292,7 +307,9 @@ false。报错信息点名该选项，使补救方式可被发现。客户端
 3. 设置 `internal-server.port` 后，公网端口上 `/internal/**` 不可达；
    公网地址非回环且为 open 模式时，broker 拒绝启动。
 4. hosted 会话的审批可由其创建者经 HTTP 应答，且其他 actor 不能；
-   迁移前的 workspace 会话保持现有行为。
+   无属主记录的会话（open 模式匿名创建，或 V31 之前创建）允许租户内
+   任意调用方应答，与其读 ACL 一致；迁移前的 workspace 会话保持现有
+   行为。
 5. `createHttpManagedSessionStores({ baseUrl: 'http://<非回环>' })`
    抛出异常，除非 `allowInsecureHttp: true`。
 

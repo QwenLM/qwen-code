@@ -32,6 +32,7 @@ public class SignatureAuthFilter extends OncePerRequestFilter
     public static final String ACTOR_HEADER = "X-Qwen-Actor-Id";
     public static final String SIGNATURE_HEADER = "X-Qwen-Signature";
     public static final String TIMESTAMP_HEADER = "X-Qwen-Signature-Timestamp";
+    public static final String IDEMPOTENCY_HEADER = "Idempotency-Key";
     private static final String PREFIX = "v1=";
     private final BrokerSecurity security;
     private final ObjectMapper objectMapper;
@@ -92,8 +93,14 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                     "The signature timestamp is outside the allowed drift.");
             return;
         }
+        // The body is signed, so it is buffered here and re-exposed to the
+        // chain; without it a captured signature would authorize any
+        // substitute body on the same method and path inside the window.
+        byte[] body = request.getInputStream().readAllBytes();
         String expected = PREFIX + sign(request.getMethod(),
-                request.getRequestURI(), tenantId, actorId, timestamp.trim());
+                request.getRequestURI(), request.getQueryString(), tenantId,
+                actorId, timestamp.trim(), body,
+                request.getHeader(IDEMPOTENCY_HEADER));
         if (!MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.US_ASCII),
                 signature.trim().getBytes(StandardCharsets.US_ASCII))) {
@@ -121,13 +128,55 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                     }
                 };
             }
+
+            @Override
+            public jakarta.servlet.ServletInputStream getInputStream() {
+                java.io.ByteArrayInputStream source =
+                        new java.io.ByteArrayInputStream(body);
+                return new jakarta.servlet.ServletInputStream() {
+                    @Override
+                    public boolean isFinished() {
+                        return source.available() == 0;
+                    }
+
+                    @Override
+                    public boolean isReady() {
+                        return true;
+                    }
+
+                    @Override
+                    public void setReadListener(
+                            jakarta.servlet.ReadListener listener) {
+                    }
+
+                    @Override
+                    public int read() {
+                        return source.read();
+                    }
+
+                    @Override
+                    public int read(byte[] target, int offset, int length) {
+                        return source.read(target, offset, length);
+                    }
+                };
+            }
+
+            @Override
+            public java.io.BufferedReader getReader() {
+                return new java.io.BufferedReader(
+                        new java.io.InputStreamReader(getInputStream(),
+                                StandardCharsets.UTF_8));
+            }
         }, response);
     }
 
-    private String sign(String method, String uri, String tenantId,
-            String actorId, String timestamp) {
+    private String sign(String method, String uri, String query,
+            String tenantId, String actorId, String timestamp, byte[] body,
+            String idempotencyKey) {
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + tenantId + "\n" + actorId + "\n" + timestamp;
+                + "\n" + (query == null ? "" : query) + "\n" + tenantId
+                + "\n" + actorId + "\n" + timestamp + "\n" + sha256Hex(body)
+                + "\n" + (idempotencyKey == null ? "" : idempotencyKey);
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(security.getSigningKey(),
@@ -137,6 +186,15 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         } catch (Exception error) {
             throw new IllegalStateException("HmacSHA256 is unavailable",
                     error);
+        }
+    }
+
+    private static String sha256Hex(byte[] body) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance(
+                    "SHA-256").digest(body));
+        } catch (Exception error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
         }
     }
 

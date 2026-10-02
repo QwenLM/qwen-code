@@ -1,15 +1,20 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.api.ApiExceptionHandler;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import org.apache.catalina.connector.Connector;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory;
 import org.springframework.boot.web.server.WebServerFactoryCustomizer;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -22,6 +27,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Configuration
 public class InternalSurfaceConfiguration
         implements WebServerFactoryCustomizer<TomcatServletWebServerFactory> {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            InternalSurfaceConfiguration.class);
     private final ManagedAgentProperties properties;
 
     public InternalSurfaceConfiguration(ManagedAgentProperties properties) {
@@ -34,13 +41,24 @@ public class InternalSurfaceConfiguration
         if (port <= 0) {
             return;
         }
+        if (factory.getSsl() != null && factory.getSsl().isEnabled()) {
+            // Additional connectors do not inherit server.ssl; say so
+            // instead of serving plaintext beside a TLS public listener.
+            LOG.warn("The internal listener on port {} serves plaintext;"
+                    + " server.ssl applies to the public connector only.",
+                    port);
+        }
         Connector connector = new Connector(
                 TomcatServletWebServerFactory.DEFAULT_PROTOCOL);
         connector.setPort(port);
         String address = properties.getInternalServer().getAddress();
         try {
-            connector.setProperty("address",
-                    java.net.InetAddress.getByName(address).getHostAddress());
+            if (!connector.setProperty("address", java.net.InetAddress
+                    .getByName(address).getHostAddress())) {
+                throw new IllegalStateException(
+                        "qwen.managed-agent.internal-server.address was"
+                                + " rejected by the connector: " + address);
+            }
         } catch (java.net.UnknownHostException error) {
             throw new IllegalStateException(
                     "qwen.managed-agent.internal-server.address is invalid: "
@@ -74,7 +92,11 @@ public class InternalSurfaceConfiguration
                 throws ServletException, IOException {
             boolean internal = request.getLocalPort() == internalPort;
             if (internal != request.getRequestURI().startsWith("/internal/")) {
-                response.sendError(HttpServletResponse.SC_NOT_FOUND);
+                response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                new ObjectMapper().writeValue(response.getOutputStream(),
+                        ApiExceptionHandler.envelope(request, "not_found",
+                                "The requested endpoint does not exist on this listener."));
                 return;
             }
             chain.doFilter(request, response);

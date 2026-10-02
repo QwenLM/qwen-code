@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.HexFormat;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -118,6 +120,83 @@ class SignatureAuthFilterTest {
     }
 
     @Test
+    void rejectsAnUnparsableTimestamp() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        MockHttpServletRequest request = request("GET",
+                "/v1/agents/sessions");
+        request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, "not-a-number");
+        request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, "v1=" + "0".repeat(64));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, new MockFilterChain());
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getContentAsString())
+                .contains("invalid_signature");
+    }
+
+    @Test
+    void coversBodyQueryAndIdempotencyKey() throws Exception {
+        SignatureAuthFilter filter = filter(signed());
+        byte[] body = "{\"agent_id\":\"qwen-code\"}"
+                .getBytes(StandardCharsets.UTF_8);
+        String timestamp = now();
+        String signed = sign("POST", "/v1/agents/sessions", "tenant-a",
+                "actor-a", timestamp, body, "key-1");
+
+        MockHttpServletRequest good = request("POST", "/v1/agents/sessions");
+        good.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        good.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        good.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signed);
+        good.addHeader(SignatureAuthFilter.IDEMPOTENCY_HEADER, "key-1");
+        good.setContent(body);
+        MockHttpServletResponse accepted = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        filter.doFilter(good, accepted, chain);
+        assertThat(((HttpServletRequest) chain.getRequest())
+                .getUserPrincipal()).isNotNull();
+
+        // The same signature over a substituted body is a different request.
+        MockHttpServletRequest swapped = request("POST",
+                "/v1/agents/sessions");
+        swapped.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        swapped.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        swapped.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signed);
+        swapped.addHeader(SignatureAuthFilter.IDEMPOTENCY_HEADER, "key-1");
+        swapped.setContent("{\"agent_id\":\"other\"}"
+                .getBytes(StandardCharsets.UTF_8));
+        MockHttpServletResponse denied = new MockHttpServletResponse();
+        filter.doFilter(swapped, denied, new MockFilterChain());
+        assertThat(denied.getStatus()).isEqualTo(401);
+    }
+
+    @Test
+    void honorsTheConfiguredDriftWindow() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setAllowedDrift(Duration.ofSeconds(1));
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        SignatureAuthFilter filter = filter(
+                new BrokerSecurity(properties, server));
+
+        // Two seconds old: inside the default 5m, outside the 1s window.
+        String timestamp = Long.toString(
+                System.currentTimeMillis() / 1000L - 2);
+        MockHttpServletRequest request = request("GET",
+                "/v1/agents/sessions");
+        request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+        request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+        request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER,
+                sign("GET", "/v1/agents/sessions", "tenant-a", "actor-a",
+                        timestamp));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        filter.doFilter(request, response, new MockFilterChain());
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getContentAsString()).contains("drift");
+    }
+
+    @Test
     void coversTheWebShellSurface() throws Exception {
         SignatureAuthFilter filter = filter(signed());
         MockHttpServletResponse unsigned = new MockHttpServletResponse();
@@ -175,12 +254,25 @@ class SignatureAuthFilterTest {
 
     private static String sign(String method, String uri, String tenant,
             String actor, String timestamp) throws Exception {
+        return sign(method, uri, tenant, actor, timestamp, new byte[0], null);
+    }
+
+    private static String sign(String method, String uri, String tenant,
+            String actor, String timestamp, byte[] body, String idempotencyKey)
+            throws Exception {
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + tenant + "\n" + actor + "\n" + timestamp;
+                + "\n" + "" + "\n" + tenant + "\n" + actor + "\n" + timestamp
+                + "\n" + sha256Hex(body) + "\n"
+                + (idempotencyKey == null ? "" : idempotencyKey);
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(KEY.getBytes(StandardCharsets.UTF_8),
                 "HmacSHA256"));
         return "v1=" + HexFormat.of().formatHex(
                 mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String sha256Hex(byte[] body) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(body));
     }
 }

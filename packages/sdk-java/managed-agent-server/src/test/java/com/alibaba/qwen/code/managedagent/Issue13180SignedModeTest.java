@@ -9,6 +9,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.UUID;
 import javax.crypto.Mac;
@@ -64,7 +65,8 @@ class Issue13180SignedModeTest {
         HttpResponse<String> wrongKey = call("GET", "/v1/agents/sessions",
                 TENANT, "actor-a", timestamp,
                 signWith("ffffffffffffffffffffffffffffffff", "GET",
-                        "/v1/agents/sessions", TENANT, "actor-a", timestamp));
+                        "/v1/agents/sessions", TENANT, "actor-a", timestamp,
+                        new byte[0], null));
         assertThat(wrongKey.statusCode()).as(wrongKey.body()).isEqualTo(401);
         assertThat(wrongKey.body()).contains("invalid_signature");
     }
@@ -77,7 +79,10 @@ class Issue13180SignedModeTest {
         HttpResponse<String> created = call("POST", "/v1/agents/sessions",
                 TENANT, "actor-a", createTimestamp,
                 sign("POST", "/v1/agents/sessions", TENANT, "actor-a",
-                        createTimestamp), idempotencyKey,
+                        createTimestamp,
+                        "{\"agent_id\":\"qwen-code\",\"input\":[]}"
+                                .getBytes(StandardCharsets.UTF_8),
+                        idempotencyKey), idempotencyKey,
                 "{\"agent_id\":\"qwen-code\",\"input\":[]}");
         assertThat(created.statusCode()).as(created.body()).isEqualTo(202);
         String session = JSON.readTree(created.body()).path("id").asText();
@@ -103,7 +108,7 @@ class Issue13180SignedModeTest {
     }
 
     @Test
-    void theInternalSurfaceStaysOnItsWriterCredential() throws Exception {
+    void theInternalSurfaceNeedsNoSignature() throws Exception {
         String timestamp = now();
         ObjectNode body = JSON.createObjectNode()
                 .put("workspaceId", "ws-signed")
@@ -124,6 +129,36 @@ class Issue13180SignedModeTest {
         // No signature headers: the signature filter does not cover the
         // internal surface, and the unbound store still accepts the token.
         assertThat(acquire.statusCode()).as(acquire.body()).isEqualTo(200);
+    }
+
+    /** Signed-mode hosted create replays under the recorded actor. */
+    @Test
+    void signedHostedCreateReplaysUnderTheSameActor() throws Exception {
+        byte[] createBody = "{\"agent_id\":\"qwen-code\",\"input\":[]}"
+                .getBytes(StandardCharsets.UTF_8);
+        String idempotencyKey = UUID.randomUUID().toString();
+        String firstTimestamp = now();
+        HttpResponse<String> first = call("POST", "/v1/agents/sessions",
+                TENANT, "actor-a", firstTimestamp,
+                sign("POST", "/v1/agents/sessions", TENANT, "actor-a",
+                        firstTimestamp, createBody, idempotencyKey),
+                idempotencyKey, new String(createBody,
+                        StandardCharsets.UTF_8));
+        assertThat(first.statusCode()).as(first.body()).isEqualTo(202);
+        String session = JSON.readTree(first.body()).path("id").asText();
+
+        String secondTimestamp = now();
+        HttpResponse<String> second = call("POST", "/v1/agents/sessions",
+                TENANT, "actor-a", secondTimestamp,
+                sign("POST", "/v1/agents/sessions", TENANT, "actor-a",
+                        secondTimestamp, createBody, idempotencyKey),
+                idempotencyKey, new String(createBody,
+                        StandardCharsets.UTF_8));
+        assertThat(second.statusCode()).as(second.body()).isEqualTo(202);
+        assertThat(JSON.readTree(second.body()).path("id").asText())
+                .isEqualTo(session);
+        assertThat(second.headers().firstValue("X-Qwen-Idempotent-Replay"))
+                .hasValue("true");
     }
 
     private HttpResponse<String> call(String method, String path,
@@ -161,17 +196,33 @@ class Issue13180SignedModeTest {
 
     private static String sign(String method, String uri, String tenant,
             String actor, String timestamp) throws Exception {
-        return signWith(KEY, method, uri, tenant, actor, timestamp);
+        return signWith(KEY, method, uri, tenant, actor, timestamp,
+                new byte[0], null);
+    }
+
+    private static String sign(String method, String uri, String tenant,
+            String actor, String timestamp, byte[] body,
+            String idempotencyKey) throws Exception {
+        return signWith(KEY, method, uri, tenant, actor, timestamp, body,
+                idempotencyKey);
     }
 
     private static String signWith(String key, String method, String uri,
-            String tenant, String actor, String timestamp) throws Exception {
+            String tenant, String actor, String timestamp, byte[] body,
+            String idempotencyKey) throws Exception {
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
-                + "\n" + tenant + "\n" + actor + "\n" + timestamp;
+                + "\n" + "" + "\n" + tenant + "\n" + actor + "\n" + timestamp
+                + "\n" + sha256Hex(body) + "\n"
+                + (idempotencyKey == null ? "" : idempotencyKey);
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8),
                 "HmacSHA256"));
         return "v1=" + HexFormat.of().formatHex(
                 mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private static String sha256Hex(byte[] body) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(body));
     }
 }

@@ -225,8 +225,12 @@ internal routes under `/internal/managed-session-store/v1/**` provide
 database-time writer leases and generations, head compare-and-set,
 idempotent transaction receipts, exact JSONL transaction bytes, paged restore
 reads, atomic checkpoint-pointer advancement, and transactional resources up
-to 64 KiB. Callers must provide the trusted tenant header and a fresh Base64URL secret in
-`X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted. Restore,
+to 64 KiB. Callers must provide the trusted tenant header and a writer
+credential in `X-Qwen-Managed-Writer-Token`; only its SHA-256 is persisted.
+Without `QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` the credential is a
+fresh Base64URL secret the caller mints (first writer wins); with a binding
+key it must be the broker-issued HMAC over the Session scope and self-minted
+secrets are rejected. Restore,
 transaction-page, and resource reads require the same current, unexpired
 writer secret.
 
@@ -248,7 +252,8 @@ export QWEN_MANAGED_AGENT_WORKSPACE_ID='workspace-demo'
 Harness. When both the Harness and Store are enabled, Java includes a scoped
 Store descriptor in each new private Hosted Session request. The ordinary
 daemon rejects that descriptor, while the Hosted Harness uses the TypeScript
-HTTP adapter and generates its own writer secret. Workspace-bound Sessions use
+HTTP adapter with the descriptor's broker-issued writer credential (or a
+self-generated secret when no binding key is configured). Workspace-bound Sessions use
 their persisted Workspace ID for the Store scope; unbound Sessions use
 `QWEN_MANAGED_AGENT_WORKSPACE_ID`. The public Session, private journal and Runtime
 binding retain one `(tenantId, workspaceId, sessionId)` identity. The global ID
@@ -365,12 +370,15 @@ and refuses to start otherwise, `open` keeps the header-asserted tenant and
 the optional trusted-actor stand-in for local runs, and `signed` requires
 every public request to carry `X-Qwen-Actor-Id`,
 `X-Qwen-Signature-Timestamp` (epoch seconds, within
-`QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT`, default `5m`) and
-`X-Qwen-Signature: v1=<hex HMAC-SHA256>` over
-`"qwen-broker-auth-v1\n" + METHOD + "\n" + path + "\n" + tenant + "\n" +
-actor + "\n" + timestamp`, keyed by
-`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY` (at least 32 bytes). Signed mode
-cannot be combined with `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
+`QWEN_MANAGED_AGENT_AUTH_ALLOWED_DRIFT`, default `5m`, minimum `1s`) and
+`X-Qwen-Signature: v1=<lowercase hex HMAC-SHA256>` over
+`"qwen-broker-auth-v1\n" + METHOD + "\n" + undecoded request path + "\n" +
+raw query string (empty when absent) + "\n" + tenant + "\n" + actor + "\n"
+
+- timestamp + "\n" + lowercase hex SHA-256 of the raw request body + "\n" +
+  the Idempotency-Key header value (empty when absent)`, keyed by
+`QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY`(at least 32 bytes). Signed mode
+cannot be combined with`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER`.
 
 `QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY` switches writer tokens from
 self-minted to broker-provisioned: the writer credential becomes an HMAC
@@ -388,7 +396,9 @@ internal surface
 port then answers 404 for the other surface's routes. Leaving loopback —
 public or internal — requires signed mode or a configured binding key
 respectively, unless `QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true`
-explicitly overrides the guard.
+explicitly overrides the guard. Loopback is a trust boundary only as strong
+as the host: a shared host that runs untrusted workloads (including
+model-generated commands) should configure a binding key even on loopback.
 
 Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 | [简体中文](../../../docs/design/managed-agent-broker-auth.zh-CN.md).

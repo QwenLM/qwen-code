@@ -1370,7 +1370,11 @@ export function registerHostedHarnessSessionRoutes(
       });
     } catch (cause) {
       debugLogger.warn('managed session store descriptor refused:', cause);
-      error(res, 400, 'invalid_managed_session_store');
+      res.status(400).json({
+        error: 'invalid_managed_session_store',
+        code: 'invalid_managed_session_store',
+        message: cause instanceof Error ? cause.message : String(cause),
+      });
       return;
     }
     opening.add(sessionId);
