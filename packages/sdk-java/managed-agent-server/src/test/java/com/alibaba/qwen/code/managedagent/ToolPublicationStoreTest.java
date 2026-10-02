@@ -588,7 +588,8 @@ class ToolPublicationStoreTest {
         int segmentLength = segmentText.length();
         if (large) {
             store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
-                    new ToolPublicationStore.Capacity(16 * 1024 * 1024, 64 * 1024 * 1024, 64 * 1024 * 1024, 10));
+                    new ToolPublicationStore.Capacity(16 * 1024 * 1024, 64 * 1024 * 1024, 64 * 1024 * 1024, 10),
+                    true);
             store.apply(request("reserve").put("captureBytes", segmentLength), WRITER_TOKEN, PUBLICATION_TOKEN);
         } else {
             reserve();
@@ -1200,7 +1201,7 @@ class ToolPublicationStoreTest {
         long allocated = captureBytes + ToolPublicationContract.PRODUCER_BYTES
                 + ToolPublicationContract.ADMISSION_BYTES;
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
-                new ToolPublicationStore.Capacity(captureBytes, allocated, allocated, 1));
+                new ToolPublicationStore.Capacity(captureBytes, allocated, allocated, 1), true);
         store.apply(request("reserve").put("captureBytes", captureBytes), WRITER_TOKEN, PUBLICATION_TOKEN);
         boolean[] slow = {false};
         int[] metadataQueries = {0};
@@ -1409,6 +1410,85 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void disabledJournalHeadAuthorizationKeepsScanningTheJournal() {
+        store = newStore(10 * ALLOCATION, 10, false);
+        reserve();
+        // With the gate off the head columns are not trusted, even when they
+        // disagree with the journal: the legacy scan authorizes instead.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET activation_phase = 'released'");
+        store.verifyDispatch(executions.findByExecutionCallId("execution-1"), "pub-1", PUBLICATION_TOKEN);
+        // The scan still backfills the head, repairing the disagreement.
+        assertThat(jdbc.queryForObject("SELECT activation_phase FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo("active");
+        // A release committed to the journal still fences both grant paths.
+        append("activation.release", event(3, "activation.changed", activation("released")) + "{}\n", 1,
+                List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
+        assertThatThrownBy(() -> store.verifyDispatch(executions.findByExecutionCallId("execution-1"),
+                "pub-1", PUBLICATION_TOKEN)).hasMessageContaining("Original activation is fenced");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+    }
+
+    @Test
+    void oneCommitKeepsTheLastActivationChange() {
+        reserve();
+        // Two activation changes in one transaction: the head must record
+        // the last one, as the journal scans do.
+        append("activation.rotate",
+                event(3, "activation.changed", activation("active"))
+                        + event(4, "activation.changed", activation("released")) + "{}\n",
+                2, List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
+        assertThat(jdbc.queryForObject("SELECT activation_phase FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo("released");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+        // The two scans' intra-record ordering must agree with the head:
+        // with the columns blanked, both backward walks fence the released
+        // activation instead of reviving the record's earlier active one.
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                + " activation_id = NULL, activation_phase = NULL,"
+                + " activation_event_epoch = NULL,"
+                + " activation_expires_at = NULL");
+        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
+                .hasMessageContaining("Activation is not active");
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                + " activation_id = NULL, activation_phase = NULL,"
+                + " activation_event_epoch = NULL,"
+                + " activation_expires_at = NULL");
+        assertThatThrownBy(() -> store.verifyDispatch(
+                executions.findByExecutionCallId("execution-1"), "pub-1",
+                PUBLICATION_TOKEN))
+                .hasMessageContaining("Original activation is fenced");
+    }
+
+    @Test
+    void oversizedActivationFieldsBlankTheHeadColumnsInsteadOfFailingTheCommit() {
+        reserve();
+        assertThat(jdbc.queryForObject("SELECT activation_phase FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo("active");
+        // A non-conforming writer can exceed the V34 column widths; the
+        // commit must still succeed and leave the columns blank, so
+        // authorization falls back to reading the journal.
+        ObjectNode oversized = JSON.createObjectNode()
+                .put("activationId", "activation-" + "a".repeat(600))
+                .put("epoch", 1).put("phase", "active")
+                .put("expiresAt", System.currentTimeMillis() + 180000);
+        append("activation.oversize", event(3, "activation.changed", oversized) + "{}\n", 1, List.of(), null);
+        var head = jdbc.queryForMap("SELECT activation_id, activation_phase,"
+                + " activation_event_epoch, activation_expires_at"
+                + " FROM qwen_managed_session_journal_head");
+        assertThat(head.get("activation_id")).isNull();
+        assertThat(head.get("activation_phase")).isNull();
+        assertThat(head.get("activation_event_epoch")).isNull();
+        assertThat(head.get("activation_expires_at")).isNull();
+        // A conforming activation writes the columns again.
+        append("activation.restore", event(4, "activation.changed", activation("active")) + "{}\n", 1,
+                List.of(resource(binding.get("checkpointRef"), checkpoint)), "checkpoint-1");
+        assertThat(jdbc.queryForObject("SELECT activation_id FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo("activation-1");
+    }
+
+    @Test
     void fencesUnusedCapacityAndRequiresDurableNoStartForFullRelease() {
         reserve();
         assertThat(store.apply(request("fence"), WRITER_TOKEN, null).path("state").asText()).isEqualTo("FENCED");
@@ -1609,8 +1689,14 @@ class ToolPublicationStoreTest {
     }
 
     private ToolPublicationStore newStore(long bytes, long count) {
+        return newStore(bytes, count, true);
+    }
+
+    private ToolPublicationStore newStore(long bytes, long count,
+            boolean journalHeadAuthorization) {
         return new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
-                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, bytes, bytes, count));
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, bytes, bytes, count),
+                journalHeadAuthorization);
     }
 
     private JsonNode reserve() {
@@ -1682,7 +1768,8 @@ class ToolPublicationStoreTest {
                         sessions,
                         executions,
                         bindings,
-                        new ToolPublicationStore.Capacity(total, allocation, allocation, 1));
+                        new ToolPublicationStore.Capacity(total, allocation, allocation, 1),
+                        true);
         store.apply(
                 fixture.request("reserve").put("captureBytes", total),
                 WRITER_TOKEN,

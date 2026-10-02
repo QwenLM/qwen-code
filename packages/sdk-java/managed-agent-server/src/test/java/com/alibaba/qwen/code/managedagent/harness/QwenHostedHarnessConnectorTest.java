@@ -58,7 +58,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo");
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
@@ -110,7 +110,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo");
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
@@ -140,7 +140,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo");
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
@@ -305,7 +305,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo");
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);

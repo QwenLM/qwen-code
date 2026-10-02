@@ -59,7 +59,7 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
@@ -1181,7 +1181,7 @@ class ManagedAgentApiContractTest {
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
         awaitIdle(tenant, sessionId);
-        TurnRecord first = store.findLatestTurn(tenant, sessionId)
+        TurnSummary first = store.findLatestTurn(tenant, sessionId)
                 .orElseThrow();
         // The fixture Harness runs one Turn per Session, so the second Turn
         // is written as a failed dispatch would leave it.

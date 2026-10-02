@@ -27,6 +27,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public interface AgentStateStore {
     Admission insertSessionCommand(String tenantId, String operation,
@@ -83,6 +84,10 @@ public interface AgentStateStore {
 
     boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
+    /** The given Sessions with a completed workspace close, in one read. */
+    Set<String> completedWorkspaceCloses(String tenantId,
+            List<String> sessionIds);
+
     SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
 
@@ -133,9 +138,24 @@ public interface AgentStateStore {
     Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId);
 
-    Optional<TurnRecord> findActiveTurn(String tenantId, String sessionId);
+    Optional<TurnSummary> findActiveTurn(String tenantId, String sessionId);
 
-    Optional<TurnRecord> findLatestTurn(String tenantId, String sessionId);
+    /** The active Turn of each given Session, in one round trip. */
+    Map<String, TurnSummary> findActiveTurns(String tenantId,
+            List<String> sessionIds);
+
+    Optional<TurnSummary> findLatestTurn(String tenantId, String sessionId);
+
+    /** The latest Turn of each given Session, in one round trip. */
+    Map<String, TurnSummary> findLatestTurns(String tenantId,
+            List<String> sessionIds);
+
+    /**
+     * The latest environment event of each Session's latest Turn, in one
+     * round trip.
+     */
+    Map<String, EventRecord> findLatestEnvironmentEvents(String tenantId,
+            Map<String, TurnSummary> latestTurns);
 
     /**
      * A page of a Session's Turns, newest first: by creation time, then by
@@ -163,7 +183,9 @@ public interface AgentStateStore {
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
-    long findSnapshotCoveredSequence(String tenantId, String sessionId);
+    /** The snapshot's covered sequence of each given Session, in one read. */
+    Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+            List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 

@@ -664,6 +664,32 @@ public final class ManagedExtensionRecords {
     }
 
     /**
+     * A millisecond timestamp read leniently, shared by the commit-side
+     * extraction and the authorization journal scans: an integral number or
+     * an integral numeric string, else absent. Anything fractional, out of
+     * range, or otherwise shaped is absent, so the scans and the head columns
+     * can never disagree about whether a payload was representable.
+     */
+    public static Long millisLenient(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        try {
+            if (node.isNumber()) {
+                return node.decimalValue().toBigIntegerExact()
+                        .longValueExact();
+            }
+            if (node.isTextual()) {
+                return new BigDecimal(node.textValue().trim())
+                        .toBigIntegerExact().longValueExact();
+            }
+        } catch (ArithmeticException | NumberFormatException error) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
      * A JSON number equal to an integer in range. As in JSON Schema and in
      * JavaScript, 1.0 counts as 1; a number past the double range, which
      * Jackson reads as an infinity, counts as none.

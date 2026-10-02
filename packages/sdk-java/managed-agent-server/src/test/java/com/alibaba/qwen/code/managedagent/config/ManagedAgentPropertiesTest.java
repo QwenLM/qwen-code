@@ -39,6 +39,17 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void relaxationDefaultsMatchTheShippedConfiguration() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        assertThat(properties.getEvents().getReadGrantRecheckInterval())
+                .isEqualTo(java.time.Duration.ofSeconds(5));
+        assertThat(properties.getArtifacts().getReadRevalidationInterval())
+                .isEqualTo(java.time.Duration.ofSeconds(5));
+        assertThat(properties.getToolPublication()
+                .isJournalHeadAuthorization()).isFalse();
+    }
+
+    @Test
     void fileAdmissionRequiresTheCompleteTrustedLocalDeployment() {
         assertThatCode(() -> new ManagedAgentProperties().validateWorkspaceFiles()).doesNotThrowAnyException();
         List<Consumer<ManagedAgentProperties>> invalid = List.of(

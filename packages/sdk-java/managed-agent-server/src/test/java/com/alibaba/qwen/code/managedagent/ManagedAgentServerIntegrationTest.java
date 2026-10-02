@@ -757,7 +757,10 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.environment.errorCode")
                         .value("runtime_warm_failed"));
 
-        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+        // The snapshot gate defers a caught-up rewrite until 5s after the
+        // last one, so the trailing non-terminal event takes that long to
+        // be covered.
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
             MvcResult transcript = mvc.perform(post(
                             "/api/agent/web-shell/v1/transcript/query")
                             .header(TenantContextFilter.HEADER, tenant)

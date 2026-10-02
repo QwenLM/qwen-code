@@ -71,7 +71,7 @@ public class ToolPublicationConfiguration {
             throw new IllegalStateException("Tool publication entry concurrency is required");
         }
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
-                bindings, capacity);
+                bindings, capacity, settings.isJournalHeadAuthorization());
     }
 
     @Bean

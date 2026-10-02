@@ -53,7 +53,7 @@ class HarnessCoordinatorTest {
                 "storage-a", ".", "config-a", 1);
         SessionRecord session = new SessionRecord(tenantId, sessionId,
                 "qwen-code", null, null, "ACTIVE", null, null, 0,
-                0, 0, 1, 1, null, 1, binding);
+                0, 0, 1, 1, null, 1, binding, "yolo");
         for (String status : List.of("ACCEPTED", "CANCELLING")) {
             AgentStateStore store = mock(AgentStateStore.class);
             HarnessConnector harness = mock(HarnessConnector.class);
@@ -191,7 +191,7 @@ class HarnessCoordinatorTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
-                                "storage-a", ".", "config-a", 1)));
+                                "storage-a", ".", "config-a", 1), "yolo"));
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         when(harness.createOrLoad("tenant", "session", false))
                 .thenThrow(failure);
@@ -221,7 +221,7 @@ class HarnessCoordinatorTest {
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         null, "ACTIVE", "boot", "epoch", 1, 1, 0, 1, 1, null, 1,
                         new ContextBinding("tenant", "ws-a", 1,
-                                "storage-a", ".", "config-a", 1)));
+                                "storage-a", ".", "config-a", 1), "yolo"));
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), warmer, directExecutor(),
                 Clock.systemUTC(), new ManagedAgentProperties());

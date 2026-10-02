@@ -160,6 +160,14 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
+     * What one journal transaction carries: the tool receipts, and the
+     * payload of its last activation.changed event (null when it has none),
+     * collected during the same pass so the commit does not parse twice.
+     */
+    record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation) {
+    }
+
+    /**
      * Applies the Stage H revisions that one journal transaction carries.
      * It runs inside the Session store's commit, after the transaction's
      * resources are stored, so {@code resources} reads each body verified.
@@ -169,12 +177,13 @@ public class ManagedExtensionRecordStore {
      * {@code eventCount} events, and its transaction must hold only those
      * events and then its commit marker, as the authority writes it.
      */
-    List<JsonNode> apply(String tenantId, String workspaceId, String sessionId,
+    ApplyResult apply(String tenantId, String workspaceId, String sessionId,
             long firstSequence, int eventCount, byte[] recordBytes,
             Function<String, StoredResource> resources) {
         String[] lines = new String(recordBytes, StandardCharsets.UTF_8)
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
+        JsonNode lastActivation = null;
         boolean applied = false;
         boolean shaped = true;
         String lastSubtype = null;
@@ -193,6 +202,10 @@ public class ManagedExtensionRecordStore {
             }
             JsonNode event = record.path("managedSession");
             JsonNode payload = event.path("payload");
+            if ("activation.changed".equals(event.path("kind")
+                    .textValue())) {
+                lastActivation = payload;
+            }
             if ("tool.receipt".equals(event.path("kind").asText())) {
                 require(index < eventCount && event.path("sequence").asLong(-1) == firstSequence + index,
                         "Tool receipt has an invalid journal position");
@@ -219,7 +232,7 @@ public class ManagedExtensionRecordStore {
         require(!applied || shaped && COMMIT_SUBTYPE.equals(lastSubtype),
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
-        return receipts;
+        return new ApplyResult(receipts, lastActivation);
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,

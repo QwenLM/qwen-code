@@ -41,7 +41,6 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -104,7 +103,7 @@ public class ManagedAgentService {
     private boolean hasActions(SessionRecord session) {
         return session.workspace() != null
                 && actions != null
-                && !"yolo".equals(actions.approvalMode(session.tenantId(), session.sessionId()));
+                && !"yolo".equals(session.approvalMode());
     }
 
     private BooleanSupplier artifactReadsEnabled = () -> false;
@@ -367,10 +366,8 @@ public class ManagedAgentService {
         SessionPage page = store.listSessions(tenantId, actorId,
                 decoded == null ? null : decoded.updatedAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
-        List<PublicSession> sessions = page.sessions().stream()
-                .map(this::publicSession).toList();
-        return new PublicList<>("list", sessions, page.hasMore(),
-                nextCursor(page));
+        return new PublicList<>("list", publicSessions(page.sessions()),
+                page.hasMore(), nextCursor(page));
     }
 
     public WebShellPage<WebShellSession> listWebShellSessions(
@@ -381,9 +378,8 @@ public class ManagedAgentService {
         SessionPage page = store.listSessions(tenantId, actorId,
                 decoded == null ? null : decoded.updatedAt(),
                 decoded == null ? null : decoded.sessionId(), limit);
-        return new WebShellPage<>(page.sessions().stream()
-                .map(this::webShellSession).toList(), nextCursor(page),
-                page.hasMore());
+        return new WebShellPage<>(webShellSessions(page.sessions()),
+                nextCursor(page), page.hasMore());
     }
 
     /**
@@ -518,12 +514,47 @@ public class ManagedAgentService {
         }
     }
 
+    /** A page assembled from grouped batch reads instead of per-row ones. */
+    private List<PublicSession> publicSessions(List<SessionRecord> sessions) {
+        if (sessions.isEmpty()) {
+            return List.of();
+        }
+        String tenantId = sessions.getFirst().tenantId();
+        List<String> ids = sessions.stream().map(SessionRecord::sessionId)
+                .toList();
+        Map<String, TurnSummary> activeTurns = store.findActiveTurns(tenantId,
+                ids);
+        Map<String, Long> coveredSequences = store
+                .findSnapshotCoveredSequences(tenantId, ids);
+        Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
+        return sessions.stream()
+                .map(session -> publicSession(session,
+                        activeTurns.get(session.sessionId()),
+                        coveredSequences.getOrDefault(session.sessionId(), 0L),
+                        session.workspace() == null
+                                || closed.contains(session.sessionId())))
+                .toList();
+    }
+
+    /** The workspace-close state of each bound Session, in one read. */
+    private Set<String> completedWorkspaceCloses(String tenantId,
+            List<SessionRecord> sessions) {
+        List<String> bound = sessions.stream()
+                .filter(session -> session.workspace() != null)
+                .map(SessionRecord::sessionId).toList();
+        return bound.isEmpty() ? Set.of()
+                : store.completedWorkspaceCloses(tenantId, bound);
+    }
+
     private PublicSession publicSession(SessionRecord session) {
-        TurnRecord activeTurn = store.findActiveTurn(session.tenantId(),
-                session.sessionId()).orElse(null);
+        return publicSessions(List.of(session)).getFirst();
+    }
+
+    private PublicSession publicSession(SessionRecord session,
+            TurnSummary activeTurn, long snapshotCoveredSequence,
+            boolean retention) {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
-        boolean retention = supportsRetention(session);
         return new PublicSession(
                 session.sessionId(),
                 "agent.session",
@@ -536,7 +567,7 @@ public class ManagedAgentService {
                 activeTurn == null ? null : publicTurn(activeTurn),
                 session.lastSequence(),
                 session.replayFloorSequence(),
-                store.findSnapshotCoveredSequence(session.tenantId(), session.sessionId()),
+                snapshotCoveredSequence,
                 // Bound close is advertised separately from archive/delete.
                 new SessionCapabilities(
                         true,
@@ -549,12 +580,36 @@ public class ManagedAgentService {
                 publicWorkspace(session));
     }
 
+    /** A page assembled from grouped batch reads instead of per-row ones. */
+    private List<WebShellSession> webShellSessions(
+            List<SessionRecord> sessions) {
+        if (sessions.isEmpty()) {
+            return List.of();
+        }
+        String tenantId = sessions.getFirst().tenantId();
+        List<String> ids = sessions.stream().map(SessionRecord::sessionId)
+                .toList();
+        Map<String, TurnSummary> latestTurns = store.findLatestTurns(tenantId,
+                ids);
+        Map<String, EventRecord> environmentEvents = store
+                .findLatestEnvironmentEvents(tenantId, latestTurns);
+        Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
+        return sessions.stream()
+                .map(session -> webShellSession(session,
+                        latestTurns.get(session.sessionId()),
+                        environmentEvents.get(session.sessionId()),
+                        session.workspace() == null
+                                || closed.contains(session.sessionId())))
+                .toList();
+    }
+
     private WebShellSession webShellSession(SessionRecord session) {
-        TurnRecord latestTurn = store.findLatestTurn(session.tenantId(),
-                session.sessionId()).orElse(null);
-        EventRecord environmentEvent = store.findLatestEnvironmentEvent(
-                session.tenantId(), session.sessionId()).orElse(null);
-        boolean retention = supportsRetention(session);
+        return webShellSessions(List.of(session)).getFirst();
+    }
+
+    private WebShellSession webShellSession(SessionRecord session,
+            TurnSummary latestTurn, EventRecord environmentEvent,
+            boolean retention) {
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -568,12 +623,9 @@ public class ManagedAgentService {
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true, hasArtifacts(session), hasActions(session), supportsClose(session),
+                new WebShellSessionCapabilities(true, hasArtifacts(session),
+                        hasActions(session), supportsClose(session),
                         retention, retention, retention));
-    }
-
-    private boolean supportsRetention(SessionRecord session) {
-        return session.workspace() == null || store.hasCompletedWorkspaceClose(session.tenantId(), session.sessionId());
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -617,12 +669,6 @@ public class ManagedAgentService {
         return Map.copyOf(environment);
     }
 
-    private static PublicTurn publicTurn(TurnRecord turn) {
-        return publicTurn(new TurnSummary(turn.sessionId(), turn.turnId(),
-                turn.status(), turn.createdAt(), turn.completedAt(),
-                turn.errorCode()));
-    }
-
     private static PublicTurn publicTurn(TurnSummary turn) {
         return new PublicTurn(turn.turnId(), "agent.turn",
                 turn.sessionId(), StoreModels.inputItemId(turn.turnId()),
@@ -633,7 +679,7 @@ public class ManagedAgentService {
                 turn.errorCode());
     }
 
-    private static WebShellTurn webShellTurn(TurnRecord turn) {
+    private static WebShellTurn webShellTurn(TurnSummary turn) {
         return new WebShellTurn(turn.turnId(), turn.sessionId(),
                 turn.status().toLowerCase(), turn.createdAt(),
                 turn.completedAt(), turn.errorCode(), null);

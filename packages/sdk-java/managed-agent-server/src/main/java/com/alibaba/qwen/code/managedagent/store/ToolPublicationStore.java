@@ -41,16 +41,21 @@ public final class ToolPublicationStore {
     private final ToolExecutionRepository executions;
     private final RuntimeBindingRepository bindings;
     private final Capacity capacity;
+    // While false, authorization keeps scanning the journal: a rolling fleet
+    // with a pre-V34 binary can commit without maintaining the head columns.
+    private final boolean journalHeadAuthorization;
 
     public ToolPublicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedSessionStore sessions, ToolExecutionRepository executions,
-            RuntimeBindingRepository bindings, Capacity capacity) {
+            RuntimeBindingRepository bindings, Capacity capacity,
+            boolean journalHeadAuthorization) {
         this.jdbc = Objects.requireNonNull(jdbc);
         this.transactions = new TransactionTemplate(manager);
         this.sessions = Objects.requireNonNull(sessions);
         this.executions = Objects.requireNonNull(executions);
         this.bindings = Objects.requireNonNull(bindings);
         this.capacity = Objects.requireNonNull(capacity);
+        this.journalHeadAuthorization = journalHeadAuthorization;
     }
 
     public JsonNode apply(JsonNode input, String writerToken, String publicationToken) {
@@ -115,7 +120,8 @@ public final class ToolPublicationStore {
                 && row.workspace().equals(text(key, "workspaceId"))
                 && row.session().equals(text(key, "sessionId")), "Publication scope conflicts");
         var head = jdbc.queryForMap("SELECT workspace_id, state, writer_id, writer_generation,"
-                        + " writer_lease_until, recovery_status, activation_epoch, journal_revision"
+                        + " writer_lease_until, recovery_status, activation_epoch, journal_revision,"
+                        + " activation_id, activation_phase, activation_event_epoch, activation_expires_at"
                         + " FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                 row.tenant(), row.session());
         Object leaseValue = head.get("writer_lease_until");
@@ -127,33 +133,19 @@ public final class ToolPublicationStore {
                 && lease != null && lease.after(now) && "READY".equals(head.get("recovery_status"))
                 && ((Number) head.get("activation_epoch")).longValue() == binding.get("activationEpoch").longValue(),
                 "Original Session owner is fenced");
-        boolean found = false;
-        for (long revision = ((Number) head.get("journal_revision")).longValue(); revision > 0 && !found; revision--) {
-            // The locking head read can see a newer revision than this transaction's snapshot.
-            byte[] record = jdbc.queryForObject("SELECT record_bytes FROM qwen_managed_session_journal_tx"
-                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ? FOR UPDATE",
-                    byte[].class, row.tenant(), row.session(), revision);
-            if (record == null) {
-                continue;
-            }
-            String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
-            for (int index = lines.length - 1; index >= 0; index--) {
-                JsonNode event = ToolPublicationContract.readJson(lines[index].getBytes(StandardCharsets.UTF_8));
-                if (!"managed_session_event_v1".equals(text(event, "subtype"))
-                        || !"activation.changed".equals(text(event.path("managedSession"), "kind"))) {
-                    continue;
-                }
-                JsonNode activation = event.path("managedSession").path("payload");
-                require("active".equals(text(activation, "phase"))
-                        && text(binding, "activationId").equals(text(activation, "activationId"))
-                        && binding.get("activationEpoch").longValue() == activation.path("epoch").asLong()
-                        && activation.path("expiresAt").asLong() > now.getTime(),
-                        "Original activation is fenced");
-                found = true;
-                break;
-            }
+        if (journalHeadAuthorization
+                && (head.get("activation_phase") != null || head.get("activation_id") != null)) {
+            // The head carries the last committed activation.changed payload.
+            require("active".equals(head.get("activation_phase"))
+                    && text(binding, "activationId").equals(head.get("activation_id"))
+                    && head.get("activation_event_epoch") instanceof Number epoch
+                    && epoch.longValue() == binding.get("activationEpoch").longValue()
+                    && head.get("activation_expires_at") instanceof Number expires
+                    && expires.longValue() > now.getTime(), "Original activation is fenced");
+        } else {
+            requireLegacyActivation(row.tenant(), row.session(), binding,
+                    ((Number) head.get("journal_revision")).longValue(), now);
         }
-        require(found, "Original activation is missing");
         requireExecution(binding, true);
         var current = jdbc.queryForMap("SELECT token_hash, state, expires_at, binding_digest"
                 + " FROM qwen_tool_publication WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
@@ -164,6 +156,66 @@ public final class ToolPublicationStore {
                 && ((Number) current.get("expires_at")).longValue() > now.getTime(),
                 "Publication grant changed");
         return binding;
+    }
+
+    /**
+     * Authorizes against the journal scan for heads whose activation columns
+     * predate migration V34, then backfills the head so later checks are
+     * answered from the head row.
+     */
+    private void requireLegacyActivation(String tenant, String session,
+            JsonNode binding, long journalRevision, Timestamp now) {
+        JsonNode found = null;
+        for (long revision = journalRevision; revision > 0 && found == null; revision--) {
+            // The locking head read can see a newer revision than this transaction's snapshot.
+            byte[] record = jdbc.queryForObject("SELECT record_bytes FROM qwen_managed_session_journal_tx"
+                    + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ? FOR UPDATE",
+                    byte[].class, tenant, session, revision);
+            if (record == null) {
+                continue;
+            }
+            String[] lines = new String(record, StandardCharsets.UTF_8).split("\n");
+            for (int index = lines.length - 1; index >= 0; index--) {
+                JsonNode event = ToolPublicationContract.readJson(lines[index].getBytes(StandardCharsets.UTF_8));
+                if (!"managed_session_event_v1".equals(text(event, "subtype"))
+                        || !"activation.changed".equals(text(event.path("managedSession"), "kind"))) {
+                    continue;
+                }
+                found = event.path("managedSession").path("payload");
+                break;
+            }
+        }
+        require(found != null, "Original activation is missing");
+        Long expiresAt = ManagedExtensionRecords.millisLenient(
+                found.path("expiresAt"));
+        require("active".equals(text(found, "phase"))
+                && text(binding, "activationId").equals(text(found, "activationId"))
+                && binding.get("activationEpoch").longValue() == found.path("epoch").asLong()
+                && expiresAt != null && expiresAt > now.getTime(),
+                "Original activation is fenced");
+        backfillActivation(tenant, session, text(found, "activationId"),
+                text(found, "phase"), found.path("epoch").asLong(),
+                expiresAt);
+    }
+
+    /**
+     * Backfills the head's activation columns from a journal scan; a payload
+     * wider than the columns is skipped instead of failing, so authorization
+     * keeps reading the journal, exactly as before the columns existed.
+     */
+    private void backfillActivation(String tenant, String session,
+            String activationId, String phase, long epoch, Long expiresAt) {
+        if ((activationId == null || activationId.length()
+                        <= ManagedSessionStoreModels.MAX_ACTIVATION_ID_CHARS)
+                && (phase == null || phase.length()
+                        <= ManagedSessionStoreModels.MAX_ACTIVATION_PHASE_CHARS)) {
+            jdbc.update("UPDATE qwen_managed_session_journal_head SET"
+                            + " activation_id = ?, activation_phase = ?,"
+                            + " activation_event_epoch = ?,"
+                            + " activation_expires_at = ? WHERE tenant_id = ?"
+                            + " AND session_id = ?",
+                    activationId, phase, epoch, expiresAt, tenant, session);
+        }
     }
 
     private JsonNode applyLocked(JsonNode request, String writerToken, String tokenHash) {
@@ -289,41 +341,73 @@ public final class ToolPublicationStore {
         require("READY".equals(writer.recoveryStatus()), "Session recovery is blocked");
         require(writer.activationEpoch() == b.get("activationEpoch").longValue()
                 && writer.checkpointId() != null, "Checkpoint or activation changed");
-        JsonNode activation = null;
-        JsonNode intent = null;
+        boolean headActivation = journalHeadAuthorization
+                && (writer.activationPhase() != null
+                        || writer.activationId() != null);
         long intentSequence = b.get("intentSequence").longValue();
-        for (long revision = writer.journalRevision(); revision > 0 && (activation == null || intent == null); revision--) {
-            var page = sessions.transactions(text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"),
-                    writerToken, revision - 1, 1);
-            require(page.transactions().size() == 1 && page.transactions().get(0).journalRevision() == revision,
-                    "Committed journal evidence is missing");
-            byte[] bytes = Base64.getDecoder().decode(page.transactions().get(0).recordBytesBase64());
-            String records = new String(bytes, StandardCharsets.UTF_8);
-            String[] lines = records.split("\n");
-            for (int i = lines.length - 1; i >= 0; i--) {
-                JsonNode record = ToolPublicationContract.readJson(lines[i].getBytes(StandardCharsets.UTF_8));
-                if (!"managed_session_event_v1".equals(text(record, "subtype"))) {
-                    continue;
-                }
-                JsonNode event = record.path("managedSession");
-                require(event.path("sessionKey").equals(key) && event.path("v").asInt() == 1,
-                        "Journal event scope conflicts");
-                if (activation == null && "activation.changed".equals(text(event, "kind"))) {
-                    activation = event.path("payload");
-                }
-                if (event.path("sequence").asLong() == intentSequence) {
-                    require("tool.intent".equals(text(event, "kind")), "Intent sequence conflicts");
-                    require(page.transactions().get(0).writerGeneration() == b.get("writerGeneration").longValue(),
-                            "Original intent writer conflicts");
-                    intent = event;
+        JsonNode activation = null;
+        JsonNode intent;
+        if (headActivation) {
+            // The head answers the activation term, and the binding names
+            // the intent's sequence, so its revision is read directly
+            // instead of walking the journal down to it.
+            intent = readIntent(b, key, writerToken, intentSequence);
+        } else {
+            intent = null;
+            for (long revision = writer.journalRevision(); revision > 0
+                    && (activation == null || intent == null); revision--) {
+                var page = sessions.transactions(text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"),
+                        writerToken, revision - 1, 1);
+                require(page.transactions().size() == 1 && page.transactions().get(0).journalRevision() == revision,
+                        "Committed journal evidence is missing");
+                byte[] bytes = Base64.getDecoder().decode(page.transactions().get(0).recordBytesBase64());
+                String records = new String(bytes, StandardCharsets.UTF_8);
+                String[] lines = records.split("\n");
+                for (int i = lines.length - 1; i >= 0; i--) {
+                    JsonNode record = ToolPublicationContract.readJson(lines[i].getBytes(StandardCharsets.UTF_8));
+                    if (!"managed_session_event_v1".equals(text(record, "subtype"))) {
+                        continue;
+                    }
+                    JsonNode event = record.path("managedSession");
+                    require(event.path("sessionKey").equals(key) && event.path("v").asInt() == 1,
+                            "Journal event scope conflicts");
+                    if (activation == null && "activation.changed".equals(text(event, "kind"))) {
+                        activation = event.path("payload");
+                    }
+                    if (event.path("sequence").asLong() == intentSequence) {
+                        require("tool.intent".equals(text(event, "kind")), "Intent sequence conflicts");
+                        require(page.transactions().get(0).writerGeneration() == b.get("writerGeneration").longValue(),
+                                "Original intent writer conflicts");
+                        intent = event;
+                    }
                 }
             }
         }
-        require(activation != null && intent != null, "Committed publication evidence is missing");
-        require("active".equals(text(activation, "phase"))
-                && text(b, "activationId").equals(text(activation, "activationId"))
-                && b.get("activationEpoch").longValue() == activation.path("epoch").asLong()
-                && activation.path("expiresAt").asLong() > writer.now(), "Activation is not active");
+        long activationExpiresAt;
+        if (headActivation) {
+            // The locked head carries the last committed activation.changed.
+            require("active".equals(writer.activationPhase())
+                    && text(b, "activationId").equals(writer.activationId())
+                    && writer.activationEventEpoch() != null
+                    && b.get("activationEpoch").longValue() == writer.activationEventEpoch()
+                    && writer.activationExpiresAt() != null
+                    && writer.activationExpiresAt() > writer.now(), "Activation is not active");
+            activationExpiresAt = writer.activationExpiresAt();
+        } else {
+            require(activation != null && intent != null, "Committed publication evidence is missing");
+            Long expiresAt = ManagedExtensionRecords.millisLenient(
+                    activation.path("expiresAt"));
+            require("active".equals(text(activation, "phase"))
+                    && text(b, "activationId").equals(text(activation, "activationId"))
+                    && b.get("activationEpoch").longValue() == activation.path("epoch").asLong()
+                    && expiresAt != null && expiresAt > writer.now(), "Activation is not active");
+            activationExpiresAt = expiresAt;
+            // Backfill the locked head so later checks read it instead of
+            // rescanning the journal, like requireLegacyActivation does.
+            backfillActivation(text(key, "tenantId"), text(key, "sessionId"),
+                    text(activation, "activationId"), text(activation, "phase"),
+                    activation.path("epoch").asLong(), expiresAt);
+        }
         JsonNode payload = intent.path("payload");
         require(text(b, "executionCallId").equals(text(payload, "executionCallId"))
                 && b.get("argsRef").equals(payload.path("argsRef"))
@@ -350,7 +434,55 @@ public final class ToolPublicationStore {
             require(execution.getState() == ToolExecutionRecord.State.PREPARED && execution.getDispatchGeneration() == 0,
                     "Publication must be reserved before dispatch");
         }
-        return Math.min(writer.leaseUntil(), activation.path("expiresAt").asLong());
+        return Math.min(writer.leaseUntil(), activationExpiresAt);
+    }
+
+    /**
+     * Reads the tool.intent event at the revision its sequence belongs to,
+     * in one query, keeping the scan's per-revision chain check for that
+     * revision.
+     */
+    private JsonNode readIntent(JsonNode b, JsonNode key, String writerToken,
+            long intentSequence) {
+        String tenant = text(key, "tenantId");
+        String session = text(key, "sessionId");
+        List<Long> revisions = jdbc.queryForList(
+                "SELECT journal_revision FROM qwen_managed_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND first_sequence <= ? AND last_sequence >= ?",
+                Long.class, tenant, session, intentSequence, intentSequence);
+        require(revisions.size() == 1, "Committed journal evidence is missing");
+        long revision = revisions.get(0);
+        var page = sessions.transactions(tenant, text(key, "workspaceId"),
+                session, writerToken, revision - 1, 1);
+        require(page.transactions().size() == 1
+                && page.transactions().get(0).journalRevision() == revision,
+                "Committed journal evidence is missing");
+        byte[] bytes = Base64.getDecoder().decode(
+                page.transactions().get(0).recordBytesBase64());
+        JsonNode intent = null;
+        for (String line : new String(bytes, StandardCharsets.UTF_8)
+                .split("\n")) {
+            JsonNode record = ToolPublicationContract.readJson(
+                    line.getBytes(StandardCharsets.UTF_8));
+            if (!"managed_session_event_v1".equals(text(record, "subtype"))) {
+                continue;
+            }
+            JsonNode event = record.path("managedSession");
+            require(event.path("sessionKey").equals(key)
+                    && event.path("v").asInt() == 1,
+                    "Journal event scope conflicts");
+            if (event.path("sequence").asLong() == intentSequence) {
+                require("tool.intent".equals(text(event, "kind")),
+                        "Intent sequence conflicts");
+                require(page.transactions().get(0).writerGeneration()
+                        == b.get("writerGeneration").longValue(),
+                        "Original intent writer conflicts");
+                intent = event;
+            }
+        }
+        require(intent != null, "Committed publication evidence is missing");
+        return intent;
     }
 
     private static void requireCheckpoint(JsonNode b, JsonNode checkpoint, ManagedSessionStore.PublicationWriter writer) {
