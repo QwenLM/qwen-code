@@ -742,25 +742,25 @@ describe('managed session authority Stage H records', () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
       const recordRef = await harness.store.publish(
-        'managed-hook_execution',
+        'managed-schedule',
         Buffer.from('{}', 'utf8'),
       );
       const sequence = authority.committedSequence;
       await expect(
         authority.appendExecution(
-          command('raw-hook'),
+          command('raw-schedule'),
           [
             {
               v: 1,
               sequence: sequence + 1,
-              eventId: 'hook-execution-1',
+              eventId: 'schedule-1',
               sessionKey,
               kind: 'domain.committed',
               occurredAt: harness.now,
               payload: {
-                domain: 'hook_execution',
+                domain: 'schedule',
                 version: 1,
-                operationId: 'raw-hook',
+                operationId: 'raw-schedule',
                 recordRef,
               },
             },
