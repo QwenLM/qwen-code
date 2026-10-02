@@ -9,16 +9,14 @@ import { randomUUID } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHookOutput, HookEventName, HookType } from './types.js';
+import { HookEventName, HookType } from './types.js';
 import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
+import { applyHookOutputToInput } from './hook-sequential-input.js';
 import type {
   HookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
-  PreToolUseInput,
-  UserPromptExpansionInput,
-  UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
   PromptHookConfig,
@@ -38,6 +36,10 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import {
+  HookCommandCgroup,
+  HookCommandIsolationUnavailableError,
+} from './hook-command-cgroup.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -50,6 +52,7 @@ const MAX_OUTPUT_LENGTH = 1024 * 1024;
 const HOOK_TERMINATE_GRACE_MS = 2000;
 const HOOK_PROCESS_GROUP_POLL_MS = 50;
 const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
+const activeHookCgroups = new Map<ChildProcess, HookCommandCgroup>();
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
@@ -331,6 +334,16 @@ function killDirectChild(child: ChildProcess, signal: NodeJS.Signals): void {
 
 function forceKillActivePosixHookProcesses(): void {
   for (const child of activePosixHookProcesses) {
+    const unit = activeHookCgroups.get(child);
+    if (unit) {
+      killDirectChild(child, 'SIGKILL');
+      try {
+        unit.kill();
+      } catch {
+        // A failed cgroup cleanup cannot provide a drained receipt.
+      }
+      continue;
+    }
     const pid = child.pid;
     if (!pid) {
       killDirectChild(child, 'SIGKILL');
@@ -372,6 +385,7 @@ function registerActivePosixHookProcess(child: ChildProcess): void {
 }
 
 function unregisterActivePosixHookProcess(child: ChildProcess): void {
+  activeHookCgroups.delete(child);
   activePosixHookProcesses.delete(child);
   if (activePosixHookProcesses.size === 0 && parentExitCleanupRegistered) {
     process.removeListener('exit', forceKillActivePosixHookProcesses);
@@ -663,6 +677,13 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     contextOrSignal?: FunctionHookContext | AbortSignal,
+    options?: {
+      waitForProcessTree?: true;
+      cgroupRoot?: string;
+      environment?: NodeJS.ProcessEnv;
+      trackHttpRequest?: true;
+      httpRequestSignal?: AbortSignal;
+    },
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
 
@@ -707,6 +728,7 @@ export class HookRunner {
             input,
             startTime,
             signal,
+            options,
           );
         case HookType.Http:
           return await this.httpRunner.execute(
@@ -714,6 +736,8 @@ export class HookRunner {
             eventName,
             input,
             signal,
+            options?.trackHttpRequest,
+            options?.httpRequestSignal,
           );
         case HookType.Function: {
           // Function hooks accept context, not just signal
@@ -1045,7 +1069,7 @@ export class HookRunner {
 
       // If the hook succeeded and has output, use it to modify the input for the next hook
       if (result.success && result.output) {
-        currentInput = this.applyHookOutputToInput(
+        currentInput = applyHookOutputToInput(
           currentInput,
           result.output,
           eventName,
@@ -1054,71 +1078,6 @@ export class HookRunner {
     }
 
     return results;
-  }
-
-  /**
-   * Apply hook output to modify input for the next hook in sequential execution
-   */
-  private applyHookOutputToInput(
-    originalInput: HookInput,
-    hookOutput: HookOutput,
-    eventName: HookEventName,
-  ): HookInput {
-    // Create a copy of the original input
-    const modifiedInput = { ...originalInput };
-
-    // Apply modifications based on hook output and event type
-    if (hookOutput.hookSpecificOutput) {
-      switch (eventName) {
-        case HookEventName.UserPromptSubmit:
-          {
-            const additionalContext =
-              hookOutput.hookSpecificOutput['additionalContext'];
-            if (
-              typeof additionalContext === 'string' &&
-              additionalContext &&
-              'prompt' in modifiedInput
-            ) {
-              (modifiedInput as UserPromptSubmitInput).prompt +=
-                '\n\n' + additionalContext;
-            }
-          }
-          break;
-
-        case HookEventName.UserPromptExpansion:
-          {
-            const additionalContext = createHookOutput(
-              eventName,
-              hookOutput,
-            ).getAdditionalContext();
-            if (additionalContext && 'prompt' in modifiedInput) {
-              (modifiedInput as UserPromptExpansionInput).prompt +=
-                '\n\n' + additionalContext;
-            }
-          }
-          break;
-
-        case HookEventName.PreToolUse:
-          if ('tool_input' in hookOutput.hookSpecificOutput) {
-            const newToolInput = hookOutput.hookSpecificOutput[
-              'tool_input'
-            ] as Record<string, unknown>;
-            if (newToolInput && 'tool_input' in modifiedInput) {
-              (modifiedInput as PreToolUseInput).tool_input = {
-                ...(modifiedInput as PreToolUseInput).tool_input,
-                ...newToolInput,
-              };
-            }
-          }
-          break;
-
-        default:
-          // For other events, no special input modification is needed
-          break;
-      }
-    }
-
-    return modifiedInput;
   }
 
   /**
@@ -1135,6 +1094,12 @@ export class HookRunner {
     input: HookInput,
     startTime: number,
     signal?: AbortSignal,
+    options?: {
+      waitForProcessTree?: true;
+      cgroupRoot?: string;
+      environment?: NodeJS.ProcessEnv;
+      trackHttpRequest?: true;
+    },
   ): Promise<HookExecutionResult> {
     const timeout = resolveCommandHookTimeoutMs(
       hookConfig.timeout,
@@ -1164,6 +1129,7 @@ export class HookRunner {
       let settled = false;
       let terminationPromise: Promise<void> | undefined;
       let childClosed = false;
+      let processTreeDrained = false;
       let survivingHookPid: number | undefined;
       let survivingHookOutcome:
         | 'completed'
@@ -1231,7 +1197,7 @@ export class HookRunner {
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
         // so they must not inherit Qwen-internal daemon secrets.
-        ...sanitizeChildEnv(process.env),
+        ...sanitizeChildEnv(options?.environment ?? process.env),
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
@@ -1239,10 +1205,30 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
+      let processUnit: HookCommandCgroup | undefined;
+      if (options?.waitForProcessTree) {
+        try {
+          processUnit = HookCommandCgroup.create(options.cgroupRoot);
+        } catch {
+          resolve({
+            hookConfig,
+            eventName,
+            success: false,
+            outcome: 'non_blocking_error',
+            error: new HookCommandIsolationUnavailableError(),
+            processTreeDrained: true,
+            duration: Date.now() - startTime,
+          });
+          return;
+        }
+      }
+      let isolationUnavailable = false;
+
       const survivesParentExit =
-        eventName === HookEventName.MessageDisplay ||
-        eventName === HookEventName.StopFailure ||
-        eventName === HookEventName.SessionDelete;
+        !options?.waitForProcessTree &&
+        (eventName === HookEventName.MessageDisplay ||
+          eventName === HookEventName.StopFailure ||
+          eventName === HookEventName.SessionDelete);
       let parentIndependentInputPath: string | undefined;
       let child: ChildProcess;
       if (survivesParentExit) {
@@ -1289,18 +1275,33 @@ export class HookRunner {
         }
       } else {
         resolveSupervisorStarted();
-        child = spawn(
+        const launch = processUnit?.launch(
           shellConfig.executable,
           [...shellConfig.argsPrefix, command],
+          env,
+        );
+        child = spawn(
+          launch?.executable ?? shellConfig.executable,
+          launch?.args ?? [...shellConfig.argsPrefix, command],
           {
-            env,
+            env: launch?.env ?? env,
             cwd: input.cwd,
-            stdio: ['pipe', 'pipe', 'pipe'],
+            stdio: processUnit
+              ? ['pipe', 'pipe', 'pipe', 'pipe']
+              : ['pipe', 'pipe', 'pipe'],
             shell: false,
-            // Own a process group so cancellation can signal the entire tree.
+            // Own a process group for legacy cancellation.
             detached: process.platform !== 'win32',
           },
         );
+        if (processUnit) {
+          let status = '';
+          child.stdio[3]?.on('data', (data: Buffer) => {
+            status += data.toString();
+            isolationUnavailable = status.includes('unavailable\n');
+          });
+          activeHookCgroups.set(child, processUnit);
+        }
       }
       if (!survivesParentExit) {
         registerActivePosixHookProcess(child);
@@ -1317,8 +1318,18 @@ export class HookRunner {
           rmSync(parentIndependentInputPath, { force: true });
           parentIndependentInputPath = undefined;
         }
-        if (!survivesParentExit) {
+        if (
+          !survivesParentExit &&
+          (!options?.waitForProcessTree || processTreeDrained)
+        ) {
           unregisterActivePosixHookProcess(child);
+        }
+        if (processTreeDrained) {
+          try {
+            processUnit?.remove();
+          } catch {
+            debugLogger.warn('Failed to remove an empty hook cgroup');
+          }
         }
         if (signal && abortListenerAttached) {
           signal.removeEventListener('abort', abortHandler);
@@ -1332,7 +1343,11 @@ export class HookRunner {
         }
         settled = true;
         cleanup();
-        resolve(result);
+        resolve(
+          options?.waitForProcessTree
+            ? { ...result, processTreeDrained }
+            : result,
+        );
       };
 
       const finishCancellation = async () => {
@@ -1366,6 +1381,11 @@ export class HookRunner {
           child.stderr?.destroy();
         }
 
+        if (processUnit) {
+          processTreeDrained =
+            childClosed &&
+            (await processUnit.waitForEmpty(HOOK_CHILD_CLOSE_WAIT_MS));
+        }
         const duration = Date.now() - startTime;
         finish({
           hookConfig,
@@ -1385,12 +1405,19 @@ export class HookRunner {
 
       const startTermination = () => {
         if (!terminationPromise) {
-          const childTermination = terminateHookProcessTree(
-            child,
-            survivesParentExit
-              ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
-              : HOOK_TERMINATE_GRACE_MS,
-          );
+          const childTermination = processUnit
+            ? (async () => {
+                // Stop the trusted launcher even if cancellation raced its
+                // initial cgroup join. The unit owns all command descendants.
+                killDirectChild(child, 'SIGKILL');
+                await processUnit.terminate(HOOK_TERMINATE_GRACE_MS);
+              })()
+            : terminateHookProcessTree(
+                child,
+                survivesParentExit
+                  ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
+                  : HOOK_TERMINATE_GRACE_MS,
+              );
           terminationPromise = survivesParentExit
             ? Promise.all([
                 childTermination,
@@ -1480,14 +1507,38 @@ export class HookRunner {
       });
 
       // Handle process exit
-      child.on('close', (exitCode) => {
+      child.on('close', async (exitCode) => {
         childClosed = true;
         resolveChildClosed();
         resolveSupervisorStarted();
-        if (aborted || timedOut) {
+        if (settled || aborted || timedOut) {
           return;
         }
+        if (processUnit) {
+          processTreeDrained = await processUnit.waitForEmpty(
+            Math.max(0, timeout - (Date.now() - startTime)),
+            () => aborted || timedOut,
+          );
+          if (aborted || timedOut) return;
+          if (!processTreeDrained) {
+            timedOut = true;
+            startTermination();
+            return;
+          }
+        }
         const duration = Date.now() - startTime;
+
+        if (isolationUnavailable) {
+          finish({
+            hookConfig,
+            eventName,
+            success: false,
+            outcome: 'non_blocking_error',
+            error: new HookCommandIsolationUnavailableError(),
+            duration,
+          });
+          return;
+        }
 
         if (survivesParentExit && survivingHookOutcome === 'timed_out') {
           timedOut = true;
@@ -1603,6 +1654,8 @@ export class HookRunner {
 
       // Handle process errors
       child.on('error', (error) => {
+        if (options?.waitForProcessTree && !child.pid)
+          processTreeDrained = true;
         if (aborted || timedOut) {
           return;
         }
