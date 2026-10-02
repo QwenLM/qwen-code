@@ -348,7 +348,10 @@ export class HostedWorkspaceToolTurn {
     this.uncertain = false;
   }
 
-  private async acquire(recovering = false): Promise<void> {
+  private async acquire(
+    recovering = false,
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.uncertain = true;
     try {
       await this.broker.acquire();
@@ -397,8 +400,8 @@ export class HostedWorkspaceToolTurn {
         // read its project instructions once, so this turn's later requests
         // and every later turn start with them. A read failure never blocks
         // the tool turn it rode in on.
-        if (!recovering && this.context?.read() === undefined)
-          await this.fetchWorkspaceContext();
+        if (!recovering && this.context?.read() === undefined && signal)
+          await this.fetchWorkspaceContext(signal);
       }
     } catch (cause) {
       if (
@@ -417,7 +420,7 @@ export class HostedWorkspaceToolTurn {
    * and offers them to the Session's context slot. Best-effort: any failure
    * leaves the slot untouched and is logged, never thrown into the turn.
    */
-  private async fetchWorkspaceContext(): Promise<void> {
+  private async fetchWorkspaceContext(signal: AbortSignal): Promise<void> {
     const slot = this.context;
     if (!slot) return;
     try {
@@ -437,7 +440,7 @@ export class HostedWorkspaceToolTurn {
         const result = await this.broker.execute(
           executionCallId,
           payloadJson,
-          new AbortController().signal,
+          signal,
         );
         if (result.executionStatus !== 'success') continue;
         const text = (result.responseParts as Array<{ text?: unknown }>)
@@ -612,7 +615,7 @@ export class HostedWorkspaceToolTurn {
     await waitForTurn(this.warmed, signal);
     if (!this.acquired) {
       // Acquisition may have taken effect even when its reply is lost.
-      await this.acquire();
+      await this.acquire(false, signal);
     }
     const shellBindings = new Map<
       string,
