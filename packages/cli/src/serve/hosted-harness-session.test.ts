@@ -1220,10 +1220,37 @@ describe('Hosted Harness no-tool session', () => {
         expect(refused.body.code).toBe('hosted_turn_recovery_required');
         damaged.mockRestore();
       }
+      const reads = new Map<string, { kind: string; count: number }>();
+      const read = LocalManagedSessionResourceStore.prototype.read;
+      const counted = vi
+        .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+        .mockImplementation(function (
+          this: LocalManagedSessionResourceStore,
+          ref,
+        ) {
+          if (ref.kind.startsWith('managed-hook')) {
+            const entry = reads.get(ref.resourceId);
+            reads.set(ref.resourceId, {
+              kind: ref.kind,
+              count: (entry?.count ?? 0) + 1,
+            });
+          }
+          return read.call(this, ref);
+        });
       const loaded = await headers(
         supertest(replacement).post(`/session/${SESSION_ID}/load`),
       ).send({ managedSessionStore: store() });
+      counted.mockRestore();
       expect(loaded.status).toBe(200);
+      // The load verified every Hook record, input, result and message part
+      // once, however many revisions name it. A plan is read again to walk
+      // its message snapshot.
+      expect(reads.size).toBeGreaterThan(10);
+      expect(
+        [...reads.values()].filter(
+          ({ kind, count }) => count !== (kind === 'managed-hook-plan' ? 2 : 1),
+        ),
+      ).toEqual([]);
       const restored = (request: supertest.Test) =>
         headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
       await restored(
