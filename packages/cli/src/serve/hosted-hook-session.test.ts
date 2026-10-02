@@ -1166,13 +1166,17 @@ it.each([
   },
 );
 
-async function operate(target: HostedHookSession, id: string): Promise<void> {
+async function operate(
+  managed: ManagedSession,
+  target: HostedHookSession,
+  id: string,
+): Promise<void> {
   catalog = {
     ...catalog,
     hooks: [{ ...catalog.hooks[0], eventName: HookEventName.Notification }],
   };
   await target.ensureReady();
-  await new ManagedHookActivationController(session).runHookOperation(
+  await new ManagedHookActivationController(managed).runHookOperation(
     {
       operationId: id,
       occurrenceId: hostedHookOccurrenceId(HookEventName.Notification, id),
@@ -1194,16 +1198,16 @@ function released(): string[] {
 it.each([true, false])(
   'releases only load owners after Hook operations replace the activation (detached: %s)',
   async (detached) => {
-    for (const id of ['a', 'b', 'c']) await operate(hooks, id);
+    for (const id of ['a', 'b', 'c']) await operate(session, hooks, id);
     if (detached) {
       await hooks.close();
       expect(released()).toEqual([hooks.broker.runtimeSessionId]);
     }
     await reopenSession();
     const replacement = new HostedHookSession(options, session, pin);
-    await operate(replacement, 'd');
+    await operate(session, replacement, 'd');
     expect(released()).toEqual([hooks.broker.runtimeSessionId]);
-    await operate(replacement, 'e');
+    await operate(session, replacement, 'e');
     await replacement.close();
     expect(released()).toEqual([replacement.broker.runtimeSessionId]);
   },
@@ -1213,7 +1217,9 @@ it('skips the restore after a Hook operation activation fails to install', async
   vi.spyOn(session.authority, 'installActivation').mockRejectedValueOnce(
     new Error('install resource failed'),
   );
-  await expect(operate(hooks, 'a')).rejects.toThrow('install resource failed');
+  await expect(operate(session, hooks, 'a')).rejects.toThrow(
+    'install resource failed',
+  );
   await hooks.close();
   expect(released()).toEqual([hooks.broker.runtimeSessionId]);
 });
@@ -1238,7 +1244,7 @@ it.each([
         return pending;
       },
     );
-  await operate(hooks, 'a');
+  await operate(session, hooks, 'a');
   if (!late) await authority.renewActivation({ leaseDurationMs: 60_000 });
   await Promise.all(renewals);
   const changes = authority
