@@ -52,6 +52,11 @@ const mocks = vi.hoisted(() => ({
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runWorkspaceRecoveryWorker: vi.fn(),
+}));
+
+vi.mock('./serve/workspace-recovery-worker.js', () => ({
+  runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
 }));
 
 vi.mock('./llm.js', () => ({
@@ -754,6 +759,15 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('runs private recovery before inherited updates or normal CLI startup', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    await runCliEntry(['--workspace-recovery-worker']);
+    expect(mocks.runWorkspaceRecoveryWorker).toHaveBeenCalledOnce();
+    expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
   });
 
   it('rejects arguments on the hidden Runtime worker route', async () => {
