@@ -4,7 +4,7 @@
 
 ## Problem and baseline
 
-O2 creates immutable foreground Shell stdout/stderr, manifests, pages and original outcomes in SQL and private OSS. O3 projects them into public Tool Results and Artifacts. Neither implementation currently proves that writers and readers have stopped before deleting bytes. This implementation is based on main `93efe3558`, including merged O3 `6310dd38d` and publication recovery fixes. Retention uses migration V27 after the existing V26 projection migration.
+O2 creates immutable foreground Shell stdout/stderr, manifests, pages and original outcomes in SQL and private OSS. O3 projects them into public Tool Results and Artifacts. Neither implementation currently proves that writers and readers have stopped before deleting bytes. This implementation is based on main `93efe3558`, including merged O3 `6310dd38d` and publication recovery fixes. Retention uses migration V28 after current main’s V27 hook-record migration; the existing V26 projection migration is unchanged.
 
 ## Contract and scope
 
@@ -30,7 +30,7 @@ After the last acknowledged page, SQL clears publication inline copies and corre
 
 ## Configuration and rollout
 
-Only `qwen.managed-agent.tool-publication.gc-enabled` (default false) and `deletion-grace` (default 24h) are added. Observation runs with publication enabled. Upgrade every Java writer before enabling GC; migration defaults legacy evidence to false. Renumber forward migrations against latest main immediately before landing. Do not enable deployment GC until the O4-3 database, process-failure, isolated OSS and large-closure gates pass.
+Only `qwen.managed-agent.tool-publication.gc-enabled` (default false) and `deletion-grace` (default 24h) are added. Observation runs with publication enabled, independently of `gc-enabled`, which is reserved for the O4-2 physical collector and has no effect in O4-1. It samples at most the first 100 retired publications in fixed catalog order; this is a bounded prefix sample, not fleet totals. Cursor-based collection belongs to O4-2. Upgrade every Java writer before enabling GC; migration defaults legacy evidence to false. Renumber forward migrations against latest main immediately before landing. Do not enable deployment GC until the O4-3 database, process-failure, isolated OSS and large-closure gates pass.
 
 ## Affected layers and delivery
 

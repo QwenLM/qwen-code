@@ -4,7 +4,7 @@
 
 ## 问题与基线
 
-O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V27 迁移，接在已有 V26 投影迁移之后。
+O2 将前台 Shell 的 stdout/stderr、manifest、pages 和原始 outcome 保存到 SQL 与私有 OSS；O3 将其投影为公共 Tool Result 和 Artifact。当前两者尚未证明读写停止后才能删除字节。实现基于 main `93efe3558`，包含已合入的 O3 `6310dd38d` 及 publication 恢复修复。退役保护使用 V28 迁移，接在当前 main 的 V27 hook record 迁移之后；已有 V26 投影迁移保持不变。
 
 ## 契约与范围
 
@@ -30,7 +30,7 @@ SQL 标记 `DELETING` 后，在事务外每页最多删除 100 个 catalog 精�
 
 ## 配置与上线
 
-只新增 `qwen.managed-agent.tool-publication.gc-enabled`（默认 false）及 `deletion-grace`（默认 24h）。启用 publication 后进行候选观察。启用 GC 前升级全部 Java writer；迁移将历史证据默认为 false。落地前按最新 main 重编号前向迁移。O4-3 的数据库、进程故障、隔离 OSS 和大闭包门禁全部通过后才允许部署启用 GC。
+只新增 `qwen.managed-agent.tool-publication.gc-enabled`（默认 false）及 `deletion-grace`（默认 24h）。启用 publication 后进行候选观察，不受 `gc-enabled` 影响；该开关保留给 O4-2 物理清理器，在 O4-1 中不生效。观察按固定 catalog 顺序最多采样前 100 个退役 publication，只是有界前缀样本，不能当作全量统计。基于游标的清理属于 O4-2。启用 GC 前升级全部 Java writer；迁移将历史证据默认为 false。落地前按最新 main 重编号前向迁移。O4-3 的数据库、进程故障、隔离 OSS 和大闭包门禁全部通过后才允许部署启用 GC。
 
 ## 涉及层与交付
 
