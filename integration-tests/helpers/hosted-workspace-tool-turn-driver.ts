@@ -22,6 +22,7 @@ const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   storeUrl: string;
   brokerUrl: string;
   resultFile: string;
+  coldLoadUrl: string;
   secondarySessionId: string;
   sessions: Array<{
     sessionId: string;
@@ -248,15 +249,20 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     .slice(lastPrompt + 1)
     .filter((message) => message.role === 'tool');
   if (current.startsWith('SHELL_') && current !== 'SHELL_REFUSAL') {
+    const reloaded =
+      current === 'SHELL_RELOADED' || current === 'SHELL_RESTARTED';
     const callId =
-      current === 'SHELL_RELOADED' ? 'shell-reloaded-proof' : 'shell-proof';
+      current === 'SHELL_RESTARTED'
+        ? 'shell-restarted-proof'
+        : reloaded
+          ? 'shell-reloaded-proof'
+          : 'shell-proof';
     if (!receipts.length) {
-      const producer =
-        current === 'SHELL_RELOADED'
-          ? "require('fs').appendFileSync('shell-reloaded.txt','x'); console.log('RELOADED_OK');"
-          : current === 'SHELL_CANCEL'
-            ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
-            : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
+      const producer = reloaded
+        ? "require('fs').appendFileSync('shell-reloaded.txt','x'); console.log('RELOADED_OK');"
+        : current === 'SHELL_CANCEL'
+          ? "require('fs').appendFileSync('shell-once.txt','x'); setInterval(()=>process.stdout.write('running\\n'),20);"
+          : "require('fs').appendFileSync('shell-once.txt','x'); (async()=>{await new Promise(r=>process.stdout.write(process.cwd()+'\\n',r)); const b=Buffer.alloc(1024*1024,0x91); for(let i=0;i<100;i++) await new Promise(r=>process.stdout.write(b,r)); await new Promise(r=>process.stdout.write('stdout-tail\\0',r)); process.stderr.write('stderr-tail\\0');})().catch(e=>{console.error(e);process.exitCode=1});";
       const quote = (text: string) =>
         "'" + text.replaceAll("'", "'\"'\"'") + "'";
       return {
@@ -273,7 +279,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
       };
     }
     assert(
-      current === 'SHELL_LARGE' || current === 'SHELL_RELOADED',
+      current === 'SHELL_LARGE' || reloaded,
       'A failed/cancelled Shell started another inference',
     );
     assert.equal(receipts.length, 1);
@@ -287,7 +293,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
       'Inference preceded durable admission',
     );
     assert.equal(receipts[0].tool_call_id, callId);
-    if (current === 'SHELL_RELOADED') {
+    if (reloaded) {
       assert.match(JSON.stringify(receipts[0].content), /RELOADED_OK/);
       return { content: 'SHELL_DONE' };
     }
@@ -301,6 +307,39 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
     );
     assert(Buffer.byteLength(JSON.stringify(receipts[0].content)) < 64 * 1024);
     return { content: 'SHELL_DONE' };
+  }
+  if (current === 'HISTORY_FILES') {
+    if (!receipts.length)
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'write_file',
+            { file_path: 'history-existing.txt', content: 'middle' },
+            'history-existing',
+          ),
+          fakeToolCall(
+            'write_file',
+            { file_path: 'history-new.txt', content: 'created' },
+            'history-new',
+          ),
+        ],
+      };
+    if (receipts.length === 2)
+      return {
+        toolCalls: [
+          fakeToolCall(
+            'edit',
+            {
+              file_path: 'history-existing.txt',
+              old_string: 'middle',
+              new_string: 'final',
+            },
+            'history-edit',
+          ),
+        ],
+      };
+    assert.equal(receipts.length, 3);
+    return { content: 'HISTORY_FILES_DONE' };
   }
   if (current.startsWith('RUN_TOOLS')) {
     if (!receipts.length)
@@ -457,9 +496,33 @@ const model = await startFakeOpenAIServer((request) => {
     throw cause;
   }
 });
-const cli = new HostedHarnessProcess();
+let cli = new HostedHarnessProcess();
 let sessionId = '';
 let clientId = '';
+async function javaLoad(expected = 200) {
+  const response = await fetch(config.coldLoadUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId,
+      harnessUrl: cli.baseUrl,
+      storeUrl: storeProxyUrl,
+    }),
+  });
+  const body = await response.text();
+  assert.equal(response.status, expected, body);
+  return JSON.parse(body) as { clientId: string; code?: string };
+}
+
+async function damageSeal(manifestResourceId: string, damage: boolean) {
+  const response = await fetch(config.coldLoadUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, manifestResourceId, damage }),
+  });
+  assert.equal(response.status, 200, await response.text());
+}
+
 async function json(
   route: string,
   body?: unknown,
@@ -647,11 +710,11 @@ try {
             .update('stderr-tail\0')
             .digest('hex'),
         });
-        await json(`/session/${sessionId}/detach`, {}, 204);
-        const loaded = await json(`/session/${sessionId}/load`, {
-          managedSessionStore: connection,
-          toolProfile: session.toolProfile,
+        await json(`/session/${sessionId}/title`, {
+          title: 'Restored Shell Workspace',
         });
+        await json(`/session/${sessionId}/detach`, {}, 204);
+        const loaded = await javaLoad();
         clientId = loaded.clientId;
         await prompt('SHELL_RELOADED');
         assert.equal(
@@ -661,6 +724,66 @@ try {
           ),
           'x',
         );
+        if (index === 2) {
+          const receipt = durableReceipts.findLast(
+            (entry) =>
+              (entry.sessionKey as { sessionId: string }).sessionId ===
+              sessionId,
+          )!;
+          const manifest = (
+            receipt.payload as { resultRef: { resourceId: string } }
+          ).resultRef;
+          await json(`/session/${sessionId}/detach`, {}, 204);
+          const before = starts.size;
+          const beforeModel = modelCalls;
+          await damageSeal(manifest.resourceId, true);
+          try {
+            assert.equal(
+              (await javaLoad(409)).code,
+              'hosted_turn_recovery_required',
+            );
+            assert.equal(starts.size, before);
+            assert.equal(modelCalls, beforeModel);
+          } finally {
+            await damageSeal(manifest.resourceId, false);
+          }
+          const previousBoot = cli.bootId;
+          await cli.close();
+          cli = new HostedHarnessProcess();
+          await cli.start(model.baseUrl, {
+            extraArgs: [
+              '--managed-runtime-broker-url',
+              `http://127.0.0.1:${address.port}`,
+              '--managed-runtime-broker-token',
+              'hosted-tools-broker-token',
+            ],
+          });
+          assert.notEqual(cli.bootId, previousBoot);
+          connection.writerId = cli.bootId;
+          clientId = (await javaLoad()).clientId;
+          assert.equal(starts.size, before);
+          assert.equal(modelCalls, beforeModel);
+          assert.equal(
+            await readFile(
+              path.join(session.directory, 'shell-reloaded.txt'),
+              'utf8',
+            ),
+            'x',
+          );
+          await prompt('SHELL_RESTARTED');
+          assert.equal(starts.size, before + 1);
+          assert.equal(modelCalls, beforeModel + 2);
+          assert.equal(
+            await readFile(
+              path.join(session.directory, 'shell-reloaded.txt'),
+              'utf8',
+            ),
+            'xx',
+          );
+          await assert.rejects(
+            access(path.join(cli.root, 'shell-reloaded.txt')),
+          );
+        }
         await prompt('TEXT_AFTER_SHELL_RELOAD');
       }
       if (index === 4) {
@@ -706,16 +829,11 @@ try {
       'decoy',
     );
     await prompt('SHELL_REFUSAL', 'error');
-    await json(`/session/${sessionId}/detach`, {}, 204);
-    await json(
-      `/session/${sessionId}/load`,
-      { managedSessionStore: connection },
-      409,
-    );
-    const loaded = await json(`/session/${sessionId}/load`, {
-      managedSessionStore: connection,
-      toolProfile: session.toolProfile,
+    await json(`/session/${sessionId}/title`, {
+      title: 'Restored File Workspace',
     });
+    await json(`/session/${sessionId}/detach`, {}, 204);
+    const loaded = await javaLoad();
     clientId = loaded.clientId;
     await prompt('HISTORY_CHECK');
     if (index === 0) {
@@ -769,6 +887,96 @@ try {
       sessionId = originalSessionId;
       clientId = originalClientId;
     }
+    await writeFile(
+      path.join(session.directory, 'history-existing.txt'),
+      'original',
+    );
+    const historyEvents = await prompt('HISTORY_FILES');
+    const targetPrompt = historyEvents
+      .filter((event) => event.type === 'turn_complete')
+      .at(-1)!.promptId;
+    assert.equal(
+      await readFile(
+        path.join(session.directory, 'history-existing.txt'),
+        'utf8',
+      ),
+      'final',
+    );
+    const history = await json(`/session/${sessionId}/files/history`);
+    assert.equal(history.history.pendingTurn, null);
+    assert.equal(
+      history.history.state.snapshots.filter(
+        (snapshot: { promptId: string }) => snapshot.promptId === targetPrompt,
+      ).length,
+      1,
+    );
+    await json(`/session/${sessionId}/detach`, {}, 204);
+    clientId = (
+      await json(`/session/${sessionId}/load`, {
+        managedSessionStore: connection,
+        toolProfile: session.toolProfile,
+      })
+    ).clientId;
+    assert.deepEqual(
+      (await json(`/session/${sessionId}/files/history`)).history,
+      history.history,
+    );
+    await writeFile(
+      path.join(session.directory, 'history-existing.txt'),
+      'external',
+    );
+    const conflictRequest = { promptId: targetPrompt, requestId: randomUUID() };
+    const conflict = await json(
+      `/session/${sessionId}/files/rewind`,
+      conflictRequest,
+      409,
+    );
+    assert.equal(conflict.conflict, true);
+    assert.equal(
+      await readFile(path.join(session.directory, 'history-new.txt'), 'utf8'),
+      'created',
+    );
+    await writeFile(
+      path.join(session.directory, 'history-existing.txt'),
+      'final',
+    );
+    const undoRequest = { promptId: targetPrompt, requestId: randomUUID() };
+    const undone = await json(
+      `/session/${sessionId}/files/rewind`,
+      undoRequest,
+    );
+    assert.equal(undone.conflict, false);
+    assert.equal(
+      await readFile(
+        path.join(session.directory, 'history-existing.txt'),
+        'utf8',
+      ),
+      'original',
+    );
+    await assert.rejects(
+      access(path.join(session.directory, 'history-new.txt')),
+    );
+    assert.deepEqual(
+      await json(`/session/${sessionId}/files/rewind`, undoRequest),
+      undone,
+    );
+    assert.deepEqual(
+      await json(`/session/${sessionId}/files/rewind`, conflictRequest, 409),
+      conflict,
+    );
+    const repeatedUndo = await json(`/session/${sessionId}/files/rewind`, {
+      promptId: targetPrompt,
+      requestId: randomUUID(),
+    });
+    assert.deepEqual(repeatedUndo.filesChanged, []);
+    assert.deepEqual(
+      await json(`/session/${sessionId}/files/rewind`, undoRequest),
+      undone,
+    );
+    assert.equal(
+      await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
+      'decoy',
+    );
     if (index === 1) {
       loseStatus = true;
       const before = modelCalls;
@@ -796,7 +1004,7 @@ try {
     } else await json(`/session/${sessionId}/detach`, {}, 204);
   }
   assert(droppedStart);
-  assert.equal(starts.size, 14);
+  assert.equal(starts.size, 21);
   assert.equal(shellExpected.length, 1);
   await writeFile(
     config.resultFile,
@@ -804,7 +1012,7 @@ try {
   );
   assert([...starts.values()].every((count) => count === 1));
   console.log(
-    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, correctable file_path refusal, same-Workspace second Session, parallel warmup, file replay, 100 MiB Shell, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
+    'HOSTED_WORKSPACE_TOOLS_OK: six Workspaces, correctable file_path refusal, same-Workspace second Session, parallel warmup, file replay, durable backups, reload/undo/conflict checks, 100 MiB Shell, Java cold load without profile, Harness process restart, damaged durable empty Shell seal refusal, Shell after text/Shell reload, lost start ACK, publication faults, cancellation, at-most-once effects',
   );
 } catch (cause) {
   console.error(cli.output);

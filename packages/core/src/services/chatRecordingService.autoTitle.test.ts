@@ -24,12 +24,8 @@ vi.mock('./sessionTitle.js', () => ({
     tryGenerateSessionTitleMock(...args),
 }));
 
-/**
- * Most tests assert on the success-outcome path: this helper wraps
- * `{title, modelUsed}` in the new `{ok: true, ...}` shape so we don't have
- * to repeat it everywhere. Failure outcomes are spelled out where they
- * exercise distinct reasons.
- */
+/** Success outcome `{ok: true, title, modelUsed}`, which most tests assert
+ * on. Failure outcomes are spelled out where they exercise distinct reasons. */
 function mockOk(title: string, modelUsed = 'qwen-turbo'): void {
   tryGenerateSessionTitleMock.mockResolvedValue({
     ok: true,
@@ -50,13 +46,10 @@ vi.mock('node:crypto', () => ({
 }));
 vi.mock('../utils/jsonl-utils.js');
 
-/**
- * Let the fire-and-forget auto-title promise kicked off by
- * `recordAssistantTurn` settle. The IIFE awaits the generation mock, which
- * adds at least one microtask hop; a single `Promise.resolve()` flush isn't
- * always enough. A setImmediate boundary after several microtask ticks
- * covers pathological cases where a mock resolves via a deeper await chain.
- */
+/** Let the fire-and-forget auto-title promise kicked off by
+ * `recordAssistantTurn` settle. Awaiting the generation mock adds at least
+ * one microtask hop, so one `Promise.resolve()` isn't always enough; the
+ * setImmediate boundary covers mocks resolving via a deeper await chain. */
 async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 8; i++) {
     await Promise.resolve();
@@ -67,11 +60,16 @@ async function flushMicrotasks(): Promise<void> {
   }
 }
 
+/** Every record appended through the (mocked) jsonl writer. */
+function writtenRecords(): ChatRecord[] {
+  return vi.mocked(jsonl.writeLine).mock.calls.map((c) => c[1] as ChatRecord);
+}
+
+const isTitleRecord = (r: ChatRecord) =>
+  r.type === 'system' && r.subtype === 'custom_title';
+
 function findCustomTitleRecord(): ChatRecord | undefined {
-  return vi
-    .mocked(jsonl.writeLine)
-    .mock.calls.map((c) => c[1] as ChatRecord)
-    .find((r) => r.type === 'system' && r.subtype === 'custom_title');
+  return writtenRecords().find(isTitleRecord);
 }
 
 function resumedSessionWithTitle(
@@ -202,29 +200,79 @@ describe('ChatRecordingService - auto-title trigger', () => {
     return service;
   }
 
+  /** Records an assistant turn replying `text`, then lets auto-title settle. */
+  const assistantTurn = (text = 'reply', service = chatRecordingService) => {
+    service.recordAssistantTurn({ model: 'qwen-plus', message: [{ text }] });
+    return flushMicrotasks();
+  };
+
+  /** A service resumed from `data`, with `overrides` on the config. */
+  function resume(data: unknown, overrides: Record<string, unknown> = {}) {
+    const resumedConfig = {
+      ...mockConfig,
+      getResumedSessionData: vi.fn().mockReturnValue(data),
+      ...overrides,
+    } as unknown as Config;
+    const service = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
+    return { resumedConfig, service };
+  }
+
+  /** Resumes a session whose persisted title is `title` (+ `source`). */
+  function resumeWithTitle(title: string, source?: 'manual' | 'auto') {
+    const sessionService = {
+      getSessionTitleInfo: vi
+        .fn()
+        .mockReturnValue({ title, ...(source ? { source } : {}) }),
+      getSessionTitle: vi.fn().mockReturnValue(title),
+    };
+    return resume(resumedSessionWithTitle(title, source), {
+      getSessionService: vi.fn().mockReturnValue(sessionService),
+    }).service;
+  }
+
+  /** Resume writes no title record by itself; the next user message
+   * re-anchors the title. Returns the re-anchored record's payload. */
+  async function reanchoredPayload(svc: ChatRecordingService) {
+    await svc.flush();
+    expect(findCustomTitleRecord()).toBeUndefined();
+    svc.recordUserMessage([{ text: 'resume work' }]);
+    await svc.flush();
+    return findCustomTitleRecord()?.systemPayload;
+  }
+
+  /** The next generation stays pending until the returned resolver runs. */
+  function holdNextGeneration(): (outcome: unknown) => void {
+    let resolveLlm: (value: unknown) => void = () => {};
+    tryGenerateSessionTitleMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLlm = resolve;
+        }),
+    );
+    return (outcome) => resolveLlm(outcome);
+  }
+
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('writes an auto-sourced title after the first assistant turn', async () => {
     mockOk('Fix login button');
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'Looking at the button handler now.' }],
-    });
-
-    await flushMicrotasks();
+    await assistantTurn('Looking at the button handler now.');
 
     const titleRecord = findCustomTitleRecord();
     expect(titleRecord).toBeDefined();
     // The assistant-turn record carries the branch from the (mocked)
     // `getGitBranch` -> `execFileSync` call; pin it so a stale mock target
     // (`execSync`) surfaces as `undefined` instead of silently passing.
-    const assistantRecord = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((c) => c[1] as ChatRecord)
-      .find((r) => r.type === 'assistant');
+    const assistantRecord = writtenRecords().find(
+      (r) => r.type === 'assistant',
+    );
     expect(assistantRecord?.gitBranch).toBe('main');
     expect(titleRecord?.systemPayload).toEqual({
       customTitle: 'Fix login button',
@@ -237,11 +285,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
   it('does not trigger when no fast model is configured', async () => {
     fastModelValue = undefined;
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'hi' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('hi');
 
     expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
     expect(findCustomTitleRecord()).toBeUndefined();
@@ -251,11 +295,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     await chatRecordingService.recordCustomTitle('chose-this-myself', 'manual');
     vi.mocked(jsonl.writeLine).mockClear();
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
     expect(findCustomTitleRecord()).toBeUndefined();
@@ -272,11 +312,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     });
 
     for (let i = 0; i < 5; i++) {
-      chatRecordingService.recordAssistantTurn({
-        model: 'qwen-plus',
-        message: [{ text: `turn ${i}` }],
-      });
-      await flushMicrotasks();
+      await assistantTurn(`turn ${i}`);
     }
 
     // Cap is 3.
@@ -296,16 +332,8 @@ describe('ChatRecordingService - auto-title trigger', () => {
         modelUsed: 'qwen-turbo',
       });
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'turn 1' }],
-    });
-    await flushMicrotasks();
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'turn 2' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('turn 1');
+    await assistantTurn('turn 2');
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledTimes(2);
     const titleRecord = findCustomTitleRecord();
@@ -316,47 +344,23 @@ describe('ChatRecordingService - auto-title trigger', () => {
   });
 
   it('does not trigger when QWEN_DISABLE_AUTO_TITLE is set', async () => {
-    const prev = process.env['QWEN_DISABLE_AUTO_TITLE'];
-    process.env['QWEN_DISABLE_AUTO_TITLE'] = '1';
-    try {
-      chatRecordingService.recordAssistantTurn({
-        model: 'qwen-plus',
-        message: [{ text: 'reply' }],
-      });
-      await flushMicrotasks();
-      expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
-      expect(findCustomTitleRecord()).toBeUndefined();
-    } finally {
-      if (prev === undefined) delete process.env['QWEN_DISABLE_AUTO_TITLE'];
-      else process.env['QWEN_DISABLE_AUTO_TITLE'] = prev;
-    }
+    vi.stubEnv('QWEN_DISABLE_AUTO_TITLE', '1');
+    await assistantTurn();
+    expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
+    expect(findCustomTitleRecord()).toBeUndefined();
   });
 
   it('still triggers when QWEN_DISABLE_AUTO_TITLE is falsy ("0")', async () => {
     mockOk('Fix login button');
-    const prev = process.env['QWEN_DISABLE_AUTO_TITLE'];
-    process.env['QWEN_DISABLE_AUTO_TITLE'] = '0';
-    try {
-      chatRecordingService.recordAssistantTurn({
-        model: 'qwen-plus',
-        message: [{ text: 'reply' }],
-      });
-      await flushMicrotasks();
-      expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
-    } finally {
-      if (prev === undefined) delete process.env['QWEN_DISABLE_AUTO_TITLE'];
-      else process.env['QWEN_DISABLE_AUTO_TITLE'] = prev;
-    }
+    vi.stubEnv('QWEN_DISABLE_AUTO_TITLE', '0');
+    await assistantTurn();
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
   });
 
   it('does not trigger in non-interactive mode', async () => {
     vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
     expect(findCustomTitleRecord()).toBeUndefined();
@@ -367,11 +371,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
     mockOk('Fix login button');
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalled();
     const record = findCustomTitleRecord();
@@ -389,11 +389,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       { displayText: '你好', hookContext: '' },
     );
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
       mockConfig,
@@ -440,26 +436,15 @@ describe('ChatRecordingService - auto-title trigger', () => {
         systemPayload: { displayText: '再见', hookContext: '' },
       },
     ];
-    const resumedConfig = {
-      ...mockConfig,
-      getResumedSessionData: vi.fn().mockReturnValue({
-        conversation: { messages },
-        lastCompletedUuid: 'user-2',
-      }),
-    } as unknown as Config;
-    const service = activateRecording(
-      new ChatRecordingService(resumedConfig, undefined, true),
-      resumedConfig,
-    );
+    const { resumedConfig, service } = resume({
+      conversation: { messages },
+      lastCompletedUuid: 'user-2',
+    });
 
     expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', '再见']);
 
     mockOk('Answer greetings');
-    service.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('reply', service);
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
       resumedConfig,
@@ -490,11 +475,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     vi.mocked(mockConfig.isInteractive).mockReturnValue(false);
     vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(false);
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).not.toHaveBeenCalled();
   });
@@ -505,11 +486,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     tryGenerateSessionTitleMock.mockImplementation(() => new Promise(() => {}));
 
     for (let i = 0; i < 5; i++) {
-      chatRecordingService.recordAssistantTurn({
-        model: 'qwen-plus',
-        message: [{ text: `turn ${i}` }],
-      });
-      await flushMicrotasks();
+      await assistantTurn(`turn ${i}`);
     }
 
     // Only the first turn should have launched a generation; subsequent
@@ -518,118 +495,40 @@ describe('ChatRecordingService - auto-title trigger', () => {
   });
 
   it('preserves titleSource across resume (auto stays auto)', async () => {
-    const mockSessionService = {
-      getSessionTitleInfo: vi.fn().mockReturnValue({
-        title: 'Auto-generated title',
-        source: 'auto',
-      }),
-      getSessionTitle: vi.fn().mockReturnValue('Auto-generated title'),
-    };
-    const resumedConfig = {
-      ...mockConfig,
-      getResumedSessionData: vi
-        .fn()
-        .mockReturnValue(
-          resumedSessionWithTitle('Auto-generated title', 'auto'),
-        ),
-      getSessionService: vi.fn().mockReturnValue(mockSessionService),
-    } as unknown as Config;
-
-    const svc = activateRecording(
-      new ChatRecordingService(resumedConfig, undefined, true),
-      resumedConfig,
-    );
+    const svc = resumeWithTitle('Auto-generated title', 'auto');
 
     expect(svc.getCurrentCustomTitle()).toBe('Auto-generated title');
     expect(svc.getCurrentTitleSource()).toBe('auto');
-
-    await svc.flush();
-    expect(findCustomTitleRecord()).toBeUndefined();
-
-    svc.recordUserMessage([{ text: 'resume work' }]);
-    await svc.flush();
-
-    const reanchoredRecord = findCustomTitleRecord();
-    expect(reanchoredRecord?.systemPayload).toEqual({
+    expect(await reanchoredPayload(svc)).toEqual({
       customTitle: 'Auto-generated title',
       titleSource: 'auto',
     });
   });
 
   it('preserves titleSource across resume (manual stays manual)', async () => {
-    // Symmetric to the auto-stays-auto case: if a user deliberately ran
-    // /rename on a session, resuming must NOT rewrite that to auto or to
-    // anything else. The worst regression path here would silently
-    // reclassify a user-chosen name as a model guess.
-    const mockSessionService = {
-      getSessionTitleInfo: vi.fn().mockReturnValue({
-        title: 'User chose this',
-        source: 'manual',
-      }),
-      getSessionTitle: vi.fn().mockReturnValue('User chose this'),
-    };
-    const resumedConfig = {
-      ...mockConfig,
-      getResumedSessionData: vi
-        .fn()
-        .mockReturnValue(resumedSessionWithTitle('User chose this', 'manual')),
-      getSessionService: vi.fn().mockReturnValue(mockSessionService),
-    } as unknown as Config;
-
-    const svc = activateRecording(
-      new ChatRecordingService(resumedConfig, undefined, true),
-      resumedConfig,
-    );
+    // Symmetric to auto-stays-auto: resuming a session the user deliberately
+    // /rename'd must NOT rewrite its source. The worst regression here would
+    // silently reclassify a user-chosen name as a model guess.
+    const svc = resumeWithTitle('User chose this', 'manual');
 
     expect(svc.getCurrentCustomTitle()).toBe('User chose this');
     expect(svc.getCurrentTitleSource()).toBe('manual');
-    await svc.flush();
-    expect(findCustomTitleRecord()).toBeUndefined();
-
-    svc.recordUserMessage([{ text: 'resume work' }]);
-    await svc.flush();
-
-    const reanchoredRecord = findCustomTitleRecord();
-    expect(reanchoredRecord?.systemPayload).toEqual({
+    expect(await reanchoredPayload(svc)).toEqual({
       customTitle: 'User chose this',
       titleSource: 'manual',
     });
   });
 
   it('preserves undefined titleSource on legacy resume (no rewrite)', async () => {
-    const mockSessionService = {
-      // Legacy record: only title surfaces, no source field.
-      getSessionTitleInfo: vi.fn().mockReturnValue({
-        title: 'Legacy title',
-      }),
-      getSessionTitle: vi.fn().mockReturnValue('Legacy title'),
-    };
-    const resumedConfig = {
-      ...mockConfig,
-      getResumedSessionData: vi
-        .fn()
-        .mockReturnValue(resumedSessionWithTitle('Legacy title')),
-      getSessionService: vi.fn().mockReturnValue(mockSessionService),
-    } as unknown as Config;
-
-    const svc = activateRecording(
-      new ChatRecordingService(resumedConfig, undefined, true),
-      resumedConfig,
-    );
+    // Legacy record: only the title surfaces, no source field.
+    const svc = resumeWithTitle('Legacy title');
 
     expect(svc.getCurrentCustomTitle()).toBe('Legacy title');
     // Must stay undefined so the JSONL isn't upgraded to a misleading
     // `titleSource: 'manual'` we can't actually verify.
     expect(svc.getCurrentTitleSource()).toBeUndefined();
-    await svc.flush();
-    expect(findCustomTitleRecord()).toBeUndefined();
-
-    svc.recordUserMessage([{ text: 'resume work' }]);
-    await svc.flush();
-
-    const reanchoredRecord = findCustomTitleRecord();
     // Payload must NOT contain a titleSource field when source is unknown.
-    expect(reanchoredRecord?.systemPayload).toEqual({
+    expect(await reanchoredPayload(svc)).toEqual({
       customTitle: 'Legacy title',
     });
   });
@@ -649,11 +548,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       getSessionTitle: vi.fn(),
     } as never);
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'reply' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
     expect(otherProcessManual).toHaveBeenCalled();
@@ -683,11 +578,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
         }),
     );
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'turn' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('turn');
 
     expect(capturedSignal).toBeDefined();
     expect(capturedSignal?.aborted).toBe(false);
@@ -706,19 +597,9 @@ describe('ChatRecordingService - auto-title trigger', () => {
 
   it('respects a late /rename that lands while the LLM call is in flight', async () => {
     // Simulate slow LLM: resolves after a manual rename lands.
-    let resolveLlm: (v: unknown) => void = () => {};
-    tryGenerateSessionTitleMock.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveLlm = resolve;
-        }),
-    );
+    const resolveLlm = holdNextGeneration();
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'turn' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('turn');
 
     // User renames while the title LLM call is still pending.
     await chatRecordingService.recordCustomTitle('user-chosen', 'manual');
@@ -735,19 +616,8 @@ describe('ChatRecordingService - auto-title trigger', () => {
   });
 
   it('lets an explicit auto rename cancel and outrank background auto-title', async () => {
-    let resolveLlm: (value: unknown) => void = () => {};
-    tryGenerateSessionTitleMock.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveLlm = resolve;
-        }),
-    );
-
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'turn' }],
-    });
-    await flushMicrotasks();
+    const resolveLlm = holdNextGeneration();
+    await assistantTurn('turn');
 
     await expect(
       chatRecordingService.recordCustomTitle('User Auto Title', 'auto'),
@@ -755,13 +625,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
     resolveLlm({ ok: true, title: 'Background Title', modelUsed: 'fast' });
     await flushMicrotasks();
 
-    const titleRecords = vi
-      .mocked(jsonl.writeLine)
-      .mock.calls.map((call) => call[1] as ChatRecord)
-      .filter(
-        (record) =>
-          record.type === 'system' && record.subtype === 'custom_title',
-      );
+    const titleRecords = writtenRecords().filter(isTitleRecord);
     expect(titleRecords).toHaveLength(1);
     expect(titleRecords[0]?.systemPayload).toMatchObject({
       customTitle: 'User Auto Title',
@@ -802,20 +666,12 @@ describe('ChatRecordingService - auto-title trigger', () => {
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('disk full'));
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'first turn' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('first turn');
     await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
     expect(chatRecordingService.getCurrentCustomTitle()).toBeUndefined();
 
-    chatRecordingService.recordAssistantTurn({
-      model: 'qwen-plus',
-      message: [{ text: 'second turn' }],
-    });
-    await flushMicrotasks();
+    await assistantTurn('second turn');
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledOnce();
     expect(jsonl.writeLine).toHaveBeenCalledTimes(2);

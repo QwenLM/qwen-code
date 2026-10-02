@@ -54,6 +54,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -109,6 +110,18 @@ class ManagedAgentServerIntegrationTest {
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @AfterEach
+    void restoreHarnessAvailability() {
+        harness.setAvailable(true);
+    }
+
+    // Keeps the dispatch recovery scanner from claiming a Turn that the
+    // test drives directly through the store: the scanner backs off while
+    // the Harness is unavailable.
+    private void pauseRecoveryScanning() {
+        harness.setAvailable(false);
+    }
 
     @Test
     void allowsRepeatingLifecycleOperationsWithNewCommandKeys() {
@@ -1110,6 +1123,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void retractionRenamesTheDeltaThatContinuedTheRetractedOne() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retract-identity-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-identity-create",
@@ -1195,6 +1209,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void ignoresLateEnvironmentResultFromAnOlderTurn() {
+        pauseRecoveryScanning();
         String tenant = "tenant-environment-order-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "environment-create",
@@ -1231,6 +1246,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void persistsRetryBackoffAcrossClaims() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retry-backoff-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retry-create",
@@ -1265,6 +1281,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void transfersHarnessGenerationOnlyBeforeAdmissionUnderDispatchLease() {
+        pauseRecoveryScanning();
         String tenant = "tenant-harness-takeover-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "takeover-create",
@@ -1302,6 +1319,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
+        pauseRecoveryScanning();
         String tenant = "tenant-harness-recovery-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "recovery-create",
@@ -1366,6 +1384,7 @@ class ManagedAgentServerIntegrationTest {
 
     @Test
     void retractsOnlyTheIncompleteContinuationEpoch() {
+        pauseRecoveryScanning();
         String tenant = "tenant-retract-" + UUID.randomUUID();
         Admission session = store.insertSessionCommand(tenant,
                 "CREATE_SESSION", "retract-create",
@@ -1616,6 +1635,12 @@ class ManagedAgentServerIntegrationTest {
             HarnessRuntimeRecovery recovery = runtimeRecovery;
             runtimeRecovery = null;
             return new Attachment(BOOT_ID, recovery);
+        }
+
+        @Override
+        public Attachment recoverManagedRuntime(String tenantId,
+                String sessionId, boolean cancellation) {
+            return createOrLoad(tenantId, sessionId, true);
         }
 
         @Override

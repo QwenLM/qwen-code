@@ -34,6 +34,7 @@ import {
   type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceVoiceStatus,
+  type DaemonWorkspaceProviderStatus,
   type GoalSnapshotV2,
   type SessionSource,
   type SessionSourcesResult,
@@ -53,8 +54,8 @@ import type {
   ChatHeaderRenderInfo,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
-import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
-import { serializeStatsMessage } from './components/messages/StatsMessage';
+import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
+import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
@@ -76,6 +77,7 @@ type MockConnection = {
   models: Array<{
     id: string;
     label?: string;
+    baseModelId?: string;
     reasoningPreview?: {
       enabled: boolean;
       effort: string;
@@ -760,6 +762,7 @@ const {
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
+      providers: [] as DaemonWorkspaceProviderStatus[],
       settingsLoading: false,
       // A background revalidation: the real resource sets loading:true while
       // keeping the last-known-good data and status.
@@ -954,7 +957,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useProviders: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
       testState.latestProvidersHookOptions = options;
       return {
-        providers: [],
+        providers: testState.providers,
         current: undefined,
         loading: false,
         error: undefined,
@@ -11585,6 +11588,7 @@ beforeEach(() => {
   testState.settings = [];
   testState.settingsLoading = false;
   testState.settingsReloading = false;
+  testState.providers = [];
   testState.settingsError = undefined;
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
@@ -14458,52 +14462,60 @@ describe('App shell command queueing', () => {
 });
 
 describe('App read-only local commands mid-turn', () => {
-  it('runs /stats immediately while streaming and skips the echo', async () => {
-    const statsFixture: DaemonSessionStatsStatus = {
-      v: 1,
-      sessionId: 'session-1',
-      workspaceCwd: '/tmp/project',
-      sessionStartTimeMs: 1000,
-      durationMs: 42000,
-      promptCount: 2,
-      models: {},
-      tools: {
-        totalCalls: 1,
-        totalSuccess: 1,
-        totalFail: 0,
-        totalDurationMs: 120,
-        byName: {},
-      },
-      files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
-      sources: [],
-    };
-    mockSessionActions.getStats.mockResolvedValue(statsFixture);
-    const { rerender } = renderApp({});
-    await flush();
+  it.each([
+    ['/stats', 'overview'],
+    ['/stats model', 'model'],
+    ['/stats tools', 'tools'],
+  ] as const)(
+    'runs %s immediately while streaming and skips the echo',
+    async (command, view) => {
+      const statsFixture: DaemonSessionStatsStatus = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        sessionStartTimeMs: 1000,
+        durationMs: 42000,
+        promptCount: 2,
+        models: {},
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          totalDurationMs: 120,
+          byName: {},
+        },
+        files: { totalLinesAdded: 3, totalLinesRemoved: 1 },
+        sources: [],
+      };
+      mockSessionActions.getStats.mockResolvedValue(statsFixture);
+      const { rerender } = renderApp({});
+      await flush();
 
-    act(() => {
-      testState.streamingState = 'responding';
-      rerender({});
-    });
-
-    let accepted: boolean | void;
-    await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('/stats');
-      await vi.waitFor(() => {
-        expect(mockSessionActions.getStats).toHaveBeenCalled();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender({});
       });
-    });
 
-    expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: serializeStatsMessage(statsFixture, 'overview'),
-      }),
-    ]);
-  });
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await vi.waitFor(() => {
+          expect(mockSessionActions.getStats).toHaveBeenCalled();
+        });
+      });
+
+      expect(accepted).toBe(true);
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Session Stats',
+          data: createStatsMessageData(statsFixture, view),
+        }),
+      ]);
+    },
+  );
 
   it('echoes /stats when idle', async () => {
     renderApp({});
@@ -14629,59 +14641,65 @@ describe('App read-only local commands mid-turn', () => {
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith('/status');
   });
 
-  it('runs /context immediately while streaming and skips the echo', async () => {
-    const contextFixture: DaemonSessionContextUsageStatus = {
-      v: 1,
-      sessionId: 'session-1',
-      workspaceCwd: '/tmp/project',
-      usage: {
-        modelName: 'qwen',
-        totalTokens: 1234,
-        contextWindowSize: 131072,
-        breakdown: {
-          systemPrompt: 500,
-          builtinTools: 200,
-          mcpTools: 0,
-          memoryFiles: 50,
-          skills: 0,
-          messages: 584,
-          freeSpace: 129738,
-          autocompactBuffer: 0,
+  it.each(['/context', '/context detail', '/context -d'])(
+    'runs %s immediately while streaming and skips the echo',
+    async (command) => {
+      const contextFixture: DaemonSessionContextUsageStatus = {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        usage: {
+          modelName: 'qwen',
+          totalTokens: 1234,
+          contextWindowSize: 131072,
+          breakdown: {
+            systemPrompt: 500,
+            builtinTools: 200,
+            mcpTools: 0,
+            memoryFiles: 50,
+            skills: 0,
+            messages: 584,
+            freeSpace: 129738,
+            autocompactBuffer: 0,
+          },
+          builtinTools: [{ name: 'read_file', tokens: 120 }],
+          mcpTools: [],
+          memoryFiles: [{ path: 'QWEN.md', tokens: 50 }],
+          skills: [],
         },
-        builtinTools: [{ name: 'read_file', tokens: 120 }],
-        mcpTools: [],
-        memoryFiles: [{ path: 'QWEN.md', tokens: 50 }],
-        skills: [],
-      },
-      formattedText: 'Context usage: 1.2k / 131k tokens',
-    };
-    mockSessionActions.getContextUsage.mockResolvedValue(contextFixture);
-    const { rerender } = renderApp({});
-    await flush();
+        formattedText: 'Context usage: 1.2k / 131k tokens',
+      };
+      mockSessionActions.getContextUsage.mockResolvedValue(contextFixture);
+      const { rerender } = renderApp({});
+      await flush();
 
-    act(() => {
-      testState.streamingState = 'responding';
-      rerender({});
-    });
-
-    let accepted: boolean | void;
-    await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('/context');
-      await vi.waitFor(() => {
-        expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender({});
       });
-    });
 
-    expect(accepted).toBe(true);
-    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
-    expect(mockStore.dispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        clearActiveText: false,
-        text: serializeContextUsageMessage(contextFixture),
-      }),
-    ]);
-  });
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await vi.waitFor(() => {
+          expect(mockSessionActions.getContextUsage).toHaveBeenCalled();
+        });
+      });
+      expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+        detail: command !== '/context',
+      });
+      expect(accepted).toBe(true);
+      expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalled();
+      expect(mockStore.dispatch).toHaveBeenCalledWith([
+        expect.objectContaining({
+          type: 'status',
+          clearActiveText: false,
+          text: 'Context Usage',
+          data: createContextUsageMessageData(contextFixture),
+        }),
+      ]);
+    },
+  );
 
   it('echoes /context when idle', async () => {
     renderApp({});
@@ -16036,7 +16054,7 @@ describe('App session callbacks', () => {
     expect(mockStore.dispatch).not.toHaveBeenCalledWith([
       expect.objectContaining({
         type: 'status',
-        text: expect.stringContaining('web-shell:context-usage:v1:'),
+        data: expect.objectContaining({ type: 'web-shell:context-usage:v1:' }),
       }),
     ]);
   });
@@ -32375,7 +32393,9 @@ describe('App session callbacks', () => {
       expect(mockStore.dispatch).not.toHaveBeenCalledWith([
         expect.objectContaining({
           type: 'status',
-          text: expect.stringContaining('web-shell:context-usage:v1:'),
+          data: expect.objectContaining({
+            type: 'web-shell:context-usage:v1:',
+          }),
         }),
       ]);
       expect(
@@ -37728,11 +37748,44 @@ describe('App session callbacks', () => {
     expect(settingsReload).toHaveBeenCalled();
   });
 
-  it('decodes a pinned fastModel setting before opening the fast-model picker (#12760)', async () => {
-    // The CLI picker persists `authType:id\0<baseUrl>`; handing the raw value
-    // to the dialog makes currentIdx -1 (no registry id can contain NUL), so
-    // the picker highlights an unrelated row and Enter erases the pin.
+  it('matches a pinned fastModel to its exact ACP row before opening the picker (#12814)', async () => {
     const pinned = 'openai:shared-fast\0https://free-quota.example.com/v1';
+    mockConnection.models = [
+      {
+        id: 'qwen-route:v1:a',
+        baseModelId: 'shared-fast',
+      },
+      {
+        id: 'qwen-route:v1:b',
+        baseModelId: 'shared-fast',
+      },
+    ];
+    testState.providers = [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: false,
+        models: [
+          {
+            modelId: 'qwen-route:v1:a',
+            baseModelId: 'shared-fast',
+            name: 'A',
+            baseUrl: 'https://exhausted-plan.example.com/v1',
+            isCurrent: false,
+            isRuntime: false,
+          },
+          {
+            modelId: 'qwen-route:v1:b',
+            baseModelId: 'shared-fast',
+            name: 'B',
+            baseUrl: 'https://free-quota.example.com/v1',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      },
+    ];
     testState.settings = [
       {
         key: 'fastModel',
@@ -37757,7 +37810,7 @@ describe('App session callbacks', () => {
       '[data-testid="model-select"]',
     );
     expect(select?.getAttribute('data-current-model-id')).toBe(
-      'shared-fast(openai)',
+      'qwen-route:v1:b',
     );
   });
 
@@ -43830,6 +43883,36 @@ it('does not restore a workspace-agent thread when collaboration is disabled', a
   mockWorkspace.capabilities = {
     ...mockWorkspace.capabilities,
     features: ['agent_collaboration_v1'],
+    workspaces: [
+      { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      {
+        id: 'enabled',
+        cwd: '/tmp/enabled',
+        primary: false,
+        trusted: true,
+        agentCollaborationEnabled: true,
+      },
+    ],
+  };
+  rerender();
+  await flush();
+
+  expect(
+    container.querySelector('[data-testid="workspace-agent-thread-route"]'),
+  ).toBeNull();
+  expect(
+    container
+      .querySelector('[data-testid="sidebar"]')
+      ?.getAttribute('data-has-open-agents'),
+  ).toBe('false');
+
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    workspaces: mockWorkspace.capabilities.workspaces.map((entry) =>
+      entry.cwd === '/tmp/project'
+        ? { ...entry, agentCollaborationEnabled: true }
+        : entry,
+    ),
   };
   rerender();
   await act(async () => {

@@ -390,6 +390,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_prompt',
       'session_turn_status',
       'session_attachments',
+      'session_attachment_chunk_upload',
       'session_attachment_list',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',

@@ -657,6 +657,49 @@ function mergeSettings(
     safeWorkspace,
     tagMcpServerScope(system, 'system'),
   ) as Settings;
+  const operatorMem0 = [systemDefaults, user, system].reduce<
+    NonNullable<Settings['memory']>['mem0'] | null
+  >(
+    (selected, scope) =>
+      scope.memory === null
+        ? null
+        : scope.memory?.mem0 !== undefined
+          ? scope.memory.mem0
+          : selected,
+    undefined,
+  );
+  if (operatorMem0 === null) {
+    if (merged.memory && typeof merged.memory === 'object') {
+      delete merged.memory.mem0;
+    }
+  } else if (operatorMem0 !== undefined) {
+    const memory = merged.memory;
+    const operatorMemory = customDeepMerge(
+      getMergeStrategyForPath,
+      ...[systemDefaults, user, system]
+        .filter((scope) => scope.memory !== undefined)
+        .map((scope) => ({ memory: scope.memory })),
+    )['memory'] as Settings['memory'];
+    merged.memory = {
+      ...(operatorMemory && typeof operatorMemory === 'object'
+        ? operatorMemory
+        : {}),
+      ...(memory && typeof memory === 'object' && !Array.isArray(memory)
+        ? memory
+        : {}),
+      mem0: operatorMem0,
+    };
+    const operatorExternalContext =
+      tagMcpServerScope(system, 'system').mcpServers?.['external-context'] ??
+      user.mcpServers?.['external-context'] ??
+      systemDefaults.mcpServers?.['external-context'];
+    if (operatorExternalContext) {
+      merged.mcpServers = {
+        ...merged.mcpServers,
+        'external-context': operatorExternalContext,
+      };
+    }
+  }
   const executionSandbox = selectOperatorExecutionSandbox(
     systemDefaults,
     user,
@@ -1190,10 +1233,8 @@ function readSettingsLayers(
           // Strategy: save corrupted file as .corrupted → reset to empty →
           // show dialog in UI. Never crash due to a corrupted settings file.
           //
-          // Note: there is no on-disk `.orig` backup to recover from. Writes go
-          // through `writeWithBackupSync`, which uses `.orig` only as an
-          // in-flight safety net and removes it on success — so it never
-          // lingers in the user's directory (see writeWithBackup.ts).
+          // Failed saves may retain private recovery copies, but those can
+          // predate another writer's save and must not be restored automatically.
 
           // Step 1: copy corrupted file to .corrupted for reference
           // MUST guarantee .corrupted exists so onExit can restore it.
@@ -1315,7 +1356,7 @@ function readSettingsLayers(
 
         // Execute migrations even on recovered settings — the migrated data
         // must persist. The disk-write branches below (version normalization)
-        // are guarded by !corruptedSaved to avoid creating .orig backups
+        // are guarded by !corruptedSaved to avoid creating recovery copies
         // of freshly-reset settings.
         if (needsMigration(settingsObject)) {
           const migrationResult = runMigrations(settingsObject, scope);
@@ -1346,7 +1387,7 @@ function readSettingsLayers(
           // Normalize it to current version to avoid repeated startup work.
           // Skip if we just recovered from corruption — the next startup will
           // handle normalization, avoiding an unnecessary writeWithBackupSync
-          // that would create a .orig file from the freshly reset settings.
+          // that would back up the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }
