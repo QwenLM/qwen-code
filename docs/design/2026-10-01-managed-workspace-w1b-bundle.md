@@ -170,7 +170,7 @@ CLI worker, local provider and Session validator. The only shared production
 changes are pure Session Store parser exports and a typed read-only W1a guard
 query, plus exact private-flag dispatch in the npm entry and bundled CLI bootstrap
 before normal CLI/model or inherited update startup. Existing HTTP Session readers, writers, Hosted turn routes and Runtime
-worker dispatch remain on their established paths. The additive V27 work queue
+worker dispatch remain on their established paths. The additive V28 work queue
 indexes support asset-key paging and Session/state reference selection.
 
 Session pages and reference queues are persisted and bounded. Read one journal
@@ -331,8 +331,14 @@ The reviewer also compared the `8bd11d5a` bundle and found only the embedded
 commit constant changed. Those measured scenarios are independent evidence at
 those artifacts, not author-run validation of later review fixes or exhaustive
 interruption coverage. Archived/closed/deleted membership remains synthetic coverage.
-Maintainer architecture signoff and supported-platform validation of the new
-diagnostic/connection changes remain pending; green CI and Ready status do not
-close these gates.
+The [round-2 deployment evidence](https://github.com/wenshao/qwen-code/tree/d6194156339afff14968c881c8355e547eb2b858/pr13138/r2)
+separately verifies `0919b9d8` on the same Linux rig, including the four review
+fixes, five physical interruption windows and real OSS refusal controls.
+It covers that revision, not the subsequent main integration. Maintainer
+architecture signoff and supported-platform validation of the integrated
+revision remain pending; green CI and Ready status do not close these gates.
 #13110 has merged into main; this integration also preserves main's V26 tool
-result projection migration and assigns the new recovery metadata to V27.
+result projection and V27 Hosted Hooks migrations, assigning only the unmerged
+W1b recovery metadata to V28. Existing migration bytes remain unchanged.
+H2 Hook domains and resources are outside W1b's supported closure and refuse
+capture; this integration does not certify or activate Hook recovery.

@@ -129,7 +129,7 @@ operation/tenant/storage ID，可选 `afterSessionId`，每页 32 个固定 Sess
 和 Session 校验器。共享生产代码只增加纯 Session Store 解析器导出和类型化只读
 W1a guard 查询，以及 npm 入口和打包 CLI bootstrap 的精确私有 flag 分派；分派先于
 普通 CLI/model 或继承的更新启动。现有 HTTP Session 读写、Hosted Turn 路由和 Runtime Worker 派发
-继续使用既有路径。V27 派生队列索引支持 asset key 分页及 Session/state 引用选择。
+继续使用既有路径。V28 派生队列索引支持 asset key 分页及 Session/state 引用选择。
 
 Session 分页和引用队列持久保存并限制批次大小，每次读取一个 journal 事务或
 资源，复用协议解析和摘要链校验，不累积整个 Session log。文件按 1 MiB 块计算
@@ -248,6 +248,11 @@ Harness/Worker/Broker 或外部 OSS 部署验收。
 Broker/Harness/Worker、真实阿里云 OSS、四个物理 kill 时点及 20,916 条目/
 77 Session。评审者还比较了 `8bd11d5a` 的 bundle，只有内嵌提交常量不同。
 这些已测场景属于对应制品的独立证据，不是作者对后续评审修复的实测，也不覆盖
-所有中断边界。归档/关闭/删除成员仍只有合成数据覆盖。维护者架构签核及新增诊断/连接
-改动的支持平台验收仍待完成；CI 绿灯和 Ready 状态不能替代这些门槛。
-#13110 已合入主干；本次整合保留主干 V26 工具结果投影迁移，将新增恢复元数据安排为 V27。
+所有中断边界。归档/关闭/删除成员仍只有合成数据覆盖。
+[第二轮部署证据](https://github.com/wenshao/qwen-code/tree/d6194156339afff14968c881c8355e547eb2b858/pr13138/r2)
+另在相同 Linux 装置验证了 `0919b9d8`，包括四项评审修复、五个物理中断窗口和真实 OSS
+拒绝对照。它覆盖该版本，不覆盖后续主干整合。维护者架构签核及整合版本的支持平台
+验收仍待完成；CI 绿灯和 Ready 状态不能替代这些门槛。
+#13110 已合入主干；本次整合保留主干 V26 工具结果投影和 V27 Hosted Hooks 迁移，
+仅将尚未合入的 W1b 恢复元数据安排为 V28。既有迁移字节保持不变。
+H2 Hook domain 和资源不在 W1b 支持的闭包内，会拒绝 capture；本次整合不认证或激活 Hook 恢复。
