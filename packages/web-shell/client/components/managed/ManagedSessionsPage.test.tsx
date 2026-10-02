@@ -651,6 +651,25 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('lets the creator cancel a running Turn on a bound Session', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        phase: 'tool_running',
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: false, canCancel: true, workspaceTurns: true },
+      }),
+    );
+    await render('bound');
+
+    await click('Cancel turn');
+
+    expect(mocks.client.cancel).toHaveBeenCalledWith(
+      'bound',
+      'p1',
+      expect.objectContaining({ clientId: expect.any(String) }),
+    );
+  });
+
   async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(
       (item) => item.textContent === label,
