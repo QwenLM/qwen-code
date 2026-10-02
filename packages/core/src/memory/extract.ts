@@ -5,11 +5,16 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { stripSystemReminderBlocks } from '../core/environmentContext.js';
+import {
+  getStartupContextLength,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
+import { isApiUserPrompt } from '../services/api-user-prompt.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
@@ -105,6 +110,31 @@ function opensOnOrphanedResponse(
     (next.parts ?? []).length > 0 &&
     (next.parts ?? []).every((part) => part.functionResponse)
   );
+}
+
+function hasUserText(content: Content): boolean {
+  return (
+    content.role === 'user' &&
+    (content.parts ?? []).some(
+      (part) =>
+        !part.thought &&
+        typeof part.text === 'string' &&
+        stripSystemReminderBlocks(part.text).trim().length > 0,
+    )
+  );
+}
+
+function hashProcessedHistory(
+  history: Content[],
+  floor: number,
+  offset: number,
+): string {
+  // ponytail: O(processed history); use a chat revision if hashing becomes costly.
+  const hash = createHash('sha256').update(`${floor}\n`);
+  for (let i = floor; i < offset; i++) {
+    hash.update(JSON.stringify(history[i])).update('\n');
+  }
+  return hash.digest('hex');
 }
 
 async function readExtractCursor(
@@ -210,7 +240,40 @@ export async function runAutoMemoryExtract(params: {
       : 0;
   // History may shrink between extract calls (compression). Clamp to length
   // so new messages after compression are not permanently skipped.
-  const startOffset = rawOffset > params.history.length ? 0 : rawOffset;
+  let startOffset = rawOffset > params.history.length ? 0 : rawOffset;
+  let historyFloor = 0;
+  if (params.preserveUnprocessedHistory) {
+    const prefixLength = getStartupContextLength(params.history, {
+      includeCompressed: true,
+    });
+    // Compression can preserve an open call as the last prefix entry. Keep
+    // it with its real response, while skipping synthetic user context.
+    historyFloor =
+      prefixLength - (endsOnOpenCall(params.history, prefixLength) ? 1 : 0);
+    const sameSession = currentCursor.sessionId === params.sessionId;
+    const matchesHistory =
+      sameSession &&
+      Number.isInteger(rawOffset) &&
+      rawOffset >= historyFloor &&
+      rawOffset <= params.history.length &&
+      currentCursor.processedHistoryHash ===
+        hashProcessedHistory(params.history, historyFloor, rawOffset);
+    if (!matchesHistory) {
+      const compressed = prefixLength > getStartupContextLength(params.history);
+      startOffset =
+        (sameSession && currentCursor.processedHistoryHash) || compressed
+          ? historyFloor
+          : Math.max(
+              historyFloor,
+              params.history.findLastIndex(
+                (content, i) =>
+                  i >= historyFloor &&
+                  hasUserText(content) &&
+                  isApiUserPrompt(content, { excludeTaskNotifications: true }),
+              ),
+            );
+    }
+  }
   // With turn-skipping enabled, a large ending turn can evict skipped facts
   // from the usual tail. Process the oldest pending window instead, and never
   // mark its unseen remainder as processed.
@@ -239,24 +302,24 @@ export async function runAutoMemoryExtract(params: {
     }
   }
   const pendingHistory = params.history.slice(startOffset, endOffset);
+  // Attest the selection before the fork awaits: the parent may mutate its
+  // history while extraction runs. Holdback must retain the start identity.
+  const startHistoryHash = params.preserveUnprocessedHistory
+    ? hashProcessedHistory(params.history, historyFloor, startOffset)
+    : undefined;
+  const endHistoryHash = params.preserveUnprocessedHistory
+    ? hashProcessedHistory(params.history, historyFloor, endOffset)
+    : undefined;
 
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. Strip runtime reminders per part as the planner does, so a
   // reminder-only tool response cannot trigger extraction after its text is removed.
-  const hasNewUserMessages = pendingHistory.some(
-    (m) =>
-      m.role === 'user' &&
-      (m.parts ?? []).some(
-        (part) =>
-          !part.thought &&
-          typeof part.text === 'string' &&
-          stripSystemReminderBlocks(part.text).trim().length > 0,
-      ),
-  );
+  const hasNewUserMessages = pendingHistory.some(hasUserText);
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
       processedOffset: endOffset,
+      ...(endHistoryHash && { processedHistoryHash: endHistoryHash }),
       updatedAt: now.toISOString(),
     };
     await writeExtractCursor(params.projectRoot, cursor);
@@ -324,6 +387,7 @@ export async function runAutoMemoryExtract(params: {
 
   const madeGenuineProgress =
     agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
+  const advances = madeGenuineProgress || endOffset < params.history.length;
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
@@ -331,10 +395,10 @@ export async function runAutoMemoryExtract(params: {
     // same slice freezes next turn. At the live end, keep the #6311 hold-back:
     // new turns grow this slice, and a zero-tool completion must not consume
     // it or arm the no-op cooldown.
-    processedOffset:
-      madeGenuineProgress || endOffset < params.history.length
-        ? endOffset
-        : startOffset,
+    processedOffset: advances ? endOffset : startOffset,
+    ...(endHistoryHash && {
+      processedHistoryHash: advances ? endHistoryHash : startHistoryHash,
+    }),
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);

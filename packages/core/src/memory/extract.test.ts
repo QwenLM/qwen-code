@@ -21,6 +21,7 @@ import {
 import { refreshMemoryInstruction } from './refresh.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { CACHE_SAFE_HISTORY_TAIL_ENTRIES } from '../agents/cache-safe-history.js';
+import { composePostCompactHistory } from '../services/postCompactAttachments.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -129,10 +130,15 @@ describe('auto-memory extraction', () => {
 
     const cursor = JSON.parse(
       await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
-    ) as { processedOffset: number; sessionId: string };
+    ) as {
+      processedOffset: number;
+      sessionId: string;
+      processedHistoryHash?: string;
+    };
 
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
+    expect(cursor.processedHistoryHash).toBeUndefined();
   });
 
   it('skips a session mismatch without advancing the cursor', async () => {
@@ -371,6 +377,13 @@ describe('auto-memory extraction', () => {
   });
 
   it('does not mark a user fact beyond an empty pending window processed', async () => {
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      preserveUnprocessedHistory: true,
+      history: [],
+    });
     const history: Content[] = [
       ...Array.from(
         { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
@@ -428,6 +441,13 @@ describe('auto-memory extraction', () => {
         touchedProjectScope: false,
         touchedUserScope: false,
         hasToolActivity: true,
+      });
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        preserveUnprocessedHistory: true,
+        history: [],
       });
       const history: Content[] = Array.from(
         { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES / 2 },
@@ -488,6 +508,7 @@ describe('auto-memory extraction', () => {
       config: mockConfig,
       preserveUnprocessedHistory: true,
     };
+    await runAutoMemoryExtract({ ...params, history: [] });
     const history: Content[] = Array.from(
       { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES },
       (_, i): Content => ({
@@ -539,6 +560,301 @@ describe('auto-memory extraction', () => {
     });
     const verified = await runAutoMemoryExtract({ ...params, history });
     expect(verified.cursor.processedOffset).toBe(history.length);
+  });
+
+  describe('window history identity', () => {
+    function toolPairs(count: number): Content[] {
+      return Array.from({ length: count }, (_, i): Content[] => [
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: `tool-${i}`, name: 'read_file' } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: `tool-${i}`,
+                name: 'read_file',
+                response: { output: 'Read.' },
+              },
+            },
+          ],
+        },
+      ]).flat();
+    }
+
+    function longTurn(): Content[] {
+      return [
+        { role: 'user', parts: [{ text: 'Remember: use pnpm.' }] },
+        { role: 'model', parts: [{ text: 'Noted.' }] },
+        ...toolPairs(39),
+      ];
+    }
+
+    function params() {
+      return {
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        preserveUnprocessedHistory: true,
+      };
+    }
+
+    function compressedPrefix(): Content[] {
+      return [
+        { role: 'user', parts: [{ text: 'Summary. Resume the prior task.' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: 'Recently accessed file (full current content embedded):\n```ts\nconst embedded = true;\n```',
+            },
+          ],
+        },
+      ];
+    }
+
+    beforeEach(() => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+    });
+
+    it('bootstraps a legal new session at its current user turn, not inherited history', async () => {
+      const inherited = longTurn();
+      await runAutoMemoryExtract({
+        ...params(),
+        preserveUnprocessedHistory: false,
+        history: inherited,
+      });
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('session-2');
+      vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+      const current: Content[] = [
+        { role: 'user', parts: [{ text: 'Remember: use isolated runtimes.' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
+
+      await runAutoMemoryExtract({
+        ...params(),
+        sessionId: 'session-2',
+        history: [...inherited, ...current],
+      });
+
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+        mockConfig,
+        projectRoot,
+        current,
+        undefined,
+      );
+    });
+
+    it('retains the opening preference on a fresh long tool turn', async () => {
+      const history = longTurn();
+      const first = await runAutoMemoryExtract({ ...params(), history });
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+        mockConfig,
+        projectRoot,
+        history.slice(0, 40),
+        { windowAsOf: expect.any(String) },
+      );
+      expect(first.cursor.processedHistoryHash).toMatch(/^[a-f0-9]{64}$/);
+      const second = await runAutoMemoryExtract({ ...params(), history });
+      expect(second.extractorRan).toBeUndefined();
+      expect(second.cursor.processedOffset).toBe(80);
+      expect(second.cursor.processedHistoryHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('excludes compressed summaries and full-file attachments with a legacy stale cursor', async () => {
+      await fs.writeFile(
+        getAutoMemoryExtractCursorPath(projectRoot),
+        JSON.stringify({
+          sessionId: 'session-1',
+          processedOffset: 400,
+          updatedAt: new Date(0).toISOString(),
+        }),
+      );
+      const realHistory = longTurn();
+      const result = await runAutoMemoryExtract({
+        ...params(),
+        history: [...compressedPrefix(), ...realHistory],
+      });
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+        mockConfig,
+        projectRoot,
+        realHistory.slice(0, 40),
+        { windowAsOf: expect.any(String) },
+      );
+      expect(result.cursor.processedOffset).toBe(43);
+    });
+
+    it('keeps facts before the stale offset reachable after unobserved shrink and regrowth', async () => {
+      const oldHistory = longTurn();
+      await runAutoMemoryExtract({ ...params(), history: oldHistory });
+      await runAutoMemoryExtract({ ...params(), history: oldHistory });
+      vi.mocked(runAutoMemoryExtractionByAgent).mockClear();
+      const middleFact: Content = {
+        role: 'user',
+        parts: [{ text: 'Remember: prefer zsh.' }],
+      };
+      const history: Content[] = [
+        ...compressedPrefix(),
+        {
+          role: 'user',
+          parts: [{ text: 'Remember: keep runtime data isolated.' }],
+        },
+        { role: 'model', parts: [{ text: 'Noted.' }] },
+        ...toolPairs(32),
+        middleFact,
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+        ...toolPairs(13),
+        { role: 'user', parts: [{ text: 'Remember: use targeted tests.' }] },
+        { role: 'model', parts: [{ text: 'Noted.' }] },
+      ];
+      expect(history.indexOf(middleFact)).toBeLessThan(80);
+      expect(history.length).toBeGreaterThan(80);
+
+      await runAutoMemoryExtract({ ...params(), history });
+      await runAutoMemoryExtract({ ...params(), history });
+
+      const windows = vi
+        .mocked(runAutoMemoryExtractionByAgent)
+        .mock.calls.flatMap((call) => call[2] ?? []);
+      expect(windows).toContainEqual(middleFact);
+      expect(windows).not.toContainEqual(history[0]);
+      expect(windows).not.toContainEqual(history[2]);
+    });
+
+    it('detects replaced content even when length and the cursor boundary entry match', async () => {
+      const history = longTurn();
+      await runAutoMemoryExtract({ ...params(), history });
+      await runAutoMemoryExtract({ ...params(), history });
+      const changedFact: Content = {
+        role: 'user',
+        parts: [{ text: 'Correction: prefer npm.' }],
+      };
+      history[0] = changedFact;
+      history.push({ role: 'user', parts: [{ text: 'Continue.' }] });
+      await runAutoMemoryExtract({ ...params(), history });
+      expect(
+        vi.mocked(runAutoMemoryExtractionByAgent).mock.lastCall?.[2],
+      ).toContainEqual(changedFact);
+    });
+
+    it('does not replay processed facts after a startup reminder refresh', async () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { text: '<system-reminder>Old environment.</system-reminder>' },
+          ],
+        },
+        ...longTurn(),
+      ];
+      await runAutoMemoryExtract({ ...params(), history });
+      await runAutoMemoryExtract({ ...params(), history });
+      history[0] = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>New environment.</system-reminder>' },
+        ],
+      };
+      const latest: Content = {
+        role: 'user',
+        parts: [{ text: 'Remember: prefer focused tests.' }],
+      };
+      history.push(latest);
+      await runAutoMemoryExtract({ ...params(), history });
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenLastCalledWith(
+        mockConfig,
+        projectRoot,
+        [latest],
+        undefined,
+      );
+    });
+
+    it('attests the history observed before an asynchronous zero-tool extraction', async () => {
+      const history = longTurn();
+      await runAutoMemoryExtract({ ...params(), history });
+      await runAutoMemoryExtract({ ...params(), history });
+      history.push({
+        role: 'user',
+        parts: [{ text: 'Remember: use isolated runtimes.' }],
+      });
+      vi.mocked(runAutoMemoryExtractionByAgent).mockClear();
+      const completion =
+        deferred<Awaited<ReturnType<typeof runAutoMemoryExtractionByAgent>>>();
+      vi.mocked(runAutoMemoryExtractionByAgent).mockReturnValueOnce(
+        completion.promise,
+      );
+      const pending = runAutoMemoryExtract({ ...params(), history });
+      await waitForMockCall(vi.mocked(runAutoMemoryExtractionByAgent));
+      const replacement: Content = {
+        role: 'user',
+        parts: [{ text: 'Correction: prefer npm.' }],
+      };
+      history[0] = replacement;
+      completion.resolve({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: false,
+      });
+      expect((await pending).cursor.processedOffset).toBe(80);
+      await runAutoMemoryExtract({ ...params(), history });
+      expect(
+        vi.mocked(runAutoMemoryExtractionByAgent).mock.lastCall?.[2],
+      ).toContainEqual(replacement);
+    });
+
+    it.each([false, true])(
+      'preserves a compressed trailing call and response (attachments: %s)',
+      async (planModeActive) => {
+        const call: Content = {
+          role: 'model',
+          parts: [{ functionCall: { id: 'pending', name: 'read_file' } }],
+        };
+        const prefix = await composePostCompactHistory([call], 'Summary.', {
+          maxFiles: 0,
+          maxImages: 0,
+          planModeActive,
+        });
+        const response: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'pending',
+                name: 'read_file',
+                response: { output: 'Read.' },
+              },
+            },
+          ],
+        };
+        const fact: Content = {
+          role: 'user',
+          parts: [{ text: 'Remember: use pnpm.' }],
+        };
+        await runAutoMemoryExtract({
+          ...params(),
+          history: [...prefix, response, fact],
+        });
+        const selected = vi.mocked(runAutoMemoryExtractionByAgent).mock
+          .lastCall?.[2];
+        expect(selected?.[0]?.parts).toContainEqual(call.parts![0]);
+        expect(selected).toContainEqual(response);
+        expect(selected).toContainEqual(fact);
+        expect(selected).not.toContainEqual(prefix[0]);
+        if (planModeActive) expect(selected).not.toContainEqual(prefix[2]);
+      },
+    );
   });
 
   it('throws when config is missing because heuristic fallback was removed', async () => {
