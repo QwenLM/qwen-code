@@ -253,14 +253,28 @@ function record(
 }
 
 function hasAcceptedInput(session: HostedSession, promptId: string): boolean {
+  return acceptedInputSequence(session, promptId) !== undefined;
+}
+
+/** The journal sequence of the input's own admission event: the watermark
+ * from which every event of that input's Turn follows. */
+function acceptedInputSequence(
+  session: HostedSession,
+  promptId: string,
+): number | undefined {
   const authority = session.managed.authority;
-  return authority
-    .eventsInSequenceRange(1, authority.committedSequence)
-    .some(
-      (event) =>
-        event.kind === 'input.accepted' &&
-        event.payload['inputId'] === promptId,
-    );
+  let sequence: number | undefined;
+  for (const event of authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  )) {
+    if (
+      event.kind === 'input.accepted' &&
+      event.payload['inputId'] === promptId
+    )
+      sequence = event.sequence;
+  }
+  return sequence;
 }
 
 function unsettledInputsThrough(
@@ -1643,20 +1657,26 @@ export function registerHostedHarnessSessionRoutes(
             brokerOptions,
             passive: body?.['passiveManagedRuntimeRecovery'] === true,
           });
-          if (outcome.kind === 'declined') {
+          if (outcome.kind === 'settled') {
+            // The journal already settled the Turn with the terminal event
+            // still unprojected: settle through the same tail the route runs
+            // for a plain load — never a terminal failure.
+            settlePromptId = outcome.promptId;
+          } else if (outcome.kind === 'declined') {
             await managed.close();
             recoveryDeclined(res, outcome.reason);
             return;
+          } else {
+            recovery = outcome.turn.report;
+            session.recoverySnapshot = {
+              promptId: outcome.turn.promptId,
+              report: outcome.turn.report,
+            };
+            if (outcome.turn.acquiredRuntime)
+              session.runtimeLeaseHeld =
+                outcome.turn.report.executions[0]?.runtimeSessionId ??
+                outcome.turn.promptId;
           }
-          recovery = outcome.turn.report;
-          session.recoverySnapshot = {
-            promptId: outcome.turn.promptId,
-            report: outcome.turn.report,
-          };
-          if (outcome.turn.acquiredRuntime)
-            session.runtimeLeaseHeld =
-              outcome.turn.report.executions[0]?.runtimeSessionId ??
-              outcome.turn.promptId;
         } catch (cause) {
           await managed.close();
           writeStderrLineSafe(
@@ -1981,6 +2001,21 @@ export function registerHostedHarnessSessionRoutes(
     )
       return error(res, 409, 'hosted_turn_recovery_required');
     if (hasAcceptedInput(session, promptId)) {
+      if (!unsettledInputs(session).has(promptId)) {
+        // The journal already accepted and settled this prompt — replay is
+        // the point of the journal's commandId idempotency, so answer the
+        // original admission with the watermark its own Turn flows from
+        // (the sequence of input.accepted itself), rather than a
+        // hint that loops the destination unboundedly.
+        res.status(202).json({
+          promptId,
+          lastEventId:
+            acceptedInputSequence(session, promptId) ??
+            session.managed.authority.committedSequence,
+          eventEpoch: epoch,
+        });
+        return;
+      }
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
     const abort = new AbortController();

@@ -1314,7 +1314,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
                         + " >= ? AND submission_attempted = TRUE AND"
-                        + " harness_event_epoch IS NULL",
+                        + " harness_event_epoch IS NULL AND status IN"
+                        + " ('ACCEPTED','RUNNING','CANCELLING')",
                 now, tenantId, sessionId, turnId, owner, now);
         return updated == 1;
     }

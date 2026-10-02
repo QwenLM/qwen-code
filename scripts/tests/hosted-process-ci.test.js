@@ -229,4 +229,50 @@ describe('Hosted real-process gates', () => {
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
   });
+
+  it.each([
+    ['Run in-flight owner failover E2E', 'test:e2e:managed-inflight-failover'],
+    [
+      'Run continuation owner failover E2E',
+      'test:e2e:managed-continuation-failover',
+    ],
+    ['Run session owner failover E2E', 'test:e2e:managed-session-failover'],
+    [
+      'Run Harness-restart session failover E2E',
+      'test:e2e:managed-harness-restart-failover',
+    ],
+    [
+      'Run Harness-restart in-flight failover E2E',
+      'test:e2e:managed-harness-restart-inflight-failover',
+    ],
+    [
+      'Run Harness-restart continuation failover E2E',
+      'test:e2e:managed-harness-restart-continuation-failover',
+    ],
+    [
+      'Run frozen former-owner fencing E2E',
+      'test:e2e:managed-continuation-frozen-owner-failover',
+    ],
+  ])('pins the %s arm into the Hosted MySQL job', (stepName, script) => {
+    const job = java.jobs['hosted-harness-mysql'];
+    expect(job['timeout-minutes']).toBe(95);
+    const install = job.steps.find(
+      (step) => step.name === 'Install MySQL binaries for the failover E2E',
+    );
+    const step = job.steps.find((s) => s.name === stepName);
+    expect(step, stepName).toBeDefined();
+    expect(
+      job.steps.indexOf(step),
+      `${stepName} must run after the MySQL binaries install`,
+    ).toBeGreaterThan(job.steps.indexOf(install));
+    expect(step.run).toContain(`npm run ${script}`);
+    expect(step['timeout-minutes'], stepName).toBe(10);
+    expect(step.if, stepName).toBeUndefined();
+    expect(step['continue-on-error'], stepName).toBeUndefined();
+    // A renamed or deleted npm script would leave the step failing for the
+    // wrong reason; pin that it drives the failover runner.
+    expect(pkg.scripts[script], script).toContain(
+      'run-managed-agent-server-e2e',
+    );
+  });
 });

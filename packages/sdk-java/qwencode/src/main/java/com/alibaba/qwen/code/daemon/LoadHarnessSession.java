@@ -49,6 +49,10 @@ public final class LoadHarnessSession {
         return harnessSessionId;
     }
 
+    boolean isRuntimeRecoveryLoad() {
+        return passiveManagedRuntimeRecovery || driveRuntimeRecovery;
+    }
+
     Map<String, Object> toJson() {
         Map<String, Object> result = new LinkedHashMap<>();
         if (managedSessionStore != null) {

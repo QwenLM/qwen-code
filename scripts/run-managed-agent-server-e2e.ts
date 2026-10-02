@@ -1151,10 +1151,17 @@ try {
 
     if (freeze) {
       // Freeze the writer side only: stopping the original Harness (the
-      // lease holder) fences it against mutation on wake. The original
-      // Spring must actually die — reclaiming its workspace binding
-      // requires death evidence from /proc liveness, and a SIGSTOPped JVM
-      // still reads as alive there.
+      // lease holder) fences it against mutation on wake. Assert liveness
+      // first — a setup that already died would make the freeze a no-op
+      // and every later wake assertion vacuous.
+      if (!processTreeExists(harness.child)) {
+        throw new Error(
+          'The original Harness died before the freeze: cannot freeze a dead owner',
+        );
+      }
+      // The original Spring must actually die — reclaiming its workspace
+      // binding requires death evidence from /proc liveness, and a
+      // SIGSTOPped JVM still reads as alive there.
       await signalProcessTree(harness.child, 'SIGSTOP');
       await crashProcess(spring.child, 'Spring Managed Agent Server A');
     } else if (harnessOnly) {
@@ -1408,9 +1415,9 @@ try {
         recoveredExecution[0] !== originalExecutionCallId ||
         recoveredExecution[1] !== 'SETTLED' ||
         // A replaced Broker bumps the re-dispatch to generation 1; a live
-        // Broker re-dispatches on the generation it already owned.
+        // Broker re-dispatches on the generation it already owned (0 or 1).
         (harnessOnly
-          ? Number(recoveredExecution[2]) > 1
+          ? !(recoveredExecution[2] === '0' || recoveredExecution[2] === '1')
           : Number(recoveredExecution[2]) !== 1) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
@@ -1513,7 +1520,7 @@ try {
         recoveredExecution[1] !== 'SETTLED' ||
         // See the in-flight arm: a live Broker keeps the generation it owns.
         (harnessOnly
-          ? Number(recoveredExecution[2]) > 1
+          ? !(recoveredExecution[2] === '0' || recoveredExecution[2] === '1')
           : Number(recoveredExecution[2]) !== 1) ||
         recoveredExecution[3] !== '1' ||
         executionCount !== 1 ||
@@ -1560,10 +1567,46 @@ try {
           mysqlPort,
           `SELECT COUNT(*) FROM qwen_managed_agent.qwen_managed_session_journal_tx WHERE ${sessionFilter} AND writer_generation < (SELECT writer_generation FROM qwen_managed_agent.qwen_managed_session_journal_head WHERE ${sessionFilter})`,
         );
-        signalProcessTree(harness.child, 'SIGCONT');
+        // Non-vacuity, proven live rather than by signal-existence: the
+        // frozen Harness must stop answering /health now and answer it
+        // again after SIGCONT, or the wake never happened and every
+        // fencing assertion below reports against nothing.
+        const frozenSilent = await fetch(
+          `http://127.0.0.1:${harnessPort}/health`,
+          {
+            headers: { authorization: `Bearer ${harnessToken}` },
+            signal: AbortSignal.timeout(1_000),
+          },
+        ).then(
+          () => false,
+          () => true,
+        );
+        if (!frozenSilent) {
+          throw new Error(
+            'Frozen Harness still answers /health before SIGCONT; the freeze did not take effect',
+          );
+        }
         if (!processTreeExists(harness.child)) {
           throw new Error(
             'Frozen Harness did not survive the freeze: the fencing proof below would be vacuous',
+          );
+        }
+        signalProcessTree(harness.child, 'SIGCONT');
+        let resumed = false;
+        for (let attempt = 0; attempt < 10 && !resumed; attempt += 1) {
+          resumed = await fetch(`http://127.0.0.1:${harnessPort}/health`, {
+            headers: { authorization: `Bearer ${harnessToken}` },
+            signal: AbortSignal.timeout(1_000),
+          }).then(
+            (response) => response.ok,
+            () => false,
+          );
+          if (!resumed)
+            await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (!resumed) {
+          throw new Error(
+            'Frozen Harness never resumed /health after SIGCONT; the wake never happened and the fencing assertions would be vacuous',
           );
         }
         await new Promise((resolve) => setTimeout(resolve, 5_000));
@@ -1907,6 +1950,12 @@ try {
     );
   }
 } finally {
+  // A frozen Harness holds SIGTERM pending from stopChild; wake it before
+  // teardown so teardown does not burn the 10-second stall on every path,
+  // failure or success.
+  if (freeze) {
+    signalProcessTree(harness.child, 'SIGCONT');
+  }
   for (const child of children.reverse()) {
     await stopChild(child.child);
   }

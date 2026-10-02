@@ -201,18 +201,22 @@ public class HarnessCoordinator {
                 terminal = failTerminally(claimed, "hosted_harness_rejected",
                         "Hosted Harness rejected the Turn.", error);
             } else {
+                // Only a live predecessor's guardrails may stretch past the
+                // pre-admission budget: a 409 on the recovery attach is a
+                // wait bounded by that predecessor's own lease. Transport
+                // and configuration-shaped failures must meet the budget.
                 terminal = transientFailure(claimed,
                         submissionAttempted.get(), error,
-                        recoveryPath.get());
+                        error.getStatusCode() == 409 && recoveryPath.get());
             }
         } catch (RuntimeBrokerException error) {
             terminal = !submissionAttempted.get() && !error.isRetryable()
                     ? fail(claimed, error.getCode(), error.getMessage())
                     : transientFailure(claimed, submissionAttempted.get(),
-                            error, recoveryPath.get());
+                            error, false);
         } catch (RuntimeException error) {
             terminal = transientFailure(claimed,
-                    submissionAttempted.get(), error, recoveryPath.get());
+                    submissionAttempted.get(), error, false);
         } finally {
             renewal.cancel(false);
             if (!terminal) {
@@ -625,11 +629,6 @@ public class HarnessCoordinator {
                 turn.tenantId(), turn.sessionId(), turn.turnId(), code,
                 message, error);
         return fail(turn, code, message);
-    }
-
-    private boolean transientFailure(TurnRecord turn,
-            boolean submissionAttempted, RuntimeException error) {
-        return transientFailure(turn, submissionAttempted, error, false);
     }
 
     private boolean transientFailure(TurnRecord turn,

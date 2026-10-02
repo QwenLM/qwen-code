@@ -270,11 +270,10 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (12+10+10+10+5×10) leave room for the uncapped setup
-    # steps; a healthy run measured ~20 min end to end before the G3 arms
-    # (session failover, three Harness-restart arms, one frozen-owner arm)
-    # were added.
-    timeout-minutes: 90
+    # The step ceilings (12+10+10+10+5×10 = 92) need headroom beyond a
+    # healthy run's ~20-25 min end-to-end; each added arm buys its own 10
+    # minutes instead of sharing the prior 20-minute envelope.
+    timeout-minutes: 95
     services:
       mysql:
         image: 'mysql:8.4.6'

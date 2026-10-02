@@ -538,27 +538,44 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
      * G3: instead of pinning every bound Session to one dead Harness
      * process, a live control plane adopts the next generation. The next
      * {@link #client()} call renegotiates, so a capability change fails
-     * closed at the boundary instead of masking it. Cached Attachments and
-     * pending recovery snapshots re-mint on demand, so both are dropped on
-     * any detected change — including one that already names the current
-     * client, so a stale ref used across another thread's rebuild cannot
-     * retry-loop on itself.
+     * closed at the boundary instead of masking it. The connector monitor
+     * only guards the client handoff and never wraps the map churn (a
+     * {@code ConcurrentHashMap.computeIfAbsent} bin lock is held across an
+     * in-flight load, so clearing maps under the monitor would invert the
+     * lock order and could deadlock). Cached Attachments re-mint on
+     * demand: a differing generation loses the client and every entry;
+     * an equal-boot exception only evicts entries minted under an older
+     * boot, so Sessions the live client still heartbeats keep working.
      */
     private void adoptGeneration(HostedHarnessGenerationException error) {
+        HostedHarnessClient stale = null;
+        String currentBootId = null;
         synchronized (this) {
             HostedHarnessClient current = client;
             if (current == null) {
                 return;
             }
-            attachments.clear();
-            pendingRecovery.clear();
             if (error.getActualBootId().equals(
                     current.capabilities().getBootId())) {
-                return;
+                currentBootId = current.capabilities().getBootId();
+            } else {
+                client = null;
+                stale = current;
             }
-            current.close();
-            client = null;
         }
+        // No map work under the monitor: a computeIfAbsent bin lock is
+        // held across an in-flight load elsewhere, so touching either map
+        // while holding `this` inverts the lock order.
+        if (currentBootId != null) {
+            String bootId = currentBootId;
+            attachments.entrySet().removeIf(entry ->
+                    !bootId.equals(entry.getValue().getHarnessBootId()));
+            pendingRecovery.clear();
+            return;
+        }
+        attachments.clear();
+        pendingRecovery.clear();
+        stale.close();
     }
 
     private static DaemonApprovalMode parseApprovalMode(String value) {

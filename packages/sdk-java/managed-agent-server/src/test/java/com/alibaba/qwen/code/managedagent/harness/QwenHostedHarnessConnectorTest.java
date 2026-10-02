@@ -443,6 +443,10 @@ class QwenHostedHarnessConnectorTest {
                 SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST))
                 .isSameAs(mismatch);
         verify(oldClient).close();
+        // The adoption is witnessed, not just its side effects: the
+        // pinned client is actually nulled for the next build.
+        assertThat(ReflectionTestUtils.getField(connector, "client"))
+                .isNull();
 
         // The rebuilt client (injected in place of a real renegotiation)
         // finds no cached attachment and re-loads before serving new work.
@@ -465,30 +469,104 @@ class QwenHostedHarnessConnectorTest {
         verify(newClient).submitTurn(any());
     }
 
-    // A stale cached ref used against an already-adopted client answers with
-    // the client's own boot as the actual id: nothing to rebuild.
+    // A stale cached ref used against an already-adopted client drops only
+    // the entries minted under another boot: nothing to rebuild, and the
+    // Sessions the live client still heartbeats keep working.
     @Test
-    void staleRefAgainstAdoptedClientDoesNotRebuild() {
+    void staleRefAgainstAdoptedClientDropsOnlyStaleEntries() {
+        String secondSessionId = "88888888-8888-4888-8888-888888888888";
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(
+                new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                        "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
+        when(sessions.requireSession("tenant-a", secondSessionId))
+                .thenReturn(new SessionRecord("tenant-a", secondSessionId,
+                        "qwen-code", null, "ACTIVE", null, null, 0, 0, 1, 1,
+                        null, 1));
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);
-        HarnessSessionRef attached = mock(HarnessSessionRef.class);
-        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        HarnessSessionRef fresh = mock(HarnessSessionRef.class);
+        HarnessSessionRef stale = mock(HarnessSessionRef.class);
+        when(capabilities.getBootId()).thenReturn(NEW_BOOT_ID);
         when(client.capabilities()).thenReturn(capabilities);
+        when(fresh.getHarnessBootId()).thenReturn(NEW_BOOT_ID);
+        when(stale.getHarnessBootId()).thenReturn(BOOT_ID);
         when(client.loadSession(any(LoadHarnessSession.class)))
-                .thenReturn(attached);
-        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
-        QwenHostedHarnessConnector connector = connector(client);
+                .thenReturn(fresh, stale);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions,
+                        mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(
+                connector, "client", client);
         connector.createOrLoad("tenant-a", SESSION_ID, true);
+        connector.createOrLoad("tenant-a", secondSessionId, true);
 
         HostedHarnessGenerationException mismatch =
                 mock(HostedHarnessGenerationException.class);
-        when(mismatch.getActualBootId()).thenReturn(BOOT_ID);
+        when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
         doThrow(mismatch).when(client).submitTurn(any());
         assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
                 SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST))
                 .isSameAs(mismatch);
         verify(client, never()).close();
+
+        @SuppressWarnings("unchecked")
+        java.util.Map<Object, HarnessSessionRef> attachments =
+                (java.util.Map<Object, HarnessSessionRef>)
+                        org.springframework.test.util.ReflectionTestUtils
+                                .getField(connector, "attachments");
+        assertThat(attachments.values())
+                .noneMatch(ref -> BOOT_ID.equals(ref.getHarnessBootId()));
+        assertThat(attachments.values())
+                .anyMatch(ref -> NEW_BOOT_ID.equals(ref.getHarnessBootId()));
+    }
+
+    // The shared bean must rebuild exactly once when two attempts surface a
+    // generation change at the same time.
+    @Test
+    void concurrentAdoptionsCloseTheClientOnlyOnce() throws Exception {
+        HostedHarnessClient oldClient = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities oldCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(oldCapabilities.getBootId()).thenReturn(BOOT_ID);
+        when(oldClient.capabilities()).thenReturn(oldCapabilities);
+        when(oldClient.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(oldClient);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+
+        HostedHarnessGenerationException mismatch =
+                mock(HostedHarnessGenerationException.class);
+        when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
+        doThrow(mismatch).when(oldClient).submitTurn(any());
+        java.util.concurrent.CountDownLatch start =
+                new java.util.concurrent.CountDownLatch(1);
+        Runnable attempt = () -> {
+            try {
+                start.await();
+            } catch (InterruptedException error) {
+                throw new RuntimeException(error);
+            }
+            assertThatThrownBy(() -> connector.submit("tenant-a",
+                    SESSION_ID, SUBMIT_PROMPT_ID, SUBMIT_CONTENT,
+                    SUBMIT_DIGEST)).isSameAs(mismatch);
+        };
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            pool.submit(attempt);
+            pool.submit(attempt);
+            start.countDown();
+            pool.shutdown();
+            assertThat(pool.awaitTermination(10,
+                    java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        } finally {
+            pool.shutdownNow();
+        }
+        verify(oldClient, org.mockito.Mockito.times(1)).close();
     }
 
     // The one code-aware call site: a takeover refusal that cannot change

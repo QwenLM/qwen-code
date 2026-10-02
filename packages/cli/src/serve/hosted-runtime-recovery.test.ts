@@ -510,6 +510,103 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it('answers a turn_settled checkpoint as settled, never declined', async () => {
+    // The journal has settled the Turn with the terminal event still
+    // unprojected: the takeover must settle, never fail the Turn.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'runnable',
+      checkpoint: {
+        identity: {
+          turnId: PROMPT_ID,
+          promptId: PROMPT_ID,
+          checkpointId: 'checkpoint-turn-settled',
+        },
+        attempt: {},
+        continuation: { phase: 'turn_settled' },
+        approval: null,
+        output: {},
+        followUp: {},
+        runtime: {},
+        tools: { items: [] },
+      },
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({ kind: 'settled', promptId: PROMPT_ID });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('rejects a transiently blocked checkpoint instead of declining it', async () => {
+    // A store blip while reading the timed checkpoint erases into the
+    // same `blocked` status as a durable parse verdict; only the durable
+    // verdicts may go terminal.
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    const authorization = vi
+      .spyOn(replacement.authority, 'harnessRunAuthorization')
+      .mockResolvedValue({
+        status: 'blocked',
+        reason: 'missing_state',
+      } as never);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      ).rejects.toThrow();
+      expect(authorization).toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('declines a durable blocked checkpoint verdict deterministically', async () => {
+    await parkAtAwaitRuntime();
+    const replacement = await open('boot-2', false);
+    vi.spyOn(
+      replacement.authority,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'opaque_state',
+    } as never);
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        passive: false,
+      });
+      expect(outcome).toEqual({
+        kind: 'declined',
+        reason: 'checkpoint_blocked',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('refuses a runnable checkpoint parked under another turn', async () => {
     // The parked checkpoint is runnable, but its turnId is not the prompt the
     // takeover names — the recovery must decline instead of reporting a

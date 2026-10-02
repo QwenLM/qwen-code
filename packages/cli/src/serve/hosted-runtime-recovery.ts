@@ -8,7 +8,11 @@ import { randomUUID } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import type { HarnessToolItem } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import type {
+  HarnessRunAuthorization,
+  HarnessToolItem,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -64,20 +68,19 @@ export type HostedRecoveryDeclineReason =
   | 'await_action'
   /** Parked at a model start phase (first model round or a no-tool Turn). */
   | 'model_start'
-  /** The Turn settled but its terminal event was not projected yet. */
-  | 'turn_settled'
   /** A Shell execution was in flight; its drives cannot be rebuilt. */
   | 'shell_in_flight'
   /** A batch was prepared but its arguments never became durable. */
   | 'batch_not_durable'
-  /** The checkpoint cannot be parsed back into a runnable state. */
+  /** The checkpoint's durable bytes fail the parse/identity verdict. */
   | 'checkpoint_blocked'
   /** The recovered state still does not authorize this Turn. */
   | 'unresolved_after_settle';
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
-  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason };
+  | { readonly kind: 'declined'; readonly reason: HostedRecoveryDeclineReason }
+  | { readonly kind: 'settled'; readonly promptId: string };
 
 function declined(
   reason: HostedRecoveryDeclineReason,
@@ -87,6 +90,30 @@ function declined(
 
 function recovered(turn: HostedRecoveryTurn): HostedRuntimeRecoveryOutcome {
   return { kind: 'recovered', turn };
+}
+
+/** A `blocked` authorization splits into durable parse/identity verdicts
+ * and erased store-call failures (`missing_state` / `missing_checkpoint`,
+ * which a 429/500/503/timeout while reading a staged resource also
+ * produces); only the durable thirds may go terminal. Everything else is
+ * transient: the caller throws and keeps its retriable refusal. */
+function isDurableBlockedVerdict(
+  authorization: Extract<HarnessRunAuthorization, { status: 'blocked' }>,
+): boolean {
+  return (
+    authorization.reason === 'opaque_state' ||
+    authorization.reason === 'invalid_state' ||
+    authorization.reason === 'identity_mismatch'
+  );
+}
+
+function isTransientStoreBlock(
+  authorization: Extract<HarnessRunAuthorization, { status: 'blocked' }>,
+): boolean {
+  return (
+    authorization.reason === 'missing_state' ||
+    authorization.reason === 'missing_checkpoint'
+  );
 }
 
 async function originalRuntimeBroker(
@@ -341,7 +368,18 @@ export async function recoverHostedRuntimeTurn(input: {
   // A submitted prompt with no checkpoint yet is parked in its first model
   // round; one whose checkpoint no longer parses cannot be driven either.
   if (authorization.status === 'initial') return declined('model_start');
-  if (authorization.status === 'blocked') return declined('checkpoint_blocked');
+  if (authorization.status === 'blocked') {
+    if (isDurableBlockedVerdict(authorization))
+      return declined('checkpoint_blocked');
+    // A store glitch while reading the staged state erased into the same
+    // status as a durable verdict: transient, so the caller retries.
+    if (isTransientStoreBlock(authorization))
+      throw new Error(
+        authorization.message ??
+          `Checkpoint read was transiently blocked (${authorization.reason})`,
+      );
+    return declined('checkpoint_blocked');
+  }
   const checkpoint = authorization.checkpoint;
   if (checkpoint.identity.turnId !== promptId)
     return declined('unresolved_after_settle');
@@ -354,9 +392,15 @@ export async function recoverHostedRuntimeTurn(input: {
       checkpoint.approval.state === 'requested'
     )
       return declined('await_action');
+    // Settled on the journal with its terminal event still unprojected:
+    // the load route's settlement path completes it — never an error.
     if (checkpoint.continuation.phase === 'turn_settled')
-      return declined('turn_settled');
-    return declined('model_start');
+      return { kind: 'settled', promptId };
+    if (HARNESS_MODEL_START_PHASES.has(checkpoint.continuation.phase))
+      return declined('model_start');
+    // A phase outside the model-start vocabulary is not one a takeover
+    // may drive: classify by the durable verdict rather than by name.
+    return declined('checkpoint_blocked');
   }
   const items = (checkpoint.tools?.items ?? []).filter(
     (item) => item.outcomeSource === 'runtime',
@@ -540,12 +584,24 @@ export async function recoverHostedRuntimeTurn(input: {
     throw cause;
   }
   if (finalAuthorization.status !== 'runnable') {
+    // Side effects may already be journaled, and the caller never learns
+    // about the lease from a returned report, so hand it back before any
+    // exit — then be careful which exits are terminal.
     if (acquiredRuntime) {
       await broker.release().catch((releaseCause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Harness recovery could not release the Runtime Session: ${String(releaseCause)}`,
         );
       });
+    }
+    if (
+      finalAuthorization.status === 'blocked' &&
+      isTransientStoreBlock(finalAuthorization)
+    ) {
+      throw new Error(
+        finalAuthorization.message ??
+          `Checkpoint re-read was transiently blocked (${finalAuthorization.reason})`,
+      );
     }
     return declined('unresolved_after_settle');
   }

@@ -167,9 +167,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
+        // Only a takeover load may settle parked executions and need the
+        // longer ceiling; a plain attach stays on the steady-state one
+        // (it also runs under ConcurrentHashMap bin locks in the connector).
+        Duration timeout = request.isRuntimeRecoveryLoad()
+                ? loadTimeout : requestTimeout;
         HttpSupport.Response response = sendMutation(path,
-                request.toJson(), null, "POST /session/:id/load",
-                loadTimeout);
+                request.toJson(), null, "POST /session/:id/load", timeout);
         try {
             DaemonClient.requireStatus(response, 200,
                     "POST /session/:id/load");

@@ -2,9 +2,11 @@
 
 [English](2026-10-02-hosted-replaceable-harness.md) | [简体中文](2026-10-02-hosted-replaceable-harness.zh-CN.md)
 
-状态：提案，未实现。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
-`728c13de21` 为准。本设计按 issue 评论中的提案回答了 #12952 的 Q2 与 Q3，
-并修正了该提案中一处机制描述（见「现状」第 1 条）。
+状态：Step 1 与 Step 2 已在本 PR 实现（D1-D9）；D10 的 Step 3 各行是
+点名的后续。跟踪 issue：#12952（Stage G）。代码引用以 `main` @
+`728c13de21` 为准，除非某个决策注明了更晚的修正。本设计按 issue 评论
+中的提案回答了 #12952 的 Q2 与 Q3，并修正了该提案中一处机制描述
+（见「现状」第 1 条）。
 
 ## 问题与范围
 
@@ -126,7 +128,8 @@ Turn 在下一次派发时被接纳。`HostedHarnessClient` 本身除按请求�
 ### D4 —— 已标记但从未准入的 Turn 撤回提交标记
 
 新 store 原语 `withdrawSubmissionAttempted`，仿
-`bindRecoveredHarness` 的 CAS：owner + 派发 lease 有效 + ACTIVE 状态 +
+`bindRecoveredHarness` 的 CAS：owner + 派发 lease 有效 + 状态窗口
+`IN ('ACCEPTED','RUNNING','CANCELLING')` +
 `submission_attempted = TRUE AND harness_event_epoch IS NULL` → 置
 `submission_attempted = FALSE`。不加列，不需要 Flyway 迁移。
 
@@ -150,15 +153,28 @@ TS：`recoverHostedRuntimeTurn` 对确定性拒绝状态返回可判别结果，
 返回 `undefined`，每种都是 journal 的稳定函数——`await_action`
 （存在 `requested` 状态的审批组）、`model_start`（还没有 checkpoint，
 或 checkpoint 停在另一模型起始相位；也是 load 路由对无工具
-Session 停靠 Turn 的回答）、`turn_settled`（journal 中已结算但终态
-事件尚未投影）、`shell_in_flight`、`batch_not_durable`（批次停在
+Session 停靠 Turn 的回答）、`shell_in_flight`（一个 Shell 执行在
+飞行中——仅由 drive 恢复 load 产出，因为 drive 无法重建；passive
+load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批次停在
 `await_runtime` 之前且参数不耐久）、`checkpoint_blocked`（checkpoint
 已无法解析回可运行状态）、`unresolved_after_settle`（checkpoint 指向
-另一个 Turn，或结算后仍不可运行）。抛出的错误保持瞬时，与今天完全
-一致。load 路由对 decline 回答新的 409 code
-`hosted_turn_recovery_declined` 并带 `reason` 字段；
-`hosted_turn_recovery_required` 此后只为瞬态发出。
-`hosted-tool-approval.ts:247` 的用法是瞬态，不改。
+另一个 Turn，或结算后仍不可运行）。有一个最初起草为 decline 的状态
+其实不是：checkpoint 相位为 `turn_settled` 的 journal 返回独立的
+`settled` 结局并携带 prompt id，load 路由为它跑自己的结算收尾——
+结算，永不失败。
+
+`checkpoint_blocked` 只对耐久判定触发（`opaque_state`、
+`invalid_state`、`identity_mismatch`）。被 authorization 层抹平成
+`missing_state` / `missing_checkpoint` 的瞬时 Managed Session Store
+失败会作为瞬态重新抛出，永不 decline：这条边界刻意收窄，接管 load
+期间的一次 store 抖动不能把 journal 完好的 Turn 终态掉。
+
+抛出的错误保持瞬时，与今天完全一致。load 路由对 decline 回答新的
+409 code `hosted_turn_recovery_declined` 并带 `reason` 字段；在接管
+分支内部，`hosted_turn_recovery_required` 此后只为瞬态发出（路由上
+更早的拒绝——restore bundle 非 ok、workspace 发布无法核实——早于
+这套分类学，保持不变）。`hosted-tool-approval.ts:247` 的用法是瞬态，
+不改。
 
 Java：除一个调用点外保持 code 不可辨别。connector 的
 `recoverManagedRuntime` 解析自己 load 响应的 409 body；遇到
@@ -218,23 +234,30 @@ Session 的下一个 Turn 完成，且在模型边界看到第一个 Turn 的 pr
 情况下移到新代；in-flight 与 continuation 支路保持现有断言。before
 画面由同一支路在 `main` 上产出：必须以 README 记录的 generation
 error 失败。README `:185` 那句随之删除。Spring 与其 Broker 都活着时
-worker 不会成孤儿，不需要 W0e reclaim，所以本支路对 workspace-turns
-场景去掉 Linux 门禁，由运行结果说明 darwin 是否通过；现有杀两棵树的
-模式保留门禁。
+worker 不会成孤儿，不需要 W0e reclaim，所以代码里对 workspace-turns
+场景解除了 Linux 门禁；杀两棵树的模式保留门禁。但运行这些支路的
+所有 lane 都是 Linux（`hosted-harness-mysql` 仅 ubuntu），所以
+darwin 是一个未被验证的预期，而不是等待首个不可能发生的运行来拍板
+的门禁。
 
 ### D9 —— 生产默认值改到自洽（按 issue 的拍板项）
 
-- **D9a，重试预算对 writer lease。** 经恢复路径附着的 Turn
-  （`session.harnessBootId() != null`）豁免于准入前重试上限：它在等
-  另一代的 lease，这个等待本身以 writer lease 为上界。恢复路径的失败
-  不再产出 `hosted_harness_unavailable`；Turn 保持排队。
+- **D9a，重试预算对 writer lease。** 已绑定 Session 的恢复附着路径
+  上、一个 takeover 形态的 409 豁免于准入前上限，因为该等待以前任
+  自己的 lease 为上界。其他一切——传输失败、配置形态的错误——都
+  计入预算，所以 Harness 永久缺席的 Turn 仍以
+  `hosted_harness_unavailable` 终结。
 - **D9b，请求超时对接管 load。** `HostedHarnessClient.loadSession`
-  使用独立的 `load-timeout`（默认 120 秒，与其他旋钮一样可用环境变量
-  覆盖）；通用 `request-timeout` 保持 30 秒。
+  只在请求带恢复标志（`passiveManagedRuntimeRecovery` 或
+  `driveRuntimeRecovery`）时使用独立的 `load-timeout`（默认 120 秒，
+  与其他旋钮一样可用环境变量覆盖）；普通 attach load 保持
+  `request-timeout`（30 秒），因为它们同时跑在 connector 的
+  `ConcurrentHashMap` bin 锁之下。
 - **D9c，journal 契约标记。** capability 协商要求一个命名 journal
-  契约的 `features` token（如 `managed_session_journal_delta_v1`）。
+  契约的 `features` token：`managed_session_journal_delta_v1`。
   老到读不了 `message.delta` journal 的 Harness 在（重新）协商时一次
-  被拒——在接纳路径上即 D2 的终态路径——而不是让每个 Session 的
+  被拒——在 coordinator 的派发路径上落地为终态 Turn code
+  `hosted_harness_protocol_error`——而不是让每个 Session 的
   open 都以 `managed_session_open_failed` 失败。
 
 ### D10 —— Step 3 保留为点名后续，去掉其中便宜的一行
@@ -257,9 +280,11 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 | Java managed-agent-server | `QwenHostedHarnessConnector.java`、新增 `HostedHarnessRecoveryDeclinedException.java`       | D1 接纳（client 重建 + 缓存失效），D5 在 `recoverManagedRuntime` 单点解析 409 code 并抛类型化异常 |
 | Java managed-agent-server | `HarnessCoordinator.java`                                                                   | D3 catch 改动、D4 撤回的使用、D9a 豁免                                                            |
 | Java managed-agent-server | `ManagedAgentStore.java`                                                                    | `withdrawSubmissionAttempted` CAS（D4）                                                           |
-| Java managed-agent-server | `ManagedAgentProperties.java`、`application.yml`                                            | `load-timeout`（D9b）、`features` 标记配置（D9c）                                                 |
+| Java managed-agent-server | `ManagedAgentProperties.java`、`application.yml`                                            | `load-timeout`（D9b）                                                                             |
 | TS CLI                    | `hosted-harness-session.ts`                                                                 | decline code 映射（D5）、快照保留与幂等重复 load（D6）                                            |
-| TS CLI                    | `hosted-runtime-recovery.ts`                                                                | 可判别的 decline 结果（D5）                                                                       |
+| TS CLI                    | `hosted-runtime-recovery.ts`                                                                | 可判别的 decline 结果（D5），复用 core 的 `HARNESS_MODEL_START_PHASES`                            |
+| TS CLI                    | `capabilities.ts`、`routes/capabilities.ts`、`qwen-serve-protocol.md`                       | `managed_session_journal_delta_v1` feature token（D9c）                                           |
+| Java qwencode             | `HostedHarnessClient.java`（协商处）                                                        | 硬编码的 `managed_session_journal_delta_v1` feature 检查（D9c）——刻意不设配置旋钮                 |
 | TS core                   | `managed-harness-checkpoint.ts`                                                             | 不改；D5 的命名复用 `HARNESS_MODEL_START_PHASES`                                                  |
 | Runner + CI               | `scripts/run-managed-agent-server-e2e.ts`、`package.json`、`.github/workflows/sdk-java.yml` | D7 冻结支路、D8 只重启 Harness 支路、 `--session-failover` 步骤                                   |
 | 文档                      | `managed-agent-server/README.md`                                                            | 删除 generation error 那句；记录接纳行为                                                          |
@@ -268,23 +293,31 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 属主沿共享 bean 结构走：`HarnessCoordinator`、
 `SessionLifecycleCoordinator`、`ActionResponseCoordinator` 与
 `ManagedAgentService` 注入的是同一个 connector bean，D1 不需要逐调用方
-改动；各层的重试机制完成剩余部分。
+改动；三个 coordinator 的重试机制完成剩余部分。`ManagedAgentService`
+不同：它唯一的同步 Harness attach（rename）没有重试机制，所以调用
+中途换代会表现为客户端可见的 `hosted_harness_unavailable`；重试的
+客户端下一次尝试会落到已接纳的新代上。
 
 ## 验证与验收
 
 单元测试（collocated）：
 
 - connector：并发不一致下接纳只重建一次；boot 相同的不一致只丢过期
-  条目；digest 不一致保持终态；`recoverManagedRuntime` 把
-  `hosted_turn_recovery_declined` + reason 映射为类型化异常，其余 409
-  保持 code 不可辨别。
-- coordinator：线上不一致排重试而非失败；恢复附着失败豁免于准入前
-  上限；decline → `managed_runtime_recovery_blocked`。
+  条目；`recoverManagedRuntime` 把 `hosted_turn_recovery_declined` +
+  reason 映射为类型化异常，其余 409 保持 code 不可辨别。digest 门禁在
+  它的两个调用点处由测试钉住——client 构造时的协商检查
+  （`HostedHarnessClientTest`）与各 coordinator 的终态 catch——而不是
+  由 connector 级测试钉住，因为 connector 没有添加第三道门禁。
+- coordinator：线上不一致排重试而非失败；已绑定 Session 的恢复附着在
+  传输失败时计入准入前预算、在 takeover 409 上豁免；decline →
+  `managed_runtime_recovery_blocked`。
 - store：`withdrawSubmissionAttempted` 只在守卫成立时成功（owner、
-  lease 有效、无 epoch、已标记）；第二次撤回输掉 CAS。
-- TS：五种 decline 各得其 reason；瞬时恢复失败仍回答
-  `hosted_turn_recovery_required`；重复接管 load 在被消费前返回同一
-  快照 200，普通重复 load 返回 409 `hosted_session_already_attached`。
+  lease 有效、状态窗口、无 epoch、已标记）；第二次撤回输掉 CAS。
+- TS：每种 decline reason 都由其 journal 状态产出；`turn_settled`
+  checkpoint 返回 `settled` 结局而非 decline；瞬时 blocked 的
+  authorization（`missing_state`）抛出而非 decline，耐久判定
+  （`opaque_state`）走终态；重复接管 load 在被消费前返回同一快照
+  200，普通重复 load 返回 409 `hosted_session_already_attached`。
 
 E2E（runner 支路，全部对着打包后的栈）：
 
@@ -295,7 +328,8 @@ E2E（runner 支路，全部对着打包后的栈）：
    Spring 不重启下移动。
 3. D7 冻结支路：SIGCONT 后的断言如上。删掉任一断言该支路必须失败。
 4. CI：`hosted-harness-mysql` 增加 D7 支路、D8 各支路与
-   `--session-failover`，任务上限随之从 60 分钟放宽到 90 分钟。
+   `--session-failover`，任务上限随之从 60 分钟放宽到 95 分钟，让
+   七条步骤上限之和（92）保留余量。
 
 D4 背后的丢回复竞态（旧代准入、202 回复被丢、Harness 重启后 Turn 必须
 完成且其 `promptId` 的 `command_id` 在 journal 中恰好一次准入）需要在
@@ -322,8 +356,9 @@ fail closed，且 Managed 失败仍不导致 Legacy 重放（既有测试不变�
   跨代存在。该切片不得弱化这一点。
 - `await_action` 结算依赖 MCP profile 的审批接线；依赖
   `managed-harness-factory.ts:541` 之前先核实。
-- darwin 上的只重启 Harness 支路：预期不经 W0e reclaim 即可通过；首个
-  绿色运行决定 Linux 门禁是否只对本支路解除。
+- darwin 上的只重启 Harness 支路：代码里已解除 Linux 门禁且预期不经
+  W0e reclaim 即可通过，但运行它的所有 lane 都是 Linux，所以 darwin
+  未经验证——作为留白记录于此，不做任何门禁。
 - 映射时发现的 nit（不做 G3 工作）：`sdk-java.yml:273-274` 的步骤分解
   陈旧（写的是 `12+10+20`，实际 `12+10+10+10`）；runner 的 Linux 门禁
   文案说「死掉的 worker」，而 reclaim 实际退的是一个仍活着的孤儿
