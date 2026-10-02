@@ -767,7 +767,7 @@ export class MonitorTool extends BaseDeclarativeTool<
     super(
       MonitorTool.Name,
       ToolDisplayNames.MONITOR,
-      'Starts a long-running shell command and streams its stdout/stderr as event notifications back to you.\n\n' +
+      'Runs a command and pushes each output line to you as an event (logs, watch builds, polling loops); is_background notifies you only once, when it exits.\n\n' +
         'Use this tool for:\n' +
         '- Watching log files: `tail -f /var/log/app.log`\n' +
         '- Monitoring build output: `npm run build --watch`\n' +

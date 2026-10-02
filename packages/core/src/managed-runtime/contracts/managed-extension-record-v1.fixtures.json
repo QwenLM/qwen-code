@@ -4078,6 +4078,146 @@
         "leaseDurationMs": 60000,
         "expiresAt": 1.5
       }
+    },
+    {
+      "id": "operation-id-high-surrogate-followed-by-a",
+      "valid": false,
+      "grant": {
+        "sessionKey": {
+          "tenantId": "tenant-fixture",
+          "workspaceId": "workspace-fixture",
+          "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "operationId": "\ud800a",
+        "domain": "channel_delivery",
+        "operationRevision": 1,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 512,
+            "digest": "4648845aa151b4cc9c6d19716dfe0a5b283076124a02a0c12698180c9f26c33f"
+          },
+          "phases": ["send_segment", "query_receipt"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
+      }
+    },
+    {
+      "id": "scope-record-digest-as-number",
+      "valid": false,
+      "grant": {
+        "sessionKey": {
+          "tenantId": "tenant-fixture",
+          "workspaceId": "workspace-fixture",
+          "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "operationId": "operation-delivery-1",
+        "domain": "channel_delivery",
+        "operationRevision": 1,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 512,
+            "digest": 5
+          },
+          "phases": ["send_segment", "query_receipt"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
+      }
+    },
+    {
+      "id": "session-key-as-three-id-array",
+      "valid": false,
+      "grant": {
+        "sessionKey": [
+          "tenant-fixture",
+          "workspace-fixture",
+          "550e8400-e29b-41d4-a716-446655440000"
+        ],
+        "operationId": "operation-delivery-1",
+        "domain": "channel_delivery",
+        "operationRevision": 1,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 512,
+            "digest": "4648845aa151b4cc9c6d19716dfe0a5b283076124a02a0c12698180c9f26c33f"
+          },
+          "phases": ["send_segment", "query_receipt"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
+      }
+    },
+    {
+      "id": "single-letter-phase",
+      "valid": true,
+      "grant": {
+        "sessionKey": {
+          "tenantId": "tenant-fixture",
+          "workspaceId": "workspace-fixture",
+          "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "operationId": "operation-delivery-1",
+        "domain": "channel_delivery",
+        "operationRevision": 1,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 512,
+            "digest": "4648845aa151b4cc9c6d19716dfe0a5b283076124a02a0c12698180c9f26c33f"
+          },
+          "phases": ["a"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
+      }
+    },
+    {
+      "id": "scope-record-zero-byte-length",
+      "valid": true,
+      "grant": {
+        "sessionKey": {
+          "tenantId": "tenant-fixture",
+          "workspaceId": "workspace-fixture",
+          "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "operationId": "operation-delivery-1",
+        "domain": "channel_delivery",
+        "operationRevision": 1,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 0,
+            "digest": "4648845aa151b4cc9c6d19716dfe0a5b283076124a02a0c12698180c9f26c33f"
+          },
+          "phases": ["send_segment", "query_receipt"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
+      }
     }
   ],
   "grantSuccessorCases": [
@@ -5171,6 +5311,58 @@
         },
         "leaseDurationMs": 30000,
         "expiresAt": 1790000180000
+      }
+    },
+    {
+      "id": "replacement-with-a-non-text-digest",
+      "valid": false,
+      "previous": {
+        "sessionKey": {
+          "tenantId": "tenant-fixture",
+          "workspaceId": "workspace-fixture",
+          "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "operationId": "operation-delivery-1",
+        "domain": "channel_delivery",
+        "operationRevision": 1,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 512,
+            "digest": "4648845aa151b4cc9c6d19716dfe0a5b283076124a02a0c12698180c9f26c33f"
+          },
+          "phases": ["send_segment", "query_receipt"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
+      },
+      "next": {
+        "sessionKey": {
+          "tenantId": "tenant-fixture",
+          "workspaceId": "workspace-fixture",
+          "sessionId": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "operationId": "operation-delivery-1",
+        "domain": "channel_delivery",
+        "operationRevision": 2,
+        "ownerId": "owner-channel-sender",
+        "workspaceGeneration": "3",
+        "resourceScope": {
+          "recordRef": {
+            "resourceId": "record-delivery-1",
+            "kind": "managed-channel_delivery",
+            "schemaVersion": 1,
+            "byteLength": 512,
+            "digest": 5
+          },
+          "phases": ["send_segment", "query_receipt"]
+        },
+        "leaseDurationMs": 60000,
+        "expiresAt": 1790000060000
       }
     }
   ],
@@ -8469,6 +8661,32 @@
         "execution": "not_started_proven",
         "runtime": null,
         "delivery": null
+      }
+    },
+    {
+      "id": "handler-unavailable-with-attached-execution",
+      "valid": true,
+      "run": {
+        "state": "recovery_blocked",
+        "reason": "handler_unavailable",
+        "definition": {
+          "definitionId": "schedule-nightly",
+          "definitionRevision": 4,
+          "definitionDigest": "61e247673460ffce91c57111d7c726aadcefacd62187190fa04dda53d5615180"
+        },
+        "executionCallId": null,
+        "effectId": "effect-send-1",
+        "dispatchId": "dispatch-1",
+        "deliveryId": "delivery-1",
+        "execution": "running_attached",
+        "runtime": {
+          "runtimeBindingId": "binding-1",
+          "generation": "2"
+        },
+        "delivery": {
+          "target": "channel",
+          "state": "sending"
+        }
       }
     }
   ],
@@ -16569,6 +16787,171 @@
           "delivery": null
         }
       }
+    },
+    {
+      "id": "debounce-as-integer-text",
+      "valid": false,
+      "monitorRun": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": "5",
+        "startReceiptRef": {
+          "resourceId": "receipt-monitor-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 256,
+          "digest": "4c2fe853769a82b46c5c3e2b2370649bda66720666cfdee0ef0731b8fa787de2"
+        },
+        "observationSequence": 3,
+        "lastObservationRef": {
+          "resourceId": "observation-3",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "c91f51d309736c5ecef334c5eddc761d26fab848df0a5df1acfdeb9813d1d8be"
+        },
+        "notifiedThrough": 2,
+        "stopReason": null,
+        "outputRef": {
+          "resourceId": "output-manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2048,
+          "digest": "8c8d256872adf1e2d71cee1bf8c90b006ec2a311e03044c683893a02dec80938"
+        },
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "running_attached",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
+    },
+    {
+      "id": "corrupt-watch-retains-start-receipt",
+      "valid": true,
+      "monitorRun": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": 1000,
+        "startReceiptRef": {
+          "resourceId": "receipt-monitor-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 256,
+          "digest": "4c2fe853769a82b46c5c3e2b2370649bda66720666cfdee0ef0731b8fa787de2"
+        },
+        "observationSequence": 3,
+        "lastObservationRef": {
+          "resourceId": "observation-3",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "c91f51d309736c5ecef334c5eddc761d26fab848df0a5df1acfdeb9813d1d8be"
+        },
+        "notifiedThrough": 2,
+        "stopReason": null,
+        "outputRef": {
+          "resourceId": "output-manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2048,
+          "digest": "8c8d256872adf1e2d71cee1bf8c90b006ec2a311e03044c683893a02dec80938"
+        },
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "execution_corrupt",
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "corrupt",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
+    },
+    {
+      "id": "first-observation-without-start-receipt",
+      "valid": false,
+      "monitorRun": {
+        "monitorId": "monitor-1",
+        "ownerScopeId": "scope-main",
+        "commandRef": {
+          "resourceId": "args-monitor-1",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 96,
+          "digest": "340601d2ac8c6a56866fb7076a83f265768be2cf64a2d70f0b1b1fad691b64b1"
+        },
+        "maxEvents": 1000,
+        "idleTimeoutMs": 300000,
+        "debounceMs": 1000,
+        "startReceiptRef": null,
+        "observationSequence": 1,
+        "lastObservationRef": {
+          "resourceId": "observation-3",
+          "kind": "managed-monitor-observation",
+          "schemaVersion": 1,
+          "byteLength": 64,
+          "digest": "c91f51d309736c5ecef334c5eddc761d26fab848df0a5df1acfdeb9813d1d8be"
+        },
+        "notifiedThrough": 0,
+        "stopReason": null,
+        "outputRef": {
+          "resourceId": "output-manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2048,
+          "digest": "8c8d256872adf1e2d71cee1bf8c90b006ec2a311e03044c683893a02dec80938"
+        },
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "definition": null,
+          "executionCallId": "call-monitor-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
     }
   ],
   "monitorRunSuccessorCases": [
@@ -17627,7 +18010,7 @@
       }
     },
     {
-      "id": "rebuilds-after-a-proven-end",
+      "id": "restarts-a-settled-watch-under-the-same-runtime",
       "valid": false,
       "previous": {
         "monitorId": "monitor-1",
@@ -17696,11 +18079,11 @@
         "idleTimeoutMs": 300000,
         "debounceMs": 1000,
         "startReceiptRef": {
-          "resourceId": "receipt-monitor-2",
+          "resourceId": "receipt-monitor-1",
           "kind": "managed-runtime-receipt",
           "schemaVersion": 1,
           "byteLength": 256,
-          "digest": "b021e670d6ab542effde66379f71a394b3bf9b8a0e8b7239c7172190acaec218"
+          "digest": "4c2fe853769a82b46c5c3e2b2370649bda66720666cfdee0ef0731b8fa787de2"
         },
         "observationSequence": 3,
         "lastObservationRef": {
@@ -17729,8 +18112,8 @@
           "deliveryId": null,
           "execution": "running_attached",
           "runtime": {
-            "runtimeBindingId": "binding-2",
-            "generation": "2"
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
           },
           "delivery": null
         }
