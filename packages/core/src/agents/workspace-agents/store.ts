@@ -397,7 +397,14 @@ function isValidProgress(value: unknown): boolean {
 
 function isValidRun(value: unknown): value is ThreadRun {
   if (!isRecord(value)) return false;
+  const receipt = value['hostResultReceipt'];
   const valid =
+    (receipt === undefined ||
+      (isRecord(receipt) &&
+        isPositiveInteger(receipt['attempt']) &&
+        isNonEmptyString(receipt['leaseId']) &&
+        typeof receipt['digest'] === 'string' &&
+        /^[a-f0-9]{64}$/.test(receipt['digest']))) &&
     isValidProgress(value['progress']) &&
     isValidId(value['id']) &&
     isValidId(value['agentId']) &&

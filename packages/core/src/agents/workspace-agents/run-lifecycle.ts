@@ -33,7 +33,7 @@ import {
   resolveThreadStatus,
 } from './thread-status.js';
 import { requireAgentRunContext, type AgentRunContext } from './run-context.js';
-import type { Thread, ThreadEvent, ThreadMessage } from './types.js';
+import type { Thread, ThreadEvent, ThreadMessage, ThreadRun } from './types.js';
 import { isThreadTerminal } from './types.js';
 import { postMessageInTransaction } from './thread-actions.js';
 import { mentionToken } from './mentions.js';
@@ -548,6 +548,7 @@ export async function finishRunInTransaction(
       attempt?: number;
       error?: string;
       failureStage?: string;
+      hostResultReceipt?: ThreadRun['hostResultReceipt'];
     };
     now?: number;
   },
@@ -609,6 +610,9 @@ export async function finishRunInTransaction(
             ...run,
             status: terminalStatus,
             endedAt: now,
+            ...(input.outcome.hostResultReceipt
+              ? { hostResultReceipt: input.outcome.hostResultReceipt }
+              : {}),
             // A run that stopped without calling a closing tool and without
             // saying anything is recorded as `unclosed`, never as an implicit
             // success. One that answered in plain text has replied: the

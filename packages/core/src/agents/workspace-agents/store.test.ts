@@ -428,6 +428,26 @@ describe('agent versioned store', () => {
     );
   });
 
+  it('rejects a malformed persisted Host result receipt', async () => {
+    await writeRaw(
+      getThreadPath(PROJECT_ROOT, 'th_root'),
+      thread({
+        runs: [
+          run(1, 0, {
+            hostResultReceipt: {
+              attempt: 1,
+              leaseId: 'lease',
+              digest: 'invalid',
+            },
+          }),
+        ],
+      }),
+    );
+    await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
+      /Malformed/,
+    );
+  });
+
   it('persists a run counter allocation before any thread write', async () => {
     await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(1);
     await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(2);

@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { createAssignedThread, postMessage } from './thread-actions.js';
+import { finishRunInTransaction } from './run-lifecycle.js';
 import {
   AGENT_HOST_REMOVED,
   AGENT_PROGRAM_UNAVAILABLE,
@@ -29,6 +30,7 @@ import {
   readThread,
   readWorkspaceAgents,
   updateWorkspaceAgents,
+  withAgentStoreTransaction,
   writeThread,
 } from './store.js';
 import {
@@ -248,9 +250,11 @@ describe('leases', () => {
         close: { kind: 'review' as const, summary: 'Marker read.' },
         tokens: 1_050,
       };
+      const reclaimed = await readThread(PROJECT_ROOT, threadId);
       await expect(
         applyHostRunResult(PROJECT_ROOT, { ...firstIdentity, ...result }, at),
       ).resolves.toMatchObject({ ok: false });
+      expect(await readThread(PROJECT_ROOT, threadId)).toEqual(reclaimed);
       await expect(
         applyHostRunResult(
           PROJECT_ROOT,
@@ -350,6 +354,190 @@ describe('leases', () => {
         .find((message) => message.id === followup.message.id)
         ?.outcomes.find((outcome) => outcome.targetAgentId === agent.id)?.runId,
     ).toBe(successor?.id);
+  });
+});
+
+describe('Host result receipts', () => {
+  it.each([0, 1_050])(
+    'recognizes only an accepted exact retry with %i tokens',
+    async (tokens) => {
+      const mine = await host('mine', ['qwen']);
+      await placeAgent([mine]);
+      const threadId = await seedQueued();
+      const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+      const input = {
+        threadId,
+        runId: assignment.runId,
+        hostId: mine,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+        status: 'completed' as const,
+        close: { kind: 'review' as const, summary: 'Accepted answer.' },
+        tokens,
+      };
+      await expect(
+        applyHostRunResult(PROJECT_ROOT, input, T0 + 1),
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { alreadyApplied: false },
+      });
+      const accepted = (await readThread(PROJECT_ROOT, threadId))!;
+      expect(accepted.tokensUsed).toBe(tokens);
+      expect(accepted.runs[0].hostResultReceipt).toMatchObject({
+        attempt: assignment.attempt,
+        leaseId: assignment.lease.leaseId,
+      });
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          {
+            ...input,
+            close: { summary: input.close.summary, kind: input.close.kind },
+          },
+          T0 + DEFAULT_RUN_LEASE_MS + 1,
+        ),
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { alreadyApplied: true },
+      });
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          {
+            ...input,
+            close: { kind: 'review', summary: 'Different answer.' },
+            tokens: tokens + 1,
+          },
+          T0 + DEFAULT_RUN_LEASE_MS + 2,
+        ),
+      ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+      expect(await readThread(PROJECT_ROOT, threadId)).toEqual(accepted);
+    },
+  );
+
+  it.each(['recovery', 'cancellation'] as const)(
+    'accounts late usage after %s without applying the result',
+    async (reason) => {
+      const mine = await host('mine', ['qwen']);
+      await placeAgent([mine]);
+      const parent = await createThread(PROJECT_ROOT, { title: 'Parent' });
+      const child = await createThread(PROJECT_ROOT, {
+        title: 'Child',
+        parentThreadId: parent.id,
+      });
+      await writeThread(PROJECT_ROOT, {
+        ...child,
+        status: 'in_progress',
+        runs: [queuedRun()],
+      });
+      const now = Date.now();
+      const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, now))!;
+      const identity = {
+        threadId: child.id,
+        runId: assignment.runId,
+        hostId: mine,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+      };
+      await reportHostRunProgress(PROJECT_ROOT, {
+        ...identity,
+        sequence: 1,
+        stage: 'thinking',
+        detail: '',
+        tokens: 100,
+      });
+      const terminal = await withAgentStoreTransaction(
+        PROJECT_ROOT,
+        async (transaction) => {
+          if (reason === 'cancellation') {
+            const current = (await transaction.readThread(child.id))!;
+            await transaction.writeThread({
+              ...current,
+              runs: current.runs.map((run) => ({
+                ...run,
+                status: 'cancelling',
+              })),
+            });
+          }
+          return finishRunInTransaction(transaction, {
+            threadId: child.id,
+            runId: assignment.runId,
+            outcome: {
+              status: 'failed',
+              attempt: assignment.attempt,
+              error: 'Recovery expired.',
+              failureStage: 'recovery',
+            },
+            now: assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS,
+          });
+        },
+      );
+      expect(terminal.outbox).toHaveLength(1);
+      const input = {
+        ...identity,
+        status: 'completed' as const,
+        close: { kind: 'review' as const, summary: 'Must not appear.' },
+        tokens: 1_050,
+      };
+      for (const tokens of [1_050, 1_050, 900]) {
+        await expect(
+          applyHostRunResult(
+            PROJECT_ROOT,
+            { ...input, tokens },
+            assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS + 1,
+          ),
+        ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+        expect(await readThread(PROJECT_ROOT, child.id)).toEqual({
+          ...terminal,
+          tokensUsed: 1_050,
+          runs: terminal.runs.map((run) => ({
+            ...run,
+            usageByRound: [
+              { attempt: assignment.attempt, round: 1, tokens: 1_050 },
+            ],
+          })),
+        });
+      }
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          {
+            ...identity,
+            status: reason === 'recovery' ? 'failed' : 'cancelled',
+            tokens: 1_200,
+          },
+          assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS + 2,
+        ),
+      ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+      expect((await readThread(PROJECT_ROOT, child.id))?.tokensUsed).toBe(
+        1_200,
+      );
+    },
+  );
+
+  it('does not account a result after its Host was removed', async () => {
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    await removeAgentHost(PROJECT_ROOT, mine);
+    const removed = await readThread(PROJECT_ROOT, threadId);
+    await expect(
+      applyHostRunResult(
+        PROJECT_ROOT,
+        {
+          threadId,
+          runId: assignment.runId,
+          hostId: mine,
+          leaseId: assignment.lease.leaseId,
+          attempt: assignment.attempt,
+          status: 'completed',
+          tokens: 1_050,
+        },
+        T0 + 1,
+      ),
+    ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+    expect(await readThread(PROJECT_ROOT, threadId)).toEqual(removed);
   });
 });
 
