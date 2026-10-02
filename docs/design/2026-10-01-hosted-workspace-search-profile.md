@@ -14,12 +14,13 @@ only fall back to `rg`/`find` inside a command, each with a full durable
 dispatch.
 
 This slice adds the read-only `glob` tool behind new profile versions,
-`hosted-workspace-files/2` and `hosted-workspace-shell/2`, following the H1
-precedent (#12946): the model-facing profile decides what is offered, and the
-worker admission widens without versioning the frozen `managed-runtime-tools/1`
-worker identity. No Java or Broker change is required: the Broker only
-special-cases `run_shell_command`, and production profile selection stays on
-`/1` until the connector chooses otherwise.
+`hosted-workspace-files/2` and `hosted-workspace-shell/2`. The model-facing
+profile decides what is offered, while worker admission widens under the
+existing `managed-runtime-tools/1` identity. Unlike H1, glob advertisement is
+static, not derived from worker discovery; the unchanged digest cannot prove
+glob support. Java and Broker remain unchanged, and public profile selection
+stays on `/1`. The coordinated rollout requirement below applies even to
+private `/2` Sessions.
 
 `grep_search` is excluded: the hosted-runtime boundary document excludes both
 Grep implementations until physical process ownership and cancellation
@@ -58,6 +59,13 @@ invariants hold there, because Glob's own validation admits external paths:
   wire, the model, or the durable record. The Runtime host's physical layout
   must not leak to the Harness; for a search tool the paths are the payload.
 
+Core ignore filtering is rooted at the Session directory. A Session below
+the repository root does not inherit ancestor `.gitignore` rules; dependency
+files may consume the scan limit. Its own ignore files still apply. This
+slice does not promise repository-root ignore semantics or change core.
+An outward symlink listed by a broad glob currently refuses the whole result;
+this conservative containment behavior also remains unchanged.
+
 ## Bounds
 
 A glob result is a path list. When the serialized outcome would exceed the
@@ -90,9 +98,19 @@ suites (995 tests) pass.
 
 ## Risks and open questions
 
-Worker admission of `glob` is not gated per Session: a `/1` Session's model is
-never offered the tool, so this is inert in practice, matching the H1 shape.
-Whether tool sets later move to explicit `managed-runtime-tools/2` versioning
-or D8 AgentDefinition pinning remains the maintainers' call; this slice does
-not preclude either. A lighter dispatch path for read-only, idempotent tools
-is explicitly out of scope.
+Worker admission of `glob` is not gated per Session. The unchanged worker
+identity does not distinguish old workers from workers with glob support.
+A new Harness dispatching glob to an old worker can leave the execution
+unknown and retain the Workspace lease, blocking other Sessions.
+
+**Rollout requirement:** before creating any `/2` Session, stop admission,
+drain existing Runtime workers, deploy this worker build to every provisioner,
+and verify that no old worker can be reused or newly provisioned. Only then
+upgrade/enable the Harness `/2` path. Keep `/2` disabled if that cannot be
+proven. Rollback likewise requires draining `/2` Sessions before restoring
+old workers. This is an operator-enforced requirement, not a negotiated
+capability or an automatic safety check. Public connector enablement remains
+separate. Mixed-version operation needs a versioned worker identity or
+worker-derived capability advertisement before it can be supported.
+
+A lighter dispatch path for read-only, idempotent tools is out of scope.

@@ -13,11 +13,11 @@ Hosted Session 只能看到其固定 profile 声明的工具：
 的持久化派发。
 
 本切片在新的 profile 版本 `hosted-workspace-files/2` 与
-`hosted-workspace-shell/2` 之后加入只读的 `glob` 工具，沿用 H1（#12946）
-的做法：由面向模型的 profile 决定提供什么，worker 准入随之放宽，而冻结的
-`managed-runtime-tools/1` worker 身份不做版本化。不需要改 Java 或 Broker：
-Broker 只对 `run_shell_command` 做特判，生产环境的 profile 选择仍停留在
-`/1`，是否切换由 connector 另行决定。
+`hosted-workspace-shell/2` 之后加入只读的 `glob` 工具。面向模型的 profile
+决定提供什么，worker 准入在现有 `managed-runtime-tools/1` 身份下放宽。
+与 H1 不同，glob 的声明是静态的，并非通过 worker 发现得来；不变的摘要无法
+证明 worker 支持 glob。Java 和 Broker 保持不变，公开入口仍选择 `/1`。
+下文的协调升级要求同样适用于私有 `/2` Session。
 
 `grep_search` 不在范围内：hosted-runtime 边界文档规定，在具备物理进程归属
 和取消结算之前排除两种 Grep 实现。`list_directory` 不在范围内：它在本地
@@ -50,6 +50,11 @@ worker 准入 `GlobTool` 并将其构建进 managed 工具集。worker 侧维持
 - 结果在到达网络、模型或持久记录之前改写为 Workspace 相对路径。Runtime
   宿主的物理目录布局不得泄露给 Harness；对搜索工具而言路径本身就是结果。
 
+Core 的忽略规则以 Session 目录为根。位于仓库子目录的 Session 不继承祖先
+目录的 `.gitignore`，依赖文件可能占满扫描上限；Session 自己的忽略文件仍
+生效。本切片不承诺仓库根目录的忽略语义，也不修改 core。宽泛 glob 列出
+外指软链接时，目前会拒绝整个结果；本轮保留这一保守的范围约束行为。
+
 ## 上限
 
 glob 的结果是路径列表。当序列化后的结果将超过 64 KiB 的 Session 内联上限
@@ -77,7 +82,16 @@ pattern or path.`），而不是把整个结果落入「输出被省略」路径
 
 ## 风险与未决问题
 
-worker 对 `glob` 的准入不按 Session 区分：`/1` Session 的模型永远看不到该
-工具，实践中是惰性的，与 H1 的形态一致。工具集之后是否转向显式的
-`managed-runtime-tools/2` 版本化或 D8 AgentDefinition 固定，由维护者决定；
-本切片不妨碍任一路线。为只读、幂等工具提供更轻的派发路径明确不在范围内。
+worker 对 `glob` 的准入不按 Session 区分。不变的 worker 身份无法区分旧
+worker 与支持 glob 的 worker。新 Harness 向旧 worker 派发 glob，可能让
+执行结果未知并持续占用 Workspace 租约，阻塞其他 Session。
+
+**升级要求：** 创建任何 `/2` Session 前，必须停止准入、排空已有 Runtime
+worker，将本次 worker 构建部署到所有 provisioner，并确认旧 worker 既不能
+被复用，也不能被新建。之后才能升级并启用 Harness 的 `/2` 路径。无法证明
+这些条件时，保持 `/2` 关闭。回滚同样必须先排空 `/2` Session，再恢复旧
+worker。这是由运维执行的要求，并非协商能力或自动安全检查。公开 connector
+的启用仍单独处理。要支持版本混用，需先实现 worker 身份版本化或来自 worker
+的能力声明。
+
+为只读、幂等工具提供更轻的派发路径不在范围内。

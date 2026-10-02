@@ -806,7 +806,7 @@ export class ManagedToolExecutor {
           path.isAbsolute(relative)
         ) {
           throw new Error(
-            `Path '${params['file_path'] as string}' is not within the Session working directory.`,
+            `Path '${entry.input['file_path'] as string}' is not within the Session working directory.`,
           );
         }
       }

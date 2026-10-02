@@ -2656,6 +2656,7 @@ export function registerHostedHarnessSessionRoutes(
             waiters: session.waiters,
           },
           session.mcp,
+          session.toolProfile,
         );
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         try {

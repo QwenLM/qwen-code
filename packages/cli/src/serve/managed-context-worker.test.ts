@@ -1194,6 +1194,12 @@ describe('Managed context tool gate', () => {
     const through = await read('call-1', 'peek/secret.txt');
     expect(through.result.executionStatus).toBe('error');
     expect(JSON.stringify(through)).not.toContain('sibling');
+    expect(JSON.stringify(through)).not.toContain(
+      realDirectory(root, 'services/api'),
+    );
+    expect(JSON.stringify(through)).toContain(
+      "Path 'peek/secret.txt' is not within the Session working directory.",
+    );
     // A nonexistent path keeps the tool's own not-found answer, not a
     // traversal accusation (realpathIfPresent's ENOENT fallback).
     const missing = await read('call-2', 'src/nope.txt');
