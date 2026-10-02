@@ -390,6 +390,65 @@ describe('auto-memory extraction', () => {
     expect(result.extractorRan).toBeUndefined();
   });
 
+  it.each([
+    { userText: '', extractorRan: undefined },
+    { userText: 'Remember: use isolated runtimes.', extractorRan: true },
+  ])(
+    'ignores runtime reminders while preserving user text: $userText',
+    async ({ userText, extractorRan }) => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: true,
+      });
+      const history: Content[] = Array.from(
+        { length: CACHE_SAFE_HISTORY_TAIL_ENTRIES / 2 },
+        (_, i): Content[] => [
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: `read-${i}`, name: 'read_file' } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: `read-${i}`,
+                  name: 'read_file',
+                  response: { output: 'Read-only result.' },
+                },
+              },
+              {
+                text: `<system-reminder>Continue the task.</system-reminder>\n${userText}`,
+              },
+            ],
+          },
+        ],
+      ).flat();
+      history.push({
+        role: 'user',
+        parts: [{ text: 'A later durable fact.' }],
+      });
+
+      const result = await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        preserveUnprocessedHistory: true,
+        history,
+      });
+
+      expect(result.cursor.processedOffset).toBe(
+        CACHE_SAFE_HISTORY_TAIL_ENTRIES,
+      );
+      expect(result.extractorRan).toBe(extractorRan);
+      expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledTimes(
+        extractorRan ? 1 : 0,
+      );
+    },
+  );
+
   it('windowed arm: a no-progress run advances the pending window instead of freezing it', async () => {
     vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
       touchedTopics: [],

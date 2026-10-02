@@ -10,6 +10,7 @@ import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
+import { stripSystemReminderBlocks } from '../core/environmentContext.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
@@ -241,11 +242,12 @@ export async function runAutoMemoryExtract(params: {
   const pendingHistory = params.history.slice(startOffset, endOffset);
 
   // Skip if there are no new, non-empty user messages in the unprocessed
-  // slice. partToString runs only on this small slice and without the
-  // global whitespace regex — the .trim().length check preserves the old
-  // behaviour of ignoring empty-text user turns.
+  // slice. Strip runtime reminders as the planner does, so a reminder-only
+  // tool response cannot trigger extraction after its text is removed.
   const hasNewUserMessages = pendingHistory.some(
-    (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+    (m) =>
+      m.role === 'user' &&
+      stripSystemReminderBlocks(partToString(m.parts ?? [])).trim().length > 0,
   );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
