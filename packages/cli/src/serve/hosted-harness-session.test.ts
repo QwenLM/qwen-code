@@ -4821,6 +4821,98 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('reports the undriven recovered Turn as in flight until a terminal route drives it', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    const getStatus = () =>
+      replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+    // The takeover answered with recovery, but the recovered Turn is still
+    // owned by the client: /status must not read the Session as idle, or the
+    // SDK's settlement check learns the Turn is terminal while it is not.
+    const afterLoad = await getStatus();
+    expect(afterLoad.body.hasActivePrompt).toBe(true);
+    expect(afterLoad.body.recoveryBlocked).toBe(false);
+    // A user cancel stays a no-op, and a fresh Turn must not start over the
+    // checkpoint the takeover just advertised: it would supersede it and
+    // strand the recovered Runtime lease.
+    await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    const freshPrompt = [{ type: 'text', text: 'a second turn' }];
+    const refused = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: freshPrompt,
+        promptId: '88888888-8888-4888-8888-888888888888',
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(freshPrompt)).digest('hex')}`,
+      });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_active');
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        expect((await getStatus()).body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    // The recovered Turn settled: the Session admits fresh Turns again.
+    const nextPrompt = [{ type: 'text', text: 'after the takeover' }];
+    const nextPromptId = '55555555-5555-4555-8555-555555555555';
+    const admitted = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: nextPrompt,
+        promptId: nextPromptId,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const later = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/transcript`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(later.body.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'turn_complete',
+              promptId: nextPromptId,
+            }),
+          ]),
+        );
+      },
+      { timeout: 10_000 },
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
   it('reports a parked execution passively and cancels the turn', async () => {
     await parkToolTurn();
     let stopConfirmed = false;
@@ -4947,40 +5039,38 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await parkToolTurn();
     // The cancel is accepted but the stop can never be observed: the
     // execution state becomes unreadable right after it.
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+    const status = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'status')
       .mockResolvedValueOnce({ state: 'prepared' })
       .mockResolvedValueOnce({ state: 'executing' })
       .mockRejectedValue(new Error('broker gone'));
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
     const { server, loaded } = await loadReplacement(true);
     expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
     const recovery = loaded.body._meta?.[
       'qwen.daemon.managedRuntimeRecovery'
     ] as { checkpointId: string; activationId: string };
-    const cancelled = await replacementHeaders(
-      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
-    )
-      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
-      .send({
-        promptId: PROMPT_ID,
-        checkpointId: recovery.checkpointId,
-        activationId: recovery.activationId,
-      });
+    const send = () =>
+      replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+    const cancelled = await send();
     expect(cancelled.status).toBe(503);
-    await vi.waitFor(
-      async () => {
-        const status = await replacementHeaders(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-        expect(status.body.hasActivePrompt).toBe(false);
-      },
-      { timeout: 10_000 },
-    );
     const transcript = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
-    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    // No terminal record may land while the stop is unconfirmed.
+    ).set('X-Qwen-Client-Id', clientId);
+    // No terminal record may land while the stop is unconfirmed, and the
+    // owned Turn keeps the Session refused rather than reading as settled.
     expect(
       (
         transcript.body.events as Array<{ type: string; promptId?: string }>
@@ -4989,6 +5079,29 @@ describe('Hosted Harness Runtime turn takeover', () => {
           event.type === 'turn_complete' && event.promptId === PROMPT_ID,
       ),
     ).toHaveLength(0);
+    const between = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(between.body.hasActivePrompt).toBe(true);
+    // The coordinator's retry re-drives the same cancellation to settlement.
+    let stopConfirmed = false;
+    status.mockImplementation(async () => ({
+      state: stopConfirmed ? 'settled' : 'prepared',
+    }));
+    cancel.mockImplementation(async () => {
+      stopConfirmed = true;
+    });
+    const retried = await send();
+    expect(retried.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const later = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(later.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
@@ -5559,6 +5672,59 @@ describe('Hosted Harness Runtime turn takeover', () => {
       },
       { timeout: 10_000 },
     );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('blocks the recovered continuation for recovery when its reconciliation fails', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    // The continuation's reconciliation re-acquire fails retryably: the
+    // route already answered, so the Turn must block for the coordinator's
+    // next takeover load instead of settling a terminal turn_result.
+    acquireSpy.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(409, 'workspace_busy'),
+    );
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(
+      (
+        transcript.body.events as Array<{ type: string; promptId?: string }>
+      ).filter(
+        (event) =>
+          event.type === 'turn_complete' && event.promptId === PROMPT_ID,
+      ),
+    ).toHaveLength(0);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

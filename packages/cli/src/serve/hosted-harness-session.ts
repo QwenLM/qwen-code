@@ -117,6 +117,11 @@ interface HostedSession {
   /** A recovery load acquired the Runtime Session for this promptId;
    * whichever terminal route runs must release it. */
   runtimeLeaseHeld?: string;
+  /** A takeover load registered this Session with its recovered Turn still
+   * owned by the client: /status reports it in flight and /prompt refuses a
+   * fresh Turn until continue/cancel drives it to a terminal record. Never
+   * alias this to active/blocked — both refuse the continue/cancel routes. */
+  recoveredTurn?: string;
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -1149,6 +1154,7 @@ export function registerHostedHarnessSessionRoutes(
             return;
           }
           recovery = recovered.report;
+          session.recoveredTurn = recovered.promptId;
           if (recovered.acquiredRuntime)
             session.runtimeLeaseHeld = recovered.promptId;
         } catch (cause) {
@@ -1444,6 +1450,10 @@ export function registerHostedHarnessSessionRoutes(
     if (hasAcceptedInput(session, promptId)) {
       return error(res, 409, 'hosted_prompt_recovery_required');
     }
+    // A fresh Turn must not start over the recovered-but-undriven one: it
+    // would supersede the checkpoint the takeover just advertised.
+    if (session.recoveredTurn !== undefined)
+      return error(res, 409, 'hosted_turn_active');
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);
@@ -1882,6 +1892,9 @@ export function registerHostedHarnessSessionRoutes(
     }
     const abort = new AbortController();
     session.active = { promptId, digest: '', abort };
+    // The recovered Turn is now driven: session.active keeps /prompt refused
+    // until the terminal record, after which the refusal no longer applies.
+    session.recoveredTurn = undefined;
     session.admissions.set(promptId, {
       digest: recoveryDigest,
       lastEventId: session.managed.authority.committedSequence,
@@ -2004,7 +2017,15 @@ export function registerHostedHarnessSessionRoutes(
           // left behind before inference — a text-only continuation never
           // re-acquires, so without this the marker outlives the turn and
           // wedges every later cold load.
-          await toolTurn.resumeCommittedResults();
+          try {
+            await toolTurn.resumeCommittedResults();
+          } catch (cause) {
+            // The route already answered, so a retryable workspace refusal
+            // cannot reach the caller as a 409: every reconciliation failure
+            // blocks for recovery instead of settling a terminal turn_result,
+            // and the coordinator's next takeover load re-drives the Turn.
+            throw new HostedToolRecoveryRequiredError(cause);
+          }
           const result = await runHostedHarnessTextTurn({
             sessionId,
             cwd,
@@ -2175,6 +2196,10 @@ export function registerHostedHarnessSessionRoutes(
             },
           }),
         );
+        // The recovered Turn settled, so /prompt stops refusing the Session.
+        // The refusal stays armed on the retryable failure path, where the
+        // coordinator's retry re-drives the same Turn.
+        session.recoveredTurn = undefined;
         // Answer at the admission watermark: the cancelled turn_result
         // streams in from there, and a replayed cancel replays it exactly.
         res.status(200).json({
@@ -2281,7 +2306,7 @@ export function registerHostedHarnessSessionRoutes(
     if (!session) return error(res, 404, 'hosted_session_not_found');
     res.json({
       sessionId: req.params['id'],
-      hasActivePrompt: !!session.active,
+      hasActivePrompt: !!session.active || session.recoveredTurn !== undefined,
       recoveryBlocked:
         session.blocked || (session.mcp?.recoveryBlocked ?? false),
     });

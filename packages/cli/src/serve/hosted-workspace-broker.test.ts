@@ -595,6 +595,16 @@ it('reads unknown only from a definitive not-found', async () => {
   }));
   await expect(abandoned.status('execution')).resolves.toBeUndefined();
 
+  // A still-reconcilable UNKNOWN record carries no terminal marker, so the
+  // read fails closed instead of reporting a running execution as stopped.
+  const unreconciled = await fixture(() => ({
+    code: 409,
+    body: { code: 'runtime_broker_execution_unknown' },
+  }));
+  await expect(unreconciled.status('execution')).rejects.toEqual(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_broker_execution_unknown'),
+  );
+
   const failing = await fixture(() => ({
     code: 500,
     body: { code: 'runtime_broker_internal_error' },

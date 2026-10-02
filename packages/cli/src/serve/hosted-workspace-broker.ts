@@ -479,9 +479,9 @@ export class HostedWorkspaceBroker {
 
   /**
    * Read-only execution state for recovery reports. A definitive not-found or
-   * a definitive unknown/abandoned answer resolves to undefined; anything else
-   * fails the caller — a recovery report must never read "unknown" from a
-   * transient error.
+   * a terminally abandoned answer resolves to undefined; anything else fails
+   * the caller — a recovery report must never read "unknown" from a transient
+   * error.
    */
   async status(id: string): Promise<{ state: string } | undefined> {
     let response: Record<string, unknown>;
@@ -492,11 +492,13 @@ export class HostedWorkspaceBroker {
         cause instanceof HostedWorkspaceBrokerRejection &&
         ((cause.status === 404 &&
           cause.code === 'runtime_execution_not_found') ||
-          // The Broker answers UNKNOWN/ABANDONED records with this definitive
-          // terminal state, which the recovery report carries as outcome
-          // 'unknown' — that is a state to report, not a read failure.
+          // Only an ABANDONED record is a definitive terminal unknown; the
+          // Broker marks it with details.terminal while a still-reconcilable
+          // UNKNOWN record carries no marker and must fail closed here, or a
+          // running execution would read as already stopped.
           (cause.status === 409 &&
-            cause.code === 'runtime_broker_execution_unknown'))
+            cause.code === 'runtime_broker_execution_unknown' &&
+            cause.details?.['terminal'] === true))
       )
         return undefined;
       throw cause;
