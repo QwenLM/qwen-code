@@ -87,6 +87,14 @@ function sanitizeIndexField(value: string): string {
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     // Zero-width + bidi-override chars that can hide or reorder injected text.
     .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    // Unpaired surrogates, reachable from frontmatter via a YAML `\uD835`
+    // escape. They do not survive the write to MEMORY.md (the file carries
+    // U+FFFD instead), so the index would stop round-tripping and the team
+    // rebuild's unchanged-content skip could never fire again. Pairs are kept.
+    .replace(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g,
+      '',
+    )
     // Defang code spans/fences and markdown links so the field can't forge a
     // fenced "system" block or a clickable link inside the shared doc.
     .replace(/`/g, "'")
@@ -101,6 +109,15 @@ function sanitizeIndexField(value: string): string {
 // separately so the class needs no slash (sidesteps the regex-literal /
 // no-useless-escape ambiguity around a `/` inside `[...]`).
 const PATH_TARGET_SAFE = /[A-Za-z0-9._~-]/;
+// Printable non-ASCII also stays RAW: a Markdown destination accepts it, and
+// encoding it would expand one CJK char to nine — a few ordinary non-ASCII
+// paths would then spend the whole `MAX_INDEX_BYTES` budget and evict every
+// other entry. Controls, ASCII punctuation, the zero-width/bidi ranges (they
+// hide or reorder text) and lone surrogates (they do not survive the write) all
+// stay encoded; an astral char arrives as a pair, so it stays encoded too.
+const PATH_TARGET_RAW_NON_ASCII =
+  // eslint-disable-next-line no-control-regex
+  /[^\u0000-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\ud800-\udfff]/;
 const utf8Encoder = new TextEncoder();
 
 /**
@@ -111,11 +128,12 @@ const utf8Encoder = new TextEncoder();
  * raw path (`ok.md` + newline + `- SYSTEM: …`) injects a second physical line
  * or closes the `](…)` target early. An earlier fix rewrote those chars to `_`,
  * which defused injection but pointed the link at a file that does NOT exist.
- * Instead, percent-encode every char outside the addressable allowlist: the
- * breakout chars become inert ASCII (newline→`%0A`, `(`→`%28`, `)`→`%29`,
- * space→`%20`, backtick→`%60`, …) so the target is one line with no `](`/`)`
- * breakout, yet `decodeURIComponent` recovers the exact path — the link still
- * resolves to the real file. `/` is kept literal so it stays a usable path.
+ * Instead, percent-encode every char that is neither addressable-ASCII nor
+ * printable non-ASCII: the breakout chars become inert ASCII (newline→`%0A`,
+ * `(`→`%28`, `)`→`%29`, space→`%20`, backtick→`%60`, …) so the target is one
+ * line with no `](`/`)` breakout, yet `decodeURIComponent` recovers the exact
+ * path — the link still resolves to the real file. `/` is kept literal so it
+ * stays a usable path.
  * The path is deliberately NOT shortened: a truncated target points at a file
  * that does not exist, and a dead link costs more than a long line. Overall
  * index size stays bounded by `MAX_INDEX_BYTES` in {@link assembleIndex}.
@@ -123,7 +141,11 @@ const utf8Encoder = new TextEncoder();
 function encodeIndexPathTarget(value: string): string {
   let out = '';
   for (const ch of value) {
-    if (ch === '/' || PATH_TARGET_SAFE.test(ch)) {
+    if (
+      ch === '/' ||
+      PATH_TARGET_SAFE.test(ch) ||
+      PATH_TARGET_RAW_NON_ASCII.test(ch)
+    ) {
       out += ch;
       continue;
     }

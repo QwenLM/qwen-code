@@ -429,6 +429,58 @@ describe('managed auto-memory indexer', () => {
     expect(content).toContain('WARNING: MEMORY.md is too large');
   });
 
+  it('does not let a few long non-ASCII paths evict the rest of the index', () => {
+    // Regression: percent-encoding expanded one CJK char to nine, so six
+    // filesystem-legal ~1.8 KB paths (603 code points, every component under
+    // NAME_MAX) spent the whole MAX_INDEX_BYTES budget between them and the
+    // short entries sorted after them never reached the committed index at all.
+    const doc = (relativePath: string, title: string, description: string) => ({
+      scope: 'team' as const,
+      type: 'feedback' as const,
+      filePath: `/tmp/${relativePath}`,
+      relativePath,
+      filename: path.basename(relativePath),
+      title,
+      description,
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
+      body: '',
+      mtimeMs: 0,
+    });
+    // 7 components x 84 CJK chars = 252 bytes per component, inside NAME_MAX.
+    const longPath = (seed: number) =>
+      `!${Array.from({ length: 7 }, (_, c) =>
+        Array.from({ length: 84 }, (_, i) =>
+          String.fromCharCode(0x4e00 + ((seed * 31 + c * 7 + i * 3) % 2000)),
+        ).join(''),
+      ).join('/')}/note-${seed}.md`;
+    const shortPath = 'zzz/feedback/real-fact.md';
+    const content = buildTeamAutoMemoryIndex([
+      ...[1, 2, 3, 4, 5, 6].map((s) =>
+        doc(longPath(s), `long ${s}`, `shared fact ${s}`),
+      ),
+      doc(shortPath, 'real fact', 'a distinct fact worth keeping'),
+    ]);
+
+    // The short entry survives as a link that resolves to the real file…
+    const shortLine = content
+      .split('\n')
+      .find((l) => l.startsWith('- [real fact]'));
+    expect(shortLine).toBeDefined();
+    expect(decodeURIComponent(linkTarget(shortLine!))).toBe(shortPath);
+    // …and the long paths did not push the index over the budget to do it.
+    expect(content).not.toContain('WARNING: MEMORY.md is too large');
+    // Every long path is still addressable too — nothing was sliced to fit.
+    const targets = content
+      .split('\n')
+      .filter((l) => l.startsWith('- ['))
+      .map((l) => decodeURIComponent(linkTarget(l)));
+    for (const s of [1, 2, 3, 4, 5, 6]) {
+      expect(targets).toContain(longPath(s));
+    }
+  });
+
   it('sanitizes an attacker-controlled relativePath in the main index line', () => {
     // Git filenames may legally contain newlines + markdown delimiters. A raw
     // path would inject a second physical line (e.g. "- SYSTEM:") into the
@@ -803,5 +855,72 @@ describe('managed auto-memory indexer', () => {
     // The invariant that actually breaks: what lands on disk must be what the
     // builder returned.
     expect(Buffer.from(line, 'utf8').toString('utf8')).toBe(line);
+  });
+
+  it('drops both halves of two adjacent lone surrogates at the cut', () => {
+    // Regression: the truncator backs off ONE unit when the cut lands inside a
+    // surrogate pair, so two adjacent lone high surrogates — reachable from
+    // frontmatter through a YAML `\uD835` escape, not through raw bytes — left
+    // one behind and the line stopped round-tripping.
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: '/tmp/feedback/two-lone.md',
+        relativePath: 'feedback/two-lone.md',
+        filename: 'two-lone.md',
+        title: `${'a'.repeat(117)}\ud835\ud835 tail words here`,
+        description: 'd',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [line] = content.split('\n');
+    expect(Buffer.from(line, 'utf8').toString('utf8')).toBe(line);
+  });
+
+  it('strips a lone surrogate from a field short enough to skip the cut', () => {
+    // A field under the cap returns from truncateIndexField before any backoff
+    // runs, so only a sanitizeIndexField-level strip can catch it. The second
+    // doc is the discriminator: a WELL-FORMED pair must be kept verbatim, so
+    // the strip may not widen to every surrogate unit.
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: '/tmp/feedback/lone-short.md',
+        relativePath: 'feedback/lone-short.md',
+        filename: 'lone-short.md',
+        title: '\ud835 lone high',
+        description: 'd',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: '/tmp/feedback/pair-kept.md',
+        relativePath: 'feedback/pair-kept.md',
+        filename: 'pair-kept.md',
+        title: '\u{1d54f} kept whole',
+        description: 'd',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const [loneLine, pairLine] = content.split('\n');
+    expect(Buffer.from(loneLine, 'utf8').toString('utf8')).toBe(loneLine);
+    expect(pairLine).toContain('\u{1d54f} kept whole');
   });
 });
