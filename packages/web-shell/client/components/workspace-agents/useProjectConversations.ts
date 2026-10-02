@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { createThreadsHttpApi } from './threads-api';
 
 export const COLLABORATION_SOURCE = 'workspace_collaboration';
@@ -8,10 +9,14 @@ export const COLLABORATION_SOURCE = 'workspace_collaboration';
 const MAX_STREAMS = 2;
 export function useProjectConversations(cwds: readonly string[]) {
   const workspace = useWorkspace();
-  const key = JSON.stringify([...new Set(cwds)].sort());
-  const enabled = workspace.capabilities?.features?.includes(
-    'agent_collaboration_v1',
+  const key = JSON.stringify(
+    [...new Set(cwds)]
+      .filter((cwd) =>
+        isAgentCollaborationEnabledForWorkspace(workspace.capabilities, cwd),
+      )
+      .sort(),
   );
+  const enabled = key !== '[]';
   const [snapshot, setSnapshot] = useState<{
     scope: string;
     sessions: DaemonSessionSummary[];
@@ -42,8 +47,6 @@ export function useProjectConversations(cwds: readonly string[]) {
   useEffect(() => {
     if (!enabled) return;
     const sessionsByCwd = cache.current!.sessionsByCwd;
-    // The capability says some workspace has collaboration on, not this one;
-    // a workspace that answers "disabled" is left alone until the list changes.
     const disabled = new Set<string>();
     let disposed = false;
     let busy = false;
