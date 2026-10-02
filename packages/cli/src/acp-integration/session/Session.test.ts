@@ -18458,6 +18458,84 @@ describe('Session', () => {
         },
       );
 
+      it.each(['STOP', 'MAX_TOKENS'])(
+        'keeps ACP bridge recovery scoped to non-truncated output (%s)',
+        async (finishReason) => {
+          const [{ ToolCallTool }, { ToolSearchTool }, { WebFetchTool }] =
+            await Promise.all([
+              import('@qwen-code/qwen-code-core/tools/tool-call.js'),
+              import('@qwen-code/qwen-code-core/tools/tool-search.js'),
+              import('@qwen-code/qwen-code-core/tools/web-fetch.js'),
+            ]);
+          const target = new WebFetchTool(mockConfig);
+          const tools = [
+            new ToolCallTool(),
+            new ToolSearchTool(mockConfig),
+            target,
+          ];
+          const findTool = (name: string) =>
+            tools.find((tool) => tool.name === name);
+          mockToolRegistry.getTool.mockImplementation(findTool);
+          mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+            findTool(name),
+          );
+          let hidden = true;
+          mockToolRegistry.isDeferredAndHidden.mockImplementation(
+            (name: string) => name === target.name && hidden,
+          );
+          mockToolRegistry.revealDeferredTool.mockImplementation(() => {
+            hidden = false;
+          });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'empty-bridge',
+                        name: core.ToolNames.TOOL_CALL,
+                        args: { name: target.name, arguments: {} },
+                      },
+                    ],
+                  },
+                },
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: { candidates: [{ finishReason }] },
+                },
+              ]),
+            )
+            .mockImplementation(async () => createEmptyStream());
+          mockLlmClient.setTools.mockClear();
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'fetch the news' }],
+          });
+
+          const shouldReveal = finishReason === 'STOP';
+          expect(hidden).toBe(!shouldReveal);
+          expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledTimes(
+            shouldReveal ? 1 : 0,
+          );
+          expect(mockLlmClient.setTools).toHaveBeenCalledTimes(
+            shouldReveal ? 1 : 0,
+          );
+          const output = JSON.stringify(
+            mockChatRecordingService.recordToolResult.mock.calls,
+          );
+          expect(output).toContain('Deferred tool');
+          expect(output).toContain(target.name);
+          expect(output).toContain('url');
+          expect(output.includes('is now declared directly')).toBe(
+            shouldReveal,
+          );
+        },
+      );
+
       it('routes tool_call through a hidden deferred tool in ACP', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         const execute = vi.fn().mockResolvedValue({

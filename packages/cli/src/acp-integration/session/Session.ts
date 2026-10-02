@@ -19,11 +19,12 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type {
-  Content,
-  FunctionCall,
-  GenerateContentResponseUsageMetadata,
-  Part,
+import {
+  FinishReason,
+  type Content,
+  type FunctionCall,
+  type GenerateContentResponseUsageMetadata,
+  type Part,
 } from '@google/genai';
 import {
   type AgentRunContext,
@@ -2153,6 +2154,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
  */
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
+  private readonly truncatedToolCalls = new WeakSet<FunctionCall>();
   private pendingPrompt: AbortController | null = null;
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
@@ -8927,7 +8929,10 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       return { responseStream: null, stopReason: 'end_turn' };
     }
+    const truncatedToolCalls = this.truncatedToolCalls;
     const responseStream = (async function* () {
+      const functionCalls: FunctionCall[] = [];
+      let wasOutputTruncated = false;
       let committed = false;
       let receivedChunk = false;
       let memoryDeliveryStateInvalidated = false;
@@ -8942,6 +8947,10 @@ export class Session implements SessionContext {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
+            functionCalls.push(...(event.value.functionCalls ?? []));
+            wasOutputTruncated ||=
+              event.value.candidates?.[0]?.finishReason ===
+              FinishReason.MAX_TOKENS;
           } else if (event.type === StreamEventType.COMPRESSED) {
             llmClient.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
@@ -8950,6 +8959,8 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
+            functionCalls.length = 0;
+            wasOutputTruncated = false;
           }
           yield event;
         }
@@ -8957,6 +8968,9 @@ export class Session implements SessionContext {
           commitMemoryDelivery();
         }
       } finally {
+        if (wasOutputTruncated) {
+          for (const call of functionCalls) truncatedToolCalls.add(call);
+        }
         if (!committed && receivedChunk && abortSignal.aborted) {
           commitMemoryDelivery();
         }
@@ -15964,6 +15978,7 @@ export class Session implements SessionContext {
             bridgedThroughToolCall && !toolBuildSucceeded;
           const declaredDirectly =
             bridgedBuildFailure &&
+            !this.truncatedToolCalls.has(fc) &&
             (await declareTargetAfterEmptyBridgedCall(
               this.config.getToolRegistry(),
               this.config.getLlmClient?.(),
