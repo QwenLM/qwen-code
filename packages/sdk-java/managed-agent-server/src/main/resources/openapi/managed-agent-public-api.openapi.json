@@ -341,7 +341,7 @@
         "tags": ["Public Sessions"],
         "operationId": "deleteSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Accepts an active, closed or archived Session. 409 turn_active while a Turn is active, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session. The same key from the same actor returns the original operation, also after the Session was deleted.",
+        "description": "Unbound Sessions accept active, closed or archived state. Returns 409 turn_active while a Turn is active and session_operation_active while another lifecycle change is pending. The same key from the same actor returns the original operation, also after the Session was deleted. Workspace-bound delete accepts only closed or archived Sessions with completed reliable-close evidence and the creator with current read access. Active deletion returns 409 session_state_conflict. Completion atomically retires private recovery/publication access with the tombstone, operation receipt and terminal event; it calls neither Harness nor Runtime and erases no shared Workspace files or backup bytes. Operations remain readable under current read grants; the same authorized actor/key can replay after deletion. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1757,7 +1757,7 @@
         "tags": ["Public Sessions"],
         "operationId": "archiveSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending, and workspace_unavailable for a Workspace-bound Session.",
+        "description": "Accepts a closed Session; 409 session_state_conflict otherwise, session_operation_active while another lifecycle change is pending. Workspace-bound archive requires a closed Session with completed reliable-close evidence and the creator with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable.",
         "responses": {
           "202": {
             "description": "Archive requires a closed Session and retains history. Java is its only authority, so a new archive is complete when it is admitted.",
@@ -1799,7 +1799,7 @@
         "tags": ["Public Sessions"],
         "operationId": "unarchiveSession",
         "x-qwen-implementation-status": "partial",
-        "description": "Restores an archived Session to closed. Shipped before the v1.10 lifecycle review, which does not cover it. It stays a synchronous mutation rather than a command operation: Java is its only authority, and the Session stays closed.",
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2049,7 +2049,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Workspace-bound archive requires a closed Session with completed reliable-close evidence and the creator with current read access. It completes atomically during admission, preserves data and the permanent close fence, and calls neither Harness nor Runtime. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable."
       }
     },
     "/api/agent/web-shell/v1/sessions/delete": {
@@ -2090,7 +2091,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Workspace-bound delete accepts only closed or archived Sessions with completed reliable-close evidence and the creator with current read access. Active deletion returns 409 session_state_conflict. Completion atomically retires private recovery/publication access with the tombstone, operation receipt and terminal event; it calls neither Harness nor Runtime and erases no shared Workspace files or backup bytes. Operations remain readable under current read grants; the same authorized actor/key can replay after deletion. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable."
       }
     },
     "/api/agent/web-shell/v1/workspaces/get": {
@@ -3006,6 +3008,53 @@
           }
         }
       }
+    },
+    "/api/agent/web-shell/v1/sessions/unarchive": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "unarchiveWebShellSession",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Current WebShell Session; replay does not repeat the mutation.",
+            "headers": {
+              "X-Qwen-Idempotent-Replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellLifecycleRequest"
+              }
+            }
+          }
+        },
+        "description": "Synchronously restores an archived Session to closed. Workspace-bound Sessions require completed reliable-close evidence and the creator with current read access (404 unreadable, 403 readable non-creator). Bound keys are tenant/Session/actor scoped. Replay returns the current visible Session without repeating the mutation; a deleted Session returns 404. The permanent close fence is preserved and no Harness or Runtime call is made."
+      }
     }
   },
   "components": {
@@ -3143,7 +3192,7 @@
         "schema": {
           "type": "boolean"
         },
-        "description": "True when the original result was returned for the same idempotency key and digest."
+        "description": "True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the current visible Session; operation responses represent the original operation at its current state."
       },
       "RequestId": {
         "schema": {
@@ -3719,6 +3768,24 @@
             "type": "boolean",
             "default": false,
             "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires creator ownership and current read access."
+          },
+          "session_archive": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+          },
+          "session_unarchive": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+          },
+          "session_delete": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
           }
         }
       },
@@ -4649,6 +4716,24 @@
             "type": "boolean",
             "default": false,
             "description": "Deployment support for close independently of archive/delete. Admission also requires creator ownership and current read access for a bound Session."
+          },
+          "sessionArchive": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+          },
+          "sessionUnarchive": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+          },
+          "sessionDelete": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
           }
         }
       },

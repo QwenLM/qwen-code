@@ -77,14 +77,25 @@ public final class ApiModels {
             @JsonProperty("session_lifecycle") boolean sessionLifecycle,
             boolean tasks,
             boolean actions,
-            @JsonProperty("session_close") boolean sessionClose) {
+            @JsonProperty("session_close") boolean sessionClose,
+            @JsonProperty("session_archive") boolean sessionArchive,
+            @JsonProperty("session_unarchive") boolean sessionUnarchive,
+            @JsonProperty("session_delete") boolean sessionDelete) {
+        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
+                boolean lifecycle, boolean tasks, boolean actions, boolean close) {
+            this(items, snapshots, artifacts, resync, lifecycle, tasks, actions, close, false, false, false);
+        }
         public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
                 boolean lifecycle, boolean tasks, boolean actions) {
             this(items, snapshots, artifacts, resync, lifecycle, tasks, actions, false);
         }
     }
 
-    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions, boolean sessionClose) {
+    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions, boolean sessionClose,
+            boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete) {
+        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions, boolean close) {
+            this(tasks, artifacts, actions, close, false, false, false);
+        }
         public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions) {
             this(tasks, artifacts, actions, false);
         }
