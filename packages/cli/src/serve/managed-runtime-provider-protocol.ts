@@ -371,7 +371,10 @@ export function parseManagedRuntimeProviderResult(
       if (operation.action !== 'rewind')
         return parseHostedFileHistoryState(value, session.harnessSessionId);
       keys(result, ['state', 'filesChanged', 'filesFailed', 'conflict']);
-      parseHostedFileHistoryState(result['state'], session.harnessSessionId);
+      const state = parseHostedFileHistoryState(
+        result['state'],
+        session.harnessSessionId,
+      );
       if (
         !Array.isArray(result['filesChanged']) ||
         !Array.isArray(result['filesFailed']) ||
@@ -380,6 +383,20 @@ export function parseManagedRuntimeProviderResult(
         throw new ManagedRuntimeProviderProtocolError();
       result['filesChanged'].forEach(historyPath);
       result['filesFailed'].forEach(historyPath);
+      if (
+        new Set(result['filesChanged']).size !==
+          result['filesChanged'].length ||
+        result['filesChanged'].some(
+          (file) => !Object.hasOwn(state.files, file),
+        ) ||
+        !state.snapshots.some(
+          (snapshot) => snapshot.promptId === operation.promptId,
+        ) ||
+        (result['conflict'] && result['filesChanged'].length !== 0)
+      )
+        throw new ManagedRuntimeProviderProtocolError(
+          'Invalid Hosted file history rewind outcome.',
+        );
       break;
     }
     case 'bind-history':

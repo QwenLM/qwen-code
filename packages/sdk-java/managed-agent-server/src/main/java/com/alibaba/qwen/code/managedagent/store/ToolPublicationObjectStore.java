@@ -10,6 +10,11 @@ public interface ToolPublicationObjectStore {
     /** The caller closes the stream after verifying its complete contents. */
     InputStream open(String key);
 
+    default InputStream open(String key, Runnable guard) {
+        guard.run();
+        return open(key);
+    }
+
     /** A versioned or suspended bucket cannot enforce the no-overwrite rule. */
     void requireUnversioned();
 }
