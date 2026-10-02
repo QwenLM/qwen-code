@@ -2282,7 +2282,7 @@ describe('useVim hook', () => {
         );
       });
 
-      it('reads the clipboard without the user profile and with a generous timeout', () => {
+      it('reads the clipboard with -NoProfile, pinned UTF-8 output, and a generous timeout', () => {
         (execFileSync as unknown as Mock).mockReturnValue('');
         const buffer = createMockBuffer('foo', [0, 0]);
         const { result } = renderHook(() =>
@@ -2293,9 +2293,64 @@ describe('useVim hook', () => {
 
         expect(execFileSync).toHaveBeenCalledWith(
           'powershell',
-          ['-NoProfile', '-c', 'Get-Clipboard'],
+          [
+            '-NoProfile',
+            '-c',
+            '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard',
+          ],
           expect.objectContaining({ timeout: 5000 }),
         );
+      });
+
+      it('pastes a multi-line clipboard below the cursor line mid-buffer', () => {
+        (execFileSync as unknown as Mock).mockReturnValue('line1\r\nline2\r\n');
+        const buffer = createMockBuffer('top\nbottom', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          1,
+          0,
+          1,
+          0,
+          'line1\nline2\n',
+        );
+        expect(buffer.vimMoveToLine).toHaveBeenCalledWith(2);
+      });
+
+      it('remembers a failed clipboard read and does not respawn powershell', async () => {
+        vi.resetModules();
+        const { useVim: freshUseVim } = await import('./vim.js');
+        (execFileSync as unknown as Mock).mockImplementation(() => {
+          throw new Error('spawn powershell ETIMEDOUT');
+        });
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          freshUseVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(execFileSync).toHaveBeenCalledTimes(1);
+      });
+
+      it('swallows a failing clipboard read and pastes nothing', () => {
+        (execFileSync as unknown as Mock).mockImplementation(() => {
+          throw new Error('spawn powershell ETIMEDOUT');
+        });
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        expect(() =>
+          act(() => result.current.handleInput(makeKey('p'))),
+        ).not.toThrow();
+        expect(buffer.replaceRange).not.toHaveBeenCalled();
       });
     });
 
