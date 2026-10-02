@@ -94,6 +94,7 @@ describe('recoverHostedRuntimeTurn', () => {
     settleBeforeClose = false,
     withIntent = true,
     extraExecutionId?: string,
+    runtimeSessionId = PROMPT_ID,
   ): Promise<ManagedSession> {
     const session = await open('boot-1', true);
     const harness = createManagedHarnessHandle(session);
@@ -138,7 +139,7 @@ describe('recoverHostedRuntimeTurn', () => {
       const input = Buffer.from(
         JSON.stringify({
           harnessSessionId: SESSION_ID,
-          runtimeSessionId: PROMPT_ID,
+          runtimeSessionId,
           payloadJson: JSON.stringify({
             toolName,
             input: { file_path: `${ordinal}.txt`, content: 'x' },
@@ -433,38 +434,42 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('reports an execution the Broker cannot account for as unknown', async () => {
-    await parkAtAwaitRuntime();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
-      undefined,
-    );
-    const replacement = await open('boot-2', false);
-    try {
-      const recovered = await recoverHostedRuntimeTurn({
-        session: replacement,
-        sessionId: SESSION_ID,
-        cwd: root,
-        promptId: PROMPT_ID,
-        brokerOptions,
-        passive: true,
-      });
-      expect(recovered!.report.executions).toEqual([
-        expect.objectContaining({
-          executionCallId: EXECUTION_ID,
-          outcome: 'unknown',
-        }),
-      ]);
-      // A passive load only reads: nothing may be journaled for the prompt.
-      expect(
-        (await replacement.sink.project()).filter(
-          (entry) =>
-            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
-        ),
-      ).toHaveLength(0);
-    } finally {
-      await replacement.close();
-    }
-  });
+  it.each([undefined, { state: 'unknown' }])(
+    'reports an execution the Broker cannot account for as unknown (%s)',
+    async (status) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue(
+        status,
+      );
+      const replacement = await open('boot-2', false);
+      try {
+        const recovered = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        });
+        expect(recovered!.report.executions).toEqual([
+          expect.objectContaining({
+            executionCallId: EXECUTION_ID,
+            outcome: 'unknown',
+          }),
+        ]);
+        // A passive load only reads: nothing may be journaled for the prompt.
+        expect(
+          (await replacement.sink.project()).filter(
+            (entry) =>
+              entry.daemonPromptId === PROMPT_ID &&
+              entry.type === 'tool_result',
+          ),
+        ).toHaveLength(0);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('refuses a turn whose checkpoint is not a Runtime wait', async () => {
     const session = await open('boot-1', true);
@@ -529,37 +534,46 @@ describe('recoverHostedRuntimeTurn', () => {
       });
       expect(recovered).toBeUndefined();
       expect(execute).not.toHaveBeenCalled();
-      // The decline happens after the lease was acquired, so it must hand it
-      // back — the caller never learns about it otherwise.
-      expect(release).toHaveBeenCalledOnce();
+      // Missing ownership evidence is refused before acquiring a Runtime.
+      expect(release).not.toHaveBeenCalled();
     } finally {
       await replacement.close();
     }
   });
 
   it('cancels parked executions without settling them', async () => {
-    await parkAtAwaitRuntime();
+    await parkAtAwaitRuntime(
+      'write_file',
+      false,
+      false,
+      true,
+      undefined,
+      'hooks-old-owner',
+    );
     let stopped = false;
     const order: string[] = [];
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
-      async () => {
+      async function (this: HostedWorkspaceBroker) {
+        expect(this.runtimeSessionId).toBe('hooks-old-owner');
         order.push('status');
         return { state: stopped ? 'settled' : 'executing' };
       },
     );
     const cancel = vi
       .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
-      .mockImplementation(async () => {
+      .mockImplementation(async function (this: HostedWorkspaceBroker) {
+        expect(this.runtimeSessionId).toBe('hooks-old-owner');
         order.push('cancel');
         stopped = true;
       });
     const replacement = await open('boot-2', false);
     try {
-      await stopParkedRuntimeExecutions({
+      const broker = await stopParkedRuntimeExecutions({
         session: replacement,
         promptId: PROMPT_ID,
         brokerOptions,
       });
+      expect(broker.runtimeSessionId).toBe('hooks-old-owner');
       expect(cancel).toHaveBeenCalledOnce();
       expect(cancel).toHaveBeenCalledWith(EXECUTION_ID);
       // Issuing the cancel is not proof of the stop: a status read must
@@ -640,6 +654,44 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it.each([false, true])(
+    'refuses cancellation when an execution outcome is unknown (afterCancel=%s)',
+    async (afterCancel) => {
+      await parkAtAwaitRuntime();
+      const status = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'status')
+        .mockResolvedValue({ state: 'unknown' });
+      if (afterCancel) status.mockResolvedValueOnce({ state: 'executing' });
+      const cancel = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+        .mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const replacement = await open('boot-2', false);
+      try {
+        await expect(
+          stopParkedRuntimeExecutions({
+            session: replacement,
+            promptId: PROMPT_ID,
+            brokerOptions,
+          }),
+        ).rejects.toThrow('Runtime execution outcome is unknown.');
+        expect(cancel).toHaveBeenCalledTimes(afterCancel ? 1 : 0);
+        expect(release).not.toHaveBeenCalled();
+        const authorization =
+          await replacement.authority.harnessRunAuthorization();
+        expect(authorization.status).toBe('runnable');
+        if (authorization.status === 'runnable')
+          expect(authorization.checkpoint.continuation.phase).toBe(
+            'await_runtime',
+          );
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
   it('does not journal a tool result twice across a recovery retry', async () => {
     await parkAtAwaitRuntime('write_file', true);
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
@@ -677,6 +729,59 @@ describe('recoverHostedRuntimeTurn', () => {
       await replacement.close();
     }
   });
+
+  it.each([false, true])(
+    'keeps a shared Runtime owner during recovery (passive=%s)',
+    async (passive) => {
+      await parkAtAwaitRuntime(
+        'write_file',
+        false,
+        false,
+        true,
+        undefined,
+        'hooks-old-owner',
+      );
+      const acquire = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          expect(this.runtimeSessionId).toBe('hooks-old-owner');
+        });
+      const status = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'status')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          expect(this.runtimeSessionId).toBe('hooks-old-owner');
+          return { state: 'executing' };
+        });
+      const execute = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          expect(this.runtimeSessionId).toBe('hooks-old-owner');
+          return {
+            executionStatus: 'success',
+            responseParts: [{ text: 'done' }],
+          } as never;
+        });
+      const replacement = await open('boot-2', false);
+      try {
+        const recovered = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive,
+        });
+        expect(recovered?.report.executions[0]?.runtimeSessionId).toBe(
+          'hooks-old-owner',
+        );
+        expect(acquire).toHaveBeenCalledTimes(passive ? 0 : 1);
+        expect(execute).toHaveBeenCalledTimes(passive ? 0 : 1);
+        expect(status).toHaveBeenCalledTimes(passive ? 1 : 0);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('reports only the state, never the result payload, from a passive read', async () => {
     await parkAtAwaitRuntime();

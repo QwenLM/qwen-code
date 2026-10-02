@@ -12129,6 +12129,46 @@ describe('Fire hook functions integration', () => {
         );
       });
 
+      it('treats Bash as safe for Code Mode regardless of the command', () => {
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.SHELL,
+            Kind.Execute,
+            { command: 'rm -rf build' },
+            'code_mode',
+          ),
+        ).toBe(true);
+        expect(
+          isToolCallConcurrencySafe(ToolNames.SHELL, Kind.Execute, {
+            command: 'rm -rf build',
+          }),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.SHELL,
+            undefined,
+            { command: 'rm -rf build' },
+            'code_mode',
+          ),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.MONITOR,
+            Kind.Execute,
+            {},
+            'code_mode',
+          ),
+        ).toBe(false);
+        expect(
+          isToolCallConcurrencySafe(
+            ToolNames.IMAGE_GEN,
+            Kind.Execute,
+            {},
+            'code_mode',
+          ),
+        ).toBe(false);
+      });
+
       it('treats a shell call with a non-string command as unsafe (fail-closed)', () => {
         expectSafety(
           ['shell', Kind.Execute, {}, false],
