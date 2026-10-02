@@ -77,21 +77,14 @@ public final class ApiModels {
             @JsonProperty("session_lifecycle") boolean sessionLifecycle,
             boolean tasks,
             boolean actions,
-            @JsonProperty("session_close") boolean sessionClose) {
-        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
-                boolean lifecycle, boolean tasks, boolean actions) {
-            this(items, snapshots, artifacts, resync, lifecycle, tasks, actions, false);
-        }
+            @JsonProperty("session_close") boolean sessionClose,
+            @JsonProperty("session_archive") boolean sessionArchive,
+            @JsonProperty("session_unarchive") boolean sessionUnarchive,
+            @JsonProperty("session_delete") boolean sessionDelete) {
     }
 
-    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions, boolean sessionClose) {
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions) {
-            this(tasks, artifacts, actions, false);
-        }
-
-        public WebShellSessionCapabilities(boolean tasks, boolean actions) {
-            this(tasks, false, actions, false);
-        }
+    public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions, boolean sessionClose,
+            boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -426,5 +419,30 @@ public final class ApiModels {
     public record WebShellTranscript(List<WebShellItem> items,
             List<WebShellEvent> events, long coveredSequence,
             String olderCursor, boolean hasMore, long lastSequence) {
+    }
+
+    /**
+     * An AgentDefinition revision's content (D8a). The server stores and
+     * digests it; no field changes Session execution yet.
+     */
+    public record AgentDefinitionRequest(
+            @NotNull Map<String, Object> model,
+            @NotNull @Size(max = 1_000_000) String instructions,
+            @NotNull @Size(max = 1000)
+                    List<@NotNull Map<String, Object>> tools,
+            @Size(max = 1000) List<@NotNull Map<String, Object>> skills,
+            @JsonProperty("mcp_servers") @Size(max = 100)
+                    List<@NotNull Map<String, Object>> mcpServers,
+            @JsonProperty("permission_policy") @NotNull
+                    Map<String, Object> permissionPolicy,
+            @JsonProperty("environment_template_id") @Size(max = 128)
+                    String environmentTemplateId,
+            Map<String, Object> metadata) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AgentDefinition(String id, String object, String revision,
+            String digest, @JsonProperty("created_at") long createdAt,
+            Map<String, Object> metadata) {
     }
 }
