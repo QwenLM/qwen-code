@@ -81,14 +81,16 @@ class TenantContextFilterTest {
 
     @Test
     void scopesTheBareAgentCollectionRoute() throws Exception {
-        MockHttpServletRequest bare = new MockHttpServletRequest("POST",
-                "/v1/agents");
-        MockHttpServletResponse response = new MockHttpServletResponse();
-        MockFilterChain chain = new MockFilterChain();
-        filter.doFilter(bare, response, chain);
-        assertThat(response.getStatus()).isEqualTo(400);
-        assertThat(response.getContentAsString()).contains("invalid_tenant");
-        assertThat(chain.getRequest()).isNull();
+        for (String path : new String[] {"/v1/agents",
+                "/v1/agents;jsessionid=abc", "/v1;route=public/agents"}) {
+            MockHttpServletRequest bare = new MockHttpServletRequest("POST", path);
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            MockFilterChain chain = new MockFilterChain();
+            filter.doFilter(bare, response, chain);
+            assertThat(response.getStatus()).isEqualTo(400);
+            assertThat(response.getContentAsString()).contains("invalid_tenant");
+            assertThat(chain.getRequest()).isNull();
+        }
 
         MockHttpServletRequest unrelated = new MockHttpServletRequest("POST",
                 "/v1/agentsx");

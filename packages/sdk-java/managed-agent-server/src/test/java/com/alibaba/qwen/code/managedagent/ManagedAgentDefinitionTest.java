@@ -166,6 +166,23 @@ class ManagedAgentDefinitionTest {
     }
 
     @Test
+    void scopesMatrixParametersBeforeDefinitionAdmission() throws Exception {
+        String tenant = tenant();
+        String path = "/v1/agents;jsessionid=abc";
+        mvc.perform(post(path).header("Idempotency-Key", "matrix")
+                        .contentType(MediaType.APPLICATION_JSON).content(DEFINITION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_tenant"));
+        assertThat(rows(tenant)).isZero();
+        mvc.perform(post(path).header(TENANT, tenant)
+                        .header("Idempotency-Key", "matrix")
+                        .contentType(MediaType.APPLICATION_JSON).content(DEFINITION))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.revision").value("1"));
+        assertThat(rows(tenant)).isEqualTo(1);
+    }
+
+    @Test
     void validatesTheRequest() throws Exception {
         String tenant = tenant();
         create(tenant, "bad key", DEFINITION)
