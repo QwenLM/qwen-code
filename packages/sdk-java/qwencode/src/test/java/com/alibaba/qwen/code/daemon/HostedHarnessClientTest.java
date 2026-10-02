@@ -731,8 +731,10 @@ class HostedHarnessClientTest {
                 .contains("managed_session_journal_delta_v1"));
     }
 
-    // The load timeout is a distinct builder knob, validated like the other
-    // timeouts; its effect on the load request is covered by the E2E arms.
+    // The load timeout is a distinct builder knob, validated like the
+    // other timeouts. No unit or E2E pin discriminates it from
+    // request-timeout today (every arm runs both at 120 s); the
+    // recovery-only selection lives at the loadSession call site.
     @Test
     void loadTimeoutMustBePositive() {
         assertThrows(IllegalArgumentException.class,
