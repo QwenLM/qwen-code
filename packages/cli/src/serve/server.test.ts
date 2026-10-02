@@ -5342,6 +5342,7 @@ describe('createServeApp', () => {
         (workspace: { primary?: boolean }) => workspace.primary,
       );
       expect(primary).toBeDefined();
+      expect(primary.agentCollaborationEnabled).toBeUndefined();
       await request(app)
         .get(`/workspaces/${primary.id}/agent/agents`)
         .set('Host', `127.0.0.1:${baseOpts.port}`)
@@ -5354,11 +5355,13 @@ describe('createServeApp', () => {
       );
       const home = path.join(root, 'home');
       const workspace = path.join(root, 'workspace');
+      const disabledWorkspace = path.join(root, 'disabled-workspace');
       const workspaceSettings = path.join(workspace, '.qwen', 'settings.json');
       const previousQwenHome = process.env['QWEN_HOME'];
       let app: ReturnType<typeof createServeApp> | undefined;
       try {
         await fsp.mkdir(home);
+        await fsp.mkdir(disabledWorkspace);
         await fsp.mkdir(path.dirname(workspaceSettings), { recursive: true });
         await fsp.writeFile(
           workspaceSettings,
@@ -5378,6 +5381,12 @@ describe('createServeApp', () => {
               primary: true,
               bridge,
             }),
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'disabled-id',
+              workspaceCwd: disabledWorkspace,
+              primary: false,
+              bridge,
+            }),
           ]),
         });
 
@@ -5385,12 +5394,19 @@ describe('createServeApp', () => {
           .get('/capabilities')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(before.body.features).toContain('agent_collaboration_v1');
+        expect(before.body.workspaces[0].agentCollaborationEnabled).toBe(true);
+        expect(
+          before.body.workspaces.find(
+            (entry: { id: string }) => entry.id === 'disabled-id',
+          ).agentCollaborationEnabled,
+        ).toBe(false);
 
         await fsp.writeFile(workspaceSettings, '{');
         const after = await request(app)
           .get('/capabilities')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(after.body.features).toContain('agent_collaboration_v1');
+        expect(after.body.workspaces[0].agentCollaborationEnabled).toBe(true);
         await expect(fsp.readFile(workspaceSettings, 'utf8')).resolves.toBe(
           '{',
         );

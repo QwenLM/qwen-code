@@ -30,7 +30,9 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
-`1`) when they are created. Every response carries `X-Request-Id`, which error
+`1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
+`POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
+revisions; Sessions do not use them yet. Every response carries `X-Request-Id`, which error
 envelopes repeat as `request_id` and the logs print. Events keep the schema and
 projection versions they were accepted with. They keep their Item and Part
 identity too, except after Harness recovery retracts output: the retracted
@@ -52,7 +54,9 @@ Durable lifecycle: [English](../../../docs/design/2026-09-28-managed-agent-durab
 Turn queries: [English](../../../docs/design/2026-09-28-managed-agent-turn-queries.md) |
 [简体中文](../../../docs/design/2026-09-28-managed-agent-turn-queries.zh-CN.md);
 Actions (Hosted permission approvals): [English](../../../docs/design/2026-09-30-managed-agent-actions.md) |
-[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md)
+[简体中文](../../../docs/design/2026-09-30-managed-agent-actions.zh-CN.md);
+AgentDefinition revisions: [English](../../../docs/design/2026-10-01-managed-agent-definitions.md) |
+[简体中文](../../../docs/design/2026-10-01-managed-agent-definitions.zh-CN.md)
 
 ## Managed tool results (O3)
 
@@ -68,13 +72,13 @@ O2 verification settings are separate from the O3 content-read timeout below.
 
 All settings below use the `qwen.managed-agent.artifacts` prefix:
 
-| Setting                | Default | Meaning                                                                                                                    |
-| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled. |
-| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                     |
-| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                    |
-| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                 |
-| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks; storage requests also use the storage client's timeouts.                |
+| Setting                | Default | Meaning                                                                                                                                                       |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`              | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                    |
+| `publish-original`     | `false` | Approve original stream representations for current Workspace readers.                                                                                        |
+| `publish-preview`      | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                       |
+| `max-concurrent-reads` | `4`     | Maximum simultaneous content responses per server process.                                                                                                    |
+| `read-timeout`         | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts. |
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -199,9 +203,11 @@ tenant, workspace, and Harness writer generation; an attach or cold-load race
 with a different identity fails closed.
 
 Delete writes a public tombstone: get and list stop returning the Session,
-while its operations stay readable. It does not physically erase the private
-journal, events or resources, and it does not mark the journal deleted;
-retention and garbage collection remain future work.
+while its operations stay readable. Completed deletion permanently marks an existing
+private journal `DELETED`, clears its writer and recovery references, and fences
+new writes and recovery. Close and archive keep output pinned. Deletion does
+not physically erase the journal, events or resources; output collection stays
+disabled by default and requires the retention deployment gates.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this
@@ -317,7 +323,11 @@ Broker with configured `runtime-broker.workspace-mounts`. Registry entries must
 use `managed-runtime-tools/1` and `preapproved-workspace-tools/1`, and their
 tenant/storage identity must have a deployment mount. The trusted ingress must
 provide an `AuthenticatedTenantActor` principal with read/create grants; a caller
-header alone does not authenticate an actor.
+header alone does not authenticate an actor. For local runs and the
+packaged-stack E2E, which have no ingress,
+`QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` names a request header whose value is
+then trusted as the actor for the request's tenant. It is disabled by default;
+never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
 `auto-edit`, the Session creator can list, inspect and answer pending permission
@@ -617,23 +627,34 @@ Hosted Harness process trees, deletes their old local homes, starts replacement
 owners against the same MySQL store, and verifies that the second Turn sees the
 first Turn's prompt and answer.
 
-The in-flight and continuation variants are not yet runnable. Both drive their
-assertion through a physical tool execution, and the Hosted Harness no-tool
-slice refuses every tool call by design, so the modes exit immediately with a
-not-yet-enabled error until the tool-capable Hosted turn tracked in #12380
-lands:
+The in-flight and continuation variants run the same replacement-owner proof
+through a physical Workspace file tool execution. The runner seeds the
+Workspace registry and access grant as deployment data, enables the G0 file
+admission, and uses `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER` for its local
+actor, so the Session is created through the public route like any other
+Workspace-bound Session:
 
 ```bash
-npm run test:e2e:managed-inflight-failover       # gated: exits not-yet-enabled
-npm run test:e2e:managed-continuation-failover   # gated: exits not-yet-enabled
+npm run test:e2e:managed-inflight-failover
+npm run test:e2e:managed-continuation-failover
 ```
 
-Once enabled, the in-flight mode holds the first Broker `:start` request after
-the Harness has durably committed its `await_runtime` checkpoint, kills the
-original Spring and Hosted Harness process trees, deletes their homes, and
-starts replacement owners. It requires the replacement Harness to use the
-original `executionCallId`, execute the physical tool exactly once, continue
-the original Prompt without replay, and commit one public terminal event.
+Both modes require Linux: the replacement owner retires the dead worker's
+Runtime binding through the durable local-Worker reclaim (#12380 W0e), which
+runs on Linux only. The runner enables `durable-local-process` for these modes
+and refuses other platforms with an explicit error; the Hosted MySQL CI job
+runs both.
+
+The in-flight mode holds the first Broker `:start` request after the Harness
+has durably committed its `await_runtime` checkpoint, kills the original
+Spring and Hosted Harness process trees, deletes their homes, and starts
+replacement owners. It requires the replacement Harness to use the original
+`executionCallId`, execute the physical tool exactly once, continue the
+original Prompt without replay, and commit one public terminal event. The
+continuation mode kills the Harness after the first published text chunk and
+requires one tool execution, one further continuation, only the replacement's
+answer in the public transcript, and one terminal event. Both modes run in the
+Hosted MySQL CI job.
 
 Once the missing integration lands, a zero-delay run can check the real-model
 path. A controlled cold-start delay can then test output before Runtime
