@@ -112,12 +112,14 @@ const PATH_TARGET_SAFE = /[A-Za-z0-9._~-]/;
 // Printable non-ASCII also stays RAW: a Markdown destination accepts it, and
 // encoding it would expand one CJK char to nine — a few ordinary non-ASCII
 // paths would then spend the whole `MAX_INDEX_BYTES` budget and evict every
-// other entry. Controls, ASCII punctuation, the zero-width/bidi ranges (they
-// hide or reorder text) and lone surrogates (they do not survive the write) all
-// stay encoded; an astral char arrives as a pair, so it stays encoded too.
+// other entry. Still encoded: whitespace (a destination may not contain any,
+// and `\s` covers the non-ASCII spaces a filename may legally hold), ASCII
+// punctuation, the zero-width/bidi ranges (they hide or reorder text) and lone
+// surrogates (they do not survive the write). An astral char arrives as a pair,
+// so it stays encoded too.
 const PATH_TARGET_RAW_NON_ASCII =
   // eslint-disable-next-line no-control-regex
-  /[^\u0000-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\ud800-\udfff]/;
+  /[^\s\u0000-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\ud800-\udfff]/;
 const utf8Encoder = new TextEncoder();
 
 /**

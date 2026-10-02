@@ -600,6 +600,34 @@ describe('managed auto-memory indexer', () => {
     expect(decodeURIComponent(target)).toBe(relativePath);
   });
 
+  it('keeps a non-ASCII space in a path encoded so the link still parses', () => {
+    // A Markdown destination may not contain whitespace, and JS `\s` covers the
+    // non-ASCII spaces (NBSP, U+3000) a filename may legally hold. Leaving one
+    // raw would render the entry as literal text — the dead link this PR exists
+    // to remove — while still looking correct in the committed file.
+    const relativePath = 'feedback/a\u00a0b\u3000c.md';
+    const content = buildManagedAutoMemoryIndex([
+      {
+        scope: 'project',
+        type: 'feedback',
+        filePath: `/tmp/${relativePath}`,
+        relativePath,
+        filename: path.basename(relativePath),
+        title: 'Spaced',
+        description: 'desc',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      },
+    ]);
+
+    const target = linkTarget(content);
+    expect(target).not.toMatch(/\s/);
+    expect(decodeURIComponent(target)).toBe(relativePath);
+  });
+
   it('drops an "(also: …)" entry whole instead of cutting its target', () => {
     // Regression: an over-long "(also: …)" suffix used to be sliced at 150
     // columns, which cut the secondary path mid-escape.
