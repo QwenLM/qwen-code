@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import {
   createThread,
+  enrollAgentHost,
+  issueAgentHostEnrollment,
   listThreads,
   readAgentWorkspace,
   readThread,
@@ -30,6 +32,7 @@ import {
 import { closeRun, finishRunInTransaction } from './run-lifecycle.js';
 import { withAgentStoreTransaction } from './store.js';
 import { postMessage } from './thread-actions.js';
+import { pickupRunForHost, renewRunLease } from './host-lease.js';
 import {
   HUMAN_AUTHOR_ID,
   AGENTS_SCHEMA_VERSION,
@@ -602,6 +605,110 @@ describe('dispatchOnce', () => {
     expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]!.status).toBe(
       'cancelled',
     );
+  });
+
+  it('fails abandoned Host work after two lease periods of recovery grace', async () => {
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      ALICE,
+      { ...BOB, execution: { mode: 'managed-host', hostIds: ['ho_gone'] } },
+    ]);
+    const thread = await seedQueued({
+      runs: [
+        run({
+          agentId: BOB.id,
+          status: 'running',
+          attempts: 1,
+          lease: {
+            hostId: 'ho_gone',
+            leaseId: 'ls_1',
+            attempt: 1,
+            acquiredAt: 1_000,
+            expiresAt: 361_000,
+          },
+        }),
+      ],
+    });
+
+    await dispatchOnce(PROJECT_ROOT, port(), { now: 480_999 });
+    expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]!.status).toBe(
+      'running',
+    );
+    const records = await dispatchOnce(PROJECT_ROOT, port(), { now: 481_000 });
+    const after = (await readThread(PROJECT_ROOT, thread.id))!;
+    expect(after.runs[0]).toMatchObject({
+      status: 'failed',
+      endedAt: 481_000,
+      failureStage: 'recovery',
+    });
+    expect(after.runs[0]!.error).toContain('Host lease expired');
+    expect(records).toContainEqual({
+      agentId: BOB.id,
+      threadId: thread.id,
+      runId: 'rn_1',
+      kind: 'recovery_failed',
+    });
+    await dispatchOnce(PROJECT_ROOT, port(), { now: 482_000 });
+    expect(
+      (await readThread(PROJECT_ROOT, thread.id))!.messages.filter(
+        (message) => message.triggerKind === 'run_failure',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('preserves renewed and reclaimed Host work past the prior deadline', async () => {
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const { host } = await enrollAgentHost(PROJECT_ROOT, {
+      token,
+      name: 'returning-host',
+      workspaceCwd: '/host-workspace',
+      providers: ['Qwen Code ACP'],
+    });
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      ALICE,
+      {
+        ...BOB,
+        execution: {
+          mode: 'managed-host',
+          hostIds: [host.id],
+          provider: 'qwen',
+        },
+      },
+    ]);
+    const thread = await seedQueued({
+      runs: [
+        run({
+          agentId: BOB.id,
+          status: 'running',
+          attempts: 1,
+          lease: {
+            hostId: host.id,
+            leaseId: 'ls_1',
+            attempt: 1,
+            acquiredAt: 1_000,
+            expiresAt: 2_000,
+          },
+        }),
+      ],
+    });
+    expect(
+      await renewRunLease(
+        PROJECT_ROOT,
+        { threadId: thread.id, runId: 'rn_1', leaseId: 'ls_1' },
+        1_999,
+      ),
+    ).toMatchObject({ ok: true });
+    await dispatchOnce(PROJECT_ROOT, port(), { now: 122_000 });
+    expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]!.status).toBe(
+      'running',
+    );
+    const reclaimed = await pickupRunForHost(PROJECT_ROOT, host.id, 122_001);
+    expect(reclaimed?.attempt).toBe(2);
+    await dispatchOnce(PROJECT_ROOT, port(), { now: 181_999 });
+    expect((await readThread(PROJECT_ROOT, thread.id))!.runs[0]).toMatchObject({
+      status: 'running',
+      attempts: 2,
+      lease: reclaimed!.lease,
+    });
   });
 
   it('keeps cancellation pending until the body stops and charges its usage', async () => {

@@ -19,6 +19,7 @@
  */
 
 import { assembleAgentPrompt } from './prompt.js';
+import { DEFAULT_RUN_LEASE_MS } from './host-lease.js';
 import {
   generateRunId,
   isAgentAddressable,
@@ -684,43 +685,54 @@ async function reconcileInterruptedRuns(
 }
 
 /**
- * Ends cancellations no Agent Host is left to confirm.
+ * Ends Host work no owner is left to confirm.
  *
- * A host finishes a cancelled run when it next renews the lease. Once that
- * lease has run out no host holds the run and none will pick it up, so the
- * cancel would stay pending and keep the agent busy for good.
+ * Cancels settle once the lease expires. Running work gets two lease periods
+ * for a Host to reclaim it before failure frees the agent.
  */
-async function settleOrphanedHostCancels(
+async function settleOrphanedHostRuns(
   projectRoot: string,
-  agents: readonly WorkspaceAgent[],
-  threads: readonly Thread[],
   now: number,
 ): Promise<DispatchRecord[]> {
-  const records: DispatchRecord[] = [];
-  for (const thread of threads) {
-    for (const run of thread.runs) {
-      if (run.status !== 'cancelling' || (run.lease?.expiresAt ?? 0) > now) {
-        continue;
-      }
-      const agent = agents.find((candidate) => candidate.id === run.agentId);
-      if (!agent || isAgentLocal(agent)) continue;
-      await withAgentStoreTransaction(projectRoot, (transaction) =>
-        finishRunInTransaction(transaction, {
+  return withAgentStoreTransaction(projectRoot, async (transaction) => {
+    const agents = await transaction.readAgents();
+    const { threads } = await transaction.listThreads();
+    const records: DispatchRecord[] = [];
+    for (const thread of threads) {
+      for (const run of thread.runs) {
+        const cancelled =
+          run.status === 'cancelling' && (run.lease?.expiresAt ?? 0) <= now;
+        const abandoned =
+          run.status === 'running' &&
+          run.lease !== undefined &&
+          run.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS <= now;
+        if (!cancelled && !abandoned) continue;
+        const agent = agents.find((candidate) => candidate.id === run.agentId);
+        if (!agent || isAgentLocal(agent)) continue;
+        await finishRunInTransaction(transaction, {
           threadId: thread.id,
           runId: run.id,
-          outcome: { status: 'cancelled', attempt: run.attempts },
+          outcome: cancelled
+            ? { status: 'cancelled', attempt: run.attempts }
+            : {
+                status: 'failed',
+                attempt: run.attempts,
+                error:
+                  'Agent Host lease expired before the run could be recovered.',
+                failureStage: 'recovery',
+              },
           now,
-        }),
-      );
-      records.push({
-        agentId: agent.id,
-        threadId: thread.id,
-        runId: run.id,
-        kind: 'cancelled',
-      });
+        });
+        records.push({
+          agentId: agent.id,
+          threadId: thread.id,
+          runId: run.id,
+          kind: cancelled ? 'cancelled' : 'recovery_failed',
+        });
+      }
     }
-  }
-  return records;
+    return records;
+  });
 }
 
 async function deliverRunningInputs(
@@ -989,10 +1001,8 @@ export async function dispatchOnce(
   const agents = await readWorkspaceAgents(projectRoot);
   const localAgents = agents.filter(isAgentLocal);
   let { threads } = await listThreads(projectRoot);
-  const records: DispatchRecord[] = await settleOrphanedHostCancels(
+  const records: DispatchRecord[] = await settleOrphanedHostRuns(
     projectRoot,
-    agents,
-    threads,
     now,
   );
   if (records.length > 0) ({ threads } = await listThreads(projectRoot));

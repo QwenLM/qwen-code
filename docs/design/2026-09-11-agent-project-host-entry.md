@@ -12,6 +12,8 @@ Qwen Host execution streams ACP reply, thought, and tool activity for the active
 
 Restarted or taken-over executions receive a new attempt and lease so their spend is counted separately. After each attempt, the Host flushes and closes the live session; later turns resume its persisted history without retaining an active session slot.
 
+If a running Host lease expires, another assigned Host can reclaim the run. The coordinator leaves two default lease periods of recovery grace after the latest lease expiry (currently 120 seconds), then fails an unreclaimed run and releases the Agent. A renewed or reclaimed lease starts its own recovery window. Cancelling work settles as cancelled once its lease expires, without waiting for this additional grace.
+
 This increment exposes only Qwen Code on a managed Host. It neither probes for nor launches Codex or Claude. Those providers require a separate isolated profile that can confine reads to the selected workspace and exclude ambient user MCP servers, plugins, hooks, skills, and credentials.
 
 ## Isolation and connection
